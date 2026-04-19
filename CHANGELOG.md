@@ -1,6 +1,6 @@
 # AnyCam — Changelog
 
-## 1.1.10
+## 1.2.0
 - Expanded CAMERA_DB from 33 to 53 entries (54 total minus 1 duplicate):
   Added: Tiandy, IndigoVision, Q-See, LaView, Zosi, Sricam/Srihome, Vstarcam,
   Wansview, Tenvis, Instar, Luma Surveillance (SnapAV), Speco Technologies, Oncam,

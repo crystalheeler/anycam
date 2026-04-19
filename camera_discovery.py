@@ -47,7 +47,7 @@ CAMS_FILE      = DATA_DIR / "cameras.json"
 BLACKLIST_FILE = DATA_DIR / "blacklist.json"
 RUNTIME_FILE   = DATA_DIR / "runtime.json"
 
-CURRENT_VERSION = "1.1.10"  # must match config.yaml
+CURRENT_VERSION = "1.2.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
