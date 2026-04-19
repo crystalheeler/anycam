@@ -1,5 +1,48 @@
 # AnyCam — Changelog
 
+## 1.1.5
+- Fixed JavaScript not executing at all (buttons dead, cameras not showing despite being loaded):
+  Root cause was Python f-string multi-level escaping — Python processes ''' → ''' in the f-string
+  before JavaScript ever sees it, causing a JS SyntaxError that silently killed the entire script block.
+  Fix: moved ALL JavaScript to a module-level raw string (_JS = r"""...""") so braces, backslashes,
+  and quotes are all literal. Only BASE is injected via str.replace(). Verified clean with Node.js --check.
+- Fixed onerror quote conflict: replaced inline onerror attribute string with imgError(this) helper function
+  that lives in the main JS scope, eliminating nested quote problems entirely.
+- ARP scan fallback: if ARP returns fewer than 3 hosts (can happen without raw socket privileges in Docker),
+  automatically supplements with ICMP ping scan before proceeding to port scan.
+- Local machine IP always added to live host list so OAK Camera addon RTSP on port 8765 is always scanned.
+- Removed not_camera auto-suppression: all live devices with open ports now get a card regardless of
+  classify_device() verdict. Only explicit user action (Not a Camera button) blacklists a device.
+  This prevents real cameras with generic HTTP banners from being silently hidden.
+- Better Stage 1 completion message: shows per-method discovery counts
+  (e.g. "23 via ARP, 1 via ONVIF, 2 via SSDP").
+
+## 1.1.4
+- Replaced single-pass nmap with a 4-stage intelligent scan pipeline:
+  Stage 1: ARP ping scan (nmap -sn -PR) finds live hosts in 3-8 seconds, eliminating timeout waste on dead IPs; ONVIF WS-Discovery, SSDP/UPnP, and mDNS/Bonjour all run in parallel
+  Stage 2: Focused camera port scan runs only on confirmed-live hosts (not the full /24), cutting scan time dramatically
+  Stage 3: Stream probing unchanged — RTSP path probe, MJPEG, HLS, RTMP, WebRTC, WS-RTSP
+  Stage 4 (optional): Broad sweep of ports 0-10000 on live hosts that did not respond to camera ports — enabled via Broad sweep checkbox in the header
+- Added SSDP/UPnP discovery (M-SEARCH on 239.255.255.250:1900) — detects cameras that announce via UPnP
+- Added mDNS/Bonjour discovery (224.0.0.251:5353) — queries _rtsp._tcp, _onvif._tcp, _camera._tcp, _nvr._tcp; gracefully handles port-in-use (avahi) by falling back to send-only mode
+- Stage indicator badge shown in status bar during scans (Stage 1/4, Stage 2/4, etc.)
+- Broad sweep toggle checkbox added to header (passes broad_sweep flag in scan POST body)
+- Scan start now accepts JSON body with broad_sweep option; no separate options endpoint needed
+- HTML caching: build_html() called once and cached to avoid regenerating on every page load
+
+## 1.1.3
+- Added port 8765 to scan list — this is where the OAK Camera addon serves RTSP via mediamtx, so AnyCam can now find the Luxonis camera
+- False-positive filtering: default gateway IP is now automatically skipped (routers are never cameras)
+- False-positive filtering: nmap product/service banners checked against known non-camera keywords (router, printer, NAS, etc.); matched devices shown with orange ⚠ Unverified badge
+- False-positive filtering: "Not a Camera" button on each card permanently blacklists the device by IP (stored in /data/blacklist.json, survives restarts and rescans)
+- ONVIF multi-stream (NVR) support: when credentials are submitted for an ONVIF device, GetProfiles + GetStreamUri called via SOAP/WS-Security to enumerate all camera channels; each channel gets its own card
+- Port Scanner: new "Port Scan" button opens a full-range scan (all 65535 ports) of any IP with -sV -sC -A flags for maximum detail; results shown in a table with port, service, version, and script output
+- Port scanner supports Pause (SIGSTOP) and Cancel (SIGTERM) controls
+- "Connect Known Camera" button opens a manual add form with fields for IP, port, protocol (all 7 supported), optional stream path, and credentials; validates by probing before saving
+- UI now has 3 views switchable via header buttons: Camera Grid, Port Scan, Connect Known Camera
+- Uncertain devices shown with orange dot and ⚠ Unverified badge; still visible so user can verify or dismiss
+- "Not a Camera" button shown on uncertain and credential-required cards
+
 ## 1.1.2
 - Fixed 404: HA ingress proxy strips the /api/hassio_ingress/TOKEN prefix before
   forwarding to the addon, so routes must be registered at bare paths (/, /api/cameras,
