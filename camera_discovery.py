@@ -52,7 +52,7 @@ OUI_CACHE_FILE = DATA_DIR / "oui_cache.json"
 OUI_CSV_URL    = "https://standards-oui.ieee.org/oui/oui.csv"
 OUI_MAX_AGE_DAYS = 30  # re-download once a month
 
-CURRENT_VERSION = "1.2.4"  # must match config.yaml
+CURRENT_VERSION = "1.2.5"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1971,7 +1971,7 @@ def is_camera_positive(ip: str, port: int, service: str, product: str,
     # skip probing entirely.  A camera that somehow has a generic service
     # banner would still be found via ONVIF/SSDP/mDNS in Stage 1.
     if verdict == "not_camera":
-        log.info(f"  nmap verdict reject: {ip}:{port} — {reason}")
+        log.info(f"  nmap verdict reject: {ip}:{port} — not_camera verdict")
         return False
 
     # ── 2. RTSP OPTIONS — raw TCP, ~100ms, works through auth ─────────────
@@ -2274,7 +2274,7 @@ async def run_verification_scan():
         stage_label="Post-upgrade: full network scan",
         message=(
             f"Post-upgrade verification complete "
-            f"({len(still_present)} OK, {len(now_missing)} missing). "
+            f"({len(still_present)} verified OK, {len(now_missing)} not responding. "
             f"Now scanning subnet for newly discoverable cameras…"
         )
     )
@@ -2286,7 +2286,7 @@ async def run_scan():
     _scan_start = time.time()
     SCAN_STATE.update(running=True, progress=0, stage=1,
                       stage_label="Stage 1/4 — Live host & multicast discovery",
-                      message="Stage 1/4 — ARP scan + ONVIF/SSDP/mDNS discovery…",
+                      message="ARP scan + ONVIF/SSDP/mDNS discovery running…",
                       started_at=_scan_start, elapsed=0.0, eta="")
     loop = asyncio.get_event_loop()
 
@@ -2337,7 +2337,7 @@ async def run_scan():
     # ── Stage 2: Focused camera port scan on live hosts only ─────────────────
     SCAN_STATE.update(progress=25, stage=2,
                       stage_label="Stage 2/4 — Camera port scan",
-                      message=f"Stage 2/4 — Scanning camera ports on {len(all_live)} live host(s)…",
+                      message=f"Scanning camera ports on {len(all_live)} live host(s)…",
                       elapsed=round(time.time() - _scan_start, 1))
 
     nmap_results = await loop.run_in_executor(
@@ -2346,9 +2346,16 @@ async def run_scan():
     responding_ips = {h["ip"] for h in nmap_results}
 
     # ── Stage 3: Stream probing ───────────────────────────────────────────────
+    _stage2_done = time.time()
+    _s2_elapsed  = _stage2_done - _scan_start
+    # 25% of scan done → crude extrapolation for ETA
+    _est_total   = _s2_elapsed * 4
+    _eta_secs    = max(0, int(_est_total - _s2_elapsed))
     SCAN_STATE.update(progress=55, stage=3,
                       stage_label="Stage 3/4 — Stream probing",
-                      message=f"Stage 3/4 — Probing {len(nmap_results)} responding host(s)…")
+                      message=f"Probing {len(nmap_results)} responding host(s)…",
+                      elapsed=round(_s2_elapsed, 1),
+                      eta=_eta_secs)
 
     # Update ARP_HOSTS hostnames from nmap results
     nmap_hostnames = {h["ip"]: h["hostname"] for h in nmap_results}
@@ -2374,9 +2381,16 @@ async def run_scan():
     total = max(len(nmap_results), 1)
     for idx, host in enumerate(nmap_results):
         ip, hostname = host["ip"], host["hostname"]
+        _now = time.time()
+        _elapsed_now = _now - _scan_start
+        _pct = (55 + int(25 * idx / max(total, 1))) / 100
+        _est_total = _elapsed_now / max(_pct, 0.01)
+        _eta_remain = max(0, int(_est_total - _elapsed_now))
         SCAN_STATE.update(
             progress=55 + int(25 * idx / total),
-            message=f"Stage 3/4 — Probing {ip} ({idx+1}/{len(nmap_results)})…")
+            message=f"Probing {ip} ({idx+1}/{len(nmap_results)})…",
+            elapsed=round(_elapsed_now, 1),
+            eta=_eta_remain)
 
         verdict, reason = classify_device(host)
         for port_info in host["open_ports"]:
@@ -2401,7 +2415,7 @@ async def run_scan():
     if SCAN_OPTIONS.get("broad_sweep") and silent:
         SCAN_STATE.update(progress=82, stage=4,
                           stage_label="Stage 4/4 — Broad sweep (0–10000)",
-                          message=f"Stage 4/4 — Broad sweep on {len(silent)} unresponsive host(s)…")
+                          message=f"Broad sweep on {len(silent)} unresponsive host(s)…")
         broad_results = await loop.run_in_executor(
             None, broad_nmap_scan, silent)
         for host in broad_results:
@@ -2577,6 +2591,22 @@ async def run_scan():
         elapsed=elapsed_secs, eta="",
     )
     log.info(completion_msg)
+
+
+# Wrap run_scan in a safety shell that catches exceptions and always
+# resets the running flag so the UI doesn't get stuck indefinitely
+_run_scan_inner = run_scan
+async def run_scan():
+    try:
+        await _run_scan_inner()
+    except Exception as e:
+        import traceback
+        log.error(f"run_scan crashed: {e}")
+        log.error(traceback.format_exc())
+        SCAN_STATE.update(
+            running=False, progress=100, stage=0, stage_label="",
+            message=f"Scan error: {e}. Check logs for details.",
+        )
 
 
 async def _probe_host_port(ip, port, hostname, initial_protocol,
@@ -3210,14 +3240,25 @@ async function pollScan() {
     } else {
       badge.style.display = 'none';
     }
-    // Show elapsed timer
+    // Show ETA countdown or completion time
     const timerEl = document.getElementById('scan-timer');
-    if (s.running && s.started_at) {
-      const elapsed = Math.round((Date.now() / 1000) - s.started_at);
-      const m = Math.floor(elapsed / 60), sec = elapsed % 60;
-      timerEl.textContent = m + ':' + String(sec).padStart(2, '0') + ' elapsed';
-      timerEl.style.display = '';
-    } else if (!s.running && s.elapsed) {
+    if (s.running) {
+      if (s.eta > 0) {
+        // Countdown: server provides eta in seconds, we count down client-side
+        const etaAdj = Math.max(0, s.eta - Math.round((Date.now()/1000) - (s.started_at||0) + (s.elapsed||0)));
+        const m = Math.floor(etaAdj / 60), sec = etaAdj % 60;
+        timerEl.textContent = '~' + m + ':' + String(sec).padStart(2, '0') + ' remaining';
+        timerEl.style.display = '';
+      } else if (s.started_at) {
+        // No ETA yet (still in early stages) — show elapsed
+        const elapsed = Math.round((Date.now()/1000) - s.started_at);
+        const m = Math.floor(elapsed / 60), sec = elapsed % 60;
+        timerEl.textContent = m + ':' + String(sec).padStart(2, '0') + ' elapsed';
+        timerEl.style.display = '';
+      } else {
+        timerEl.style.display = 'none';
+      }
+    } else if (s.elapsed) {
       const m = Math.floor(s.elapsed / 60), sec = Math.round(s.elapsed) % 60;
       timerEl.textContent = 'Completed in ' + m + ':' + String(sec).padStart(2, '0');
       timerEl.style.display = '';
@@ -3909,7 +3950,8 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
   </h1>
   <span id="cam-count" style="color:var(--text-dim);font-size:.78rem"></span>
   <label class="sweep-toggle" title="Scan ports 0-10000 on live hosts that don't respond to camera ports">
-    <input type="checkbox" id="broad-sweep"> Broad sweep
+    <input type="checkbox" id="broad-sweep">
+    <span>Broad sweep<br><small style="font-weight:400;opacity:.6;font-size:.68rem">Ports 1&#x2013;10,000</small></span>
   </label>
   <button class="btn btn-primary"   id="scan-btn"  onclick="startScan()">&#x1F50D; Scan Network</button>
   <button class="btn btn-secondary" id="pscan-btn" onclick="switchView('pscan')">&#x1F50E; Port Scan</button>
@@ -4054,10 +4096,26 @@ def make_app() -> web.Application:
     return app
 
 
+class _DockerIPFilter(logging.Filter):
+    """Suppress aiohttp access log entries from Docker bridge IPs (172.x.x.x)."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        # Drop lines where the client IP starts with 172. (Docker/HA Supervisor)
+        # Format: "172.30.32.2 [date] "METHOD /path..." status size ..."
+        return not (msg.startswith("172.") or
+                    msg.startswith('"172.') or
+                    " 172." in msg[:20])
+
+
 async def main():
     load_cameras()
     load_blacklist()
     load_oui_db()   # Load cached OUI DB synchronously (fast, from disk)
+
+    # Suppress Docker bridge IP entries from the aiohttp access log
+    _access_log = logging.getLogger("aiohttp.access")
+    _access_log.addFilter(_DockerIPFilter())
+
     app = make_app()
     runner = web.AppRunner(app)
     await runner.setup()

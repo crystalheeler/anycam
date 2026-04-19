@@ -1,5 +1,27 @@
 # AnyCam — Changelog
 
+## 1.2.5
+- Critical bug fix: NameError crash in is_camera_positive() — 'reason' was
+  referenced in the not_camera verdict log line but is not a parameter of that
+  function; this caused run_scan() to crash immediately when any device with a
+  not_camera verdict was encountered (e.g. a printer), leaving SCAN_STATE
+  running=True forever and the UI stuck in an infinite polling loop
+- Added safety wrapper around run_scan(): any uncaught exception now sets
+  running=False with an error message so the UI never gets permanently stuck
+- Stage label removed from status message text — stage is shown only in the
+  purple badge; message now shows just what is happening (e.g. 'Probing
+  192.168.50.3 (1/4)...') without the 'Stage 3/4 —' prefix duplication
+- Scan timer changed from elapsed to ETA countdown:
+  Early stages show 'X:XX elapsed'; once Stage 3 begins, an ETA is calculated
+  by extrapolating from Stage 1+2 time (25% of work) to 100% and showing
+  '~X:XX remaining' that counts down; completion shows 'Completed in X:XX'
+- Docker IP access log filtering: a logging.Filter on aiohttp.access suppresses
+  all log entries from 172.x.x.x addresses (HA Supervisor Docker bridge proxy);
+  these requests are still served normally, just not logged
+- Broad sweep checkbox now shows 'Ports 1–10,000' as small subtext below label
+- Lorex probe also runs in ONVIF-only else branch (previous fix) — timeouts
+  per-port are now explicit with asyncio.wait_for
+
 ## 1.2.4
 - Lorex NVR identification improvements:
   Added 'flirlorex' and 'flir lorex' to all Lorex DB detection patterns;
