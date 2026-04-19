@@ -1,5 +1,33 @@
 # AnyCam — Changelog
 
+## 1.2.4
+- Lorex NVR identification improvements:
+  Added 'flirlorex' and 'flir lorex' to all Lorex DB detection patterns;
+  ONVIF-only device HTTP probe now tries ports 80, 443, 8080, 8888, 8090, 34567
+  (NVRs often use non-standard web ports); added asyncio timeout and per-port
+  logging so failures are visible in the log
+- Docker/internal IP exclusion: hosts with 172.x.x.x or 169.254.x.x addresses
+  are now excluded from the live host list; these are HA Supervisor Docker bridge
+  IPs, not real LAN devices — this fixes the 'homeassistant' card from the
+  Docker gateway appearing in scan results
+- ACTi false positive fix (HP printer misidentified):
+  identify_manufacturer() now uses word-boundary matching for keywords shorter
+  than 6 characters; short strings like 'acti' no longer match as substrings
+  inside words like 'interactive' or 'active' on unrelated device pages
+- ACTi false positive fix (part 2): is_camera_positive() now respects the
+  nmap not_camera verdict (printer, router, NAS, etc.) as an early rejection,
+  skipping all protocol probing for devices nmap identified as non-cameras;
+  OUI camera confirmation still overrides this if MAC OUI is a known camera maker
+- Scan timing: SCAN_STATE now tracks started_at timestamp and elapsed seconds
+- Elapsed timer shown in status bar to the right of the progress bar:
+  'X:XX elapsed' while running, 'Completed in X:XX' when done
+- Completion log message now includes elapsed time:
+  'Scan complete — N device(s), N streaming. Completed in X:XX.'
+
+Broad sweep reminder: enables Stage 4 — after the focused top-1000-port scan,
+any live hosts that did not respond get scanned on ports 0-10,000 to catch
+cameras on very non-standard ports. Adds 5-20 minutes depending on silent hosts.
+
 ## 1.2.3
 - Deduplication fix: confirmed_ips now includes any card where manufacturer
   is identified OR protocol is a camera type OR verdict_reason starts with

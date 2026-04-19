@@ -52,7 +52,7 @@ OUI_CACHE_FILE = DATA_DIR / "oui_cache.json"
 OUI_CSV_URL    = "https://standards-oui.ieee.org/oui/oui.csv"
 OUI_MAX_AGE_DAYS = 30  # re-download once a month
 
-CURRENT_VERSION = "1.2.3"  # must match config.yaml
+CURRENT_VERSION = "1.2.4"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -64,7 +64,8 @@ PORT         = int(os.environ.get("INGRESS_PORT", 8099))
 CAMERAS    = {}
 BLACKLIST  = set()
 SCAN_STATE = {"running": False, "progress": 0, "message": "Idle. Click Scan to begin.",
-               "stage": 0, "stage_label": ""}
+               "stage": 0, "stage_label": "",
+               "started_at": 0.0, "elapsed": 0.0, "eta": ""}
 SCAN_OPTIONS = {"broad_sweep": False}
 _FERNET    = None
 
@@ -182,13 +183,14 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Lorex",
-        "aliases": ["lorex", "flir lorex"],
-        "http_titles": ["lorex", "lorex nvr", "lorex dvr"],
-        "http_body":   ["lorex", "lorextechnology", "lorex technology"],
-        "http_headers":["lorex"],
+        "aliases": ["lorex", "flir lorex", "flirlorex"],
+        "http_titles": ["lorex", "lorex nvr", "lorex dvr", "flirlorex"],
+        "http_body":   ["lorex", "lorextechnology", "lorex technology",
+                        "flirlorex", "flir lorex"],
+        "http_headers":["lorex", "flirlorex"],
         "nmap_products":["lorex"],
         "onvif_scopes": ["lorex"],
-        "default_ports": [554, 80, 34567],
+        "default_ports": [80, 443, 8080, 8888, 554, 34567],
         "notes": "Lorex (FLIR) NVR/DVR or IP camera",
     },
     {
@@ -768,16 +770,34 @@ for _entry in CAMERA_DB:
             _DB_ENTRIES_BY_KEY[_k] = _entry
 
 
+import re as _re_mod
+
+def _kw_matches(kw: str, text_l: str) -> bool:
+    """
+    Match a keyword against text.
+    Short keywords (< 6 chars) require word-boundary match to prevent
+    false positives from substring matches (e.g. 'acti' matching 'interactive').
+    Long keywords use plain substring matching.
+    """
+    if len(kw) < 6:
+        # Word boundary: kw must be preceded and followed by non-alphanumeric
+        pattern = r'(?<![a-z0-9])' + _re_mod.escape(kw) + r'(?![a-z0-9])'
+        return bool(_re_mod.search(pattern, text_l))
+    return kw in text_l
+
+
 def identify_manufacturer(text: str) -> dict | None:
     """
     Given a blob of text (HTTP body, nmap banner, etc.), return the best-matching
     CAMERA_DB entry, or None if no match found.
     Best match = entry with the most keyword hits.
+    Short keywords (< 6 chars) require word-boundary matching to avoid false
+    positives (e.g. 'acti' matching 'interactive' on HP printer pages).
     """
     text_l = text.lower()
     scores: dict[str, int] = {}
     for kw, entry in _DB_ENTRIES_BY_KEY.items():
-        if kw in text_l:
+        if _kw_matches(kw, text_l):
             name = entry["name"]
             scores[name] = scores.get(name, 0) + 1
     if not scores:
@@ -1936,8 +1956,6 @@ def is_camera_positive(ip: str, port: int, service: str, product: str,
         return True
 
     # ── 1b. OUI camera-positive (MAC address manufacturer lookup) ─────────
-    #  If the OUI definitively identifies a camera manufacturer, confirm.
-    #  If it definitively identifies a non-camera device, reject early.
     if mac_addr:
         oui_result = oui_is_camera(mac_addr)
         if oui_result is True:
@@ -1946,6 +1964,15 @@ def is_camera_positive(ip: str, port: int, service: str, product: str,
         if oui_result is False:
             log.info(f"  OUI non-camera reject: {ip} MAC {mac_addr} → {lookup_oui(mac_addr)}")
             return False
+
+    # ── 1c. Respect nmap not_camera verdict ────────────────────────────────
+    # If nmap's service/product banner identified this as a non-camera device
+    # (printer, router, NAS, etc.) AND OUI didn't confirm it's a camera,
+    # skip probing entirely.  A camera that somehow has a generic service
+    # banner would still be found via ONVIF/SSDP/mDNS in Stage 1.
+    if verdict == "not_camera":
+        log.info(f"  nmap verdict reject: {ip}:{port} — {reason}")
+        return False
 
     # ── 2. RTSP OPTIONS — raw TCP, ~100ms, works through auth ─────────────
     if port in (554, 8554, 10554, 2020, 8765):
@@ -2256,9 +2283,11 @@ async def run_verification_scan():
 
 
 async def run_scan():
+    _scan_start = time.time()
     SCAN_STATE.update(running=True, progress=0, stage=1,
                       stage_label="Stage 1/4 — Live host & multicast discovery",
-                      message="Stage 1/4 — ARP scan + ONVIF/SSDP/mDNS discovery…")
+                      message="Stage 1/4 — ARP scan + ONVIF/SSDP/mDNS discovery…",
+                      started_at=_scan_start, elapsed=0.0, eta="")
     loop = asyncio.get_event_loop()
 
     subnet  = await loop.run_in_executor(None, get_local_subnet)
@@ -2284,6 +2313,12 @@ async def run_scan():
     if gateway:
         all_live.discard(gateway)
 
+    # Remove Docker/internal bridge IPs (172.x.x.x) — these are HA Supervisor
+    # internal network addresses, not real LAN devices with cameras.
+    all_live = {ip for ip in all_live
+                if not ip.startswith("172.")
+                and not ip.startswith("169.254.")}  # also skip APIPA
+
     disc_summary = []
     if arp_hosts:   disc_summary.append(f"{len(arp_hosts)} via ARP")
     if onvif_ips:   disc_summary.append(f"{len(onvif_ips)} via ONVIF")
@@ -2302,7 +2337,8 @@ async def run_scan():
     # ── Stage 2: Focused camera port scan on live hosts only ─────────────────
     SCAN_STATE.update(progress=25, stage=2,
                       stage_label="Stage 2/4 — Camera port scan",
-                      message=f"Stage 2/4 — Scanning camera ports on {len(all_live)} live host(s)…")
+                      message=f"Stage 2/4 — Scanning camera ports on {len(all_live)} live host(s)…",
+                      elapsed=round(time.time() - _scan_start, 1))
 
     nmap_results = await loop.run_in_executor(
         None, focused_nmap_scan, sorted(all_live))
@@ -2400,12 +2436,23 @@ async def run_scan():
             # so no HTTP probing happened during _probe_host_port)
             if not any(c.get("manufacturer") for c in existing):
                 identity = {}
-                for _p in (80, 443, 8080):
-                    identity = await loop.run_in_executor(
-                        None, probe_http_identity, ip, _p)
+                for _p in (80, 443, 8080, 8888, 8090, 34567):
+                    try:
+                        identity = await asyncio.wait_for(
+                            loop.run_in_executor(None, probe_http_identity, ip, _p),
+                            timeout=12
+                        )
+                    except asyncio.TimeoutError:
+                        log.debug(f"  ONVIF HTTP probe timeout: {ip}:{_p}")
+                        identity = {}
                     if identity.get("manufacturer"):
-                        log.info(f"  ONVIF merge HTTP identity: {ip} → {identity['manufacturer']}")
+                        log.info(f"  ONVIF merge HTTP identity: {ip}:{_p} → {identity['manufacturer']}")
                         break
+                    elif identity.get("is_camera"):
+                        log.info(f"  ONVIF merge HTTP camera keyword: {ip}:{_p}")
+                        break
+                else:
+                    log.info(f"  ONVIF merge: no HTTP identity found for {ip}")
                 if identity.get("manufacturer"):
                     for cam in existing:
                         cam.setdefault("manufacturer", identity.get("manufacturer",""))
@@ -2520,11 +2567,16 @@ async def run_scan():
 
     save_cameras()
     ready = sum(1 for c in CAMERAS.values() if c["status"] == "ready")
+    elapsed_secs = round(time.time() - _scan_start)
+    elapsed_str  = f"{elapsed_secs // 60}:{elapsed_secs % 60:02d}"
+    completion_msg = (f"Scan complete — {len(CAMERAS)} device(s), {ready} streaming. "
+                      f"Completed in {elapsed_str}.")
     SCAN_STATE.update(
         running=False, progress=100, stage=0, stage_label="",
-        message=f"Scan complete — {len(CAMERAS)} device(s), {ready} streaming."
+        message=completion_msg,
+        elapsed=elapsed_secs, eta="",
     )
-    log.info(SCAN_STATE["message"])
+    log.info(completion_msg)
 
 
 async def _probe_host_port(ip, port, hostname, initial_protocol,
@@ -3157,6 +3209,20 @@ async function pollScan() {
       badge.style.display = '';
     } else {
       badge.style.display = 'none';
+    }
+    // Show elapsed timer
+    const timerEl = document.getElementById('scan-timer');
+    if (s.running && s.started_at) {
+      const elapsed = Math.round((Date.now() / 1000) - s.started_at);
+      const m = Math.floor(elapsed / 60), sec = elapsed % 60;
+      timerEl.textContent = m + ':' + String(sec).padStart(2, '0') + ' elapsed';
+      timerEl.style.display = '';
+    } else if (!s.running && s.elapsed) {
+      const m = Math.floor(s.elapsed / 60), sec = Math.round(s.elapsed) % 60;
+      timerEl.textContent = 'Completed in ' + m + ':' + String(sec).padStart(2, '0');
+      timerEl.style.display = '';
+    } else {
+      timerEl.style.display = 'none';
     }
     if (s.running) {
       pollT = setTimeout(pollScan, 1500);
@@ -3856,6 +3922,7 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
   <div class="progress-track" id="progress-track" style="display:none">
     <div class="progress-fill" id="progress-fill"></div>
   </div>
+  <span id="scan-timer" style="display:none;font-size:.74rem;color:var(--primary);font-weight:600;white-space:nowrap"></span>
 </div>
 
 <div class="view active" id="cameras-view">
