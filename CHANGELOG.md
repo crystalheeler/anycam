@@ -1,5 +1,63 @@
 # AnyCam — Changelog
 
+## 1.2.2
+- MAC address OUI lookup added to device identification pipeline:
+  nmap reports MAC addresses and vendor names from its built-in OUI DB
+  during ARP-based LAN scans; these are now extracted from nmap XML and
+  stored on every camera card
+- Full IEEE OUI database (~37,000 entries) downloaded from
+  standards-oui.ieee.org on first startup and cached to /data/oui_cache.json;
+  refreshed automatically when cache is older than 30 days; download runs
+  as a background async task and never blocks the scan
+- lookup_oui(mac): returns vendor name from full IEEE DB, or embedded fallback
+- oui_is_camera(mac): returns True/False/None based on OUI vendor matching
+  against CAMERA_DB aliases (camera) or NON_CAMERA_KEYWORDS (non-camera)
+- is_camera_positive() now checks OUI immediately after multicast signals;
+  a camera-manufacturer OUI is a definitive positive; a non-camera OUI
+  (Cisco, Apple, HP, Ubiquiti, Synology, etc.) causes early rejection
+  before any slower probes are attempted
+- _parse_nmap_xml() extracts address[@addrtype=mac] addr and vendor attributes;
+  supplements nmap vendor with full IEEE DB when nmap does not identify it
+- _probe_host_port() and base() carry mac_addr and mac_vendor through to the
+  camera dict; OUI vendor used to fill manufacturer field if HTTP probe
+  did not identify one
+- Identity card section now shows MAC / OUI row: address + vendor name in
+  parentheses (e.g. "1C:C3:16:xx:xx:xx  (Hangzhou Hikvision Digital...")
+- Embedded curated OUI sets: ~30 known camera-manufacturer OUI prefixes
+  and ~60 known non-camera OUI prefixes (Cisco, Juniper, MikroTik, Ubiquiti,
+  HP, Dell, Apple, Netgear, ASUS, Brother, Epson, Synology, QNAP)
+
+## 1.2.1
+- Lorex NVR detection fix: probe_http_identity now extracts script/link src
+  attribute values from HTML (not just body text) — catches SPAs like Lorex
+  where the manufacturer name appears only in JavaScript asset paths
+  (e.g. src="/flirLorex/js/desktop/...") not as visible page text
+- probe_http_identity now ignores SSL certificate errors (cameras and NVRs
+  almost always use self-signed certs); previously a certificate error
+  silently returned empty identity with no manufacturer detected
+- probe_http_identity now tries multiple paths per host: /, /index.html,
+  /login.htm, /login.html, /web/, /web/index.html, /cgi-bin/main-cgi,
+  /view/index.shtml, /live, /admin/ — stops at first manufacturer match
+- probe_http_identity now tries both http:// and https:// on every port
+- Body read increased from 8KB to 16KB for better SPA coverage
+- Focused nmap scan changed from fixed 15-port camera list to
+  --top-ports 1000 (nmap's curated most-common-1000 ports list);
+  covers all camera protocols plus thousands of other ports, catching
+  cameras on non-standard ports identified by manufacturer name in banner
+- IP-level deduplication: after all probing, if an IP already has a
+  confirmed streaming camera card (status=ready, non-HTTP protocol),
+  any sibling cards on that same IP that are HTTP-only/needs_credentials
+  are automatically suppressed — prevents noise cards like serial-number
+  hostnames appearing alongside confirmed camera cards
+- Port Scanner: ARP-discovered hosts now listed above the IP input with
+  checkboxes — IP and hostname shown; Select all / Clear buttons available
+- Port Scanner: batch mode — check any number of hosts and click
+  Scan All Ports to scan them sequentially; results table shows a Host
+  column when more than one IP was scanned; results accumulate across all
+  hosts in the batch
+- ARP_HOSTS global stores last scan results; /api/arp_hosts endpoint
+  returns them; Port Scanner auto-refreshes the list when opened
+
 ## 1.2.0
 - Expanded CAMERA_DB from 33 to 53 entries (54 total minus 1 duplicate):
   Added: Tiandy, IndigoVision, Q-See, LaView, Zosi, Sricam/Srihome, Vstarcam,

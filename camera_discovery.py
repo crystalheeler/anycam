@@ -46,8 +46,13 @@ KEY_FILE       = DATA_DIR / "secret.key"
 CAMS_FILE      = DATA_DIR / "cameras.json"
 BLACKLIST_FILE = DATA_DIR / "blacklist.json"
 RUNTIME_FILE   = DATA_DIR / "runtime.json"
+OUI_CACHE_FILE = DATA_DIR / "oui_cache.json"
 
-CURRENT_VERSION = "1.2.0"  # must match config.yaml
+# IEEE OUI CSV download URL (official source, ~37k entries, refreshed periodically)
+OUI_CSV_URL    = "https://standards-oui.ieee.org/oui/oui.csv"
+OUI_MAX_AGE_DAYS = 30  # re-download once a month
+
+CURRENT_VERSION = "1.2.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -67,6 +72,10 @@ PSCAN = {
     "running": False, "paused": False, "ip": "",
     "progress": 0, "message": "", "results": [], "proc_pid": None,
 }
+
+# Last ARP-discovered hosts — populated by run_scan(), consumed by Port Scan UI
+ARP_HOSTS: list[dict] = []   # [{ip, hostname}, ...]
+PSCAN_QUEUE: list[str] = []  # IPs queued for sequential batch scan
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Protocol constants
@@ -779,6 +788,242 @@ def identify_manufacturer(text: str) -> dict | None:
             return entry
     return None
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OUI (MAC address) database
+# ─────────────────────────────────────────────────────────────────────────────
+
+# In-memory OUI lookup: "XX:XX:XX" (uppercase, colon-separated) → vendor string
+_OUI_DB: dict[str, str] = {}
+_OUI_DB_LOADED = False
+
+# Curated embedded OUI entries for known camera and non-camera vendors.
+# Used as fallback when the IEEE cache is unavailable, and to seed the
+# camera/non-camera classification even before the full DB loads.
+_CAMERA_OUI_VENDORS = {
+    # Hikvision
+    "1C:C3:16", "28:57:BE", "3C:E8:24", "44:19:B6", "48:EA:63",
+    "4C:11:BF", "54:C4:15", "70:A7:41", "80:18:44", "84:EB:18",
+    "A0:AC:1B", "B4:A3:82", "BC:AD:28", "C8:02:8F", "D8:69:73",
+    "E8:EA:6A", "C8:C2:FA", "50:2A:8B", "D4:56:B0",
+    # Dahua
+    "70:62:B8", "90:02:A9", "98:03:D8", "A8:6B:7C",
+    "C8:02:10", "E0:50:8B", "F4:AA:2C",
+    # Axis Communications
+    "00:40:8C", "AC:CC:8E", "B8:A4:4F", "F4:4D:30",
+    # Hanwha / Samsung Techwin
+    "00:09:18", "00:16:6C", "34:FC:EF",
+    # Reolink
+    "EC:71:DB", "DC:A6:32",
+    # Amcrest / Dahua OEM
+    "98:03:D8", "70:62:B8",
+    # Mobotix
+    "00:4A:E0",
+    # ACTi
+    "00:1F:9F",
+    # Vivotek
+    "00:02:D1",
+    # GeoVision
+    "00:13:E2",
+    # Pelco
+    "00:07:CB",
+    # Bosch
+    "00:04:63",
+    # Sony (network cameras)
+    "00:01:4A", "00:90:C6",
+    # Panasonic
+    "00:80:45", "04:B1:67",
+    # Foscam
+    "C4:D9:87", "E0:AE:5E",
+    # TP-Link (Tapo cameras)
+    "50:3E:AA", "98:DA:C4", "C0:06:C3",
+    # Uniview (UNV)
+    "E8:73:2E",
+    # Lorex / FLIR
+    "00:1C:F0", "C0:03:EF",
+    # Milesight
+    "2C:41:38",
+    # Luxonis
+    "44:A9:2C",
+    # iENSO
+    # (OUI not widely published — identified via HTTP)
+}
+
+# OUI prefixes of devices that are almost certainly NOT cameras
+_NON_CAMERA_OUI_VENDORS: set[str] = {
+    # Cisco Systems
+    "00:00:0C", "00:01:42", "00:01:43", "00:01:96", "00:01:97",
+    "00:03:6B", "00:03:E3", "00:0A:8A", "00:0E:38", "00:14:BF",
+    "00:17:94", "00:19:E7", "00:1A:2F", "00:1B:2B", "00:1E:49",
+    "00:1F:27", "00:21:A0", "00:22:BD", "00:23:AC", "00:24:14",
+    "00:25:83", "00:26:0B", "00:27:0D", "00:60:2F",
+    # Juniper Networks
+    "00:05:85", "00:10:DB", "00:12:1E", "00:14:F6", "00:17:CB",
+    "00:19:E2", "00:1F:12", "00:21:59", "00:23:9C", "00:24:DC",
+    # MikroTik
+    "00:0C:42", "2C:C8:1B", "4C:5E:0C", "6C:3B:6B", "74:4D:28",
+    "8C:22:50", "B8:69:F4", "CC:2D:E0", "D4:CA:6D", "DC:2C:6E",
+    "E4:8D:8C", "18:FD:74",
+    # Ubiquiti Networks
+    "00:15:6D", "00:27:22", "04:18:D6", "0C:80:63", "18:E8:29",
+    "24:A4:3C", "44:D9:E7", "68:72:51", "80:2A:A8", "B4:FB:E4",
+    "DC:9F:DB", "F0:9F:C2",
+    # HP / Hewlett-Packard
+    "00:01:E6", "00:02:A5", "00:0D:9D", "00:11:0A", "00:13:21",
+    "00:17:08", "00:18:71", "00:1E:0B", "00:1F:29", "00:21:5A",
+    "00:23:7D", "00:24:81", "00:25:B3", "00:26:55", "3C:D9:2B",
+    # Dell
+    "00:06:5B", "00:08:74", "00:0B:DB", "00:0F:1F", "00:11:43",
+    "00:12:3F", "00:13:72", "00:14:22", "00:15:C5", "00:16:F0",
+    "00:18:8B", "00:19:B9", "00:1A:A0", "00:1C:23", "00:1D:09",
+    # Apple
+    "00:03:93", "00:0A:27", "00:0A:95", "00:0D:93", "00:11:24",
+    "00:14:51", "00:16:CB", "00:17:F2", "00:19:E3", "00:1B:63",
+    "00:1C:B3", "00:1D:4F", "00:1E:52", "00:1E:C2", "00:1F:5B",
+    "00:1F:F3", "00:21:E9", "00:22:41", "00:23:12", "00:23:32",
+    "00:23:6C", "00:23:DF", "00:24:36", "00:25:00", "00:25:4B",
+    "00:25:BC", "00:26:08", "00:26:4A", "00:26:B9", "00:26:BB",
+    # Netgear
+    "00:09:5B", "00:0F:B5", "00:14:6C", "00:18:4D", "00:1B:2F",
+    "00:1E:2A", "00:1F:33", "00:22:3F", "00:24:B2", "00:26:F2",
+    # ASUS
+    "00:0C:6E", "00:11:2F", "00:13:D4", "00:15:F2", "00:17:31",
+    "00:18:F3", "00:1A:92", "00:1B:FC", "00:1D:60", "00:1E:8C",
+    "00:1F:C6", "00:22:15", "00:23:54", "00:24:8C", "00:26:18",
+    # Brother (printers)
+    "00:0C:29", "00:1B:A9", "00:80:77",
+    # Epson (printers)
+    "00:26:AB",
+    # Synology (NAS)
+    "00:11:32",
+    # QNAP (NAS)
+    "00:08:9B",
+}
+
+
+def _oui_key(mac: str) -> str:
+    """Normalise a MAC address to XX:XX:XX uppercase OUI key."""
+    mac = mac.upper().replace("-", ":").replace(".", ":")
+    parts = mac.split(":")
+    return ":".join(parts[:3]) if len(parts) >= 3 else ""
+
+
+def load_oui_db():
+    """
+    Load the OUI database from /data/oui_cache.json into _OUI_DB.
+    The cache is downloaded asynchronously by refresh_oui_db() on first run.
+    """
+    global _OUI_DB_LOADED
+    if _OUI_DB_LOADED:
+        return
+    if OUI_CACHE_FILE.exists():
+        try:
+            _OUI_DB.update(json.loads(OUI_CACHE_FILE.read_text()))
+            log.info(f"OUI DB loaded: {len(_OUI_DB)} entries")
+        except Exception as e:
+            log.warning(f"OUI cache load error: {e}")
+    _OUI_DB_LOADED = True
+
+
+async def refresh_oui_db():
+    """
+    Download the IEEE OUI CSV and cache it to /data/oui_cache.json.
+    Runs once on startup if cache is missing or older than OUI_MAX_AGE_DAYS.
+    Non-blocking — runs as a background task.
+    """
+    import csv, io, urllib.request
+
+    needs_refresh = True
+    if OUI_CACHE_FILE.exists():
+        age_days = (time.time() - OUI_CACHE_FILE.stat().st_mtime) / 86400
+        if age_days < OUI_MAX_AGE_DAYS:
+            needs_refresh = False
+            log.info(f"OUI cache is {age_days:.0f} days old — no refresh needed")
+
+    if not needs_refresh:
+        return
+
+    log.info(f"Downloading IEEE OUI database from {OUI_CSV_URL}…")
+    try:
+        loop = asyncio.get_event_loop()
+
+        def _download():
+            req = urllib.request.Request(OUI_CSV_URL)
+            req.add_header("User-Agent", "AnyCam/1.0")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+
+        raw = await loop.run_in_executor(None, _download)
+
+        # Parse CSV: Registry, Assignment (OUI hex), Organization Name, Address
+        oui_map: dict[str, str] = {}
+        reader = csv.reader(io.StringIO(raw))
+        next(reader, None)  # skip header
+        for row in reader:
+            if len(row) < 3:
+                continue
+            assignment = row[1].strip().upper()  # e.g. "1CC316"
+            org        = row[2].strip()
+            if len(assignment) == 6:
+                key = f"{assignment[0:2]}:{assignment[2:4]}:{assignment[4:6]}"
+                oui_map[key] = org
+
+        DATA_DIR.mkdir(exist_ok=True)
+        OUI_CACHE_FILE.write_text(json.dumps(oui_map))
+        _OUI_DB.update(oui_map)
+        log.info(f"OUI DB refreshed: {len(oui_map)} entries cached")
+    except Exception as e:
+        log.warning(f"OUI DB download failed: {e} — will use embedded fallback")
+
+
+def lookup_oui(mac: str) -> str:
+    """
+    Return the vendor name for a MAC address.
+    Checks the full downloaded OUI DB first, then falls back to
+    camera/non-camera embedded sets (returns prefix like 'Hikvision (OUI)').
+    Returns empty string if unknown.
+    """
+    key = _oui_key(mac)
+    if not key:
+        return ""
+    # Full downloaded DB
+    if key in _OUI_DB:
+        return _OUI_DB[key]
+    # Curated embedded fallback label
+    if key in _CAMERA_OUI_VENDORS:
+        return "(known camera manufacturer)"
+    if key in _NON_CAMERA_OUI_VENDORS:
+        return "(known non-camera device)"
+    return ""
+
+
+def oui_is_camera(mac: str) -> bool | None:
+    """
+    Return True if OUI is a known camera manufacturer,
+    False if a known non-camera device, None if unknown.
+    """
+    key = _oui_key(mac)
+    if not key:
+        return None
+    # Check full DB vendor name against CAMERA_DB
+    vendor = _OUI_DB.get(key, "").lower()
+    if vendor:
+        # Match against camera DB aliases
+        for entry in CAMERA_DB:
+            for alias in entry.get("aliases", []):
+                if alias.lower() in vendor:
+                    return True
+        # Match against known non-camera keywords
+        for kw in NON_CAMERA_KEYWORDS:
+            if kw in vendor:
+                return False
+    # Curated embedded sets
+    if key in _CAMERA_OUI_VENDORS:
+        return True
+    if key in _NON_CAMERA_OUI_VENDORS:
+        return False
+    return None
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Encryption
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1179,22 +1424,25 @@ def onvif_discover(timeout: int = 5) -> list[dict]:
 
 def focused_nmap_scan(host_list: list[str]) -> list[dict]:
     """
-    Scan only known-live hosts on the camera port list.
-    Because hosts are pre-confirmed alive, no timeout waste on dead IPs.
-    Typical time: 15-45 seconds for 50 hosts.
+    Scan only known-live hosts on the top 1000 most common ports.
+    Using nmap --top-ports 1000 covers all standard camera ports plus
+    thousands of other well-known ports, catching cameras on non-standard
+    ports and identifying devices by service banner even without a camera
+    protocol.  Because hosts are pre-confirmed alive via ARP, no timeout
+    waste on dead IPs.
+    Typical time: 30-90 seconds for 20 hosts.
     """
     if not host_list:
         return []
-    ports_str = ",".join(str(p) for p in CAMERA_PORTS)
-    log.info(f"Focused scan: {len(host_list)} host(s), ports {ports_str}")
+    log.info(f"Focused scan: {len(host_list)} host(s), top 1000 ports")
     try:
         r = subprocess.run(
-            ["nmap", "-sV", "--open", "-p", ports_str,
-             "--host-timeout", "20s", "-T4", "-oX", "-"] + host_list,
-            capture_output=True, text=True, timeout=300,
+            ["nmap", "-sV", "--open", "--top-ports", "1000",
+             "--host-timeout", "30s", "-T4", "-oX", "-"] + host_list,
+            capture_output=True, text=True, timeout=360,
         )
         hosts = _parse_nmap_xml(r.stdout)
-        log.info(f"Focused scan: {len(hosts)} host(s) responded on camera ports")
+        log.info(f"Focused scan: {len(hosts)} host(s) responded")
         return hosts
     except Exception as e:
         log.warning(f"Focused nmap: {e}")
@@ -1239,7 +1487,17 @@ def _parse_nmap_xml(xml_text: str) -> list[dict]:
             continue
         ip = addr_el.get("addr")
         hn = host.find("hostnames/hostname")
-        hostname   = hn.get("name", ip) if hn is not None else ip
+        hostname = hn.get("name", ip) if hn is not None else ip
+
+        # Extract MAC address + nmap's built-in OUI vendor (ARP scan only)
+        mac_el  = host.find("address[@addrtype='mac']")
+        mac_addr   = mac_el.get("addr", "")   if mac_el is not None else ""
+        mac_vendor = mac_el.get("vendor", "") if mac_el is not None else ""
+
+        # Supplement nmap vendor with our full OUI DB if nmap didn't identify it
+        if mac_addr and not mac_vendor:
+            mac_vendor = lookup_oui(mac_addr)
+
         open_ports = []
         for p in host.findall("ports/port"):
             pst = p.find("state")
@@ -1252,7 +1510,10 @@ def _parse_nmap_xml(xml_text: str) -> list[dict]:
                 "product": svc.get("product", "") if svc is not None else "",
             })
         if open_ports:
-            results.append({"ip": ip, "hostname": hostname, "open_ports": open_ports})
+            results.append({
+                "ip": ip, "hostname": hostname, "open_ports": open_ports,
+                "mac_addr": mac_addr, "mac_vendor": mac_vendor,
+            })
     return results
 
 
@@ -1444,35 +1705,46 @@ def probe_rtsp_options(ip: str, port: int, timeout: int = 3) -> bool:
     return False
 
 
+# Additional paths to try for identity probing beyond root /
+_IDENTITY_PATHS = [
+    "/", "/index.html", "/index.htm", "/login.htm", "/login.html",
+    "/web/", "/web/index.html", "/cgi-bin/main-cgi", "/view/index.shtml",
+    "/live", "/admin/",
+]
+
+
+def _make_ssl_ctx():
+    """SSL context that ignores self-signed certificates (common on cameras/NVRs)."""
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode    = ssl.CERT_NONE
+    return ctx
+
+
 def probe_http_identity(ip: str, port: int, timeout: int = 5) -> dict:
     """
-    Fetch the HTTP root page and extract as much identity info as possible:
-      - Page title
-      - Server header
-      - Manufacturer match from CAMERA_DB
-      - Whether the page is camera-positive (is_camera bool)
+    Fetch HTTP pages from a device and extract identity info:
+      - Page title, Server header
+      - Manufacturer matched against CAMERA_DB
+      - is_camera flag
 
-    Returns a dict:
-      {
-        "is_camera":    bool,
-        "title":        str,   # HTML <title> contents
-        "server":       str,   # Server header value
-        "manufacturer": str,   # matched CAMERA_DB name or ""
-        "notes":        str,   # matched CAMERA_DB notes or ""
-        "raw_snippet":  str,   # first 500 chars of body for debug
-      }
-    Falls back gracefully on any network or TLS error.
+    Key improvements over naive fetch:
+      - SSL certificate errors ignored (cameras use self-signed certs)
+      - Both http:// and https:// tried on every port
+      - Multiple paths probed (/, /login.htm, /web/, etc.)
+      - Script src attributes scanned — catches JS SPAs where the logo
+        is an image but the manufacturer name appears in asset paths
+        (e.g. Lorex's /flirLorex/js/... paths)
+      - Up to 16KB of body read for better coverage
     """
-    import urllib.request, urllib.error, re as _re
+    import urllib.request, urllib.error, re as _re, ssl as _ssl
 
     result = {
         "is_camera": False,
         "title": "", "server": "",
         "manufacturer": "", "notes": "", "raw_snippet": "",
     }
-
-    scheme = "https" if port in (443, 8443) else "http"
-    url    = f"{scheme}://{ip}:{port}/"
 
     GENERIC_CAM_BODY = [
         "camera", "ipcam", "webcam", "nvr", "dvr", "cctv",
@@ -1481,61 +1753,98 @@ def probe_http_identity(ip: str, port: int, timeout: int = 5) -> dict:
         "channel", "ptz", "pan tilt",
     ]
 
-    def _extract(body_bytes: bytes, headers_str: str) -> None:
+    ssl_ctx = _make_ssl_ctx()
+
+    def _extract(body_bytes: bytes, headers_str: str, url: str) -> bool:
+        """Returns True if a match was found (stop probing further paths)."""
         body = body_bytes.decode("utf-8", errors="replace")
-        result["raw_snippet"] = body[:500]
+        if not result["raw_snippet"]:
+            result["raw_snippet"] = body[:500]
 
         # Page title
-        m = _re.search(r"<title[^>]*>([^<]{1,120})</title>", body, _re.I)
-        if m:
-            result["title"] = m.group(1).strip()
+        if not result["title"]:
+            m = _re.search(r"<title[^>]*>([^<]{1,120})</title>", body, _re.I)
+            if m:
+                result["title"] = m.group(1).strip()
 
-        # Build combined text for DB matching
-        combined = headers_str + " " + body[:8192]
+        # Include script src paths — SPAs like Lorex put the manufacturer
+        # name in asset paths (e.g. src="/flirLorex/js/...")
+        # Extract all attribute values from the HTML
+        attr_values = " ".join(_re.findall(r'(?:src|href|action)=["\']([^"\']{3,120})["\']',
+                                           body, _re.I))
 
-        # Try CAMERA_DB first (rich manufacturer identification)
+        combined = headers_str + " " + body[:16384] + " " + attr_values
+
+        # CAMERA_DB match (rich, manufacturer-specific)
         entry = identify_manufacturer(combined)
         if entry and entry["name"] != "Generic IP Camera":
             result["manufacturer"] = entry["name"]
             result["notes"]        = entry["notes"]
             result["is_camera"]    = True
-            log.info(f"  HTTP identity: {ip}:{port} → {entry['name']}")
-            return
+            log.info(f"  HTTP identity: {ip}:{port}{url} → {entry['name']}")
+            return True
 
-        # Generic camera keywords (fallback)
+        # Generic camera keyword fallback
         combined_l = combined.lower()
         for kw in GENERIC_CAM_BODY:
             if kw in combined_l:
                 result["is_camera"] = True
-                if entry:  # Generic IP Camera entry
+                if entry:
                     result["manufacturer"] = entry["name"]
                     result["notes"]        = entry["notes"]
-                log.info(f"  HTTP body camera confirm: {ip}:{port} ({kw})")
-                return
+                log.info(f"  HTTP camera keyword: {ip}:{port} ({kw})")
+                return True
 
-    try:
-        req = urllib.request.Request(url)
-        req.add_header("User-Agent", "AnyCam/1.0")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            server = resp.headers.get("Server", "")
-            result["server"] = server
-            all_headers = str(resp.headers)
-            body = resp.read(8192)
-            _extract(body, all_headers + " " + server)
-    except urllib.error.HTTPError as e:
-        # 401/403 auth challenge — headers may still identify manufacturer
-        server = e.headers.get("Server", "")
-        result["server"] = server
-        all_headers = str(e.headers)
+        return False
+
+    def _fetch_and_extract(url: str) -> bool:
+        """Fetch a URL (with SSL bypass) and run _extract. Returns True on match."""
         try:
-            body = e.read(8192)
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "Mozilla/5.0 AnyCam/1.0")
+            with urllib.request.urlopen(req, timeout=timeout,
+                                        context=ssl_ctx) as resp:
+                server = resp.headers.get("Server", "")
+                if not result["server"]:
+                    result["server"] = server
+                all_headers = str(resp.headers)
+                body = resp.read(16384)
+                return _extract(body, all_headers + " " + server, url)
+        except urllib.error.HTTPError as e:
+            # 401/403: headers may still identify the device
+            server = e.headers.get("Server", "")
+            if not result["server"]:
+                result["server"] = server
+            all_headers = str(e.headers)
+            try:
+                body = e.read(16384)
+            except Exception:
+                body = b""
+            return _extract(body, all_headers + " " + server, url)
         except Exception:
-            body = b""
-        _extract(body, all_headers + " " + server)
-    except Exception:
-        pass
+            return False
+
+    # Try both schemes; cameras often redirect http→https
+    schemes = []
+    if port in (443, 8443):
+        schemes = ["https"]
+    elif port in (80, 8080, 8000, 8888):
+        schemes = ["http", "https"]
+    else:
+        schemes = ["http", "https"]
+
+    for scheme in schemes:
+        for path in _IDENTITY_PATHS:
+            url = f"{scheme}://{ip}:{port}{path}"
+            if _fetch_and_extract(url):
+                return result  # found a match — stop
 
     return result
+
+
+def probe_http_for_camera(ip: str, port: int, timeout: int = 4) -> bool:
+    """Thin wrapper — returns True if probe_http_identity says is_camera."""
+    return probe_http_identity(ip, port, timeout).get("is_camera", False)
 
 
 def probe_http_for_camera(ip: str, port: int, timeout: int = 4) -> bool:
@@ -1601,7 +1910,7 @@ def probe_hls_quick(ip: str, port: int, timeout: int = 3) -> bool:
 
 def is_camera_positive(ip: str, port: int, service: str, product: str,
                         verdict: str, onvif_ips: set, ssdp_cam_ips: set,
-                        mdns_ips: set) -> bool:
+                        mdns_ips: set, mac_addr: str = "") -> bool:
     """
     Gate function: returns True only if at least one active probe or
     multicast discovery confirms this device is likely a camera.
@@ -1625,6 +1934,18 @@ def is_camera_positive(ip: str, port: int, service: str, product: str,
     # ── 1. Multicast-confirmed (instant, already done in Stage 1) ──────────
     if ip in onvif_ips or ip in ssdp_cam_ips or ip in mdns_ips:
         return True
+
+    # ── 1b. OUI camera-positive (MAC address manufacturer lookup) ─────────
+    #  If the OUI definitively identifies a camera manufacturer, confirm.
+    #  If it definitively identifies a non-camera device, reject early.
+    if mac_addr:
+        oui_result = oui_is_camera(mac_addr)
+        if oui_result is True:
+            log.info(f"  OUI camera confirm: {ip} MAC {mac_addr} → {lookup_oui(mac_addr)}")
+            return True
+        if oui_result is False:
+            log.info(f"  OUI non-camera reject: {ip} MAC {mac_addr} → {lookup_oui(mac_addr)}")
+            return False
 
     # ── 2. RTSP OPTIONS — raw TCP, ~100ms, works through auth ─────────────
     if port in (554, 8554, 10554, 2020, 8765):
@@ -1972,6 +2293,12 @@ async def run_scan():
     log.info(f"Live hosts: {len(all_live)} ({disc_str})")
     SCAN_STATE.update(message=f"Stage 1 complete — {len(all_live)} live host(s) found ({disc_str}). Starting port scan…")
 
+    # Populate ARP_HOSTS for Port Scan UI — resolve hostnames from nmap results later;
+    # for now, store IPs sorted numerically with empty hostname to be filled in
+    ARP_HOSTS.clear()
+    for ip in sorted(all_live, key=lambda x: [int(p) for p in x.split('.')]):
+        ARP_HOSTS.append({"ip": ip, "hostname": ""})
+
     # ── Stage 2: Focused camera port scan on live hosts only ─────────────────
     SCAN_STATE.update(progress=25, stage=2,
                       stage_label="Stage 2/4 — Camera port scan",
@@ -1986,6 +2313,12 @@ async def run_scan():
     SCAN_STATE.update(progress=55, stage=3,
                       stage_label="Stage 3/4 — Stream probing",
                       message=f"Stage 3/4 — Probing {len(nmap_results)} responding host(s)…")
+
+    # Update ARP_HOSTS hostnames from nmap results
+    nmap_hostnames = {h["ip"]: h["hostname"] for h in nmap_results}
+    for entry in ARP_HOSTS:
+        if entry["ip"] in nmap_hostnames:
+            entry["hostname"] = nmap_hostnames[entry["ip"]]
 
     saved = {cid: c for cid, c in CAMERAS.items() if c.get("user_saved")}
     CAMERAS.clear()
@@ -2010,7 +2343,9 @@ async def run_scan():
                                              prev, verdict, reason, loop,
                                              onvif_ips=onvif_ips,
                                              ssdp_cam_ips=ssdp_cam_ips,
-                                             mdns_ips=mdns_ips)
+                                             mdns_ips=mdns_ips,
+                                             mac_addr=host.get("mac_addr",""),
+                                             mac_vendor=host.get("mac_vendor",""))
             if cam:
                 CAMERAS[cam["id"]] = cam
 
@@ -2036,7 +2371,9 @@ async def run_scan():
                                                  prev, verdict, reason, loop,
                                                  onvif_ips=onvif_ips,
                                                  ssdp_cam_ips=ssdp_cam_ips,
-                                                 mdns_ips=mdns_ips)
+                                                 mdns_ips=mdns_ips,
+                                                 mac_addr=host.get("mac_addr",""),
+                                                 mac_vendor=host.get("mac_vendor",""))
                 if cam:
                     CAMERAS[cam["id"]] = cam
 
@@ -2102,6 +2439,31 @@ async def run_scan():
                 "verdict": "camera", "verdict_reason": "SSDP/UPnP discovered",
             }
 
+    # ── IP-level deduplication ───────────────────────────────────────────────
+    # If an IP has at least one card with status="ready" (confirmed camera
+    # on a specific protocol), suppress any sibling cards on the same IP
+    # that are HTTP-only with needs_credentials and no protocol match.
+    # This prevents noise cards like "SN0123456789-ABCDEF012345" on port 80
+    # appearing alongside a confirmed camera card on port 554 at the same IP.
+    confirmed_ips = {
+        cam["ip"] for cam in CAMERAS.values()
+        if cam.get("status") == "ready"
+        and cam.get("protocol") not in ("HTTP", "UNKNOWN")
+    }
+    suppressed = []
+    for cid, cam in list(CAMERAS.items()):
+        if (cam["ip"] in confirmed_ips
+                and cam.get("status") == "needs_credentials"
+                and cam.get("protocol") in ("HTTP", "UNKNOWN")
+                and not cam.get("user_saved")):
+            suppressed.append(cid)
+            log.info(f"  Suppressed noise card: {cam['ip']}:{cam.get('port')} "
+                     f"(confirmed camera already present on this IP)")
+    for cid in suppressed:
+        del CAMERAS[cid]
+    if suppressed:
+        log.info(f"  Suppressed {len(suppressed)} HTTP-only noise card(s)")
+
     save_cameras()
     ready = sum(1 for c in CAMERAS.values() if c["status"] == "ready")
     SCAN_STATE.update(
@@ -2114,7 +2476,8 @@ async def run_scan():
 async def _probe_host_port(ip, port, hostname, initial_protocol,
                            prev, verdict, reason, loop,
                            onvif_ips=None, ssdp_cam_ips=None,
-                           mdns_ips=None) -> dict | None:
+                           mdns_ips=None,
+                           mac_addr="", mac_vendor="") -> dict | None:
     cid = f"{ip}_{port}"
     prev_creds = prev.get("credentials")
     prev_name  = prev.get("name", hostname)
@@ -2137,6 +2500,7 @@ async def _probe_host_port(ip, port, hostname, initial_protocol,
             onvif_ips or set(),
             ssdp_cam_ips or set(),
             mdns_ips or set(),
+            mac_addr,
         )
         if not camera_confirmed:
             log.info(f"  Skipping {ip}:{port} — no camera-positive signal")
@@ -2158,6 +2522,9 @@ async def _probe_host_port(ip, port, hostname, initial_protocol,
             identity.setdefault("manufacturer", entry["name"])
             identity.setdefault("notes", entry["notes"])
 
+    # ── OUI camera-positive signal ──────────────────────────────────────
+    oui_cam = oui_is_camera(mac_addr) if mac_addr else None
+
     def base(proto, url, status, display="proxy"):
         cam = {
             "id": cid, "ip": ip, "hostname": hostname, "port": port,
@@ -2170,9 +2537,13 @@ async def _probe_host_port(ip, port, hostname, initial_protocol,
             "device_notes": identity.get("notes", ""),
             "page_title":   identity.get("title", ""),
             "server_header":identity.get("server", ""),
+            "mac_addr":     mac_addr,
+            "mac_vendor":   mac_vendor,
         }
-        # If we identified a manufacturer and the name is still the default,
-        # upgrade the display name to include the manufacturer
+        # Use OUI vendor to fill manufacturer if HTTP identity didn't find one
+        if not cam["manufacturer"] and mac_vendor and oui_cam is True:
+            cam["manufacturer"] = mac_vendor
+        # Upgrade display name if still default
         if cam["manufacturer"] and cam["name"] == hostname:
             cam["name"] = f"{cam['manufacturer']} ({ip})"
         return cam
@@ -2361,7 +2732,8 @@ def _safe_cam(cam: dict) -> dict:
     s["has_credentials"]  = bool(s.get("credentials"))
     s["upgrade_missing"]  = bool(s.get("upgrade_missing"))
     # Ensure identity fields always present
-    for f in ("manufacturer", "device_notes", "page_title", "server_header"):
+    for f in ("manufacturer", "device_notes", "page_title", "server_header",
+              "mac_addr", "mac_vendor"):
         s.setdefault(f, "")
     s.pop("credentials", None)
     return s
@@ -2565,18 +2937,57 @@ async def api_add_camera(request):
     return web.json_response({"status": "ok", "camera_id": cid})
 
 
+async def api_arp_hosts(request):
+    """Return the last ARP-discovered host list for the Port Scan UI."""
+    return web.json_response(ARP_HOSTS)
+
+
 async def api_pscan_start(request):
     try:
         data = await request.json()
         ip   = data.get("ip","").strip()
+        ips  = data.get("ips", [])  # batch: list of IPs
     except Exception:
         return web.json_response({"error": "Invalid JSON"}, status=400)
-    if not ip:
-        return web.json_response({"error": "IP required"}, status=400)
+
     if PSCAN["running"]:
         return web.json_response({"error": "Scan already running"}, status=409)
+
+    if ips:
+        # Batch mode: queue all IPs, scan sequentially
+        PSCAN_QUEUE.clear()
+        PSCAN_QUEUE.extend([i.strip() for i in ips if i.strip()])
+        if not PSCAN_QUEUE:
+            return web.json_response({"error": "No valid IPs"}, status=400)
+        asyncio.create_task(run_batch_port_scan())
+        return web.json_response({"status": "started", "count": len(PSCAN_QUEUE)})
+
+    if not ip:
+        return web.json_response({"error": "IP required"}, status=400)
     asyncio.create_task(run_port_scan(ip))
     return web.json_response({"status": "started"})
+
+
+async def run_batch_port_scan():
+    """Run port scans sequentially for all IPs in PSCAN_QUEUE."""
+    total = len(PSCAN_QUEUE)
+    all_results = []
+    for idx, ip in enumerate(list(PSCAN_QUEUE)):
+        PSCAN.update(
+            running=True, ip=ip, progress=int(100 * idx / total),
+            message=f"Scanning {ip} ({idx+1}/{total})…",
+        )
+        await run_port_scan(ip)
+        # Prefix each result with the IP it came from
+        for r in PSCAN["results"]:
+            r["scanned_ip"] = ip
+        all_results.extend(PSCAN["results"])
+    PSCAN.update(
+        running=False, progress=100, results=all_results,
+        message=f"Batch scan complete — {total} host(s), {len(all_results)} open port(s) total.",
+        ip="",
+    )
+    PSCAN_QUEUE.clear()
 
 async def api_pscan_status(request):
     return web.json_response(PSCAN)
@@ -2644,6 +3055,7 @@ function switchView(v) {
   ).classList.add('active');
   document.getElementById('pscan-btn').classList.toggle('active', v === 'pscan');
   document.getElementById('add-btn').classList.toggle('active', v === 'add');
+  if (v === 'pscan') loadArpHosts();
 }
 
 /* ── Camera scan ───────────────────────────────────────────────────────────── */
@@ -2804,6 +3216,10 @@ function feedHTML(cam) {
 function identityHTML(cam) {
   const rows = [];
   if (cam.manufacturer)   rows.push(['Manufacturer', cam.manufacturer]);
+  if (cam.mac_addr) {
+    const macLabel = cam.mac_addr + (cam.mac_vendor ? '  (' + cam.mac_vendor + ')' : '');
+    rows.push(['MAC / OUI', macLabel]);
+  }
   if (cam.page_title)     rows.push(['Page title',   cam.page_title]);
   if (cam.server_header)  rows.push(['Server',       cam.server_header]);
   if (cam.hostname && cam.hostname !== cam.ip) rows.push(['Hostname', cam.hostname]);
@@ -2964,12 +3380,59 @@ document.getElementById('rename-input').addEventListener('keydown',
   e => { if (e.key === 'Enter') submitRename(); if (e.key === 'Escape') closeRename(); });
 
 /* ── Port scanner ──────────────────────────────────────────────────────────── */
+let _arpHosts = [];
+
+async function loadArpHosts() {
+  try {
+    _arpHosts = await (await fetch(BASE + '/api/arp_hosts')).json();
+    renderArpList();
+  } catch(e) {
+    console.warn('ARP hosts not available yet');
+  }
+}
+
+function renderArpList() {
+  const wrap = document.getElementById('arp-host-list');
+  if (!_arpHosts.length) {
+    wrap.innerHTML = '<span class="arp-empty">No hosts discovered yet — run a network scan first.</span>';
+    return;
+  }
+  wrap.innerHTML = '<div class="arp-select-row">'
+    + '<button class="btn btn-ghost btn-sm" onclick="arpSelectAll(true)">Select all</button>'
+    + '<button class="btn btn-ghost btn-sm" onclick="arpSelectAll(false)">Clear</button>'
+    + '<span style="color:var(--text-dim);font-size:.75rem;margin-left:6px">'
+    + _arpHosts.length + ' host' + (_arpHosts.length !== 1 ? 's' : '') + ' discovered</span>'
+    + '</div>'
+    + _arpHosts.map(h => {
+        const label = h.ip + (h.hostname && h.hostname !== h.ip ? ' — ' + esc(h.hostname) : '');
+        return '<label class="arp-row">'
+          + '<input type="checkbox" class="arp-cb" value="' + h.ip + '"> '
+          + '<span class="arp-ip">' + h.ip + '</span>'
+          + (h.hostname && h.hostname !== h.ip
+              ? '<span class="arp-host"> — ' + esc(h.hostname) + '</span>' : '')
+          + '</label>';
+      }).join('');
+}
+
+function arpSelectAll(val) {
+  document.querySelectorAll('.arp-cb').forEach(cb => cb.checked = val);
+}
+
+function getSelectedIPs() {
+  const manual = document.getElementById('pscan-ip').value.trim();
+  const checked = [...document.querySelectorAll('.arp-cb:checked')].map(cb => cb.value);
+  const combined = [...new Set([...checked, ...(manual ? [manual] : [])])];
+  return combined;
+}
+
 async function startPortScan() {
-  const ip = document.getElementById('pscan-ip').value.trim();
-  if (!ip) { alert('Enter an IP address.'); return; }
+  const ips = getSelectedIPs();
+  if (!ips.length) { alert('Select at least one host or enter an IP address.'); return; }
+
+  const body = ips.length === 1 ? {ip: ips[0]} : {ips};
   const r = await fetch(BASE + '/api/pscan/start', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ip})
+    body: JSON.stringify(body)
   });
   if (!r.ok) { const d = await r.json(); alert(d.error || 'Scan failed'); return; }
   document.getElementById('ps-start').disabled = true;
@@ -3001,11 +3464,24 @@ async function pollPscan() {
 
 function renderPorts(results) {
   document.getElementById('port-table').style.display = '';
-  document.getElementById('port-tbody').innerHTML = results.map(p => {
+  const hasBatch = results.some(p => p.scanned_ip);
+  const tbody = document.getElementById('port-tbody');
+  // Update header if batch
+  const thead = document.querySelector('#port-table thead tr');
+  if (hasBatch && !thead.querySelector('.batch-ip-col')) {
+    const th = document.createElement('th');
+    th.textContent = 'Host'; th.className = 'batch-ip-col';
+    thead.insertBefore(th, thead.firstChild);
+  } else if (!hasBatch) {
+    const old = thead.querySelector('.batch-ip-col');
+    if (old) old.remove();
+  }
+  tbody.innerHTML = results.map(p => {
     const ver = [p.product, p.version, p.extra].filter(Boolean).join(' ');
     const scripts = Object.entries(p.scripts || {})
       .map(([k,v]) => '<b>' + esc(k) + '</b>: ' + esc(v)).join('\n');
     return '<tr>'
+      + (hasBatch ? '<td class="arp-ip" style="white-space:nowrap">' + esc(p.scanned_ip || '') + '</td>' : '')
       + '<td class="pnum">' + p.port + '</td>'
       + '<td>' + esc(p.proto) + '</td>'
       + '<td class="psvc">' + esc(p.service) + '</td>'
@@ -3161,6 +3637,19 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .dot-uncertain{{background:var(--orange);box-shadow:0 0 5px var(--orange)}}
 .dot-error{{background:var(--red);box-shadow:0 0 5px var(--red)}}
 .dot-upgrade{{background:var(--orange);box-shadow:0 0 8px var(--orange);animation:pulse 2s infinite}}
+.arp-host-section{{padding:14px 18px 0;display:flex;flex-direction:column;gap:6px}}
+.arp-section-label{{font-size:.75rem;font-weight:600;color:var(--text-dim);letter-spacing:.04em}}
+.arp-host-list{{background:var(--surface);border:1px solid var(--border);border-radius:8px;
+               padding:10px;display:flex;flex-direction:column;gap:3px;max-height:220px;overflow-y:auto}}
+.arp-empty{{font-size:.78rem;color:var(--text-dim);padding:4px 0}}
+.arp-select-row{{display:flex;align-items:center;gap:6px;padding-bottom:6px;
+                border-bottom:1px solid var(--border);margin-bottom:4px}}
+.arp-row{{display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:5px;
+         cursor:pointer;font-size:.82rem}}
+.arp-row:hover{{background:var(--surface2)}}
+.arp-row input{{accent-color:var(--primary);cursor:pointer;flex-shrink:0}}
+.arp-ip{{font-family:monospace;font-weight:600;color:var(--primary)}}
+.arp-host{{color:var(--text-dim)}}
 .id-section{{margin:0 12px 8px;border:1px solid var(--border);border-radius:8px;overflow:hidden}}
 .id-section summary{{padding:6px 10px;font-size:.72rem;font-weight:600;color:var(--text-dim);
                      cursor:pointer;list-style:none;user-select:none}}
@@ -3265,8 +3754,16 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 </div>
 
 <div class="view" id="pscan-view">
+  <!-- ARP-discovered hosts with checkboxes -->
+  <div class="arp-host-section">
+    <div class="arp-section-label">&#x1F4E1; Discovered hosts <span style="color:var(--text-dim);font-weight:400">(check to include in scan)</span></div>
+    <div id="arp-host-list" class="arp-host-list">
+      <span class="arp-empty">No hosts yet — run a network scan first.</span>
+    </div>
+  </div>
+  <!-- Manual IP + controls -->
   <div class="pscan-top">
-    <input type="text" id="pscan-ip" placeholder="IP address (e.g. 192.168.1.100)"
+    <input type="text" id="pscan-ip" placeholder="Or enter IP manually (e.g. 192.168.1.100)"
            onkeydown="if(event.key==='Enter')startPortScan()"/>
     <div class="pscan-ctl">
       <button class="btn btn-primary"   id="ps-start"  onclick="startPortScan()">&#x25B6; Scan All Ports</button>
@@ -3275,7 +3772,7 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
       <button class="btn btn-ghost btn-sm" onclick="switchView('cameras')">&#x2190; Cameras</button>
     </div>
   </div>
-  <div id="pscan-msg" style="padding:6px 0;font-size:.8rem;color:var(--text-dim)">Enter an IP and click Scan All Ports.</div>
+  <div id="pscan-msg" style="padding:6px 0;font-size:.8rem;color:var(--text-dim)">Select hosts above and/or enter an IP, then click Scan All Ports.</div>
   <div class="progress-track" id="ps-prog-track" style="display:none;max-width:100%;margin-bottom:6px">
     <div class="progress-fill" id="ps-prog-fill"></div>
   </div>
@@ -3361,6 +3858,7 @@ def make_app() -> web.Application:
     app.router.add_post(  "/api/cameras/add",                     api_add_camera)
     app.router.add_get(   "/stream/{camera_id}",                  handle_stream)
     app.router.add_get(   "/snapshot/{camera_id}",                handle_snapshot)
+    app.router.add_get(   "/api/arp_hosts",                        api_arp_hosts)
     app.router.add_post(  "/api/pscan/start",                     api_pscan_start)
     app.router.add_get(   "/api/pscan/status",                    api_pscan_status)
     app.router.add_post(  "/api/pscan/cancel",                    api_pscan_cancel)
@@ -3372,6 +3870,7 @@ def make_app() -> web.Application:
 async def main():
     load_cameras()
     load_blacklist()
+    load_oui_db()   # Load cached OUI DB synchronously (fast, from disk)
     app = make_app()
     runner = web.AppRunner(app)
     await runner.setup()
@@ -3395,6 +3894,9 @@ async def main():
 
     # Record the current version so next startup can compare
     save_runtime({"version": CURRENT_VERSION})
+
+    # Background: download/refresh IEEE OUI database (non-blocking)
+    asyncio.create_task(refresh_oui_db())
 
     await asyncio.Event().wait()
 
