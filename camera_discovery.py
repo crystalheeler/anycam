@@ -52,7 +52,7 @@ OUI_CACHE_FILE = DATA_DIR / "oui_cache.json"
 OUI_CSV_URL    = "https://standards-oui.ieee.org/oui/oui.csv"
 OUI_MAX_AGE_DAYS = 30  # re-download once a month
 
-CURRENT_VERSION = "1.2.2"  # must match config.yaml
+CURRENT_VERSION = "1.2.3"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2320,6 +2320,17 @@ async def run_scan():
         if entry["ip"] in nmap_hostnames:
             entry["hostname"] = nmap_hostnames[entry["ip"]]
 
+    # Remove our own service port from nmap results so AnyCam itself
+    # never creates a camera card (port 8099 on the Pi serves our own UI).
+    # We still probe the Pi for OAK Camera on port 8765.
+    local_ip = next((e["ip"] for e in ARP_HOSTS if e["ip"] == get_local_ip()), "")
+    for host in nmap_results:
+        if host["ip"] == local_ip:
+            host["open_ports"] = [
+                p for p in host["open_ports"]
+                if p["port"] != PORT   # skip AnyCam's own ingress port
+            ]
+
     saved = {cid: c for cid, c in CAMERAS.items() if c.get("user_saved")}
     CAMERAS.clear()
     CAMERAS.update(saved)
@@ -2384,6 +2395,27 @@ async def run_scan():
             continue
         existing = [c for c in CAMERAS.values() if c["ip"] == ip]
         if existing:
+            # Run HTTP identity probe if none of the existing cards identified
+            # the manufacturer yet (e.g. device was found on port 554 only,
+            # so no HTTP probing happened during _probe_host_port)
+            if not any(c.get("manufacturer") for c in existing):
+                identity = {}
+                for _p in (80, 443, 8080):
+                    identity = await loop.run_in_executor(
+                        None, probe_http_identity, ip, _p)
+                    if identity.get("manufacturer"):
+                        log.info(f"  ONVIF merge HTTP identity: {ip} → {identity['manufacturer']}")
+                        break
+                if identity.get("manufacturer"):
+                    for cam in existing:
+                        cam.setdefault("manufacturer", identity.get("manufacturer",""))
+                        cam.setdefault("device_notes", identity.get("notes",""))
+                        cam.setdefault("page_title",   identity.get("title",""))
+                        cam.setdefault("server_header",identity.get("server",""))
+                        # Auto-upgrade name if still using hostname default
+                        if (cam["manufacturer"] and
+                                cam.get("name") in (ip, onvif.get("name",""), "")):
+                            cam["name"] = f"{cam['manufacturer']} ({ip})"
             for cam in existing:
                 cam["onvif"]  = True
                 cam["xaddrs"] = onvif.get("xaddrs", cam.get("xaddrs", ""))
@@ -2440,26 +2472,48 @@ async def run_scan():
             }
 
     # ── IP-level deduplication ───────────────────────────────────────────────
-    # If an IP has at least one card with status="ready" (confirmed camera
-    # on a specific protocol), suppress any sibling cards on the same IP
-    # that are HTTP-only with needs_credentials and no protocol match.
-    # This prevents noise cards like "SN0123456789-ABCDEF012345" on port 80
-    # appearing alongside a confirmed camera card on port 554 at the same IP.
-    confirmed_ips = {
-        cam["ip"] for cam in CAMERAS.values()
-        if cam.get("status") == "ready"
-        and cam.get("protocol") not in ("HTTP", "UNKNOWN")
-    }
-    suppressed = []
-    for cid, cam in list(CAMERAS.items()):
-        if (cam["ip"] in confirmed_ips
-                and cam.get("status") == "needs_credentials"
-                and cam.get("protocol") in ("HTTP", "UNKNOWN")
-                and not cam.get("user_saved")):
-            suppressed.append(cid)
-            log.info(f"  Suppressed noise card: {cam['ip']}:{cam.get('port')} "
-                     f"(confirmed camera already present on this IP)")
+    # An IP is "confirmed camera" if ANY card on it meets ONE of:
+    #   a) status=ready with a non-HTTP protocol (streaming)
+    #   b) manufacturer is identified (even if still needs_credentials)
+    #   c) protocol is a specific camera proto (RTSP, MJPEG, HLS, RTMP, etc.)
+    #   d) verdict == "camera" from multicast discovery (ONVIF/SSDP/mDNS)
+    # Once confirmed, suppress sibling cards that are HTTP-only /
+    # needs_credentials with no manufacturer and no camera protocol.
+    CAMERA_PROTOS = {"RTSP", "MJPEG", "HLS", "RTMP", "WebRTC", "WS-RTSP",
+                     "DVR", "ONVIF"}
+
+    def _is_confirmed(cam: dict) -> bool:
+        if cam.get("status") == "ready" and cam.get("protocol") not in ("HTTP","UNKNOWN"):
+            return True
+        if cam.get("manufacturer"):
+            return True
+        if cam.get("protocol") in CAMERA_PROTOS:
+            return True
+        if cam.get("verdict_reason","").startswith("ONVIF") or            cam.get("verdict_reason","").startswith("SSDP") or            cam.get("verdict_reason","").startswith("mDNS"):
+            return True
+        return False
+
+    confirmed_ips = {cam["ip"] for cam in CAMERAS.values() if _is_confirmed(cam)}
+
+    def _is_noise(cam: dict) -> bool:
+        """True if this card adds no value when a better card exists for the IP."""
+        if cam.get("user_saved"):
+            return False
+        if cam.get("protocol") in CAMERA_PROTOS:
+            return False
+        if cam.get("manufacturer"):
+            return False
+        if cam.get("status") in ("ready", "info"):
+            return False
+        return cam.get("protocol") in ("HTTP", "UNKNOWN")
+
+    suppressed = [
+        cid for cid, cam in CAMERAS.items()
+        if cam["ip"] in confirmed_ips and _is_noise(cam)
+    ]
     for cid in suppressed:
+        log.info(f"  Suppressed noise card: {CAMERAS[cid]['ip']}:{CAMERAS[cid].get('port')} "
+                 f"— better card exists for this IP")
         del CAMERAS[cid]
     if suppressed:
         log.info(f"  Suppressed {len(suppressed)} HTTP-only noise card(s)")
@@ -3055,7 +3109,23 @@ function switchView(v) {
   ).classList.add('active');
   document.getElementById('pscan-btn').classList.toggle('active', v === 'pscan');
   document.getElementById('add-btn').classList.toggle('active', v === 'add');
-  if (v === 'pscan') loadArpHosts();
+  if (v === 'pscan') {
+    loadArpHosts();
+    // Resume polling if a scan is already running
+    const ps = fetch(BASE + '/api/pscan/status').then(r => r.json()).then(s => {
+      if (s.running) {
+        document.getElementById('ps-start').disabled = true;
+        document.getElementById('ps-pause').style.display = '';
+        document.getElementById('ps-cancel').style.display = '';
+        document.getElementById('ps-prog-track').style.display = '';
+        _paused = s.paused || false;
+        document.getElementById('ps-pause').textContent = _paused ? '▶ Resume' : '⏸ Pause';
+        pollPscan();
+      } else if (s.results && s.results.length) {
+        renderPorts(s.results);
+      }
+    });
+  }
 }
 
 /* ── Camera scan ───────────────────────────────────────────────────────────── */
@@ -3462,11 +3532,35 @@ async function pollPscan() {
   } catch { pscanT = setTimeout(pollPscan, 3000); }
 }
 
+const CAM_PORTS   = new Set([554,8554,10554,1935,1936,2020,37777,34567,8765]);
+const CAM_SERVICES = ['rtsp','onvif','rtmp','camera','ipcam','nvr','dvr','cctv',
+                      'video server','webcam','dahua','hikvision','lorex','reolink',
+                      'axis','amcrest','axis-cgi','mediamtx'];
+
+function isCamPort(p) {
+  if (CAM_PORTS.has(p.port)) return true;
+  const combined = (p.service + ' ' + p.product).toLowerCase();
+  return CAM_SERVICES.some(k => combined.includes(k));
+}
+
+function makePortRow(p, hasBatch) {
+  const ver = [p.product, p.version, p.extra].filter(Boolean).join(' ');
+  const scripts = Object.entries(p.scripts || {})
+    .map(([k,v]) => '<b>' + esc(k) + '</b>: ' + esc(v)).join('\n');
+  return '<tr>'
+    + (hasBatch ? '<td class="arp-ip" style="white-space:nowrap">' + esc(p.scanned_ip || '') + '</td>' : '')
+    + '<td class="pnum">' + p.port + '</td>'
+    + '<td>' + esc(p.proto) + '</td>'
+    + '<td class="psvc">' + esc(p.service) + '</td>'
+    + '<td>' + esc(ver) + '</td>'
+    + '<td>' + (scripts ? '<div class="pscripts">' + scripts + '</div>' : '—') + '</td>'
+    + '</tr>';
+}
+
 function renderPorts(results) {
+  if (!results.length) return;
   document.getElementById('port-table').style.display = '';
   const hasBatch = results.some(p => p.scanned_ip);
-  const tbody = document.getElementById('port-tbody');
-  // Update header if batch
   const thead = document.querySelector('#port-table thead tr');
   if (hasBatch && !thead.querySelector('.batch-ip-col')) {
     const th = document.createElement('th');
@@ -3476,19 +3570,34 @@ function renderPorts(results) {
     const old = thead.querySelector('.batch-ip-col');
     if (old) old.remove();
   }
-  tbody.innerHTML = results.map(p => {
-    const ver = [p.product, p.version, p.extra].filter(Boolean).join(' ');
-    const scripts = Object.entries(p.scripts || {})
-      .map(([k,v]) => '<b>' + esc(k) + '</b>: ' + esc(v)).join('\n');
-    return '<tr>'
-      + (hasBatch ? '<td class="arp-ip" style="white-space:nowrap">' + esc(p.scanned_ip || '') + '</td>' : '')
-      + '<td class="pnum">' + p.port + '</td>'
-      + '<td>' + esc(p.proto) + '</td>'
-      + '<td class="psvc">' + esc(p.service) + '</td>'
-      + '<td>' + esc(ver) + '</td>'
-      + '<td>' + (scripts ? '<div class="pscripts">' + scripts + '</div>' : '—') + '</td>'
-      + '</tr>';
-  }).join('');
+
+  const camPorts  = results.filter(isCamPort);
+  const otherPorts = results.filter(p => !isCamPort(p));
+
+  let html = '';
+  if (camPorts.length) {
+    html += '<tr class="section-header"><td colspan="99">&#x1F4F9; Likely camera-related ('
+          + camPorts.length + ' port' + (camPorts.length !== 1 ? 's' : '') + ')</td></tr>';
+    html += camPorts.map(p => makePortRow(p, hasBatch)).join('');
+  }
+  if (otherPorts.length) {
+    html += '<tr class="section-header other-header" onclick="toggleOther(this)">'
+          + '<td colspan="99">&#x25B6; Other ports ('
+          + otherPorts.length + ') — click to show/hide</td></tr>';
+    html += '<tbody class="other-ports" style="display:none">'
+          + otherPorts.map(p => makePortRow(p, hasBatch)).join('')
+          + '</tbody>';
+  }
+  document.getElementById('port-tbody').innerHTML = html;
+}
+
+function toggleOther(hdrRow) {
+  const next = hdrRow.nextElementSibling;
+  if (!next) return;
+  const hidden = next.style.display === 'none';
+  next.style.display = hidden ? '' : 'none';
+  const arrow = hdrRow.querySelector('td');
+  if (arrow) arrow.textContent = arrow.textContent.replace(hidden ? '▶' : '▼', hidden ? '▼' : '▶');
 }
 
 async function togglePause() {
@@ -3668,13 +3777,21 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .cred-error{{font-size:.71rem;color:var(--red);display:none}}
 .cred-error.visible{{display:block}}
 .card-actions{{padding:0 12px 10px;display:flex;gap:4px;margin-top:auto;flex-wrap:wrap}}
-#pscan-view{{padding:18px;gap:14px}}
+#pscan-view{{padding:16px 18px;gap:12px}}
+.pscan-header{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px}}
+.pscan-header .pscan-ctl{{margin-left:auto}}
+.pscan-ctl{{display:flex;gap:6px;flex-wrap:wrap}}
 .pscan-top{{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end}}
 .pscan-top input{{background:var(--surface);border:1px solid var(--border);color:var(--text);
-                  border-radius:8px;padding:7px 12px;font-size:.88rem;outline:none;flex:1;min-width:160px}}
+                  border-radius:8px;padding:7px 12px;font-size:.88rem;outline:none;
+                  flex:1;min-width:200px;max-width:400px}}
 .pscan-top input:focus{{border-color:var(--primary)}}
-.pscan-ctl{{display:flex;gap:6px;flex-wrap:wrap}}
-#pscan-msg{{font-size:.8rem;color:var(--text-dim);padding:4px 0}}
+#pscan-msg{{font-size:.78rem;color:var(--text-dim);padding:2px 0;line-height:1.5}}
+.section-header td{{background:var(--surface2);font-size:.73rem;font-weight:700;
+                     color:var(--text-dim);letter-spacing:.04em;padding:6px 10px;
+                     border-bottom:1px solid var(--border)}}
+.other-header{{cursor:pointer}}
+.other-header:hover td{{background:var(--border)}}
 .port-table{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;flex:1}}
 .port-table table{{width:100%;border-collapse:collapse;font-size:.8rem}}
 .port-table th{{background:var(--surface2);padding:7px 10px;text-align:left;font-size:.72rem;color:var(--text-dim);font-weight:600;letter-spacing:.04em;border-bottom:1px solid var(--border)}}
@@ -3754,25 +3871,28 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 </div>
 
 <div class="view" id="pscan-view">
-  <!-- ARP-discovered hosts with checkboxes -->
-  <div class="arp-host-section">
-    <div class="arp-section-label">&#x1F4E1; Discovered hosts <span style="color:var(--text-dim);font-weight:400">(check to include in scan)</span></div>
-    <div id="arp-host-list" class="arp-host-list">
-      <span class="arp-empty">No hosts yet — run a network scan first.</span>
-    </div>
-  </div>
-  <!-- Manual IP + controls -->
-  <div class="pscan-top">
-    <input type="text" id="pscan-ip" placeholder="Or enter IP manually (e.g. 192.168.1.100)"
-           onkeydown="if(event.key==='Enter')startPortScan()"/>
+  <!-- Back button upper left + controls -->
+  <div class="pscan-header">
+    <button class="btn btn-ghost btn-sm" onclick="switchView('cameras')">&#x2190; Back to Cameras</button>
     <div class="pscan-ctl">
       <button class="btn btn-primary"   id="ps-start"  onclick="startPortScan()">&#x25B6; Scan All Ports</button>
       <button class="btn btn-secondary" id="ps-pause"  onclick="togglePause()" style="display:none">&#x23F8; Pause</button>
       <button class="btn btn-danger"    id="ps-cancel" onclick="cancelPortScan()" style="display:none">&#x2715; Cancel</button>
-      <button class="btn btn-ghost btn-sm" onclick="switchView('cameras')">&#x2190; Cameras</button>
     </div>
   </div>
-  <div id="pscan-msg" style="padding:6px 0;font-size:.8rem;color:var(--text-dim)">Select hosts above and/or enter an IP, then click Scan All Ports.</div>
+  <!-- ARP-discovered hosts with checkboxes -->
+  <div class="arp-host-section">
+    <div class="arp-section-label">&#x1F4E1; Discovered hosts <span style="color:var(--text-dim);font-weight:400">(check any to include in port scan)</span></div>
+    <div id="arp-host-list" class="arp-host-list">
+      <span class="arp-empty">No hosts yet — run a network scan first.</span>
+    </div>
+  </div>
+  <!-- Manual IP input -->
+  <div class="pscan-top">
+    <input type="text" id="pscan-ip" placeholder="Or enter an IP address manually (e.g. 192.168.1.100)"
+           onkeydown="if(event.key==='Enter')startPortScan()"/>
+  </div>
+  <div id="pscan-msg" style="padding:6px 2px;font-size:.8rem;color:var(--text-dim)">Select hosts above and/or enter an IP, then click Scan All Ports.<br><small style="opacity:.7">Note: navigating away will not cancel an in-progress scan.</small></div>
   <div class="progress-track" id="ps-prog-track" style="display:none;max-width:100%;margin-bottom:6px">
     <div class="progress-fill" id="ps-prog-fill"></div>
   </div>

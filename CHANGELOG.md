@@ -1,5 +1,26 @@
 # AnyCam — Changelog
 
+## 1.2.3
+- Deduplication fix: confirmed_ips now includes any card where manufacturer
+  is identified OR protocol is a camera type OR verdict_reason starts with
+  ONVIF/SSDP/mDNS — not just status=ready with non-HTTP protocol; this
+  correctly suppresses the 192.168.50.210:80 and :443 noise cards when the
+  iENSO was identified on port 8888 but still needs credentials
+- AnyCam self-exclusion: nmap results for the local Pi IP have our own
+  ingress port (8099) removed before probing; prevents AnyCam's own UI
+  from appearing as a camera card (our page contains 'camera' everywhere)
+- Lorex/ONVIF identity fix: when ONVIF merges into an existing nmap-found
+  entry (e.g. device found on port 554 but ONVIF confirmed), HTTP identity
+  probing now runs on ports 80/443/8080 if manufacturer is still empty;
+  this allows Lorex NVRs found on RTSP to get HTTP-probed and identified
+- Port Scanner: navigating away no longer cancels the scan; returning to
+  Port Scan view resumes status polling automatically if scan is running
+- Port Scanner: results split into two sections:
+  'Likely camera-related' (camera ports + camera service keywords) shown
+  fully expanded; 'Other ports' collapsed with click-to-expand toggle
+- Port Scanner: 'Back to Cameras' button moved to upper left of the view
+- Port Scanner: hint text added noting that navigating away won't cancel
+
 ## 1.2.2
 - MAC address OUI lookup added to device identification pipeline:
   nmap reports MAC addresses and vendor names from its built-in OUI DB
