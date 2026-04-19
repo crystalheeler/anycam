@@ -726,6 +726,224 @@ def probe_ws_rtsp(ip: str, port: int, timeout: int = 4) -> str | None:
     return None
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Active camera-positive probes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def probe_rtsp_options(ip: str, port: int, timeout: int = 3) -> bool:
+    """
+    Send RTSP OPTIONS via raw TCP and check for an RTSP response header.
+    Works even when auth is required — a 401 is still camera-positive.
+    This is the fastest and most reliable camera litmus test.
+    Routers, printers, NAS devices do NOT speak RTSP and will close the
+    connection or return HTTP/garbage.
+    """
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as sock:
+            request = (
+                f"OPTIONS rtsp://{ip}:{port}/ RTSP/1.0\r\n"
+                f"CSeq: 1\r\n"
+                f"User-Agent: AnyCam/1.0\r\n"
+                f"\r\n"
+            )
+            sock.sendall(request.encode())
+            sock.settimeout(timeout)
+            response = sock.recv(256).decode("utf-8", errors="replace")
+            # Any RTSP response = camera
+            if response.startswith("RTSP/"):
+                log.info(f"  RTSP OPTIONS confirm: {ip}:{port} -> {response.split(chr(13))[0]}")
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def probe_http_for_camera(ip: str, port: int, timeout: int = 4) -> bool:
+    """
+    Fetch the HTTP root page and scan response headers + body for
+    camera-specific strings.  Much more reliable than nmap banner matching
+    because we're reading actual page content, not a service fingerprint.
+    """
+    import urllib.request
+    import urllib.error
+
+    scheme = "https" if port in (443, 8443) else "http"
+    url    = f"{scheme}://{ip}:{port}/"
+
+    CAMERA_BODY_MARKERS = [
+        b"camera", b"ipcam", b"webcam", b"nvr", b"dvr", b"cctv",
+        b"onvif", b"rtsp", b"video", b"stream", b"live view",
+        b"hikvision", b"dahua", b"reolink", b"axis", b"amcrest",
+        b"network camera", b"ip camera", b"surveillance",
+        b"channel", b"ptz", b"pan tilt",
+    ]
+    CAMERA_HEADER_MARKERS = [
+        "camera", "ipcam", "nvr", "dvr", "onvif",
+        "hikvision", "dahua", "reolink", "axis",
+    ]
+
+    try:
+        req = urllib.request.Request(url)
+        req.add_header("User-Agent", "AnyCam/1.0")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            # Check headers (Server, X-Application, etc.)
+            all_headers = str(resp.headers).lower()
+            for marker in CAMERA_HEADER_MARKERS:
+                if marker in all_headers:
+                    log.info(f"  HTTP header camera confirm: {ip}:{port} ({marker})")
+                    return True
+            # Check body (first 4KB)
+            body = resp.read(4096).lower()
+            for marker in CAMERA_BODY_MARKERS:
+                if marker in body:
+                    log.info(f"  HTTP body camera confirm: {ip}:{port} ({marker.decode()})")
+                    return True
+    except urllib.error.HTTPError as e:
+        # 401/403 on a camera-like path is still informative — check headers
+        all_headers = str(e.headers).lower()
+        for marker in CAMERA_HEADER_MARKERS:
+            if marker in all_headers:
+                log.info(f"  HTTP 4xx header camera confirm: {ip}:{port} ({marker})")
+                return True
+    except Exception:
+        pass
+    return False
+
+
+# Quick probe path lists — shorter than the full probers, used only for
+# the is_camera_positive gate check where speed matters more than coverage.
+_QUICK_MJPEG_PATHS = ["/video", "/mjpeg", "/stream", "/mjpg/video.mjpg",
+                      "/cgi-bin/mjpg/video.cgi", "/videostream.cgi"]
+_QUICK_HLS_PATHS   = ["/index.m3u8", "/stream.m3u8", "/live.m3u8",
+                      "/hls/stream.m3u8", "/live/stream.m3u8"]
+
+
+def probe_mjpeg_quick(ip: str, port: int, timeout: int = 3) -> bool:
+    """
+    Check a handful of common MJPEG paths for multipart/x-mixed-replace
+    or image/jpeg Content-Type.  Used as a fast gate check; the full
+    probe_mjpeg_http() runs later if this passes.
+    """
+    import urllib.request
+    scheme = "https" if port in (443, 8443) else "http"
+    for path in _QUICK_MJPEG_PATHS:
+        url = f"{scheme}://{ip}:{port}{path}"
+        try:
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "AnyCam/1.0")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                ct = resp.headers.get("Content-Type", "").lower()
+                if any(k in ct for k in ("multipart/x-mixed-replace",
+                                         "image/jpeg", "mjpeg", "mjpg")):
+                    log.info(f"  MJPEG gate confirm: {ip}:{port}{path}")
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def probe_hls_quick(ip: str, port: int, timeout: int = 3) -> bool:
+    """
+    Check a handful of common HLS paths for an M3U8 playlist response
+    (#EXTM3U header or mpegurl Content-Type).  Used as a fast gate check.
+    """
+    import urllib.request
+    scheme = "https" if port in (443, 8443) else "http"
+    for path in _QUICK_HLS_PATHS:
+        url = f"{scheme}://{ip}:{port}{path}"
+        try:
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "AnyCam/1.0")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                ct   = resp.headers.get("Content-Type", "").lower()
+                body = resp.read(32).decode("utf-8", errors="replace")
+                if ("mpegurl" in ct or "m3u8" in ct or
+                        body.strip().startswith("#EXTM3U")):
+                    log.info(f"  HLS gate confirm: {ip}:{port}{path}")
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def is_camera_positive(ip: str, port: int, service: str, product: str,
+                        verdict: str, onvif_ips: set, ssdp_cam_ips: set,
+                        mdns_ips: set) -> bool:
+    """
+    Gate function: returns True only if at least one active probe or
+    multicast discovery confirms this device is likely a camera.
+
+    Probes run in priority order — fastest / most definitive first,
+    slower / less certain probes only tried if earlier ones fail.
+
+    Protocol coverage:
+      RTSP    — raw OPTIONS handshake (~100ms, definitive, works through auth)
+      RTMP    — C0 handshake byte check (~50ms, definitive)
+      MJPEG   — Content-Type multipart/x-mixed-replace on common paths (~200ms)
+      HLS     — #EXTM3U body or mpegurl Content-Type on common paths (~200ms)
+      WebRTC  — WHEP POST + heuristic GET on signaling paths (~300ms)
+      WS-RTSP — WebSocket upgrade with Sec-WebSocket-Protocol: rtsp (~200ms)
+      HTTP    — full page body + header scan for camera strings (~500ms)
+      ONVIF   — already confirmed by multicast Stage 1 (instant)
+      SSDP    — already confirmed by multicast Stage 1 (instant)
+      mDNS    — already confirmed by multicast Stage 1 (instant)
+      DVR     — ports 37777/34567 assumed positive by definition
+    """
+    # ── 1. Multicast-confirmed (instant, already done in Stage 1) ──────────
+    if ip in onvif_ips or ip in ssdp_cam_ips or ip in mdns_ips:
+        return True
+
+    # ── 2. RTSP OPTIONS — raw TCP, ~100ms, works through auth ─────────────
+    if port in (554, 8554, 10554, 2020, 8765):
+        if probe_rtsp_options(ip, port):
+            return True
+        # Fall through: camera may have broken RTSP but working web UI
+
+    # ── 3. RTMP C0 handshake — ~50ms, definitively identifies RTMP server ─
+    if port in (1935, 1936):
+        if probe_rtmp(ip, port):
+            log.info(f"  RTMP gate confirm: {ip}:{port}")
+            return True
+
+    # ── 4. DVR ports — Dahua (37777) and generic DVR (34567) ──────────────
+    if port in (37777, 34567):
+        return True
+
+    # ── 5–8. HTTP-family probes (all run on HTTP/HTTPS ports) ──────────────
+    if port in (80, 8080, 8000, 8888, 443, 8443):
+
+        # 5. MJPEG Content-Type check — fast, definitive for MJPEG cameras
+        if probe_mjpeg_quick(ip, port):
+            return True
+
+        # 6. HLS M3U8 check — fast, definitive for HLS cameras/NVRs
+        if probe_hls_quick(ip, port):
+            return True
+
+        # 7. WebRTC WHEP probe — POST SDP offer, look for SDP answer or hints
+        if probe_webrtc(ip, port):
+            log.info(f"  WebRTC gate confirm: {ip}:{port}")
+            return True
+
+        # 8. HTTP body/header content scan — broadest net, catches web UIs
+        if probe_http_for_camera(ip, port):
+            return True
+
+    # ── 9. WS-RTSP upgrade — try on any port not already covered ──────────
+    #       go2rtc typically serves on 8554, mediamtx on 8888 or custom;
+    #       we try after the port-specific checks above.
+    if probe_ws_rtsp(ip, port):
+        log.info(f"  WS-RTSP gate confirm: {ip}:{port}")
+        return True
+
+    # ── 10. nmap keyword fallback — least reliable, last resort ────────────
+    combined = (service + " " + product).lower()
+    if any(k in combined for k in CAMERA_KEYWORDS):
+        return True
+
+    return False
+
+
 # ONVIF SOAP (multi-stream NVR support)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -938,7 +1156,10 @@ async def run_scan():
             initial = _initial_protocol(port, port_info["service"], port_info["product"])
             prev    = saved.get(cid, {})
             cam     = await _probe_host_port(ip, port, hostname, initial,
-                                             prev, verdict, reason, loop)
+                                             prev, verdict, reason, loop,
+                                             onvif_ips=onvif_ips,
+                                             ssdp_cam_ips=ssdp_cam_ips,
+                                             mdns_ips=mdns_ips)
             if cam:
                 CAMERAS[cam["id"]] = cam
 
@@ -961,7 +1182,10 @@ async def run_scan():
                 initial = _initial_protocol(port, port_info["service"], port_info["product"])
                 prev    = saved.get(cid, {})
                 cam     = await _probe_host_port(ip, port, hostname, initial,
-                                                 prev, verdict, reason, loop)
+                                                 prev, verdict, reason, loop,
+                                                 onvif_ips=onvif_ips,
+                                                 ssdp_cam_ips=ssdp_cam_ips,
+                                                 mdns_ips=mdns_ips)
                 if cam:
                     CAMERAS[cam["id"]] = cam
 
@@ -1023,7 +1247,9 @@ async def run_scan():
 
 
 async def _probe_host_port(ip, port, hostname, initial_protocol,
-                           prev, verdict, reason, loop) -> dict | None:
+                           prev, verdict, reason, loop,
+                           onvif_ips=None, ssdp_cam_ips=None,
+                           mdns_ips=None) -> dict | None:
     cid = f"{ip}_{port}"
     prev_creds = prev.get("credentials")
     prev_name  = prev.get("name", hostname)
@@ -1033,6 +1259,23 @@ async def _probe_host_port(ip, port, hostname, initial_protocol,
             saved_u, saved_p = decrypt_creds(prev_creds)
         except Exception:
             pass
+
+    # ── Active camera gate ────────────────────────────────────────────────
+    # Skip this port entirely unless at least one active probe confirms
+    # it looks like a camera.  User-saved cameras bypass this check so
+    # they always appear after being manually confirmed.
+    if not bool(prev):
+        camera_confirmed = await loop.run_in_executor(
+            None, is_camera_positive,
+            ip, port, initial_protocol, "",
+            verdict,
+            onvif_ips or set(),
+            ssdp_cam_ips or set(),
+            mdns_ips or set(),
+        )
+        if not camera_confirmed:
+            log.info(f"  Skipping {ip}:{port} — no camera-positive signal")
+            return None
 
     def base(proto, url, status, display="proxy"):
         return {"id": cid, "ip": ip, "hostname": hostname, "port": port,
