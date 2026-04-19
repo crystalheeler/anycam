@@ -45,6 +45,9 @@ DATA_DIR       = Path("/data")
 KEY_FILE       = DATA_DIR / "secret.key"
 CAMS_FILE      = DATA_DIR / "cameras.json"
 BLACKLIST_FILE = DATA_DIR / "blacklist.json"
+RUNTIME_FILE   = DATA_DIR / "runtime.json"
+
+CURRENT_VERSION = "1.1.10"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -131,6 +134,652 @@ CAMERA_KEYWORDS = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Camera manufacturer / model database
+#
+# Each entry:
+#   "name"     : canonical display name
+#   "aliases"  : alternate spellings / brand families
+#   "http_titles"  : substrings to match in HTML <title> (case-insensitive)
+#   "http_body"    : substrings to match anywhere in page body (case-insensitive)
+#   "http_headers" : substrings to match in any HTTP response header value
+#   "nmap_products": substrings to match in nmap service product/version field
+#   "onvif_scopes" : substrings to match in ONVIF WS-Discovery scope strings
+#   "default_ports": hint ports commonly used by this manufacturer
+#   "notes"        : human-readable notes shown in Identity section
+# ─────────────────────────────────────────────────────────────────────────────
+
+CAMERA_DB: list[dict] = [
+    {
+        "name": "Hikvision",
+        "aliases": ["hik", "hikvision", "ds-2"],
+        "http_titles": ["hikvision", "ds-2", "network camera", "ivms"],
+        "http_body":   ["hikvision", "ivms-4200", "ds-2cd", "ds-2de", "hik-connect"],
+        "http_headers":["hikvision", "webs/hikvision"],
+        "nmap_products":["hikvision", "hikvision ip camera"],
+        "onvif_scopes": ["hikvision"],
+        "default_ports": [554, 8000, 80],
+        "notes": "Hikvision IP camera or NVR/DVR",
+    },
+    {
+        "name": "Dahua",
+        "aliases": ["dahua", "dhip", "dh-ipc", "imou"],
+        "http_titles": ["dahua", "ipc", "nvr", "xvr", "imou"],
+        "http_body":   ["dahua technology", "dahua", "imou", "lechange", "dh-ipc"],
+        "http_headers":["dahua", "dh-"],
+        "nmap_products":["dahua"],
+        "onvif_scopes": ["dahua"],
+        "default_ports": [37777, 80, 554],
+        "notes": "Dahua Technology IP camera, NVR/DVR or IMOU device",
+    },
+    {
+        "name": "Lorex",
+        "aliases": ["lorex", "flir lorex"],
+        "http_titles": ["lorex", "lorex nvr", "lorex dvr"],
+        "http_body":   ["lorex", "lorextechnology", "lorex technology"],
+        "http_headers":["lorex"],
+        "nmap_products":["lorex"],
+        "onvif_scopes": ["lorex"],
+        "default_ports": [554, 80, 34567],
+        "notes": "Lorex (FLIR) NVR/DVR or IP camera",
+    },
+    {
+        "name": "Reolink",
+        "aliases": ["reolink"],
+        "http_titles": ["reolink"],
+        "http_body":   ["reolink", "reolink app"],
+        "http_headers":["reolink"],
+        "nmap_products":["reolink"],
+        "onvif_scopes": ["reolink"],
+        "default_ports": [554, 80, 8080, 9000],
+        "notes": "Reolink IP camera or NVR",
+    },
+    {
+        "name": "Axis",
+        "aliases": ["axis communications", "axis network"],
+        "http_titles": ["axis", "axis network camera", "axis video"],
+        "http_body":   ["axis communications", "axis network camera", "axiscam"],
+        "http_headers":["axis", "boa/"],
+        "nmap_products":["axis network camera", "axis"],
+        "onvif_scopes": ["axis"],
+        "default_ports": [554, 80, 443],
+        "notes": "Axis Communications IP camera or encoder",
+    },
+    {
+        "name": "Hanwha / Samsung Techwin",
+        "aliases": ["hanwha", "samsung techwin", "wisenet", "qnv", "xnv"],
+        "http_titles": ["wisenet", "hanwha", "samsung techwin", "snv-", "qnv-"],
+        "http_body":   ["hanwha", "wisenet", "samsung techwin"],
+        "http_headers":["hanwha", "wisenet"],
+        "nmap_products":["hanwha", "wisenet", "samsung techwin"],
+        "onvif_scopes": ["hanwha", "samsung"],
+        "default_ports": [554, 80, 8080],
+        "notes": "Hanwha Vision (formerly Samsung Techwin) — Wisenet series",
+    },
+    {
+        "name": "Amcrest",
+        "aliases": ["amcrest", "amcrest technologies"],
+        "http_titles": ["amcrest", "amcrest ip"],
+        "http_body":   ["amcrest", "amcrestsecurity"],
+        "http_headers":["amcrest"],
+        "nmap_products":["amcrest"],
+        "onvif_scopes": ["amcrest"],
+        "default_ports": [37777, 80, 554],
+        "notes": "Amcrest IP camera or NVR (Dahua-based OEM)",
+    },
+    {
+        "name": "Uniview (UNV)",
+        "aliases": ["uniview", "unv", "univideo"],
+        "http_titles": ["uniview", "unv", "network camera"],
+        "http_body":   ["uniview", "univideo", "unv camera"],
+        "http_headers":["uniview", "unv"],
+        "nmap_products":["uniview", "unv"],
+        "onvif_scopes": ["uniview"],
+        "default_ports": [554, 80],
+        "notes": "Uniview (UNV) IP camera or NVR",
+    },
+    {
+        "name": "Vivotek",
+        "aliases": ["vivotek"],
+        "http_titles": ["vivotek", "network camera", "ip camera"],
+        "http_body":   ["vivotek", "vvtk"],
+        "http_headers":["vivotek", "vvtk-http"],
+        "nmap_products":["vivotek"],
+        "onvif_scopes": ["vivotek"],
+        "default_ports": [554, 80, 8080],
+        "notes": "Vivotek IP camera or NVR",
+    },
+    {
+        "name": "Bosch",
+        "aliases": ["bosch security", "bosch camera", "autodome", "flexidome", "dinion"],
+        "http_titles": ["bosch", "autodome", "flexidome", "dinion"],
+        "http_body":   ["bosch security", "bosch camera", "dinion", "flexidome", "autodome"],
+        "http_headers":["bosch"],
+        "nmap_products":["bosch"],
+        "onvif_scopes": ["bosch"],
+        "default_ports": [554, 80, 443],
+        "notes": "Bosch Security Systems IP camera",
+    },
+    {
+        "name": "Pelco",
+        "aliases": ["pelco", "sarix", "spectra", "optera"],
+        "http_titles": ["pelco", "sarix", "spectra enhanced"],
+        "http_body":   ["pelco", "sarix", "pelco.com"],
+        "http_headers":["pelco"],
+        "nmap_products":["pelco"],
+        "onvif_scopes": ["pelco"],
+        "default_ports": [554, 80],
+        "notes": "Pelco IP camera (Motorola Solutions)",
+    },
+    {
+        "name": "Sony",
+        "aliases": ["sony ipela", "sony security", "snc-"],
+        "http_titles": ["sony", "sony ipela", "snc-"],
+        "http_body":   ["sony ipela", "sony security", "snc-rz", "snc-ep", "snc-vb"],
+        "http_headers":["sony"],
+        "nmap_products":["sony network camera", "sony ipela"],
+        "onvif_scopes": ["sony"],
+        "default_ports": [554, 80, 443],
+        "notes": "Sony IPELA IP camera",
+    },
+    {
+        "name": "Panasonic / i-PRO",
+        "aliases": ["panasonic", "i-pro", "ipro", "wv-"],
+        "http_titles": ["panasonic", "i-pro", "network camera", "wv-"],
+        "http_body":   ["panasonic", "i-pro", "wv-sc", "wv-sf", "wv-sp"],
+        "http_headers":["panasonic", "i-pro"],
+        "nmap_products":["panasonic network camera", "i-pro"],
+        "onvif_scopes": ["panasonic"],
+        "default_ports": [554, 80, 443],
+        "notes": "Panasonic / i-PRO IP camera",
+    },
+    {
+        "name": "Avigilon",
+        "aliases": ["avigilon", "motorola solutions"],
+        "http_titles": ["avigilon"],
+        "http_body":   ["avigilon", "avigilon corporation"],
+        "http_headers":["avigilon"],
+        "nmap_products":["avigilon"],
+        "onvif_scopes": ["avigilon"],
+        "default_ports": [554, 80, 443],
+        "notes": "Avigilon (Motorola Solutions) IP camera or NVR",
+    },
+    {
+        "name": "FLIR",
+        "aliases": ["flir systems", "flir camera"],
+        "http_titles": ["flir", "flir systems"],
+        "http_body":   ["flir systems", "flir camera", "flir.com"],
+        "http_headers":["flir"],
+        "nmap_products":["flir"],
+        "onvif_scopes": ["flir"],
+        "default_ports": [554, 80, 443],
+        "notes": "FLIR Systems thermal/optical camera",
+    },
+    {
+        "name": "Mobotix",
+        "aliases": ["mobotix"],
+        "http_titles": ["mobotix", "mx-"],
+        "http_body":   ["mobotix", "mx-q", "mx-s", "mobotix.com"],
+        "http_headers":["mobotix", "mx-httpd"],
+        "nmap_products":["mobotix"],
+        "onvif_scopes": ["mobotix"],
+        "default_ports": [554, 80, 443],
+        "notes": "Mobotix IP camera",
+    },
+    {
+        "name": "ACTi",
+        "aliases": ["acti", "acti corporation"],
+        "http_titles": ["acti"],
+        "http_body":   ["acti corporation", "acti camera"],
+        "http_headers":["acti"],
+        "nmap_products":["acti"],
+        "onvif_scopes": ["acti"],
+        "default_ports": [554, 80, 443],
+        "notes": "ACTi IP camera",
+    },
+    {
+        "name": "GeoVision",
+        "aliases": ["geovision", "gv-"],
+        "http_titles": ["geovision", "gv-"],
+        "http_body":   ["geovision", "geo vision", "gv-bx", "gv-ptz"],
+        "http_headers":["geovision"],
+        "nmap_products":["geovision"],
+        "onvif_scopes": ["geovision"],
+        "default_ports": [554, 80, 4550],
+        "notes": "GeoVision IP camera or NVR",
+    },
+    {
+        "name": "Foscam",
+        "aliases": ["foscam"],
+        "http_titles": ["foscam", "ip camera"],
+        "http_body":   ["foscam", "foscam digital technologies"],
+        "http_headers":["foscam"],
+        "nmap_products":["foscam"],
+        "onvif_scopes": ["foscam"],
+        "default_ports": [554, 88, 80, 443],
+        "notes": "Foscam IP camera",
+    },
+    {
+        "name": "Annke",
+        "aliases": ["annke"],
+        "http_titles": ["annke"],
+        "http_body":   ["annke", "annke.com"],
+        "http_headers":["annke"],
+        "nmap_products":["annke"],
+        "onvif_scopes": ["annke"],
+        "default_ports": [554, 80, 8000],
+        "notes": "Annke IP camera or NVR/DVR (Hikvision-based OEM)",
+    },
+    {
+        "name": "Swann",
+        "aliases": ["swann", "swann communications"],
+        "http_titles": ["swann"],
+        "http_body":   ["swann", "swann security", "swann communications"],
+        "http_headers":["swann"],
+        "nmap_products":["swann"],
+        "onvif_scopes": ["swann"],
+        "default_ports": [554, 80, 34567],
+        "notes": "Swann security camera or NVR/DVR",
+    },
+    {
+        "name": "TP-Link Tapo / Kasa",
+        "aliases": ["tapo", "kasa", "tp-link"],
+        "http_titles": ["tapo", "kasa", "tp-link"],
+        "http_body":   ["tapo", "tp-link tapo", "kasa camera"],
+        "http_headers":["tp-link", "tapo"],
+        "nmap_products":["tp-link", "tapo"],
+        "onvif_scopes": ["tapo", "tp-link"],
+        "default_ports": [554, 80, 2020],
+        "notes": "TP-Link Tapo / Kasa smart camera",
+    },    {
+        "name": "Night Owl",
+        "aliases": ["night owl", "nightowl"],
+        "http_titles": ["night owl"],
+        "http_body":   ["night owl", "nightowl security"],
+        "http_headers":["night owl"],
+        "nmap_products":["night owl"],
+        "onvif_scopes": ["nightowl"],
+        "default_ports": [554, 80, 34567],
+        "notes": "Night Owl security camera or NVR/DVR",
+    },
+    {
+        "name": "iENSO",
+        "aliases": ["ienso", "ienso inc", "ienso camera"],
+        "http_titles": ["ienso", "ienso camera", "ienso inc"],
+        "http_body":   ["ienso", "ienso inc", "ienso.com", "made in canada"],
+        "http_headers":["ienso"],
+        "nmap_products":["ienso"],
+        "onvif_scopes": ["ienso"],
+        "default_ports": [554, 80, 8080],
+        "notes": "iENSO embedded IP camera (Canada)",
+    },
+    {
+        "name": "Digital Watchdog",
+        "aliases": ["digital watchdog", "dw-"],
+        "http_titles": ["digital watchdog", "dw megazip"],
+        "http_body":   ["digital watchdog", "dwipnetwork", "dw.com"],
+        "http_headers":["digital watchdog"],
+        "nmap_products":["digital watchdog"],
+        "onvif_scopes": ["digitalwatchdog"],
+        "default_ports": [554, 80],
+        "notes": "Digital Watchdog IP camera or NVR",
+    },
+    {
+        "name": "March Networks",
+        "aliases": ["march networks", "marchnetworks"],
+        "http_titles": ["march networks"],
+        "http_body":   ["march networks", "marchnetworks.com"],
+        "http_headers":["march networks"],
+        "nmap_products":["march networks"],
+        "onvif_scopes": ["marchnetworks"],
+        "default_ports": [554, 80],
+        "notes": "March Networks IP camera or NVR",
+    },
+    {
+        "name": "Nest / Google",
+        "aliases": ["nest", "google nest"],
+        "http_titles": ["nest", "dropcam"],
+        "http_body":   ["nest labs", "google nest", "dropcam"],
+        "http_headers":["nest"],
+        "nmap_products":["nest", "dropcam"],
+        "onvif_scopes": ["nest"],
+        "default_ports": [554, 443, 80],
+        "notes": "Google Nest / Dropcam IP camera",
+    },
+    {
+        "name": "Ring",
+        "aliases": ["ring", "ring doorbell", "ring camera"],
+        "http_titles": ["ring"],
+        "http_body":   ["ring.com", "ring video", "ring doorbell"],
+        "http_headers":["ring"],
+        "nmap_products":["ring"],
+        "onvif_scopes": ["ring"],
+        "default_ports": [554, 443, 80],
+        "notes": "Ring doorbell or security camera (Amazon)",
+    },
+    {
+        "name": "Wyze",
+        "aliases": ["wyze", "wyze cam"],
+        "http_titles": ["wyze"],
+        "http_body":   ["wyze", "wyzecam", "wyze cam"],
+        "http_headers":["wyze"],
+        "nmap_products":["wyze"],
+        "onvif_scopes": ["wyze"],
+        "default_ports": [554, 80],
+        "notes": "Wyze IP camera",
+    },
+    {
+        "name": "Eufy / Anker",
+        "aliases": ["eufy", "anker", "eufysecurity"],
+        "http_titles": ["eufy", "eufysecurity"],
+        "http_body":   ["eufy", "eufysecurity", "anker innovations"],
+        "http_headers":["eufy"],
+        "nmap_products":["eufy"],
+        "onvif_scopes": ["eufy"],
+        "default_ports": [554, 80, 443],
+        "notes": "Eufy (Anker) IP camera",
+    },
+    {
+        "name": "Arlo",
+        "aliases": ["arlo", "arlo technologies"],
+        "http_titles": ["arlo"],
+        "http_body":   ["arlo", "arlo technologies", "netgear arlo"],
+        "http_headers":["arlo"],
+        "nmap_products":["arlo"],
+        "onvif_scopes": ["arlo"],
+        "default_ports": [554, 443, 80],
+        "notes": "Arlo wireless IP camera",
+    },
+    {
+        "name": "Verkada",
+        "aliases": ["verkada"],
+        "http_titles": ["verkada"],
+        "http_body":   ["verkada", "verkada command"],
+        "http_headers":["verkada"],
+        "nmap_products":["verkada"],
+        "onvif_scopes": ["verkada"],
+        "default_ports": [443, 80],
+        "notes": "Verkada cloud-managed IP camera",
+    },
+    {
+        "name": "Luxonis / OAK",
+        "aliases": ["luxonis", "oak-d", "oak camera", "depthAI"],
+        "http_titles": ["luxonis", "oak"],
+        "http_body":   ["luxonis", "oak-d", "depthai", "oak camera"],
+        "http_headers":["luxonis"],
+        "nmap_products":["luxonis", "mediamtx", "oak"],
+        "onvif_scopes": ["luxonis"],
+        "default_ports": [8765, 554, 80],
+        "notes": "Luxonis OAK-D depth/AI camera",
+    },
+    {
+        "name": "Tiandy",
+        "aliases": ["tiandy"],
+        "http_titles": ["tiandy"],
+        "http_body":   ["tiandy", "tiandy technologies", "tiandy.com"],
+        "http_headers":["tiandy"],
+        "nmap_products":["tiandy"],
+        "onvif_scopes": ["tiandy"],
+        "default_ports": [554, 80, 8000],
+        "notes": "Tiandy Technologies IP camera or NVR",
+    },
+    {
+        "name": "IndigoVision",
+        "aliases": ["indigovision"],
+        "http_titles": ["indigovision"],
+        "http_body":   ["indigovision", "indigovision.com"],
+        "http_headers":["indigovision"],
+        "nmap_products":["indigovision"],
+        "onvif_scopes": ["indigovision"],
+        "default_ports": [554, 80, 443],
+        "notes": "IndigoVision IP camera or NVR (Scotland)",
+    },
+    {
+        "name": "Q-See",
+        "aliases": ["q-see", "qsee"],
+        "http_titles": ["q-see", "qsee"],
+        "http_body":   ["q-see", "qsee", "q-see technologies"],
+        "http_headers":["q-see"],
+        "nmap_products":["q-see", "qsee"],
+        "onvif_scopes": ["qsee"],
+        "default_ports": [554, 80, 34567],
+        "notes": "Q-See consumer DVR/NVR or IP camera",
+    },
+    {
+        "name": "LaView",
+        "aliases": ["laview"],
+        "http_titles": ["laview"],
+        "http_body":   ["laview", "laview technology", "laview.us"],
+        "http_headers":["laview"],
+        "nmap_products":["laview"],
+        "onvif_scopes": ["laview"],
+        "default_ports": [554, 80, 8080],
+        "notes": "LaView IP camera or NVR",
+    },
+    {
+        "name": "Zosi",
+        "aliases": ["zosi"],
+        "http_titles": ["zosi"],
+        "http_body":   ["zosi", "zosi security", "zositechnology"],
+        "http_headers":["zosi"],
+        "nmap_products":["zosi"],
+        "onvif_scopes": ["zosi"],
+        "default_ports": [554, 80, 34567],
+        "notes": "Zosi budget security camera or NVR/DVR",
+    },
+    {
+        "name": "Sricam / Srihome",
+        "aliases": ["sricam", "srihome"],
+        "http_titles": ["sricam", "srihome"],
+        "http_body":   ["sricam", "srihome", "sricam.com"],
+        "http_headers":["sricam", "srihome"],
+        "nmap_products":["sricam", "srihome"],
+        "onvif_scopes": ["sricam", "srihome"],
+        "default_ports": [554, 80, 8080],
+        "notes": "Sricam / Srihome budget IP camera",
+    },
+    {
+        "name": "Vstarcam",
+        "aliases": ["vstarcam"],
+        "http_titles": ["vstarcam"],
+        "http_body":   ["vstarcam", "vstarcam.com"],
+        "http_headers":["vstarcam"],
+        "nmap_products":["vstarcam"],
+        "onvif_scopes": ["vstarcam"],
+        "default_ports": [554, 80, 8080],
+        "notes": "Vstarcam budget WiFi IP camera",
+    },
+    {
+        "name": "Wansview",
+        "aliases": ["wansview"],
+        "http_titles": ["wansview"],
+        "http_body":   ["wansview", "wansview.com"],
+        "http_headers":["wansview"],
+        "nmap_products":["wansview"],
+        "onvif_scopes": ["wansview"],
+        "default_ports": [554, 80, 8080],
+        "notes": "Wansview budget IP camera",
+    },
+    {
+        "name": "Tenvis",
+        "aliases": ["tenvis"],
+        "http_titles": ["tenvis"],
+        "http_body":   ["tenvis", "tenvis technology"],
+        "http_headers":["tenvis"],
+        "nmap_products":["tenvis"],
+        "onvif_scopes": ["tenvis"],
+        "default_ports": [554, 80, 8080],
+        "notes": "Tenvis IP camera",
+    },
+    {
+        "name": "Instar",
+        "aliases": ["instar"],
+        "http_titles": ["instar"],
+        "http_body":   ["instar", "instar gmbh", "instar.de"],
+        "http_headers":["instar"],
+        "nmap_products":["instar"],
+        "onvif_scopes": ["instar"],
+        "default_ports": [554, 80, 8080, 443],
+        "notes": "Instar IP camera (Germany — popular in Europe)",
+    },
+    {
+        "name": "Luma Surveillance",
+        "aliases": ["luma surveillance", "luma", "snapav"],
+        "http_titles": ["luma surveillance", "luma"],
+        "http_body":   ["luma surveillance", "snapav", "luma.com"],
+        "http_headers":["luma"],
+        "nmap_products":["luma surveillance", "luma"],
+        "onvif_scopes": ["luma"],
+        "default_ports": [554, 80, 443],
+        "notes": "Luma Surveillance IP camera or NVR (SnapAV) — Hikvision OEM",
+    },
+    {
+        "name": "Speco Technologies",
+        "aliases": ["speco", "speco technologies"],
+        "http_titles": ["speco"],
+        "http_body":   ["speco technologies", "speco", "specotech.com"],
+        "http_headers":["speco"],
+        "nmap_products":["speco"],
+        "onvif_scopes": ["speco"],
+        "default_ports": [554, 80, 443],
+        "notes": "Speco Technologies IP camera or NVR",
+    },
+    {
+        "name": "Oncam",
+        "aliases": ["oncam", "oncam grandeye"],
+        "http_titles": ["oncam", "grandeye"],
+        "http_body":   ["oncam", "grandeye", "oncam.com"],
+        "http_headers":["oncam"],
+        "nmap_products":["oncam", "grandeye"],
+        "onvif_scopes": ["oncam"],
+        "default_ports": [554, 80, 443],
+        "notes": "Oncam 360-degree fisheye IP camera",
+    },
+    {
+        "name": "Illustra (Johnson Controls)",
+        "aliases": ["illustra", "johnson controls", "tyco security"],
+        "http_titles": ["illustra", "johnson controls"],
+        "http_body":   ["illustra", "tyco security", "johnson controls"],
+        "http_headers":["illustra", "tyco"],
+        "nmap_products":["illustra", "johnson controls"],
+        "onvif_scopes": ["illustra", "johnsoncontrols"],
+        "default_ports": [554, 80, 443],
+        "notes": "Illustra IP camera (Johnson Controls / Tyco Security)",
+    },
+    {
+        "name": "Milesight",
+        "aliases": ["milesight", "milesight iot"],
+        "http_titles": ["milesight"],
+        "http_body":   ["milesight", "milesight-iot.com"],
+        "http_headers":["milesight"],
+        "nmap_products":["milesight"],
+        "onvif_scopes": ["milesight"],
+        "default_ports": [554, 80, 8080, 443],
+        "notes": "Milesight IP camera or NVR",
+    },
+    {
+        "name": "Sunell",
+        "aliases": ["sunell"],
+        "http_titles": ["sunell"],
+        "http_body":   ["sunell", "sunell technology", "sunell.com"],
+        "http_headers":["sunell"],
+        "nmap_products":["sunell"],
+        "onvif_scopes": ["sunell"],
+        "default_ports": [554, 80, 8000],
+        "notes": "Sunell IP camera or NVR",
+    },
+    {
+        "name": "TVT",
+        "aliases": ["tvt", "tvt digital technology"],
+        "http_titles": ["tvt", "tvt digital"],
+        "http_body":   ["tvt digital", "tvt technology", "tvt-ip.com"],
+        "http_headers":["tvt"],
+        "nmap_products":["tvt"],
+        "onvif_scopes": ["tvt"],
+        "default_ports": [554, 80, 8000, 34567],
+        "notes": "TVT Digital Technology IP camera or NVR (common OEM base)",
+    },
+    {
+        "name": "Kedacom",
+        "aliases": ["kedacom"],
+        "http_titles": ["kedacom"],
+        "http_body":   ["kedacom", "kedacom.com"],
+        "http_headers":["kedacom"],
+        "nmap_products":["kedacom"],
+        "onvif_scopes": ["kedacom"],
+        "default_ports": [554, 80, 443],
+        "notes": "Kedacom IP camera or NVR",
+    },
+    {
+        "name": "VideoIQ (Avigilon)",
+        "aliases": ["videoiq"],
+        "http_titles": ["videoiq"],
+        "http_body":   ["videoiq", "videoiq.com"],
+        "http_headers":["videoiq"],
+        "nmap_products":["videoiq"],
+        "onvif_scopes": ["videoiq"],
+        "default_ports": [554, 80, 443],
+        "notes": "VideoIQ analytics camera (absorbed by Avigilon/Motorola)",
+    },
+    {
+        "name": "Samsung (standalone)",
+        "aliases": ["samsung camera", "sno-", "snd-", "snh-"],
+        "http_titles": ["samsung", "sno-", "snd-", "snh-"],
+        "http_body":   ["samsung camera", "samsung techwin", "sno-", "snd-", "snh-"],
+        "http_headers":["samsung"],
+        "nmap_products":["samsung network camera"],
+        "onvif_scopes": ["samsung"],
+        "default_ports": [554, 80, 443],
+        "notes": "Samsung standalone IP camera (pre-Hanwha rebranding)",
+    },
+    {
+        "name": "Generic IP Camera",
+        "aliases": ["webcam", "ipcam", "network camera"],
+        "http_titles": ["ip camera", "network camera", "webcam", "ipcam",
+                        "video server", "live view", "camera login"],
+        "http_body":   ["ip camera", "network camera", "video surveillance",
+                        "live view", "ptz control"],
+        "http_headers":[],
+        "nmap_products":["ip camera", "network camera", "video server", "webcam"],
+        "onvif_scopes": [],
+        "default_ports": [554, 80, 8080],
+        "notes": "Generic IP camera (manufacturer unidentified)",
+    },
+]
+
+# Build fast lookup structures from the DB
+_DB_MANUFACTURERS: set[str] = set()   # all lowercase match strings for is_camera_positive
+_DB_ENTRIES_BY_KEY: dict[str, dict] = {}  # pattern → db_entry for identify_manufacturer
+
+for _entry in CAMERA_DB:
+    for _field in ("http_titles", "http_body", "http_headers",
+                   "nmap_products", "onvif_scopes", "aliases"):
+        for _kw in _entry.get(_field, []):
+            _k = _kw.lower()
+            _DB_MANUFACTURERS.add(_k)
+            _DB_ENTRIES_BY_KEY[_k] = _entry
+
+
+def identify_manufacturer(text: str) -> dict | None:
+    """
+    Given a blob of text (HTTP body, nmap banner, etc.), return the best-matching
+    CAMERA_DB entry, or None if no match found.
+    Best match = entry with the most keyword hits.
+    """
+    text_l = text.lower()
+    scores: dict[str, int] = {}
+    for kw, entry in _DB_ENTRIES_BY_KEY.items():
+        if kw in text_l:
+            name = entry["name"]
+            scores[name] = scores.get(name, 0) + 1
+    if not scores:
+        return None
+    best_name = max(scores, key=lambda n: scores[n])
+    for entry in CAMERA_DB:
+        if entry["name"] == best_name:
+            return entry
+    return None
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Encryption
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -188,6 +837,43 @@ def load_blacklist():
 def save_blacklist():
     DATA_DIR.mkdir(exist_ok=True)
     BLACKLIST_FILE.write_text(json.dumps(list(BLACKLIST)))
+
+def load_runtime() -> dict:
+    """Load persisted runtime state (last run version, etc.)."""
+    if not RUNTIME_FILE.exists():
+        return {}
+    try:
+        return json.loads(RUNTIME_FILE.read_text())
+    except Exception:
+        return {}
+
+def save_runtime(data: dict):
+    DATA_DIR.mkdir(exist_ok=True)
+    RUNTIME_FILE.write_text(json.dumps(data, indent=2))
+
+def get_startup_mode() -> str:
+    """
+    Determine what kind of startup this is.
+
+    Returns:
+      "new_install"   — no saved cameras and no prior version recorded
+      "routine"       — same version as last run (reboot / HA restart)
+      "post_upgrade"  — version differs from last run
+    """
+    runtime = load_runtime()
+    last_version = runtime.get("version")
+
+    if last_version is None:
+        # First ever run — could be new install or pre-1.1.8 upgrade
+        if CAMS_FILE.exists():
+            # Cameras were saved by an older version that didn't write runtime.json
+            return "post_upgrade"
+        return "new_install"
+
+    if last_version == CURRENT_VERSION:
+        return "routine"
+
+    return "post_upgrade"
 
 def _strip_creds(url: str) -> str:
     return re.sub(r"(://)[^@]+@", r"\1", url) if url else url
@@ -758,56 +1444,103 @@ def probe_rtsp_options(ip: str, port: int, timeout: int = 3) -> bool:
     return False
 
 
-def probe_http_for_camera(ip: str, port: int, timeout: int = 4) -> bool:
+def probe_http_identity(ip: str, port: int, timeout: int = 5) -> dict:
     """
-    Fetch the HTTP root page and scan response headers + body for
-    camera-specific strings.  Much more reliable than nmap banner matching
-    because we're reading actual page content, not a service fingerprint.
+    Fetch the HTTP root page and extract as much identity info as possible:
+      - Page title
+      - Server header
+      - Manufacturer match from CAMERA_DB
+      - Whether the page is camera-positive (is_camera bool)
+
+    Returns a dict:
+      {
+        "is_camera":    bool,
+        "title":        str,   # HTML <title> contents
+        "server":       str,   # Server header value
+        "manufacturer": str,   # matched CAMERA_DB name or ""
+        "notes":        str,   # matched CAMERA_DB notes or ""
+        "raw_snippet":  str,   # first 500 chars of body for debug
+      }
+    Falls back gracefully on any network or TLS error.
     """
-    import urllib.request
-    import urllib.error
+    import urllib.request, urllib.error, re as _re
+
+    result = {
+        "is_camera": False,
+        "title": "", "server": "",
+        "manufacturer": "", "notes": "", "raw_snippet": "",
+    }
 
     scheme = "https" if port in (443, 8443) else "http"
     url    = f"{scheme}://{ip}:{port}/"
 
-    CAMERA_BODY_MARKERS = [
-        b"camera", b"ipcam", b"webcam", b"nvr", b"dvr", b"cctv",
-        b"onvif", b"rtsp", b"video", b"stream", b"live view",
-        b"hikvision", b"dahua", b"reolink", b"axis", b"amcrest",
-        b"network camera", b"ip camera", b"surveillance",
-        b"channel", b"ptz", b"pan tilt",
+    GENERIC_CAM_BODY = [
+        "camera", "ipcam", "webcam", "nvr", "dvr", "cctv",
+        "onvif", "rtsp", "video", "stream", "live view",
+        "network camera", "ip camera", "surveillance",
+        "channel", "ptz", "pan tilt",
     ]
-    CAMERA_HEADER_MARKERS = [
-        "camera", "ipcam", "nvr", "dvr", "onvif",
-        "hikvision", "dahua", "reolink", "axis",
-    ]
+
+    def _extract(body_bytes: bytes, headers_str: str) -> None:
+        body = body_bytes.decode("utf-8", errors="replace")
+        result["raw_snippet"] = body[:500]
+
+        # Page title
+        m = _re.search(r"<title[^>]*>([^<]{1,120})</title>", body, _re.I)
+        if m:
+            result["title"] = m.group(1).strip()
+
+        # Build combined text for DB matching
+        combined = headers_str + " " + body[:8192]
+
+        # Try CAMERA_DB first (rich manufacturer identification)
+        entry = identify_manufacturer(combined)
+        if entry and entry["name"] != "Generic IP Camera":
+            result["manufacturer"] = entry["name"]
+            result["notes"]        = entry["notes"]
+            result["is_camera"]    = True
+            log.info(f"  HTTP identity: {ip}:{port} → {entry['name']}")
+            return
+
+        # Generic camera keywords (fallback)
+        combined_l = combined.lower()
+        for kw in GENERIC_CAM_BODY:
+            if kw in combined_l:
+                result["is_camera"] = True
+                if entry:  # Generic IP Camera entry
+                    result["manufacturer"] = entry["name"]
+                    result["notes"]        = entry["notes"]
+                log.info(f"  HTTP body camera confirm: {ip}:{port} ({kw})")
+                return
 
     try:
         req = urllib.request.Request(url)
         req.add_header("User-Agent", "AnyCam/1.0")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            # Check headers (Server, X-Application, etc.)
-            all_headers = str(resp.headers).lower()
-            for marker in CAMERA_HEADER_MARKERS:
-                if marker in all_headers:
-                    log.info(f"  HTTP header camera confirm: {ip}:{port} ({marker})")
-                    return True
-            # Check body (first 4KB)
-            body = resp.read(4096).lower()
-            for marker in CAMERA_BODY_MARKERS:
-                if marker in body:
-                    log.info(f"  HTTP body camera confirm: {ip}:{port} ({marker.decode()})")
-                    return True
+            server = resp.headers.get("Server", "")
+            result["server"] = server
+            all_headers = str(resp.headers)
+            body = resp.read(8192)
+            _extract(body, all_headers + " " + server)
     except urllib.error.HTTPError as e:
-        # 401/403 on a camera-like path is still informative — check headers
-        all_headers = str(e.headers).lower()
-        for marker in CAMERA_HEADER_MARKERS:
-            if marker in all_headers:
-                log.info(f"  HTTP 4xx header camera confirm: {ip}:{port} ({marker})")
-                return True
+        # 401/403 auth challenge — headers may still identify manufacturer
+        server = e.headers.get("Server", "")
+        result["server"] = server
+        all_headers = str(e.headers)
+        try:
+            body = e.read(8192)
+        except Exception:
+            body = b""
+        _extract(body, all_headers + " " + server)
     except Exception:
         pass
-    return False
+
+    return result
+
+
+def probe_http_for_camera(ip: str, port: int, timeout: int = 4) -> bool:
+    """Thin wrapper — returns True if probe_http_identity says is_camera."""
+    return probe_http_identity(ip, port, timeout).get("is_camera", False)
 
 
 # Quick probe path lists — shorter than the full probers, used only for
@@ -936,9 +1669,20 @@ def is_camera_positive(ip: str, port: int, service: str, product: str,
         log.info(f"  WS-RTSP gate confirm: {ip}:{port}")
         return True
 
-    # ── 10. nmap keyword fallback — least reliable, last resort ────────────
+    # ── 10. nmap banner: check against CAMERA_DB (much richer than CAMERA_KEYWORDS)
     combined = (service + " " + product).lower()
-    if any(k in combined for k in CAMERA_KEYWORDS):
+    if combined.strip():
+        if identify_manufacturer(combined) is not None:
+            log.info(f"  nmap DB match: {ip}:{port} — {combined.strip()}")
+            return True
+        # Fallback to simple keyword list
+        if any(k in combined for k in CAMERA_KEYWORDS):
+            return True
+
+    # ── 11. DB alias check against hostname ────────────────────────────────
+    # Sometimes the device hostname itself contains a manufacturer name
+    # (e.g. "lorex-nvr.local", "hikvision-123.lan")
+    if any(k in combined for k in _DB_MANUFACTURERS):
         return True
 
     return False
@@ -1083,6 +1827,113 @@ async def run_port_scan(ip: str):
 # Main scan orchestration — 4-stage pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def run_verification_scan():
+    """
+    Post-upgrade verification scan.
+    Runs after saved cameras are loaded.
+
+    For each saved camera:
+      - Probe it with is_camera_positive() + the appropriate stream prober
+      - If still reachable → keep as-is, status unchanged
+      - If unreachable    → mark as "unverified_after_upgrade" so the user
+                            can decide whether to keep or remove it
+
+    After verifying saved cameras, runs a fresh full scan to discover
+    any new cameras that upgraded detection capabilities might now find.
+    """
+    SCAN_STATE.update(
+        running=True, progress=0, stage=1,
+        stage_label="Post-upgrade verification",
+        message="Post-upgrade: verifying previously saved cameras…"
+    )
+    loop = asyncio.get_event_loop()
+    log.info(f"Post-upgrade verification scan (was: {load_runtime().get('version','?')} → now: {CURRENT_VERSION})")
+
+    # ── Verify each saved camera ──────────────────────────────────────────
+    still_present = []
+    now_missing   = []
+
+    for cid, cam in list(CAMERAS.items()):
+        if not cam.get("user_saved"):
+            continue
+        ip   = cam.get("ip","")
+        port = cam.get("port", 554)
+        proto = cam.get("protocol","RTSP")
+        SCAN_STATE["message"] = f"Verifying {cam.get('name', ip)}…"
+
+        found = False
+        creds = cam.get("credentials")
+        u = p = ""
+        if creds:
+            try:
+                u, p = decrypt_creds(creds)
+            except Exception:
+                pass
+
+        # Quick probe appropriate to the protocol
+        if proto in ("RTSP", "DVR", "ONVIF"):
+            url = cam.get("stream_url","")
+            if url:
+                found = await loop.run_in_executor(None, probe_rtsp, url, u, p)
+            if not found:
+                found = await loop.run_in_executor(None, probe_rtsp_options, ip, port)
+        elif proto == "MJPEG":
+            result = await loop.run_in_executor(None, probe_mjpeg_quick, ip, port)
+            found = bool(result)
+        elif proto == "HLS":
+            result = await loop.run_in_executor(None, probe_hls_quick, ip, port)
+            found = bool(result)
+        elif proto == "RTMP":
+            found = await loop.run_in_executor(None, probe_rtmp, ip, port)
+        else:
+            # WebRTC / WS-RTSP / HTTP — just check TCP reachability
+            try:
+                _, w = await asyncio.wait_for(
+                    asyncio.open_connection(ip, port), timeout=3)
+                w.close()
+                found = True
+            except Exception:
+                found = False
+
+        if found:
+            still_present.append(cid)
+            # Clear any stale unverified flag from a previous upgrade
+            cam.pop("upgrade_missing", None)
+            log.info(f"  Verified OK: {cam.get('name', ip)}")
+        else:
+            now_missing.append(cid)
+            cam["upgrade_missing"] = True
+            cam["upgrade_missing_version"] = CURRENT_VERSION
+            # Don't delete — let the user decide
+            log.info(f"  Not found after upgrade: {cam.get('name', ip)} @ {ip}:{port}")
+
+    if now_missing:
+        log.info(f"Verification: {len(still_present)} OK, {len(now_missing)} not found")
+        SCAN_STATE["message"] = (
+            f"Verification: {len(still_present)} camera(s) OK, "
+            f"{len(now_missing)} not responding — see cards for details."
+        )
+    else:
+        log.info(f"Verification: all {len(still_present)} camera(s) still present")
+
+    save_cameras()
+
+    # ── Run a full fresh scan for new discoveries ────────────────────────
+    # This is essential after upgrades: improved detection code may now
+    # find cameras that previous versions missed entirely.
+    SCAN_STATE.update(
+        progress=20, stage=1,
+        stage_label="Post-upgrade: full network scan",
+        message=(
+            f"Post-upgrade verification complete "
+            f"({len(still_present)} OK, {len(now_missing)} missing). "
+            f"Now scanning subnet for newly discoverable cameras…"
+        )
+    )
+    log.info("Post-upgrade: starting full subnet scan for new cameras")
+    await run_scan()   # run_scan sets running=False when done
+
+
 async def run_scan():
     SCAN_STATE.update(running=True, progress=0, stage=1,
                       stage_label="Stage 1/4 — Live host & multicast discovery",
@@ -1204,17 +2055,31 @@ async def run_scan():
         else:
             cid  = f"{ip}_onvif"
             prev = saved.get(cid, {})
+            # Try to identify manufacturer via HTTP on common ports
+            identity = {}
+            for _p in (80, 8080, 443):
+                identity = await loop.run_in_executor(
+                    None, probe_http_identity, ip, _p)
+                if identity.get("manufacturer"):
+                    break
+            display_name = prev.get("name", onvif["name"])
+            if identity.get("manufacturer") and display_name == onvif["name"]:
+                display_name = f"{identity['manufacturer']} ({ip})"
             CAMERAS[cid] = {
                 "id": cid, "ip": ip, "hostname": onvif["name"],
                 "port": 80, "protocol": "ONVIF",
                 "stream_url": prev.get("stream_url",""),
                 "requires_credentials": True,
                 "credentials": prev.get("credentials"),
-                "name": prev.get("name", onvif["name"]),
+                "name": display_name,
                 "xaddrs": onvif.get("xaddrs",""),
                 "status": "needs_credentials",
                 "onvif": True, "user_saved": bool(prev), "display": "proxy",
                 "verdict": "camera", "verdict_reason": "ONVIF discovered",
+                "manufacturer": identity.get("manufacturer", ""),
+                "device_notes": identity.get("notes", ""),
+                "page_title":   identity.get("title", ""),
+                "server_header":identity.get("server", ""),
             }
 
     for ssdp in ssdp_results:
@@ -1277,13 +2142,40 @@ async def _probe_host_port(ip, port, hostname, initial_protocol,
             log.info(f"  Skipping {ip}:{port} — no camera-positive signal")
             return None
 
+    # ── Collect identity info from HTTP if available ─────────────────────
+    identity = {}
+    if port in (80, 8080, 8000, 8888, 443, 8443):
+        try:
+            identity = await loop.run_in_executor(
+                None, probe_http_identity, ip, port)
+        except Exception:
+            pass
+    # Also try to identify from nmap banner via DB
+    if not identity.get("manufacturer"):
+        nmap_text = f"{initial_protocol}"
+        entry = identify_manufacturer(nmap_text) if nmap_text.strip() else None
+        if entry:
+            identity.setdefault("manufacturer", entry["name"])
+            identity.setdefault("notes", entry["notes"])
+
     def base(proto, url, status, display="proxy"):
-        return {"id": cid, "ip": ip, "hostname": hostname, "port": port,
-                "protocol": proto, "stream_url": url,
-                "requires_credentials": False, "credentials": None,
-                "name": prev_name, "status": status,
-                "user_saved": bool(prev), "display": display,
-                "verdict": verdict, "verdict_reason": reason}
+        cam = {
+            "id": cid, "ip": ip, "hostname": hostname, "port": port,
+            "protocol": proto, "stream_url": url,
+            "requires_credentials": False, "credentials": None,
+            "name": prev_name, "status": status,
+            "user_saved": bool(prev), "display": display,
+            "verdict": verdict, "verdict_reason": reason,
+            "manufacturer": identity.get("manufacturer", ""),
+            "device_notes": identity.get("notes", ""),
+            "page_title":   identity.get("title", ""),
+            "server_header":identity.get("server", ""),
+        }
+        # If we identified a manufacturer and the name is still the default,
+        # upgrade the display name to include the manufacturer
+        if cam["manufacturer"] and cam["name"] == hostname:
+            cam["name"] = f"{cam['manufacturer']} ({ip})"
+        return cam
 
     if initial_protocol in ("RTSP", "DVR"):
         url = await loop.run_in_executor(None, find_rtsp_path, ip, port)
@@ -1466,7 +2358,11 @@ def _safe_cam(cam: dict) -> dict:
     s = dict(cam)
     if s.get("stream_url"):
         s["stream_url"] = _strip_creds(s["stream_url"])
-    s["has_credentials"] = bool(s.get("credentials"))
+    s["has_credentials"]  = bool(s.get("credentials"))
+    s["upgrade_missing"]  = bool(s.get("upgrade_missing"))
+    # Ensure identity fields always present
+    for f in ("manufacturer", "device_notes", "page_title", "server_header"):
+        s.setdefault(f, "")
     s.pop("credentials", None)
     return s
 
@@ -1590,6 +2486,19 @@ async def api_delete_camera(request):
     CAMERAS.pop(request.match_info["camera_id"], None)
     save_cameras()
     return web.json_response({"status": "ok"})
+
+async def api_confirm_camera(request):
+    """User confirmed a post-upgrade missing camera — clear the flag."""
+    cid    = request.match_info["camera_id"]
+    camera = CAMERAS.get(cid)
+    if not camera:
+        return web.json_response({"error": "Not found"}, status=404)
+    camera.pop("upgrade_missing", None)
+    camera.pop("upgrade_missing_version", None)
+    camera["user_saved"] = True
+    save_cameras()
+    return web.json_response({"status": "ok"})
+
 
 async def api_not_camera(request):
     cid = request.match_info["camera_id"]
@@ -1824,6 +2733,7 @@ function updateCard(cam) {
 }
 
 function dotClass(cam) {
+  if (cam.upgrade_missing)                 return 'dot-upgrade';
   if (cam.status === 'ready')              return 'dot-ready';
   if (cam.status === 'info')               return 'dot-info';
   if (cam.verdict === 'uncertain' ||
@@ -1846,6 +2756,15 @@ function imgError(img) {
 
 function feedHTML(cam) {
   const d = cam.display || 'proxy';
+
+  // Post-upgrade: camera was saved but not found after upgrade scan
+  if (cam.upgrade_missing)
+    return '<div class="feed-placeholder">'
+         + '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">'
+         + '<circle cx="12" cy="12" r="10"/><path d="M4.93 4.93l14.14 14.14"/></svg>'
+         + '<span style="color:var(--orange)"><strong>Not found after upgrade</strong><br>'
+         + '<small style="opacity:.75">Was present before upgrade but did not respond.<br>'
+         + 'May be offline, removed, or a false positive from the previous version.</small></span></div>';
 
   if (d === 'proxy' && cam.status === 'ready')
     return '<img class="live" src="' + BASE + '/stream/' + cam.id + '" alt="Live" onerror="imgError(this)">'
@@ -1882,6 +2801,19 @@ function feedHTML(cam) {
        + '<span>Credentials required</span></div>';
 }
 
+function identityHTML(cam) {
+  const rows = [];
+  if (cam.manufacturer)   rows.push(['Manufacturer', cam.manufacturer]);
+  if (cam.page_title)     rows.push(['Page title',   cam.page_title]);
+  if (cam.server_header)  rows.push(['Server',       cam.server_header]);
+  if (cam.hostname && cam.hostname !== cam.ip) rows.push(['Hostname', cam.hostname]);
+  if (cam.device_notes)   rows.push(['Notes',        cam.device_notes]);
+  if (!rows.length) return '';
+  return '<details class="id-section"><summary>&#x1F50D; Identity</summary><table class="id-table">'
+    + rows.map(([k,v]) => '<tr><td class="id-key">' + esc(k) + '</td><td>' + esc(v) + '</td></tr>').join('')
+    + '</table></details>';
+}
+
 function credFormHTML(cam) {
   if (cam.status !== 'needs_credentials' || ['webrtc','wsrtsp'].includes(cam.display)) return '';
   return '<div class="cred-form">'
@@ -1895,6 +2827,16 @@ function credFormHTML(cam) {
     + '<div class="cred-row">'
     + '<button class="btn btn-primary btn-sm" onclick="submitCreds(\'' + cam.id + '\')">Connect</button>'
     + '</div></div>';
+}
+
+function cardActions(cam, clearBtn, notCamBtn) {
+  // Post-upgrade missing: offer keep or remove
+  if (cam.upgrade_missing) {
+    return '<button class="btn btn-ghost btn-sm" onclick="confirmCamera(\'' + cam.id + '\')">✓ Keep (may be offline)</button>'
+         + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(\'' + cam.id + '\')">Remove</button>';
+  }
+  return clearBtn + notCamBtn
+       + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(\'' + cam.id + '\')">Remove</button>';
 }
 
 function cardHTML(cam) {
@@ -1912,6 +2854,9 @@ function cardHTML(cam) {
     '<button class="btn btn-ghost btn-sm" onclick="markNotCamera(\'' + cam.id + '\')"'
     + ' title="Permanently hide — not a camera">🚫 Not a Camera</button>';
 
+  const upgradeBdg = cam.upgrade_missing
+    ? '<span class="badge" style="background:#3a2a10;color:var(--orange)">⚠ Not found after upgrade</span>' : '';
+
   return '<div class="feed-wrap">' + feedHTML(cam) + '</div>'
     + '<div class="card-info">'
     + '<div class="status-dot ' + dotClass(cam) + '"></div>'
@@ -1921,10 +2866,13 @@ function cardHTML(cam) {
     + '<div class="badges">' + protoBadge(cam.protocol)
     + '<span class="badge" style="background:#1e2d1e;color:#6fcf97">:' + cam.port + '</span>'
     + '<span class="badge" style="background:#2d2020;color:#e88">' + cam.ip + '</span>'
-    + onvifBdg + credBdg + uncBdg + '</div>'
+    + onvifBdg + credBdg + uncBdg + upgradeBdg + '</div>'
+    + '<span class="badge" style="background:#3a2a10;color:var(--orange)">' 
+      + (cam.upgrade_missing ? '⚠ Not found after upgrade' : '') + '</span>'
+    + '</div>'
+    + identityHTML(cam)
     + credFormHTML(cam)
-    + '<div class="card-actions">' + clearBtn + notCamBtn
-    + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(\'' + cam.id + '\')">Remove</button>'
+    + '<div class="card-actions">' + cardActions(cam, clearBtn, notCamBtn)
     + '</div>';
 }
 
@@ -1971,6 +2919,12 @@ async function deleteCamera(cid) {
   await fetch(BASE + '/api/cameras/' + cid, {method: 'DELETE'});
   cameras = cameras.filter(c => c.id !== cid);
   renderGrid();
+}
+
+async function confirmCamera(cid) {
+  // User acknowledges camera may just be offline — clear the upgrade_missing flag
+  await fetch(BASE + '/api/cameras/' + cid + '/confirm', {method: 'POST'});
+  await loadCameras();
 }
 
 async function markNotCamera(cid) {
@@ -2206,6 +3160,14 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .dot-info{{background:var(--blue);box-shadow:0 0 5px var(--blue)}}
 .dot-uncertain{{background:var(--orange);box-shadow:0 0 5px var(--orange)}}
 .dot-error{{background:var(--red);box-shadow:0 0 5px var(--red)}}
+.dot-upgrade{{background:var(--orange);box-shadow:0 0 8px var(--orange);animation:pulse 2s infinite}}
+.id-section{{margin:0 12px 8px;border:1px solid var(--border);border-radius:8px;overflow:hidden}}
+.id-section summary{{padding:6px 10px;font-size:.72rem;font-weight:600;color:var(--text-dim);
+                     cursor:pointer;list-style:none;user-select:none}}
+.id-section summary:hover{{color:var(--text);background:var(--surface2)}}
+.id-table{{width:100%;border-collapse:collapse;font-size:.74rem}}
+.id-table td{{padding:4px 10px;border-top:1px solid var(--border);vertical-align:top}}
+.id-key{{color:var(--text-dim);font-weight:600;white-space:nowrap;width:90px}}
 .cred-form{{margin:0 12px 10px;background:var(--surface2);border:1px solid var(--border);
             border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:6px}}
 .cred-form label{{font-size:.7rem;color:var(--text-dim);font-weight:600;letter-spacing:.04em}}
@@ -2393,6 +3355,7 @@ def make_app() -> web.Application:
     app.router.add_post(  "/api/credentials",                     api_set_credentials)
     app.router.add_delete("/api/cameras/{camera_id}/credentials", api_clear_credentials)
     app.router.add_post(  "/api/cameras/{camera_id}/name",        api_rename_camera)
+    app.router.add_post(  "/api/cameras/{camera_id}/confirm",     api_confirm_camera)
     app.router.add_post(  "/api/cameras/{camera_id}/not_camera",  api_not_camera)
     app.router.add_delete("/api/cameras/{camera_id}",             api_delete_camera)
     app.router.add_post(  "/api/cameras/add",                     api_add_camera)
@@ -2414,9 +3377,25 @@ async def main():
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
     log.info(f"AnyCam on :{PORT}  ingress='{INGRESS_PATH}'")
-    if not CAMERAS:
-        log.info("No saved cameras — auto-starting scan")
+
+    startup_mode = get_startup_mode()
+    log.info(f"Startup mode: {startup_mode}")
+
+    if startup_mode == "new_install":
+        log.info("New install — starting initial scan")
         asyncio.create_task(run_scan())
+
+    elif startup_mode == "post_upgrade":
+        prev = load_runtime().get("version", "unknown")
+        log.info(f"Post-upgrade ({prev} → {CURRENT_VERSION}) — running verification scan")
+        asyncio.create_task(run_verification_scan())
+
+    else:  # "routine"
+        log.info(f"Routine restart (v{CURRENT_VERSION}) — loaded {len(CAMERAS)} saved camera(s)")
+
+    # Record the current version so next startup can compare
+    save_runtime({"version": CURRENT_VERSION})
+
     await asyncio.Event().wait()
 
 

@@ -1,5 +1,65 @@
 # AnyCam — Changelog
 
+## 1.1.10
+- Expanded CAMERA_DB from 33 to 53 entries (54 total minus 1 duplicate):
+  Added: Tiandy, IndigoVision, Q-See, LaView, Zosi, Sricam/Srihome, Vstarcam,
+  Wansview, Tenvis, Instar, Luma Surveillance (SnapAV), Speco Technologies, Oncam,
+  Illustra (Johnson Controls), Milesight, Sunell, TVT Digital, Kedacom,
+  VideoIQ (Avigilon), Samsung standalone (pre-Hanwha)
+- Removed duplicate Reolink entry
+
+## 1.1.9
+- Camera manufacturer/model database (CAMERA_DB): 33 entries covering all major
+  manufacturers — Hikvision, Dahua, Lorex, Reolink, Axis, Hanwha/Samsung, Amcrest,
+  Uniview, Vivotek, Bosch, Pelco, Sony, Panasonic/i-PRO, Avigilon, FLIR, Mobotix,
+  ACTi, GeoVision, Foscam, Annke, Swann, TP-Link Tapo, Night Owl, iENSO, Digital
+  Watchdog, March Networks, Nest/Google, Ring, Wyze, Eufy/Anker, Arlo, Verkada, Luxonis
+- Each DB entry contains signature patterns for: HTTP page titles, page body text,
+  HTTP response headers, nmap service/product fields, and ONVIF WS-Discovery scope strings
+- identify_manufacturer(): scores all DB entries against a text blob and returns the
+  best-matching entry; used during probing and nmap banner analysis
+- probe_http_identity(): replaces probe_http_for_camera() — fetches the HTTP root
+  page (up to 8KB), extracts page title, Server header, and runs DB matching; returns
+  structured dict with manufacturer, notes, title, server, is_camera, raw_snippet
+- probe_http_for_camera() now a thin wrapper around probe_http_identity()
+- is_camera_positive() now checks nmap banners against CAMERA_DB (not just keyword list)
+  and also checks device hostnames against DB alias strings
+- _probe_host_port() now calls probe_http_identity() on HTTP ports and attaches identity
+  fields (manufacturer, device_notes, page_title, server_header) to every camera dict
+- Camera display name auto-upgraded: if manufacturer is identified and the name is still
+  the IP-derived default, the name is set to "Manufacturer (ip)" (e.g. "Lorex (192.168.50.3)")
+- ONVIF-only devices (detected by multicast but not port scan) now also get HTTP identity
+  probing on ports 80, 8080, 443
+- Identity section on each camera card: collapsible "🔍 Identity" section showing
+  Manufacturer, Page title, Server header, Hostname, and Notes rows
+- Post-upgrade scan clarification: status message now explicitly says "scanning subnet
+  for newly discoverable cameras" when the full scan runs after verification
+
+## 1.1.8
+- Version-aware startup logic — three distinct startup modes:
+  new_install: no saved cameras and no prior version recorded → auto-scan as before
+  routine: same version as last run (HAOS reboot, addon restart) → load cameras silently, no scan
+  post_upgrade: version differs from last run → load cameras, then run verification scan + fresh full scan
+- Post-upgrade verification scan:
+  Each saved camera is probed individually using its own protocol (RTSP probe, MJPEG quick-check, etc.)
+  Cameras still responding → kept as-is, upgrade_missing flag cleared
+  Cameras not responding → marked upgrade_missing=True (kept in list, not deleted automatically)
+  After verifying saved cameras, a full fresh scan runs to discover new cameras the upgraded
+  detection code may now find
+- Cameras marked upgrade_missing show:
+  Pulsing orange status dot (distinct from yellow needs_credentials and red error)
+  Orange badge: ⚠ Not found after upgrade
+  Feed area shows explanatory overlay: was present before upgrade but did not respond;
+  may be offline, removed, or a false positive from the previous version
+  Two decision buttons: Keep (may be offline) clears the flag and restores normal card behaviour;
+  Remove deletes permanently
+- New /api/cameras/{id}/confirm endpoint: clears upgrade_missing flag
+- Version persisted in /data/runtime.json on every startup so next run can compare
+- Pre-1.1.8 upgrades handled: if runtime.json does not exist but cameras.json does,
+  startup mode is treated as post_upgrade (covers users upgrading from any previous version)
+- 172.30.32.x log entries clarification: these are the HA Supervisor Docker bridge IPs,
+  not external clients — all browser requests are proxied through the Supervisor
+
 ## 1.1.7
 - Extended is_camera_positive gate to cover all 7 supported protocols:
   RTMP: wired existing probe_rtmp() C0 handshake byte check into the gate
