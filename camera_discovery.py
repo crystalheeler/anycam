@@ -1390,24 +1390,21 @@ async def handle_index(request: web.Request) -> web.Response:
 
 def make_app() -> web.Application:
     app = web.Application()
-    p   = INGRESS_PATH
 
-    # Register the index for both slash and no-slash variants.
-    # HA ingress sidebar clicks arrive WITHOUT a trailing slash; internal
-    # links arrive WITH one.  aiohttp treats these as different paths.
-    app.router.add_get(p or "/",  handle_index)
-    if p:
-        app.router.add_get(p + "/", handle_index)
-
-    app.router.add_get(    p + "/api/cameras",                         api_cameras)
-    app.router.add_get(    p + "/api/scan/status",                     api_scan_status)
-    app.router.add_post(   p + "/api/scan",                            api_scan)
-    app.router.add_post(   p + "/api/credentials",                     api_set_credentials)
-    app.router.add_delete( p + "/api/cameras/{camera_id}/credentials", api_clear_credentials)
-    app.router.add_post(   p + "/api/cameras/{camera_id}/name",        api_rename_camera)
-    app.router.add_delete( p + "/api/cameras/{camera_id}",             api_delete_camera)
-    app.router.add_get(    p + "/stream/{camera_id}",                  handle_stream)
-    app.router.add_get(    p + "/snapshot/{camera_id}",                handle_snapshot)
+    # HA ingress STRIPS the /api/hassio_ingress/TOKEN prefix before
+    # forwarding to the addon, so routes must be registered at bare paths.
+    # INGRESS_PATH is only used in the JS as BASE so browser fetch() calls
+    # include the full path that HA expects.
+    app.router.add_get(    "/",                                    handle_index)
+    app.router.add_get(    "/api/cameras",                         api_cameras)
+    app.router.add_get(    "/api/scan/status",                     api_scan_status)
+    app.router.add_post(   "/api/scan",                            api_scan)
+    app.router.add_post(   "/api/credentials",                     api_set_credentials)
+    app.router.add_delete( "/api/cameras/{camera_id}/credentials", api_clear_credentials)
+    app.router.add_post(   "/api/cameras/{camera_id}/name",        api_rename_camera)
+    app.router.add_delete( "/api/cameras/{camera_id}",             api_delete_camera)
+    app.router.add_get(    "/stream/{camera_id}",                  handle_stream)
+    app.router.add_get(    "/snapshot/{camera_id}",                handle_snapshot)
     return app
 
 

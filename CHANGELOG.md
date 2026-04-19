@@ -1,5 +1,10 @@
 # AnyCam — Changelog
 
+## 1.1.2
+- Fixed 404: HA ingress proxy strips the /api/hassio_ingress/TOKEN prefix before
+  forwarding to the addon, so routes must be registered at bare paths (/, /api/cameras,
+  etc.). INGRESS_PATH is now only used as the JavaScript BASE for browser fetch() calls.
+
 ## 1.1.1
 - Fixed 404 on sidebar click: register index route for both /path and /path/ variants
   (HA ingress arrives without trailing slash; aiohttp treats slash vs no-slash as distinct routes)
