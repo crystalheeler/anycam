@@ -1,5 +1,9 @@
 # AnyCam — Changelog
 
+## 1.1.1
+- Fixed 404 on sidebar click: register index route for both /path and /path/ variants
+  (HA ingress arrives without trailing slash; aiohttp treats slash vs no-slash as distinct routes)
+
 ## 1.1.0
 - Added HTTP MJPEG detection: probes 17 common paths, checks Content-Type for multipart/x-mixed-replace or image/jpeg; streams via ffmpeg proxy
 - Added HLS detection: probes 11 common .m3u8 paths, verifies #EXTM3U body or mpegurl Content-Type; plays via hls.js in browser (native Safari fallback)

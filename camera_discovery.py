@@ -1391,7 +1391,14 @@ async def handle_index(request: web.Request) -> web.Response:
 def make_app() -> web.Application:
     app = web.Application()
     p   = INGRESS_PATH
-    app.router.add_get(    p + "/",                                    handle_index)
+
+    # Register the index for both slash and no-slash variants.
+    # HA ingress sidebar clicks arrive WITHOUT a trailing slash; internal
+    # links arrive WITH one.  aiohttp treats these as different paths.
+    app.router.add_get(p or "/",  handle_index)
+    if p:
+        app.router.add_get(p + "/", handle_index)
+
     app.router.add_get(    p + "/api/cameras",                         api_cameras)
     app.router.add_get(    p + "/api/scan/status",                     api_scan_status)
     app.router.add_post(   p + "/api/scan",                            api_scan)
