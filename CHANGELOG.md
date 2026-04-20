@@ -1,5 +1,17 @@
 # AnyCam — Changelog
 
+## 1.3.8
+- URL credential encoding fix: the previous fix encoded ! as %21 but many
+  RTSP servers (including Hikvision-based cameras) do not percent-decode
+  credentials before authentication — they compare %21 literally against the
+  stored password, causing authentication to fail; per RFC 3986, the userinfo
+  component allows sub-delimiters (! $ & ' ( ) * + , ; =) unencoded; the
+  safe set is now set to these sub-delimiters plus unreserved chars, so only
+  truly URL-breaking characters are encoded: @ : / ? # [ ]
+  Result: 'fuckyou!' stays as 'fuckyou!' in the URL (correct) while a
+  password like 'p@ss:w0rd' becomes 'p%40ss%3Aw0rd' (necessary to avoid
+  breaking the user:pass@host URL structure)
+
 ## 1.3.7
 - Critical URL encoding fix: build_authenticated_url() now percent-encodes
   both username and password using urllib.parse.quote() before inserting

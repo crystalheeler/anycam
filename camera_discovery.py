@@ -58,7 +58,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.3.7"  # must match config.yaml
+CURRENT_VERSION = "1.3.8"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2973,9 +2973,14 @@ def build_authenticated_url(camera: dict) -> str | None:
         try:
             from urllib.parse import quote as _quote
             u, p = decrypt_creds(creds)
-            # URL-encode username and password — special chars like ! : @ must be encoded
-            u_enc = _quote(u, safe="")
-            p_enc = _quote(p, safe="")
+            # URL-encode only characters that break URL parsing.
+            # Per RFC 3986 userinfo, sub-delims like ! $ & ' ( ) * + , ; = are
+            # VALID unencoded — only @ : / ? # [ ] must be encoded.
+            # Many RTSP servers don't decode %-encoded credentials, so encoding
+            # ! as %21 causes authentication to fail with the wrong password.
+            _USERINFO_SAFE = "!$&'()*+,;=~-._"
+            u_enc = _quote(u, safe=_USERINFO_SAFE)
+            p_enc = _quote(p, safe=_USERINFO_SAFE)
             proto, rest = url.split("://", 1)
             rest = re.sub(r"^[^@]+@", "", rest)   # strip any existing creds
             url  = f"{proto}://{u_enc}:{p_enc}@{rest}"
