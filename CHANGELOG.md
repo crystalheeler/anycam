@@ -1,5 +1,25 @@
 # AnyCam — Changelog
 
+## 1.4.4
+- Critical fix: JPEG frame parser was broken — SOI (0xff 0xd8) and EOI (0xff 0xd9)
+  markers were stored in source as double-escaped strings (\xff\xd8) meaning
+  Python searched for literal 8-char ASCII sequences instead of 2-byte JPEG
+  markers; no frame boundaries were ever found so the stream read loop ran until
+  30-second timeout with zero frames delivered to the browser; fixed via binary
+  replacement ensuring file has single-escaped ÿØ (4-char escape sequence
+  that Python compiles to bytes 0xFF 0xD8 at runtime)
+- HEVC cameras now registered with go2rtc using ffmpeg wrapper source:
+  go2rtc_source() returns 'ffmpeg:rtsp://...#video=h264&width=640&fps=8' for
+  HEVC streams; go2rtc uses its configured ffmpeg binary to transcode HEVC→H.264
+  internally; the local RTSP restream (port 8554) then delivers H.264; our
+  ffmpeg process reads H.264 from 127.0.0.1:8554 and easily converts to MJPEG
+  For 4K HEVC: 480x270 @ 4fps; for 1080p/720p HEVC: 640x360 @ 8fps
+- go2rtc_source() used consistently everywhere: handle_stream, go2rtc_register_all,
+  ONVIF profile card registration, and credential save all pass camera dict so the
+  correct source URL (direct or ffmpeg-wrapped) is used from the start
+- Startup log now shows whether each camera is registered as direct or ffmpeg-wrapped
+  and what codec is stored; Stream log shows go2rtc mode and source resolution
+
 ## 1.4.3
 - Critical fix: added 'import aiohttp' to module imports; go2rtc_add/remove
   functions use aiohttp.ClientSession() but the module only had

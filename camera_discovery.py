@@ -59,12 +59,13 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.4.3"  # must match config.yaml
+CURRENT_VERSION = "1.4.4"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
-GO2RTC_PORT  = 1984
-GO2RTC_API   = f"http://127.0.0.1:{GO2RTC_PORT}"
+GO2RTC_PORT      = 1984
+GO2RTC_RTSP_PORT = 8554
+GO2RTC_API       = f"http://127.0.0.1:{GO2RTC_PORT}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # State
@@ -3158,22 +3159,55 @@ async def go2rtc_remove(cid: str):
         pass
 
 
-async def go2rtc_ensure(cid: str, url: str) -> bool:
+def go2rtc_source(camera: dict, url: str) -> str:
+    """
+    Build the go2rtc source URL.
+    HEVC cameras use go2rtc's ffmpeg integration to transcode HEVC→H.264
+    internally, so the local RTSP restream on port 8554 delivers H.264.
+    ffmpeg (used later for MJPEG) can then handle H.264 easily.
+    H.264 or unknown cameras are registered directly — go2rtc re-streams as-is.
+    """
+    codec = (camera.get("stream_codec") or "").lower()
+    w     = camera.get("stream_width") or 0
+    if codec in ("hevc", "h265"):
+        # go2rtc ffmpeg wrapper: decode HEVC, re-encode to H.264 at reduced res/fps
+        if w >= 3840:
+            params = "video=h264&width=480&height=270&fps=4"
+        else:
+            params = "video=h264&width=640&height=360&fps=8"
+        return f"ffmpeg:{url}#{params}"
+    # H.264 or unknown: let go2rtc handle natively; ffmpeg will decode H.264 easily
+    return url
+
+
+async def go2rtc_ensure(cid: str, url: str, camera: dict = {}) -> bool:
     if cid not in _go2rtc_streams:
-        return await go2rtc_add(cid, url)
+        src = go2rtc_source(camera, url) if camera else url
+        return await go2rtc_add(cid, src)
     return True
 
 
 async def go2rtc_register_all():
-    """Register all ready cameras with go2rtc on startup."""
+    """Register all ready cameras with go2rtc on startup using correct source URLs."""
     for cam in list(CAMERAS.values()):
         if cam.get("status") == "ready":
             url = build_authenticated_url(cam)
             if url:
-                await go2rtc_add(cam["id"], url)
+                src = go2rtc_source(cam, url)
+                ffwrap = src.startswith("ffmpeg:")
+                log.info(f"go2rtc: registering {cam['id']} "
+                         f"({'ffmpeg-wrapped' if ffwrap else 'direct'}, "
+                         f"codec={cam.get('stream_codec') or '?'})")
+                await go2rtc_add(cam["id"], src)
 
 
 async def handle_stream(request: web.Request) -> web.StreamResponse:
+    """
+    Hybrid streaming: go2rtc proxies the camera RTSP (handling auth,
+    reconnection, ONVIF), then we run ffmpeg against go2rtc's local RTSP
+    server at localhost:8554 (no auth required).  This separates camera
+    connectivity concerns (go2rtc) from MJPEG transcoding (ffmpeg).
+    """
     camera_id = request.match_info["camera_id"]
     camera    = CAMERAS.get(camera_id)
     if not camera:
@@ -3188,11 +3222,29 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     proto = camera.get("protocol", "RTSP")
 
     # Ensure stream is registered with go2rtc
-    if not await go2rtc_ensure(camera_id, url):
+    if not await go2rtc_ensure(camera_id, url, camera):
         log.warning(f"Stream {camera_id}: go2rtc registration failed")
         return web.Response(status=503)
 
-    log.info(f"Stream [{proto}] {camera_id} via go2rtc")
+    # go2rtc's local RTSP proxy — no auth needed, no network issues
+    local_rtsp = f"rtsp://127.0.0.1:{GO2RTC_RTSP_PORT}/{camera_id}"
+
+    # Choose output resolution/fps based on stored stream details
+    stream_codec = camera.get("stream_codec", "").lower()
+    stream_w     = camera.get("stream_width") or 0
+    is_hevc      = stream_codec in ("hevc", "h265")
+
+    if is_hevc and stream_w >= 3840:
+        out_vf = "fps=4,scale=480:-2,format=yuv420p"
+    elif is_hevc:
+        out_vf = "fps=8,scale=640:-2,format=yuv420p"
+    else:
+        out_vf = "fps=10,scale=640:-2,format=yuv420p"
+
+    ffwrap = camera.get("stream_codec","").lower() in ("hevc","h265")
+    log.info(f"Stream [{proto}] {camera_id} "
+             f"{'go2rtc(ffmpeg-wrapped)' if ffwrap else 'go2rtc'}→ffmpeg "
+             f"codec={stream_codec or '?'} res={stream_w or '?'}px vf={out_vf}")
 
     response = web.StreamResponse(headers={
         "Content-Type":  "multipart/x-mixed-replace; boundary=frame",
@@ -3200,26 +3252,81 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     })
     await response.prepare(request)
 
-    # go2rtc MJPEG endpoint — go2rtc handles all codec/auth/reconnection
-    mjpeg_url = f"{GO2RTC_API}/{camera_id}.mjpeg"
+    async def _launch(hw_dec=""):
+        hw_args = ["-c:v", hw_dec] if hw_dec else []
+        return await asyncio.create_subprocess_exec(
+            "ffmpeg", "-loglevel", "warning",
+            "-rtsp_transport", "tcp",     # local RTSP to go2rtc
+            *hw_args,
+            "-i", local_rtsp,
+            "-vf", out_vf,
+            "-q:v", "5", "-f", "mjpeg", "pipe:1",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+    # Try hardware decode first (Pi 4 VideoCore VI), fall back to software
+    hw_dec     = "hevc_v4l2m2m" if is_hevc else ("h264_v4l2m2m" if stream_codec == "h264" else "")
+    proc       = await _launch(hw_dec)
+    buf        = b""
+    frames     = 0
+    hw_tried   = bool(hw_dec)
+
     try:
-        async with aiohttp.ClientSession() as sess:
-            async with sess.get(
-                mjpeg_url,
-                timeout=aiohttp.ClientTimeout(connect=10, sock_read=30, total=None),
-            ) as r:
-                if r.status != 200:
-                    log.warning(f"Stream {camera_id}: go2rtc MJPEG returned {r.status}")
+        while True:
+            # Short first-read timeout when hw decode in play — switch fast if nothing comes
+            timeout = 3.0 if (hw_tried and frames == 0) else 30
+            try:
+                chunk = await asyncio.wait_for(proc.stdout.read(32768), timeout=timeout)
+            except asyncio.TimeoutError:
+                if hw_tried and frames == 0:
+                    try: proc.kill()
+                    except Exception: pass
+                    try: await asyncio.wait_for(proc.wait(), timeout=2)
+                    except Exception: pass
+                    log.info(f"Stream {camera_id}: hw decode timeout, retrying software")
+                    proc, hw_tried = await _launch(), False
+                    continue
+                log.warning(f"Stream {camera_id}: 30s timeout ({frames} frames sent)")
+                break
+            if not chunk:
+                if hw_tried and frames == 0:
+                    try: proc.kill()
+                    except Exception: pass
+                    try: await asyncio.wait_for(proc.wait(), timeout=2)
+                    except Exception: pass
+                    log.info(f"Stream {camera_id}: hw decode EOF, retrying software")
+                    proc, hw_tried = await _launch(), False
+                    continue
+                break
+            buf += chunk
+            while True:
+                s = buf.find(b"\xff\xd8")
+                if s < 0: break
+                e = buf.find(b"\xff\xd9", s + 2)
+                if e < 0: break
+                frame = buf[s:e+2]
+                buf   = buf[e+2:]
+                frames += 1
+                try:
+                    CRLF2 = b"\r\n"
+                    hdr = (b"--frame" + CRLF2
+                           + b"Content-Type: image/jpeg" + CRLF2
+                           + b"Content-Length: " + str(len(frame)).encode() + CRLF2 + CRLF2)
+                    await response.write(hdr + frame + CRLF2)
+                except (ConnectionResetError, ConnectionAbortedError):
                     return response
-                async for chunk in r.content.iter_chunked(65536):
-                    try:
-                        await response.write(chunk)
-                    except (ConnectionResetError, ConnectionAbortedError):
-                        return response
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        log.warning(f"Stream {camera_id} proxy error: {e}")
+    except Exception as ex:
+        log.warning(f"Stream {camera_id}: {ex}")
+    finally:
+        try: proc.kill()
+        except Exception: pass
+        try:
+            _, err = await asyncio.wait_for(proc.communicate(), timeout=3)
+            if err and err.strip():
+                log.warning(f"Stream {camera_id} ffmpeg: "
+                            + err.decode("utf-8", errors="replace").strip()[:300])
+        except Exception: pass
     return response
 
 
@@ -3419,8 +3526,9 @@ async def api_set_credentials(request):
                 for cid in created:
                     cam = CAMERAS.get(cid)
                     if cam:
+                        cam_url = build_authenticated_url(cam) or ""
                         asyncio.create_task(
-                            go2rtc_add(cid, build_authenticated_url(cam) or ""))
+                            go2rtc_add(cid, go2rtc_source(cam, cam_url)))
                 return web.json_response({"status": "ok", "channels": len(created)})
             log.warning(f"  ONVIF: profiles found but no streams probed OK — falling back to direct RTSP")
         else:
@@ -3463,7 +3571,8 @@ async def api_set_credentials(request):
     save_cameras()
     log.info(f"Credentials accepted for {camera_id}: {_strip_creds(url)}")
     # Register with go2rtc (best-effort, don't block the response)
-    asyncio.create_task(go2rtc_add(camera_id, build_authenticated_url(camera) or url))
+    _cam_url = build_authenticated_url(camera) or url
+    asyncio.create_task(go2rtc_add(camera_id, go2rtc_source(camera, _cam_url)))
     return web.json_response({"status": "ok", "stream_url": _strip_creds(url), **details})
 
 

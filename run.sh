@@ -10,9 +10,13 @@ bashio::log.info "Ingress path: ${INGRESS_PATH}"
 cat > /tmp/go2rtc.yaml << 'EOF'
 api:
   listen: "127.0.0.1:1984"
+rtsp:
+  listen: "127.0.0.1:8554"
 log:
   level: warn
   format: text
+ffmpeg:
+  bin: ffmpeg
 EOF
 
 # Start go2rtc in background
