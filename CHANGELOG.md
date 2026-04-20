@@ -1,5 +1,21 @@
 # AnyCam — Changelog
 
+## 1.5.2
+- Add X-Accel-Buffering: no response header: HA ingress is an nginx proxy;
+  without this header nginx buffers the entire multipart/x-mixed-replace
+  stream in memory before forwarding it to the browser, so the browser
+  receives zero frames until the stream ends — this is the primary cause
+  of the 'no live feed' symptom despite ffmpeg producing frames correctly
+- Track hardware decoder availability at runtime: when hevc_v4l2m2m or
+  h264_v4l2m2m reports 'Could not find a valid device', the decoder name
+  is added to _HW_UNAVAILABLE (module-level set); subsequent stream
+  requests skip hw decode immediately instead of wasting 3 seconds per
+  attempt on a guaranteed failure
+- Fix deprecated pixel format warning: change format=yuvj420p to
+  format=yuv420p in all vf chains and add -color_range 2 to the ffmpeg
+  command; yuvj420p is deprecated in ffmpeg 5+ and triggered a swscaler
+  warning on every new scale context, filling the stderr pipe with noise
+
 ## 1.5.1
 - Add diagnostic logging to handle_stream: log the ffmpeg command (creds
   stripped), the sanitized RTSP URL, ffmpeg exit code, and a warning on

@@ -59,13 +59,18 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.5.1"  # must match config.yaml
+CURRENT_VERSION = "1.5.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
 GO2RTC_PORT      = 1984
 GO2RTC_RTSP_PORT = 8554
 GO2RTC_API       = f"http://127.0.0.1:{GO2RTC_PORT}"
+
+# Hardware decoder names unavailable on this system (detected at runtime).
+# When v4l2m2m reports "Could not find a valid device", the decoder name
+# is added here so future stream requests skip hw decode immediately.
+_HW_UNAVAILABLE: set = set()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # State
@@ -3229,21 +3234,25 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     is_hevc      = stream_codec in ("hevc", "h265")
 
     # Scale + fps limits: 4K HEVC -> 480p@4fps, other HEVC -> 640p@8fps, else 640p@10fps
-    # yuvj420p (not yuv420p) is the JPEG full-range pixel format mjpeg encoder expects.
+    # yuv420p in the vf chain; -color_range 2 tells the mjpeg encoder to use full range.
     if is_hevc and stream_w >= 3840:
-        out_vf = "fps=4,scale=480:-2,format=yuvj420p"
+        out_vf = "fps=4,scale=480:-2,format=yuv420p"
     elif is_hevc:
-        out_vf = "fps=8,scale=640:-2,format=yuvj420p"
+        out_vf = "fps=8,scale=640:-2,format=yuv420p"
     else:
-        out_vf = "fps=10,scale=640:-2,format=yuvj420p"
+        out_vf = "fps=10,scale=640:-2,format=yuv420p"
 
     safe_url = _strip_creds(url)
     log.info(f"Stream [{proto}] {camera_id} -> {safe_url} "
              f"codec={stream_codec or '?'} vf={out_vf}")
 
     response = web.StreamResponse(headers={
-        "Content-Type":  "multipart/x-mixed-replace; boundary=frame",
-        "Cache-Control": "no-cache", "Pragma": "no-cache", "Connection": "keep-alive",
+        "Content-Type":        "multipart/x-mixed-replace; boundary=frame",
+        "Cache-Control":       "no-cache",
+        "Pragma":              "no-cache",
+        "Connection":          "keep-alive",
+        "X-Accel-Buffering":   "no",   # tell nginx (HA ingress proxy) not to buffer
+        "X-Content-Type-Options": "nosniff",
     })
     await response.prepare(request)
 
@@ -3267,6 +3276,7 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
             "-vf", out_vf,
             "-vcodec", "mjpeg",
             "-q:v", "5",
+            "-color_range", "2",     # full (PC/JPEG) range for mjpeg encoder
             "-f", "image2pipe",
             "pipe:1",
         ]
@@ -3304,9 +3314,19 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
         if lines:
             joined = " | ".join(lines)[:600]
             log.warning(f"Stream {label} ffmpeg stderr: {joined}")
+            # Detect v4l2m2m unavailability and mark it globally so future
+            # stream requests skip hw decode without wasting 3 seconds.
+            for hw in ("hevc_v4l2m2m", "h264_v4l2m2m"):
+                if hw in joined and "Could not find a valid device" in joined:
+                    _HW_UNAVAILABLE.add(hw)
+                    log.info(f"Marked {hw} as unavailable on this system")
 
     # Try hardware decode first; on ARM this is hevc_v4l2m2m / h264_v4l2m2m.
-    hw_dec   = "hevc_v4l2m2m" if is_hevc else ("h264_v4l2m2m" if stream_codec == "h264" else "")
+    # Skip hw decode immediately if we already know it's unavailable on this system.
+    _wanted_hw = "hevc_v4l2m2m" if is_hevc else ("h264_v4l2m2m" if stream_codec == "h264" else "")
+    hw_dec     = "" if (_wanted_hw in _HW_UNAVAILABLE) else _wanted_hw
+    if _wanted_hw and hw_dec == "":
+        log.info(f"Stream {camera_id}: skipping {_wanted_hw} (known unavailable), using sw decode")
     proc     = await _launch(hw_dec)
     stderr_t = asyncio.create_task(_drain_stderr(proc, camera_id))
     buf      = b""
