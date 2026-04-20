@@ -58,7 +58,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.3.6"  # must match config.yaml
+CURRENT_VERSION = "1.3.7"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2971,10 +2971,14 @@ def build_authenticated_url(camera: dict) -> str | None:
     creds = camera.get("credentials")
     if creds:
         try:
+            from urllib.parse import quote as _quote
             u, p = decrypt_creds(creds)
+            # URL-encode username and password — special chars like ! : @ must be encoded
+            u_enc = _quote(u, safe="")
+            p_enc = _quote(p, safe="")
             proto, rest = url.split("://", 1)
-            rest = re.sub(r"^[^@]+@", "", rest)
-            url  = f"{proto}://{u}:{p}@{rest}"
+            rest = re.sub(r"^[^@]+@", "", rest)   # strip any existing creds
+            url  = f"{proto}://{u_enc}:{p_enc}@{rest}"
         except Exception as e:
             log.warning(f"Cred decrypt: {e}")
     return url
@@ -3017,13 +3021,13 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     # Scale + fps strategy based on codec and source resolution
     if stream_codec in ("hevc","h265") and stream_w >= 3840:
         # 4K HEVC: scale down hard to reduce decode workload
-        out_vf = "fps=4,scale=480:-2"
+        out_vf = "fps=4,scale=480:-2,format=yuv420p"
         log.info(f"Stream [{proto}] {camera_id} — 4K HEVC detected, scaling to 480p@4fps")
     elif stream_codec in ("hevc","h265"):
         # Sub-4K HEVC: moderate reduction
-        out_vf = "fps=8,scale=640:-2"
+        out_vf = "fps=8,scale=640:-2,format=yuv420p"
     else:
-        out_vf = "fps=10,scale=640:-2"
+        out_vf = "fps=10,scale=640:-2,format=yuv420p"
 
     log.info(f"Stream [{proto}] {camera_id} codec={stream_codec or '?'} hw={hw_dec or 'sw'} vf={out_vf}")
 
@@ -3032,7 +3036,6 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
             "ffmpeg", "-loglevel", "warning", "-timeout", "8000000",
             *flags, *extra_flags, "-i", url,
             "-vf", out_vf,
-            "-pix_fmt", "yuvj420p",   # JPEG-range YUV = native MJPEG pixel format
             "-q:v", "5", "-f", "mjpeg", "pipe:1",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

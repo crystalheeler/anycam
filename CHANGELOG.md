@@ -1,5 +1,18 @@
 # AnyCam — Changelog
 
+## 1.3.7
+- Critical URL encoding fix: build_authenticated_url() now percent-encodes
+  both username and password using urllib.parse.quote() before inserting
+  into the RTSP/HTTP URL; special characters like ! @ : # ? in passwords
+  were being passed raw, causing ffmpeg to fail with 'Invalid data found
+  when processing input' — e.g. password 'abc!def' is now encoded as
+  'abc%21def' in the URL string; this fix affects all stream protocols
+- Replaced -pix_fmt yuvj420p flag with format=yuv420p inside the -vf
+  filter chain; having -pix_fmt as a separate flag was conflicting with
+  how the HEVC software decoder outputs frames and causing swscaler to
+  run an extra conversion; moving it into the filter chain as
+  'fps=N,scale=W:-2,format=yuv420p' is the correct approach
+
 ## 1.3.6
 - Added -pix_fmt yuvj420p to ffmpeg output — yuvj420p is the JPEG full-range
   YUV pixel format that MJPEG encoding expects natively; without it, ffmpeg runs
