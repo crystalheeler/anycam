@@ -1,5 +1,44 @@
 # AnyCam — Changelog
 
+## 1.2.7
+- Port scanner: ETA countdown shown from the moment scanning starts:
+  Uses last_port_scan_duration from runtime.json as the initial estimate;
+  updates every ~10 seconds using nmap's own timing output (--stats-every 10s);
+  counts down smoothly client-side between polls accounting for poll drift;
+  saves actual elapsed time to runtime.json on completion for next scan
+- Port scanner: checkbox state now persists across view switches using a
+  persistent _selectedIPs Set; selections survive navigating to Cameras and back;
+  'Select all' / 'Clear all' also update the persistent set correctly
+- Port scanner: live port discovery feed shown during scan:
+  nmap -v flag emits 'Discovered open port X/tcp on Y' lines as ports are found;
+  these are streamed line-by-line from stdout and added to PSCAN['live_ports'];
+  a scrolling box (max 220px, auto-scrolls to bottom) shows ports as found;
+  message updates to 'Scanning X... N open port(s) found' in real time;
+  only open/active ports are shown, never closed or filtered ones
+- Port scanner: live discovery box replaced by full results table when done;
+  nmap XML now written to a temp file instead of stdout so we can stream
+  the verbose text output for live discovery simultaneously
+- Port scanner: ETA and live box both cleared when navigating back to page;
+  completed results are restored from PSCAN state when returning to Port Scan
+- api_pscan_status now includes elapsed (computed server-side from scan_start)
+  so JS can accurately compute time drift between polls for smooth countdown
+
+## 1.2.6
+- ETA estimate shown from the very first second of scanning:
+  On first-ever scan: initial estimate is 4 minutes (240s) for a typical /24 network
+  On subsequent scans: uses actual duration from the most recent completed scan
+  (stored as last_scan_duration in /data/runtime.json) as the starting estimate
+- ETA progressively refined at each stage:
+  After Stage 1 (ARP complete): refined using actual S1 time + host count
+  formula (S1_elapsed * 10, floored at S1 + hosts * 8s)
+  After Stage 2 (nmap complete): refined using S1+S2 elapsed / 0.55 to project
+  100%, also floored at responding_hosts * 15s
+  Per-host in Stage 3: updated continuously as each host is probed
+- ETA display: 'estimated X:XX remaining' while running, counting down smoothly
+  client-side between 1.5s polls; jumps are expected as estimates are refined
+- Actual scan duration saved to runtime.json on completion for next scan's ETA
+- ETA label changed from '~X:XX remaining' to 'estimated X:XX remaining'
+
 ## 1.2.5
 - Critical bug fix: NameError crash in is_camera_positive() — 'reason' was
   referenced in the not_camera verdict log line but is not a parameter of that

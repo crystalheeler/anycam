@@ -52,7 +52,7 @@ OUI_CACHE_FILE = DATA_DIR / "oui_cache.json"
 OUI_CSV_URL    = "https://standards-oui.ieee.org/oui/oui.csv"
 OUI_MAX_AGE_DAYS = 30  # re-download once a month
 
-CURRENT_VERSION = "1.2.5"  # must match config.yaml
+CURRENT_VERSION = "1.2.7"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -70,8 +70,12 @@ SCAN_OPTIONS = {"broad_sweep": False}
 _FERNET    = None
 
 PSCAN = {
-    "running": False, "paused": False, "ip": "",
-    "progress": 0, "message": "", "results": [], "proc_pid": None,
+    "running":    False, "paused": False, "ip": "",
+    "progress":   0, "message": "", "results": [], "proc_pid": None,
+    "live_ports": [],    # ports found so far during active scan
+    "scan_start": 0.0,   # timestamp scan began
+    "eta":        0,     # seconds remaining (from nmap --stats-every)
+    "percent":    0.0,   # % done (from nmap)
 }
 
 # Last ARP-discovered hosts — populated by run_scan(), consumed by Port Scan UI
@@ -2128,46 +2132,118 @@ def _onvif_media_url(ip: str, port: int, xaddrs: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def run_port_scan(ip: str):
-    PSCAN.update(running=True, paused=False, ip=ip, progress=5,
-                 message=f"Scanning all 65535 ports on {ip}…", results=[], proc_pid=None)
+    """
+    Full 65535-port scan with live discovery feed.
+
+    Uses nmap -v so it emits 'Discovered open port X/tcp on Y' lines
+    as ports are found, and --stats-every 10s for ETA lines.
+    Results are written to a temp XML file; parsed for the final table.
+    """
+    import os as _os
+
+    # Load initial ETA estimate from last port scan duration
+    _runtime    = load_runtime()
+    _last_p_dur = _runtime.get("last_port_scan_duration", 0)
+    _init_eta   = int(_last_p_dur) if _last_p_dur > 10 else 300  # 5 min fallback
+
+    PSCAN.update(
+        running=True, paused=False, ip=ip, progress=2,
+        message=f"Scanning all 65535 ports on {ip}…",
+        results=[], live_ports=[], proc_pid=None,
+        scan_start=time.time(), eta=_init_eta, percent=0.0,
+    )
+
+    xml_path = f"/tmp/anycam_pscan_{ip.replace('.','_')}.xml"
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "nmap", "-sV", "-sC", "-A", "--open", "-p-",
-            "--host-timeout", "600s", "-T3", "-oX", "-", ip,
+            "-v", "--stats-every", "10s",
+            "--host-timeout", "600s", "-T3",
+            "-oX", xml_path, ip,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.STDOUT,  # merge stderr so we capture stats
         )
         PSCAN["proc_pid"] = proc.pid
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=660)
-        xml_text  = stdout.decode("utf-8", errors="replace")
+
+        # Stream stdout line by line for live port discovery + ETA
+        async for raw_line in proc.stdout:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+
+            # "Discovered open port 554/tcp on 192.168.50.3"
+            m_port = re.search(r"Discovered open port (\d+)/(\w+)", line)
+            if m_port:
+                port_num = int(m_port.group(1))
+                proto    = m_port.group(2)
+                PSCAN["live_ports"].append({"port": port_num, "proto": proto})
+                PSCAN["message"] = (
+                    f"Scanning {ip}… {len(PSCAN['live_ports'])} open port(s) found")
+                continue
+
+            # "About 34.56% done; ETC: 13:45 (0:03:12 remaining)"
+            m_pct = re.search(r"About ([\d.]+)% done", line)
+            if m_pct:
+                pct = float(m_pct.group(1))
+                PSCAN["percent"]  = pct
+                PSCAN["progress"] = max(2, min(95, int(pct)))
+
+            m_eta = re.search(r"(\d+):(\d+):(\d+) remaining", line)
+            if m_eta:
+                h, m, s = int(m_eta.group(1)), int(m_eta.group(2)), int(m_eta.group(3))
+                PSCAN["eta"] = h * 3600 + m * 60 + s
+
+        await asyncio.wait_for(proc.wait(), timeout=30)
+
+        # Parse the XML temp file for rich service details
         results = []
-        try:
-            root = ET.fromstring(xml_text)
-            for host in root.findall("host"):
-                for port_el in host.findall("ports/port"):
-                    pst = port_el.find("state")
-                    if pst is None or pst.get("state") != "open":
-                        continue
-                    svc     = port_el.find("service")
-                    scripts = {sc.get("id",""): sc.get("output","")
-                               for sc in port_el.findall("script")}
-                    results.append({
-                        "port":    int(port_el.get("portid")),
-                        "proto":   port_el.get("protocol", "tcp"),
-                        "service": svc.get("name","")    if svc is not None else "",
-                        "product": svc.get("product","") if svc is not None else "",
-                        "version": svc.get("version","") if svc is not None else "",
-                        "extra":   svc.get("extrainfo","") if svc is not None else "",
-                        "scripts": scripts,
-                    })
-        except Exception as e:
-            log.warning(f"Port scan XML parse: {e}")
-        PSCAN.update(running=False, progress=100, results=results,
-                     message=f"Scan complete — {len(results)} open port(s) on {ip}.")
+        if _os.path.exists(xml_path):
+            try:
+                with open(xml_path) as f:
+                    xml_text = f.read()
+                root = ET.fromstring(xml_text)
+                for host in root.findall("host"):
+                    for port_el in host.findall("ports/port"):
+                        pst = port_el.find("state")
+                        if pst is None or pst.get("state") != "open":
+                            continue
+                        svc     = port_el.find("service")
+                        scripts = {sc.get("id",""):sc.get("output","")
+                                   for sc in port_el.findall("script")}
+                        results.append({
+                            "port":    int(port_el.get("portid")),
+                            "proto":   port_el.get("protocol","tcp"),
+                            "service": svc.get("name","")      if svc is not None else "",
+                            "product": svc.get("product","")   if svc is not None else "",
+                            "version": svc.get("version","")   if svc is not None else "",
+                            "extra":   svc.get("extrainfo","") if svc is not None else "",
+                            "scripts": scripts,
+                        })
+            except Exception as e:
+                log.warning(f"Port scan XML parse: {e}")
+            finally:
+                try:
+                    _os.unlink(xml_path)
+                except Exception:
+                    pass
+
+        elapsed = round(time.time() - PSCAN["scan_start"])
+        # Save for next scan's ETA
+        _rt = load_runtime()
+        _rt["last_port_scan_duration"] = elapsed
+        save_runtime(_rt)
+
+        PSCAN.update(
+            running=False, progress=100, results=results,
+            live_ports=[],   # clear — final table takes over
+            eta=0, percent=100.0,
+            message=f"Scan complete — {len(results)} open port(s) on {ip}. "
+                    f"({elapsed//60}:{elapsed%60:02d})",
+        )
+
     except asyncio.TimeoutError:
-        PSCAN.update(running=False, progress=100, message="Scan timed out.")
+        PSCAN.update(running=False, progress=100, message="Scan timed out.", live_ports=[])
     except Exception as e:
-        PSCAN.update(running=False, progress=100, message=f"Scan error: {e}")
+        PSCAN.update(running=False, progress=100, message=f"Scan error: {e}", live_ports=[])
     finally:
         PSCAN["proc_pid"] = None
 
@@ -2284,10 +2360,22 @@ async def run_verification_scan():
 
 async def run_scan():
     _scan_start = time.time()
+
+    # Initial ETA estimate: use last scan duration if available, otherwise
+    # estimate based on subnet size (rough: /24 = ~240s, /23 = ~480s etc.)
+    _runtime    = load_runtime()
+    _last_dur   = _runtime.get("last_scan_duration", 0)
+    if _last_dur > 10:
+        _initial_eta = int(_last_dur)
+    else:
+        # First scan: estimate ~4 minutes for a typical /24 home network
+        _initial_eta = 240
+
     SCAN_STATE.update(running=True, progress=0, stage=1,
                       stage_label="Stage 1/4 — Live host & multicast discovery",
                       message="ARP scan + ONVIF/SSDP/mDNS discovery running…",
-                      started_at=_scan_start, elapsed=0.0, eta="")
+                      started_at=_scan_start, elapsed=0.0,
+                      eta=_initial_eta)
     loop = asyncio.get_event_loop()
 
     subnet  = await loop.run_in_executor(None, get_local_subnet)
@@ -2326,7 +2414,16 @@ async def run_scan():
     if mdns_ips:    disc_summary.append(f"{len(mdns_ips)} via mDNS")
     disc_str = ", ".join(disc_summary) or "none"
     log.info(f"Live hosts: {len(all_live)} ({disc_str})")
-    SCAN_STATE.update(message=f"Stage 1 complete — {len(all_live)} live host(s) found ({disc_str}). Starting port scan…")
+    _stage1_elapsed = time.time() - _scan_start
+    # After ARP: we know host count → refine estimate
+    # Stage 1 ≈ 10% of work; each additional host ≈ 8s for focused scan + probing
+    _refined_total = max(_stage1_elapsed * 10,
+                         _stage1_elapsed + len(all_live) * 8)
+    _eta_after_s1  = max(0, int(_refined_total - _stage1_elapsed))
+    SCAN_STATE.update(
+        message=f"{len(all_live)} live host(s) found ({disc_str}). Starting port scan…",
+        elapsed=round(_stage1_elapsed, 1),
+        eta=_eta_after_s1)
 
     # Populate ARP_HOSTS for Port Scan UI — resolve hostnames from nmap results later;
     # for now, store IPs sorted numerically with empty hostname to be filled in
@@ -2348,9 +2445,11 @@ async def run_scan():
     # ── Stage 3: Stream probing ───────────────────────────────────────────────
     _stage2_done = time.time()
     _s2_elapsed  = _stage2_done - _scan_start
-    # 25% of scan done → crude extrapolation for ETA
-    _est_total   = _s2_elapsed * 4
+    # Stage 2 complete ≈ 55% of work done; extrapolate remaining
+    _est_total   = _s2_elapsed / 0.55
     _eta_secs    = max(0, int(_est_total - _s2_elapsed))
+    # Also factor in responding host count (each takes ~15s to probe)
+    _eta_secs    = max(_eta_secs, len(nmap_results) * 15)
     SCAN_STATE.update(progress=55, stage=3,
                       stage_label="Stage 3/4 — Stream probing",
                       message=f"Probing {len(nmap_results)} responding host(s)…",
@@ -2588,9 +2687,14 @@ async def run_scan():
     SCAN_STATE.update(
         running=False, progress=100, stage=0, stage_label="",
         message=completion_msg,
-        elapsed=elapsed_secs, eta="",
+        elapsed=elapsed_secs, eta=0,
     )
     log.info(completion_msg)
+
+    # Persist actual duration so next scan can use it as the initial ETA
+    _runtime_save = load_runtime()
+    _runtime_save["last_scan_duration"] = elapsed_secs
+    save_runtime(_runtime_save)
 
 
 # Wrap run_scan in a safety shell that catches exceptions and always
@@ -3126,7 +3230,13 @@ async def run_batch_port_scan():
     PSCAN_QUEUE.clear()
 
 async def api_pscan_status(request):
-    return web.json_response(PSCAN)
+    # Add current elapsed so JS can compute drift between polls
+    resp = dict(PSCAN)
+    if resp.get("scan_start") and resp.get("running"):
+        resp["elapsed"] = round(time.time() - resp["scan_start"], 1)
+    resp.pop("live_ports", None)  # send separately to avoid huge payload
+    resp["live_ports"] = PSCAN.get("live_ports", [])
+    return web.json_response(resp)
 
 async def api_pscan_cancel(request):
     pid = PSCAN.get("proc_pid")
@@ -3193,8 +3303,7 @@ function switchView(v) {
   document.getElementById('add-btn').classList.toggle('active', v === 'add');
   if (v === 'pscan') {
     loadArpHosts();
-    // Resume polling if a scan is already running
-    const ps = fetch(BASE + '/api/pscan/status').then(r => r.json()).then(s => {
+    fetch(BASE + '/api/pscan/status').then(r => r.json()).then(s => {
       if (s.running) {
         document.getElementById('ps-start').disabled = true;
         document.getElementById('ps-pause').style.display = '';
@@ -3204,7 +3313,10 @@ function switchView(v) {
         document.getElementById('ps-pause').textContent = _paused ? '▶ Resume' : '⏸ Pause';
         pollPscan();
       } else if (s.results && s.results.length) {
+        // Restore completed results
         renderPorts(s.results);
+        const msgEl = document.getElementById('pscan-msg');
+        if (s.message) msgEl.textContent = s.message;
       }
     });
   }
@@ -3240,24 +3352,18 @@ async function pollScan() {
     } else {
       badge.style.display = 'none';
     }
-    // Show ETA countdown or completion time
+    // ETA countdown — server provides eta in seconds remaining
+    // We adjust client-side for time since last poll to keep it smooth
     const timerEl = document.getElementById('scan-timer');
     if (s.running) {
-      if (s.eta > 0) {
-        // Countdown: server provides eta in seconds, we count down client-side
-        const etaAdj = Math.max(0, s.eta - Math.round((Date.now()/1000) - (s.started_at||0) + (s.elapsed||0)));
-        const m = Math.floor(etaAdj / 60), sec = etaAdj % 60;
-        timerEl.textContent = '~' + m + ':' + String(sec).padStart(2, '0') + ' remaining';
-        timerEl.style.display = '';
-      } else if (s.started_at) {
-        // No ETA yet (still in early stages) — show elapsed
-        const elapsed = Math.round((Date.now()/1000) - s.started_at);
-        const m = Math.floor(elapsed / 60), sec = elapsed % 60;
-        timerEl.textContent = m + ':' + String(sec).padStart(2, '0') + ' elapsed';
-        timerEl.style.display = '';
-      } else {
-        timerEl.style.display = 'none';
-      }
+      const serverEta    = s.eta || 0;
+      const serverElap   = s.elapsed || 0;
+      const clientElap   = s.started_at ? (Date.now()/1000) - s.started_at : serverElap;
+      const secondsGone  = Math.max(0, clientElap - serverElap);
+      const etaAdj       = Math.max(0, Math.round(serverEta - secondsGone));
+      const etaM = Math.floor(etaAdj / 60), etaSec = etaAdj % 60;
+      timerEl.textContent = 'estimated ' + etaM + ':' + String(etaSec).padStart(2, '0') + ' remaining';
+      timerEl.style.display = '';
     } else if (s.elapsed) {
       const m = Math.floor(s.elapsed / 60), sec = Math.round(s.elapsed) % 60;
       timerEl.textContent = 'Completed in ' + m + ':' + String(sec).padStart(2, '0');
@@ -3558,6 +3664,7 @@ document.getElementById('rename-input').addEventListener('keydown',
 
 /* ── Port scanner ──────────────────────────────────────────────────────────── */
 let _arpHosts = [];
+let _selectedIPs = new Set();   // persists across view switches
 
 async function loadArpHosts() {
   try {
@@ -3576,14 +3683,15 @@ function renderArpList() {
   }
   wrap.innerHTML = '<div class="arp-select-row">'
     + '<button class="btn btn-ghost btn-sm" onclick="arpSelectAll(true)">Select all</button>'
-    + '<button class="btn btn-ghost btn-sm" onclick="arpSelectAll(false)">Clear</button>'
+    + '<button class="btn btn-ghost btn-sm" onclick="arpSelectAll(false)">Clear all</button>'
     + '<span style="color:var(--text-dim);font-size:.75rem;margin-left:6px">'
     + _arpHosts.length + ' host' + (_arpHosts.length !== 1 ? 's' : '') + ' discovered</span>'
     + '</div>'
     + _arpHosts.map(h => {
-        const label = h.ip + (h.hostname && h.hostname !== h.ip ? ' — ' + esc(h.hostname) : '');
+        const checked = _selectedIPs.has(h.ip) ? ' checked' : '';
         return '<label class="arp-row">'
-          + '<input type="checkbox" class="arp-cb" value="' + h.ip + '"> '
+          + '<input type="checkbox" class="arp-cb" value="' + h.ip + '"'
+          + checked + ' onchange="onCbChange(this)"> '
           + '<span class="arp-ip">' + h.ip + '</span>'
           + (h.hostname && h.hostname !== h.ip
               ? '<span class="arp-host"> — ' + esc(h.hostname) + '</span>' : '')
@@ -3591,14 +3699,22 @@ function renderArpList() {
       }).join('');
 }
 
+function onCbChange(cb) {
+  if (cb.checked) _selectedIPs.add(cb.value);
+  else            _selectedIPs.delete(cb.value);
+}
+
 function arpSelectAll(val) {
-  document.querySelectorAll('.arp-cb').forEach(cb => cb.checked = val);
+  document.querySelectorAll('.arp-cb').forEach(cb => {
+    cb.checked = val;
+    if (val) _selectedIPs.add(cb.value);
+    else     _selectedIPs.delete(cb.value);
+  });
 }
 
 function getSelectedIPs() {
   const manual = document.getElementById('pscan-ip').value.trim();
-  const checked = [...document.querySelectorAll('.arp-cb:checked')].map(cb => cb.value);
-  const combined = [...new Set([...checked, ...(manual ? [manual] : [])])];
+  const combined = [...new Set([..._selectedIPs, ...(manual ? [manual] : [])])];
   return combined;
 }
 
@@ -3618,6 +3734,8 @@ async function startPortScan() {
   document.getElementById('ps-prog-track').style.display = '';
   document.getElementById('port-table').style.display = 'none';
   document.getElementById('port-tbody').innerHTML = '';
+  document.getElementById('live-ports-box').innerHTML = '';
+  document.getElementById('live-ports-box').style.display = 'none';
   _paused = false;
   pollPscan();
 }
@@ -3626,9 +3744,48 @@ async function pollPscan() {
   clearTimeout(pscanT);
   try {
     const s = await (await fetch(BASE + '/api/pscan/status')).json();
-    document.getElementById('pscan-msg').textContent = s.message;
-    document.getElementById('ps-prog-fill').style.width = s.progress + '%';
-    if (s.results && s.results.length) renderPorts(s.results);
+
+    // Message + ETA
+    const msgEl   = document.getElementById('pscan-msg');
+    const timerEl = document.getElementById('ps-timer');
+    msgEl.textContent = s.message;
+
+    if (s.running && s.eta > 0 && s.scan_start) {
+      const clientElap  = (Date.now()/1000) - s.scan_start;
+      const serverElap  = s.elapsed || 0;
+      const drift       = Math.max(0, clientElap - serverElap);
+      const etaAdj      = Math.max(0, Math.round(s.eta - drift));
+      const etaM = Math.floor(etaAdj/60), etaSec = etaAdj % 60;
+      timerEl.textContent = 'estimated ' + etaM + ':' + String(etaSec).padStart(2,'0') + ' remaining';
+      timerEl.style.display = '';
+    } else if (!s.running && s.elapsed) {
+      timerEl.style.display = 'none';  // message already has elapsed time
+    } else {
+      timerEl.style.display = 'none';
+    }
+
+    document.getElementById('ps-prog-fill').style.width = (s.progress || 0) + '%';
+
+    // Live port discovery box (during scan)
+    const liveBox = document.getElementById('live-ports-box');
+    if (s.running && s.live_ports && s.live_ports.length) {
+      liveBox.style.display = '';
+      liveBox.innerHTML = s.live_ports.map(p =>
+        '<div class="live-port-row">'
+        + '<span class="pnum">' + p.port + '</span>'
+        + '<span class="live-proto">/' + esc(p.proto) + '</span>'
+        + '</div>'
+      ).join('');
+      liveBox.scrollTop = liveBox.scrollHeight;
+    } else if (!s.running) {
+      liveBox.style.display = 'none';
+    }
+
+    // Final results table (when done)
+    if (!s.running && s.results && s.results.length) {
+      renderPorts(s.results);
+    }
+
     if (s.running) {
       pscanT = setTimeout(pollPscan, 2000);
     } else {
@@ -3894,6 +4051,13 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
                   flex:1;min-width:200px;max-width:400px}}
 .pscan-top input:focus{{border-color:var(--primary)}}
 #pscan-msg{{font-size:.78rem;color:var(--text-dim);padding:2px 0;line-height:1.5}}
+.live-ports-box{{background:var(--surface);border:1px solid var(--border);
+               border-radius:8px;padding:10px 12px;max-height:220px;overflow-y:auto;
+               display:flex;flex-direction:column;gap:3px;margin-bottom:8px;
+               font-family:monospace;font-size:.82rem}}
+.live-port-row{{display:flex;align-items:center;gap:6px;padding:1px 0}}
+.live-port-row .pnum{{color:var(--primary);font-weight:700;min-width:52px}}
+.live-proto{{color:var(--text-dim)}}
 .section-header td{{background:var(--surface2);font-size:.73rem;font-weight:700;
                      color:var(--text-dim);letter-spacing:.04em;padding:6px 10px;
                      border-bottom:1px solid var(--border)}}
@@ -4002,9 +4166,14 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
            onkeydown="if(event.key==='Enter')startPortScan()"/>
   </div>
   <div id="pscan-msg" style="padding:6px 2px;font-size:.8rem;color:var(--text-dim)">Select hosts above and/or enter an IP, then click Scan All Ports.<br><small style="opacity:.7">Note: navigating away will not cancel an in-progress scan.</small></div>
-  <div class="progress-track" id="ps-prog-track" style="display:none;max-width:100%;margin-bottom:6px">
-    <div class="progress-fill" id="ps-prog-fill"></div>
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
+    <div class="progress-track" id="ps-prog-track" style="display:none;flex:1;max-width:none">
+      <div class="progress-fill" id="ps-prog-fill"></div>
+    </div>
+    <span id="ps-timer" style="display:none;font-size:.74rem;color:var(--primary);font-weight:600;white-space:nowrap"></span>
   </div>
+  <!-- Live port discovery feed — shown during scan, replaced by table when done -->
+  <div id="live-ports-box" class="live-ports-box" style="display:none"></div>
   <div class="port-table" id="port-table" style="display:none">
     <table>
       <thead><tr><th>Port</th><th>Proto</th><th>Service</th><th>Product / Version</th><th>Script Output</th></tr></thead>
@@ -4138,7 +4307,11 @@ async def main():
         log.info(f"Routine restart (v{CURRENT_VERSION}) — loaded {len(CAMERAS)} saved camera(s)")
 
     # Record the current version so next startup can compare
-    save_runtime({"version": CURRENT_VERSION})
+    # Also save last scan duration so we can use it for future ETA estimates
+    _runtime_data = {"version": CURRENT_VERSION}
+    if "last_scan_duration" in load_runtime():
+        _runtime_data["last_scan_duration"] = load_runtime()["last_scan_duration"]
+    save_runtime(_runtime_data)
 
     # Background: download/refresh IEEE OUI database (non-blocking)
     asyncio.create_task(refresh_oui_db())
