@@ -58,7 +58,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.3.2"  # must match config.yaml
+CURRENT_VERSION = "1.3.3"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2358,6 +2358,13 @@ async def run_verification_scan():
             url = cam.get("stream_url","")
             if url:
                 found = await loop.run_in_executor(None, probe_rtsp, url, u, p)
+                # If verified OK and codec not yet stored, probe stream details now
+                if found and not cam.get("stream_codec"):
+                    details = await probe_stream_details(url, "RTSP")
+                    if details:
+                        cam.update(details)
+                        log.info(f"  Stream details populated: {cam.get('stream_codec','?')} "
+                                 f"{cam.get('stream_width','?')}x{cam.get('stream_height','?')}")
             if not found:
                 found = await loop.run_in_executor(None, probe_rtsp_options, ip, port)
         elif proto == "MJPEG":
@@ -2995,21 +3002,31 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     await response.prepare(request)
 
     stream_codec = camera.get("stream_codec", "").lower()
-    out_fps      = "8" if stream_codec in ("hevc", "h265") else "10"
+    stream_w     = camera.get("stream_width") or 0
 
     # Hardware decoders for Pi 4 VideoCore VI (v4l2m2m)
     hw_decoders  = {"hevc":"hevc_v4l2m2m","h265":"hevc_v4l2m2m",
                     "h264":"h264_v4l2m2m","avc":"h264_v4l2m2m"}
-    hw_dec       = hw_decoders.get(stream_codec, "")
-    hw_flags     = (["-c:v", hw_dec] if hw_dec else [])
+    hw_dec = hw_decoders.get(stream_codec, "")
 
-    log.info(f"Stream [{proto}] {camera_id} codec={stream_codec or '?'} hw={hw_dec or 'none'}")
+    # Scale + fps strategy based on codec and source resolution
+    if stream_codec in ("hevc","h265") and stream_w >= 3840:
+        # 4K HEVC: scale down hard to reduce decode workload
+        out_vf = "fps=4,scale=480:-2"
+        log.info(f"Stream [{proto}] {camera_id} — 4K HEVC detected, scaling to 480p@4fps")
+    elif stream_codec in ("hevc","h265"):
+        # Sub-4K HEVC: moderate reduction
+        out_vf = "fps=8,scale=640:-2"
+    else:
+        out_vf = "fps=10,scale=640:-2"
+
+    log.info(f"Stream [{proto}] {camera_id} codec={stream_codec or '?'} hw={hw_dec or 'sw'} vf={out_vf}")
 
     async def _launch_ffmpeg(extra_flags):
         return await asyncio.create_subprocess_exec(
             "ffmpeg", "-loglevel", "warning", "-stimeout", "8000000",
             *flags, *extra_flags, "-i", url,
-            "-vf", f"fps={out_fps},scale=640:-2",
+            "-vf", out_vf,
             "-q:v", "5", "-f", "mjpeg", "pipe:1",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -3019,19 +3036,43 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     buf = b""
     _hw_failed   = False
     _frames_seen = 0
+
+    async def _check_early_fail(p, timeout_s=5.0):
+        """Return True if process exits with error within timeout_s seconds."""
+        try:
+            await asyncio.wait_for(p.wait(), timeout=timeout_s)
+            return p.returncode not in (None, 0)
+        except asyncio.TimeoutError:
+            return False  # still running = not an early fail
+
+    # For hw decode: do a quick check — if it exits immediately with an error,
+    # fall back to software right away rather than waiting 30s.
+    if hw_dec:
+        failed_early = await _check_early_fail(proc, timeout_s=4.0)
+        if failed_early:
+            try:
+                _, err = await asyncio.wait_for(proc.communicate(), timeout=2)
+                log.warning(f"Stream hw decode early fail ({hw_dec}): "
+                            + err.decode("utf-8", errors="replace").strip()[:200])
+            except Exception:
+                pass
+            log.info(f"Stream [{proto}] {camera_id} — hw {hw_dec} unavailable, using software")
+            proc = await _launch_ffmpeg([])
+            _hw_failed = True
+
     try:
         while True:
             chunk = await asyncio.wait_for(proc.stdout.read(16384), timeout=30)
             if not chunk:
-                # If hardware decode produced no frames, retry with software
+                # If hw decode ran (not early-failed) but produced no frames, retry sw
                 if hw_dec and not _hw_failed and _frames_seen == 0:
                     _hw_failed = True
                     try: proc.kill()
                     except Exception: pass
                     try: await asyncio.wait_for(proc.wait(), timeout=2)
                     except Exception: pass
-                    log.info(f"Stream [{proto}] {camera_id} — hw decode failed, retrying software")
-                    proc = await _launch_ffmpeg([])  # no hardware flags
+                    log.info(f"Stream [{proto}] {camera_id} — hw decode no frames, retrying software")
+                    proc = await _launch_ffmpeg([])
                     continue
                 break
             buf += chunk
@@ -3054,20 +3095,25 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
                 except (ConnectionResetError, ConnectionAbortedError):
                     return response
     except asyncio.TimeoutError:
-        # Log any ffmpeg stderr for debugging
-        try:
-            _, err = await asyncio.wait_for(proc.communicate(), timeout=2)
-            if err and err.strip():
-                log.warning(f"Stream [{proto}] {camera_id} ffmpeg: "
-                            + err.decode("utf-8", errors="replace").strip()[:300])
-        except Exception:
-            pass
+        log.warning(
+            f"Stream [{proto}] {camera_id} — 30s read timeout "
+            f"(frames_sent={_frames_seen}, codec={stream_codec or '?'}, "
+            f"source_res={stream_w or '?'}px). "
+            + ("If codec is HEVC with 0 frames: hw decode may be unavailable "
+               "or Pi cannot decode this resolution in software." if _frames_seen == 0 else ""))
     except Exception as ex:
         log.warning(f"Stream error [{proto}] {camera_id}: {ex}")
     finally:
         try:
             proc.kill()
-            await proc.wait()
+        except Exception:
+            pass
+        # Always drain stderr for diagnostics
+        try:
+            _, err = await asyncio.wait_for(proc.communicate(), timeout=3)
+            if err and err.strip():
+                log.warning(f"Stream [{proto}] {camera_id} ffmpeg stderr: "
+                            + err.decode("utf-8", errors="replace").strip()[:400])
         except Exception:
             pass
     return response

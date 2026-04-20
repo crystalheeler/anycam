@@ -1,5 +1,22 @@
 # AnyCam — Changelog
 
+## 1.3.3
+- Critical fix: stream codec (HEVC/H.264) now populated during the post-upgrade
+  verification scan for cameras that were saved before 1.3.2 was installed;
+  previously 'codec=?' meant hardware decode was never attempted even though
+  the camera supports it; now probe_stream_details() is called during
+  verification when a camera has a stream_url but no stream_codec stored
+- 4K HEVC handling: streams from sources >=3840px wide now use fps=4,scale=480:-2
+  output filter (versus fps=8,scale=640:-2 for 1080p HEVC and fps=10,scale=640:-2
+  for H.264); reduces the decode + re-encode workload to a level a Pi 4 can sustain
+- Hardware decode early-fail detection: for HEVC/H.264 streams where a hardware
+  decoder (hevc_v4l2m2m or h264_v4l2m2m) is attempted, a 4-second window checks
+  if ffmpeg exits immediately with an error code; if so, stderr is logged and
+  ffmpeg is restarted immediately with software decode (no waiting 30s)
+- Timeout log message now includes frames_sent count, codec, and source resolution;
+  zero frames + HEVC explicitly noted as likely hw decode availability issue
+- ffmpeg stderr always drained and logged in finally block (not just on TimeoutError)
+
 ## 1.3.2
 - HEVC/H.265 streaming support without changing camera settings:
   handle_stream now reads the stored stream_codec and selects the appropriate
