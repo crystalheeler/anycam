@@ -58,7 +58,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.3.1"  # must match config.yaml
+CURRENT_VERSION = "1.3.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2417,6 +2417,55 @@ async def run_verification_scan():
     await run_scan()   # run_scan sets running=False when done
 
 
+async def probe_stream_details(url: str, proto: str) -> dict:
+    """
+    Run ffprobe on a confirmed stream URL to extract codec, resolution,
+    FPS, and audio info.  Called after credentials are accepted so we know
+    the URL works.  Returns a flat dict of stream_* fields.
+    """
+    extra = ["-rtsp_transport", "tcp"] if proto in ("RTSP", "DVR", "ONVIF") else []
+    try:
+        loop = asyncio.get_event_loop()
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", *extra,
+            "-show_streams", "-print_format", "json", "-i", url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=12)
+        if proc.returncode != 0:
+            return {}
+        data    = json.loads(out.decode("utf-8", errors="replace"))
+        streams = data.get("streams", [])
+        video   = next((s for s in streams if s.get("codec_type") == "video"), None)
+        audio   = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        result  = {}
+        if video:
+            fps_str = video.get("avg_frame_rate", "0/1")
+            try:
+                n, d = fps_str.split("/")
+                fps = round(int(n) / int(d), 1) if int(d) else 0
+            except Exception:
+                fps = 0
+            result.update({
+                "stream_codec":  video.get("codec_name", ""),
+                "stream_width":  video.get("width"),
+                "stream_height": video.get("height"),
+                "stream_fps":    fps,
+                "stream_profile": video.get("profile", ""),
+            })
+        if audio:
+            result["stream_audio"] = audio.get("codec_name", "")
+        log.info(f"  Stream details: {result}")
+        return result
+    except asyncio.TimeoutError:
+        log.debug("probe_stream_details timed out")
+        return {}
+    except Exception as e:
+        log.debug(f"probe_stream_details: {e}")
+        return {}
+
+
 async def run_scan():
     _scan_start = time.time()
 
@@ -2945,20 +2994,45 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     })
     await response.prepare(request)
 
-    proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-loglevel", "warning",
-        "-stimeout", "8000000",     # 8s RTSP connection timeout
-        *flags, "-i", url,
-        "-vf", "fps=10,scale=640:-2", "-q:v", "5", "-f", "mjpeg", "pipe:1",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    log.info(f"Stream [{proto}] {camera_id}")
+    stream_codec = camera.get("stream_codec", "").lower()
+    out_fps      = "8" if stream_codec in ("hevc", "h265") else "10"
+
+    # Hardware decoders for Pi 4 VideoCore VI (v4l2m2m)
+    hw_decoders  = {"hevc":"hevc_v4l2m2m","h265":"hevc_v4l2m2m",
+                    "h264":"h264_v4l2m2m","avc":"h264_v4l2m2m"}
+    hw_dec       = hw_decoders.get(stream_codec, "")
+    hw_flags     = (["-c:v", hw_dec] if hw_dec else [])
+
+    log.info(f"Stream [{proto}] {camera_id} codec={stream_codec or '?'} hw={hw_dec or 'none'}")
+
+    async def _launch_ffmpeg(extra_flags):
+        return await asyncio.create_subprocess_exec(
+            "ffmpeg", "-loglevel", "warning", "-stimeout", "8000000",
+            *flags, *extra_flags, "-i", url,
+            "-vf", f"fps={out_fps},scale=640:-2",
+            "-q:v", "5", "-f", "mjpeg", "pipe:1",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+    proc = await _launch_ffmpeg(hw_flags)
     buf = b""
+    _hw_failed   = False
+    _frames_seen = 0
     try:
         while True:
             chunk = await asyncio.wait_for(proc.stdout.read(16384), timeout=30)
             if not chunk:
+                # If hardware decode produced no frames, retry with software
+                if hw_dec and not _hw_failed and _frames_seen == 0:
+                    _hw_failed = True
+                    try: proc.kill()
+                    except Exception: pass
+                    try: await asyncio.wait_for(proc.wait(), timeout=2)
+                    except Exception: pass
+                    log.info(f"Stream [{proto}] {camera_id} — hw decode failed, retrying software")
+                    proc = await _launch_ffmpeg([])  # no hardware flags
+                    continue
                 break
             buf += chunk
             while True:
@@ -2970,6 +3044,7 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
                     break
                 frame = buf[s:e + 2]
                 buf   = buf[e + 2:]
+                _frames_seen += 1
                 try:
                     await response.write(
                         b"--frame\r\nContent-Type: image/jpeg\r\n"
@@ -3078,6 +3153,12 @@ def _safe_cam(cam: dict) -> dict:
     for f in ("manufacturer", "device_notes", "page_title", "server_header",
               "mac_addr", "mac_vendor"):
         s.setdefault(f, "")
+    # Stream technical details (populated after credentials are accepted)
+    for f in ("stream_codec", "stream_audio", "stream_profile"):
+        s.setdefault(f, "")
+    for f in ("stream_width", "stream_height"):
+        s.setdefault(f, None)
+    s.setdefault("stream_fps", None)
     s.pop("credentials", None)
     return s
 
@@ -3132,6 +3213,8 @@ async def api_set_credentials(request):
                 ok = await loop.run_in_executor(None, probe_rtsp, stream_url, username, password)
                 if not ok:
                     continue
+                # Probe stream details (codec, resolution, FPS) for this profile
+                details = await probe_stream_details(stream_url, "RTSP")
                 cid = f"{camera['ip']}_onvif_{prof['token']}"
                 CAMERAS[cid] = {
                     "id": cid, "ip": camera["ip"],
@@ -3142,6 +3225,7 @@ async def api_set_credentials(request):
                     "name": f"{camera.get('name', camera['ip'])} — {prof['name']}",
                     "status": "ready", "display": "proxy", "user_saved": True,
                     "verdict": "camera", "verdict_reason": "ONVIF profile",
+                    **details,
                 }
                 created.append(cid)
             if created:
@@ -3167,11 +3251,13 @@ async def api_set_credentials(request):
     if not url:
         return web.json_response({"error": "Could not connect with those credentials."}, status=401)
 
+    # Probe stream for codec/resolution/FPS details
+    details = await probe_stream_details(url, proto)
     camera.update(credentials=encrypt_creds(username, password),
                   stream_url=url, requires_credentials=False,
-                  status="ready", user_saved=True)
+                  status="ready", user_saved=True, **details)
     save_cameras()
-    return web.json_response({"status": "ok", "stream_url": _strip_creds(url)})
+    return web.json_response({"status": "ok", "stream_url": _strip_creds(url), **details})
 
 
 async def api_clear_credentials(request):
@@ -3645,6 +3731,18 @@ function identityHTML(cam) {
   if (cam.server_header)  rows.push(['Server',       cam.server_header]);
   if (cam.hostname && cam.hostname !== cam.ip) rows.push(['Hostname', cam.hostname]);
   if (cam.device_notes)   rows.push(['Notes',        cam.device_notes]);
+  // Stream technical details (populated once credentials are accepted)
+  if (cam.stream_codec) {
+    const codec = cam.stream_codec.toUpperCase()
+                + (cam.stream_profile ? ' (' + cam.stream_profile + ')' : '');
+    rows.push(['Video codec', codec]);
+  }
+  if (cam.stream_width && cam.stream_height) {
+    const res = cam.stream_width + 'x' + cam.stream_height
+              + (cam.stream_fps ? '  @  ' + cam.stream_fps + ' fps' : '');
+    rows.push(['Resolution', res]);
+  }
+  if (cam.stream_audio)   rows.push(['Audio codec',  cam.stream_audio.toUpperCase()]);
   if (!rows.length) return '';
   return '<details class="id-section"><summary>&#x1F50D; Identity</summary><table class="id-table">'
     + rows.map(([k,v]) => '<tr><td class="id-key">' + esc(k) + '</td><td>' + esc(v) + '</td></tr>').join('')

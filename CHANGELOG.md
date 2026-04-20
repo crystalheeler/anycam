@@ -1,5 +1,25 @@
 # AnyCam — Changelog
 
+## 1.3.2
+- HEVC/H.265 streaming support without changing camera settings:
+  handle_stream now reads the stored stream_codec and selects the appropriate
+  hardware decoder — hevc_v4l2m2m (Raspberry Pi 4 VideoCore VI) for H.265,
+  h264_v4l2m2m for H.264; these use the Pi GPU rather than the CPU
+  If hardware decode produces no frames, automatically retries with software
+  decode (ffmpeg selects the native hevc/h264 software decoder)
+  Output FPS reduced from 10 to 8 for HEVC streams to ease Pi CPU load
+- Stream details auto-detected after credentials accepted:
+  probe_stream_details() runs ffprobe on the confirmed stream URL and stores
+  stream_codec, stream_width, stream_height, stream_fps, stream_profile,
+  and stream_audio on the camera dict; called from both the RTSP/MJPEG/HLS
+  credential path and the ONVIF profile card creation path
+- Stream details shown in Identity section:
+  Video codec row: e.g. 'HEVC (High)' or 'H264 (High)'
+  Resolution row: e.g. '1920x1080  @  30 fps'
+  Audio codec row: e.g. 'AAC' (if audio track present)
+- _safe_cam API response now includes stream_codec, stream_width, stream_height,
+  stream_fps, stream_profile, stream_audio fields
+
 ## 1.3.1
 - Stream diagnostics: ffmpeg stderr is now ALWAYS captured and logged as WARNING
   when the stream ends (previously only logged on timeout); this makes silent
