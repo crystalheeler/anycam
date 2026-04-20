@@ -46,13 +46,19 @@ KEY_FILE       = DATA_DIR / "secret.key"
 CAMS_FILE      = DATA_DIR / "cameras.json"
 BLACKLIST_FILE = DATA_DIR / "blacklist.json"
 RUNTIME_FILE   = DATA_DIR / "runtime.json"
-OUI_CACHE_FILE = DATA_DIR / "oui_cache.json"
+OUI_CACHE_FILE  = DATA_DIR / "oui_cache.json"
+FEEDBACK_FILE   = DATA_DIR / "not_camera_feedback.json"
 
 # IEEE OUI CSV download URL (official source, ~37k entries, refreshed periodically)
-OUI_CSV_URL    = "https://standards-oui.ieee.org/oui/oui.csv"
+OUI_CSV_URL      = "https://standards-oui.ieee.org/oui/oui.csv"
 OUI_MAX_AGE_DAYS = 30  # re-download once a month
 
-CURRENT_VERSION = "1.2.7"  # must match config.yaml
+# Community verdicts endpoint — leave empty to disable sharing.
+# When a community AnyCam server exists, set this URL and shared
+# fingerprints will be submitted automatically.
+COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
+
+CURRENT_VERSION = "1.2.9"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1106,6 +1112,59 @@ def load_blacklist():
 def save_blacklist():
     DATA_DIR.mkdir(exist_ok=True)
     BLACKLIST_FILE.write_text(json.dumps(list(BLACKLIST)))
+
+# In-memory feedback store: cid → rich fingerprint record
+FEEDBACK: dict = {}
+
+def load_feedback():
+    if not FEEDBACK_FILE.exists():
+        return
+    try:
+        FEEDBACK.update(json.loads(FEEDBACK_FILE.read_text()))
+        log.info(f"Loaded {len(FEEDBACK)} feedback record(s)")
+    except Exception as e:
+        log.warning(f"Feedback load: {e}")
+
+def save_feedback():
+    DATA_DIR.mkdir(exist_ok=True)
+    FEEDBACK_FILE.write_text(json.dumps(FEEDBACK, indent=2))
+
+def build_fingerprint(cam: dict) -> dict:
+    """
+    Build a shareable device fingerprint from a camera dict.
+    Contains NO IP addresses or personally identifying information —
+    only hardware/service signatures useful for pattern matching.
+    """
+    return {
+        "oui":          cam.get("mac_addr","")[:8].upper(),  # first 3 octets only
+        "mac_vendor":   cam.get("mac_vendor",""),
+        "port":         cam.get("port"),
+        "protocol":     cam.get("protocol",""),
+        "service":      cam.get("server_header",""),
+        "page_title":   cam.get("page_title",""),
+        "manufacturer": cam.get("manufacturer",""),
+    }
+
+async def submit_to_community(record: dict):
+    """
+    Fire-and-forget submission to the community endpoint.
+    Silently fails if the endpoint is unavailable or not configured.
+    """
+    if not COMMUNITY_ENDPOINT:
+        return
+    import urllib.request, urllib.error
+    try:
+        body = json.dumps(record).encode()
+        req  = urllib.request.Request(
+            COMMUNITY_ENDPOINT + "/api/v1/report",
+            data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", f"AnyCam/{CURRENT_VERSION}")
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            log.info(f"Community report submitted: {resp.status}")
+    except Exception as e:
+        log.debug(f"Community submit failed (non-fatal): {e}")
+
 
 def load_runtime() -> dict:
     """Load persisted runtime state (last run version, etc.)."""
@@ -2682,8 +2741,7 @@ async def run_scan():
     ready = sum(1 for c in CAMERAS.values() if c["status"] == "ready")
     elapsed_secs = round(time.time() - _scan_start)
     elapsed_str  = f"{elapsed_secs // 60}:{elapsed_secs % 60:02d}"
-    completion_msg = (f"Scan complete — {len(CAMERAS)} device(s), {ready} streaming. "
-                      f"Completed in {elapsed_str}.")
+    completion_msg = f"Scan complete — {len(CAMERAS)} device(s), {ready} streaming."
     SCAN_STATE.update(
         running=False, progress=100, stage=0, stage_label="",
         message=completion_msg,
@@ -3115,12 +3173,47 @@ async def api_confirm_camera(request):
 async def api_not_camera(request):
     cid = request.match_info["camera_id"]
     cam = CAMERAS.get(cid)
-    if cam:
-        BLACKLIST.add(cam["ip"])
-        BLACKLIST.add(cid)
-        CAMERAS.pop(cid, None)
-        save_cameras()
-        save_blacklist()
+    if not cam:
+        return web.json_response({"error": "Not found"}, status=404)
+
+    reason_type   = "unknown"
+    reason_detail = ""
+    share         = False
+    try:
+        data          = await request.json()
+        reason_type   = data.get("reason_type", "unknown")
+        reason_detail = data.get("reason_detail", "").strip()[:200]
+        share         = bool(data.get("share", False))
+    except Exception:
+        pass
+
+    BLACKLIST.add(cam["ip"])
+    BLACKLIST.add(cid)
+
+    fingerprint = build_fingerprint(cam)
+    record = {
+        "cid":           cid,
+        "reason_type":   reason_type,
+        "reason_detail": reason_detail,
+        "fingerprint":   fingerprint,
+        "share":         share,
+        "added_at":      datetime.datetime.utcnow().isoformat(),
+        "version":       CURRENT_VERSION,
+    }
+    FEEDBACK[cid] = record
+    save_feedback()
+
+    log.info(f"Not-a-camera: {cid} | reason={reason_type}"
+             + (f" | {reason_detail}" if reason_detail else "")
+             + (" | share=yes" if share else ""))
+
+    CAMERAS.pop(cid, None)
+    save_cameras()
+    save_blacklist()
+
+    if share and COMMUNITY_ENDPOINT:
+        asyncio.create_task(submit_to_community(record))
+
     return web.json_response({"status": "ok"})
 
 async def api_add_camera(request):
@@ -3626,15 +3719,55 @@ async function confirmCamera(cid) {
   await loadCameras();
 }
 
-async function markNotCamera(cid) {
+/* ── Not a Camera modal ────────────────────────────────────────────────────── */
+let _notCamId = null;
+const COMMUNITY_ENDPOINT = '___COMMUNITY___';
+
+function openNotCamModal(cid) {
+  _notCamId = cid;
   const cam = cameras.find(c => c.id === cid);
-  const label = cam ? cam.ip : cid;
-  if (!confirm('Mark ' + label + ' as "not a camera"?\nThis IP will be permanently hidden from future scans.'))
-    return;
-  await fetch(BASE + '/api/cameras/' + cid + '/not_camera', {method: 'POST'});
-  cameras = cameras.filter(c => c.id !== cid);
+  const label = cam ? (cam.manufacturer || cam.name || cam.ip) : cid;
+  document.getElementById('nc-device-label').textContent = label;
+  document.querySelectorAll('.nc-reason-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('nc-detail').value = '';
+  document.getElementById('nc-share').checked = !!COMMUNITY_ENDPOINT;
+  document.getElementById('nc-share-row').style.display = COMMUNITY_ENDPOINT ? '' : 'none';
+  document.getElementById('nc-modal').classList.add('open');
+  setTimeout(() => document.querySelector('.nc-reason-btn[data-reason="unknown"]')?.focus(), 50);
+}
+
+function closeNotCamModal() {
+  document.getElementById('nc-modal').classList.remove('open');
+  _notCamId = null;
+}
+
+function selectReason(btn) {
+  document.querySelectorAll('.nc-reason-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+async function submitNotCam() {
+  if (!_notCamId) { closeNotCamModal(); return; }
+  const activeBtn   = document.querySelector('.nc-reason-btn.active');
+  const reasonType  = activeBtn ? activeBtn.dataset.reason : 'unknown';
+  const reasonDetail = document.getElementById('nc-detail').value.trim();
+  const share       = document.getElementById('nc-share').checked;
+  await fetch(BASE + '/api/cameras/' + _notCamId + '/not_camera', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({reason_type: reasonType, reason_detail: reasonDetail, share})
+  });
+  cameras = cameras.filter(c => c.id !== _notCamId);
+  closeNotCamModal();
   renderGrid();
 }
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.getElementById('nc-modal').classList.contains('open'))
+    closeNotCamModal();
+});
+
+async function markNotCamera(cid) { openNotCamModal(cid); }
 
 /* ── Rename ────────────────────────────────────────────────────────────────── */
 function openRename(cid, name) {
@@ -4089,7 +4222,22 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .modal h3{{font-size:.92rem;font-weight:600}}
 .modal input{{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.86rem;padding:7px 10px;outline:none}}
 .modal input:focus{{border-color:var(--primary)}}
-.modal-btns{{display:flex;gap:8px;justify-content:flex-end}}"""
+.modal-btns{{display:flex;gap:8px;justify-content:flex-end}}
+.nc-modal-inner{{width:min(460px,94vw)}}
+.nc-subtitle{{font-size:.82rem;color:var(--text-dim);margin-top:-4px}}
+.nc-reasons{{display:flex;flex-wrap:wrap;gap:7px}}
+.nc-reason-btn{{background:var(--surface2);border:1px solid var(--border);color:var(--text);
+                border-radius:8px;padding:7px 12px;font-size:.78rem;cursor:pointer;
+                transition:background .15s,border-color .15s;white-space:nowrap}}
+.nc-reason-btn:hover{{background:var(--surface);border-color:var(--primary)}}
+.nc-reason-btn.active{{background:var(--red);border-color:var(--red);color:#fff;font-weight:600}}
+.nc-detail-row input{{width:100%;background:var(--bg);border:1px solid var(--border);
+                      border-radius:8px;color:var(--text);font-size:.82rem;padding:7px 10px;outline:none}}
+.nc-detail-row input:focus{{border-color:var(--primary)}}
+.nc-share-row{{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px}}
+.nc-share-label{{display:flex;align-items:flex-start;gap:8px;font-size:.8rem;cursor:pointer}}
+.nc-share-label input{{flex-shrink:0;margin-top:2px;accent-color:var(--primary)}}
+.nc-share-note{{font-size:.7rem;color:var(--text-dim);margin-top:5px;line-height:1.4}}"""
 
     return """<!DOCTYPE html>
 <html lang="en">
@@ -4223,6 +4371,36 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
   </div>
 </div>
 
+<div class="modal-backdrop" id="nc-modal" onclick="if(event.target.id==='nc-modal')closeNotCamModal()">
+  <div class="modal nc-modal-inner">
+    <h3>&#x1F6AB; Not a Camera</h3>
+    <p class="nc-subtitle">What kind of device is <strong id="nc-device-label"></strong>?</p>
+    <div class="nc-reasons">
+      <button class="nc-reason-btn" data-reason="printer"    onclick="selectReason(this)">&#x1F5A8; Printer</button>
+      <button class="nc-reason-btn" data-reason="router"     onclick="selectReason(this)">&#x1F310; Router / Firewall</button>
+      <button class="nc-reason-btn" data-reason="nas"        onclick="selectReason(this)">&#x1F4BE; NAS / Storage</button>
+      <button class="nc-reason-btn" data-reason="computer"   onclick="selectReason(this)">&#x1F4BB; Computer</button>
+      <button class="nc-reason-btn" data-reason="tv"         onclick="selectReason(this)">&#x1F4FA; Smart TV</button>
+      <button class="nc-reason-btn" data-reason="iot"        onclick="selectReason(this)">&#x1F4F1; IoT Device</button>
+      <button class="nc-reason-btn" data-reason="unknown"    onclick="selectReason(this)">&#x2753; Not sure</button>
+    </div>
+    <div class="nc-detail-row">
+      <input type="text" id="nc-detail" placeholder="Optional: any extra detail (e.g. model name)" maxlength="200"/>
+    </div>
+    <div class="nc-share-row" id="nc-share-row">
+      <label class="nc-share-label">
+        <input type="checkbox" id="nc-share">
+        <span>Share this anonymously to help improve AnyCam for everyone</span>
+      </label>
+      <p class="nc-share-note">No IP addresses are sent — only device type, OUI, open ports, and service banners.</p>
+    </div>
+    <div class="modal-btns">
+      <button class="btn btn-ghost btn-sm" onclick="closeNotCamModal()">Cancel</button>
+      <button class="btn btn-danger btn-sm" onclick="submitNotCam()">Confirm — Not a Camera</button>
+    </div>
+  </div>
+</div>
+
 <script>
 """ + js_code + """
 </script>
@@ -4279,6 +4457,7 @@ class _DockerIPFilter(logging.Filter):
 async def main():
     load_cameras()
     load_blacklist()
+    load_feedback()
     load_oui_db()   # Load cached OUI DB synchronously (fast, from disk)
 
     # Suppress Docker bridge IP entries from the aiohttp access log

@@ -1,5 +1,30 @@
 # AnyCam — Changelog
 
+## 1.2.9
+- Removed duplicate 'Completed in X:XX' from grey status bar message;
+  completion time now shown only in the blue timer element to the right
+
+## 1.2.8
+- Not a Camera: replaced bare confirm() dialog with a proper modal:
+  Shows device name/manufacturer prominently
+  7 quick-select device type buttons: Printer, Router/Firewall, NAS/Storage,
+  Computer, Smart TV, IoT Device, Not sure — selected button turns red
+  Free-text detail field for optional extra info (model name, notes, etc.)
+  Share anonymously checkbox — when checked, a device fingerprint is submitted
+  to the configured community endpoint (no IP addresses, only OUI, device type,
+  open ports, service banners, and page title)
+  Keyboard: Escape closes the modal without blacklisting
+- Feedback storage: each Not a Camera action now stored in /data/not_camera_feedback.json
+  Record includes: cid, reason_type, reason_detail, fingerprint (OUI + vendor +
+  port + protocol + service + page_title + manufacturer), share flag, timestamp, version
+  Feedback persists across restarts and survives upgrades
+- Community sharing architecture: ANYCAM_COMMUNITY_URL env var configures a community
+  endpoint; when set and user checks Share, fingerprint is POSTed to /api/v1/report;
+  silently ignored if endpoint unavailable; no endpoint configured by default
+- build_fingerprint() helper extracts shareable device signatures from camera dicts
+- submit_to_community() is a fire-and-forget async task (never blocks the UI)
+- Broad sweep subtext: removed duplicate; label now shows Ports 1-10,000 cleanly
+
 ## 1.2.7
 - Port scanner: ETA countdown shown from the moment scanning starts:
   Uses last_port_scan_duration from runtime.json as the initial estimate;
