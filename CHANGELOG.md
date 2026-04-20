@@ -1,5 +1,18 @@
 # AnyCam — Changelog
 
+## 1.3.9
+- Added full diagnostic logging to api_set_credentials — every step now logs
+  at INFO/WARNING so credential failures are visible in the log:
+  which protocol path is taken, ONVIF media URL, how many profiles returned,
+  each profile's stream URL, probe_rtsp result per profile, which RTSP ports
+  were tried, final success/failure outcome
+- RTSP port 554 fallback for ONVIF cards: ONVIF cards store port 80 (the web
+  UI port) but RTSP is always on port 554; if ONVIF SOAP fails and falls back
+  to direct RTSP probing, we now always also try port 554 explicitly, not just
+  the stored port; this fixes 'Could not connect' for cameras where ONVIF auth
+  fails but direct RTSP works fine
+- Also tries xaddrs port from ONVIF discovery as a third fallback
+
 ## 1.3.8
 - URL credential encoding fix: the previous fix encoded ! as %21 but many
   RTSP servers (including Hikvision-based cameras) do not percent-decode

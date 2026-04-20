@@ -58,7 +58,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.3.8"  # must match config.yaml
+CURRENT_VERSION = "1.3.9"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3249,34 +3249,42 @@ async def api_set_credentials(request):
         return web.json_response({"error": "Camera not found"}, status=404)
 
     proto = camera.get("protocol", "RTSP")
+    ip    = camera["ip"]
+    port  = camera.get("port", 554)
     loop  = asyncio.get_event_loop()
     url   = None
 
+    log.info(f"Credential attempt: {camera_id} proto={proto} ip={ip}:{port} "
+             f"onvif={camera.get('onvif')} xaddrs={camera.get('xaddrs','')[:40]}")
+
     if proto in ("ONVIF",) or camera.get("onvif"):
-        media_url = _onvif_media_url(camera["ip"], camera["port"], camera.get("xaddrs",""))
+        media_url = _onvif_media_url(ip, port, camera.get("xaddrs",""))
+        log.info(f"  ONVIF media URL: {media_url}")
         profiles  = await loop.run_in_executor(
             None, onvif_get_profiles, media_url, username, password)
+        log.info(f"  ONVIF profiles found: {len(profiles)} — {[p['name'] for p in profiles]}")
         if profiles:
             enc_creds = encrypt_creds(username, password)
             created   = []
             for prof in profiles:
                 stream_url = await loop.run_in_executor(
                     None, onvif_get_stream_uri, media_url, prof["token"], username, password)
+                log.info(f"  Profile '{prof['name']}' stream_url: {stream_url}")
                 if not stream_url:
                     continue
                 ok = await loop.run_in_executor(None, probe_rtsp, stream_url, username, password)
+                log.info(f"  probe_rtsp OK: {ok}")
                 if not ok:
                     continue
-                # Probe stream details (codec, resolution, FPS) for this profile
                 details = await probe_stream_details(stream_url, "RTSP")
-                cid = f"{camera['ip']}_onvif_{prof['token']}"
+                cid = f"{ip}_onvif_{prof['token']}"
                 CAMERAS[cid] = {
-                    "id": cid, "ip": camera["ip"],
-                    "hostname": camera.get("hostname", camera["ip"]),
-                    "port": camera["port"], "protocol": "RTSP", "onvif": True,
+                    "id": cid, "ip": ip,
+                    "hostname": camera.get("hostname", ip),
+                    "port": port, "protocol": "RTSP", "onvif": True,
                     "stream_url": stream_url,
                     "requires_credentials": False, "credentials": enc_creds,
-                    "name": f"{camera.get('name', camera['ip'])} — {prof['name']}",
+                    "name": f"{camera.get('name', ip)} — {prof['name']}",
                     "status": "ready", "display": "proxy", "user_saved": True,
                     "verdict": "camera", "verdict_reason": "ONVIF profile",
                     **details,
@@ -3286,31 +3294,46 @@ async def api_set_credentials(request):
                 CAMERAS.pop(camera_id, None)
                 save_cameras()
                 return web.json_response({"status": "ok", "channels": len(created)})
+            log.warning(f"  ONVIF: profiles found but no streams probed OK — falling back to direct RTSP")
+        else:
+            log.warning(f"  ONVIF: no profiles returned (auth failed or device unreachable)")
 
+    # RTSP direct — for ONVIF cards always try port 554 in addition to stored port
     if proto in ("RTSP", "DVR", "ONVIF"):
+        # Try stored port first
+        log.info(f"  Trying direct RTSP on {ip}:{port}")
         url = await loop.run_in_executor(
-            None, find_rtsp_path, camera["ip"], camera["port"], username, password)
+            None, find_rtsp_path, ip, port, username, password)
+        # For ONVIF cards the stored port is often 80; always also try 554
+        if not url and port != 554:
+            log.info(f"  Trying direct RTSP on {ip}:554 (standard RTSP port)")
+            url = await loop.run_in_executor(
+                None, find_rtsp_path, ip, 554, username, password)
         if not url and camera.get("xaddrs"):
             parsed = urlparse(camera["xaddrs"])
+            rtsp_port = parsed.port or 554
+            log.info(f"  Trying RTSP via xaddrs {ip}:{rtsp_port}")
             url = await loop.run_in_executor(
-                None, find_rtsp_path, parsed.hostname or camera["ip"],
-                parsed.port or 554, username, password)
+                None, find_rtsp_path, parsed.hostname or ip,
+                rtsp_port, username, password)
+        log.info(f"  RTSP result: {_strip_creds(url) if url else 'None'}")
     elif proto == "MJPEG":
         url = await loop.run_in_executor(
-            None, probe_mjpeg_http, camera["ip"], camera["port"], username, password)
+            None, probe_mjpeg_http, ip, port, username, password)
     elif proto == "HLS":
         url = await loop.run_in_executor(
-            None, probe_hls, camera["ip"], camera["port"], username, password)
+            None, probe_hls, ip, port, username, password)
 
     if not url:
+        log.warning(f"Credential attempt FAILED for {camera_id} — no working stream found")
         return web.json_response({"error": "Could not connect with those credentials."}, status=401)
 
-    # Probe stream for codec/resolution/FPS details
     details = await probe_stream_details(url, proto)
     camera.update(credentials=encrypt_creds(username, password),
                   stream_url=url, requires_credentials=False,
                   status="ready", user_saved=True, **details)
     save_cameras()
+    log.info(f"Credentials accepted for {camera_id}: {_strip_creds(url)}")
     return web.json_response({"status": "ok", "stream_url": _strip_creds(url), **details})
 
 
