@@ -1,5 +1,41 @@
 # AnyCam — Changelog
 
+## 1.5.0
+- Remove go2rtc from streaming hot path (Option B architectural fix)
+  ffmpeg now connects directly to the authenticated camera RTSP URL and
+  outputs MJPEG frames to stdout; the go2rtc RTSP restream layer
+  (localhost:8554) is no longer used for streaming, eliminating the
+  phantom-registration bug where go2rtc created sourceless empty streams
+  because the PUT /api/streams endpoint reads the source URL from the
+  'src' query parameter, not the request body as our code incorrectly sent
+- Remove double-transcode for HEVC cameras: previous pipeline decoded
+  HEVC inside go2rtc then re-encoded to H.264, then ffmpeg decoded H.264
+  again to produce MJPEG; new pipeline decodes HEVC once directly to MJPEG
+- Add -nostdin flag and stdin=DEVNULL: prevents ffmpeg from inheriting the
+  Python process stdin, which could cause unexpected blocking
+- Add -an flag (no audio): drops audio stream entirely, saves CPU and
+  prevents audio codec warnings from filling the stderr pipe
+- Switch output format from -f mjpeg to -f image2pipe: both produce raw
+  concatenated JPEGs but image2pipe is the documented format for pipe output
+- Fix pixel format in vf chain: format=yuv420p -> format=yuvj420p
+  The JPEG full-range variant avoids a deprecation warning ffmpeg emits
+  when the mjpeg encoder receives limited-range yuv420p; the warning was
+  silently filling the stderr pipe and could contribute to stderr deadlock
+- Fix stderr deadlock: stderr is now drained by a concurrent asyncio Task
+  (_drain_stderr) that reads stderr line-by-line throughout the stream;
+  previously stderr was only read in the finally block after streaming
+  ended, so any stderr output during streaming could fill the 64KB OS pipe
+  buffer, blocking ffmpeg from writing to stdout, causing 30s timeouts
+- Define SOI/EOI/CRLF as bytes([...]) literals in handle_stream: removes
+  all escape sequence ambiguity that caused the broken frame-parser bug
+- Add 4MB buf overflow cap: if buf exceeds 4MB without a complete JPEG
+  frame, the buffer is discarded; this prevents unbounded memory growth
+  when a camera sends corrupted or non-JPEG data
+- Improve buf handling: bytes before SOI are trimmed immediately instead
+  of carrying them through the next read loop iteration
+- go2rtc is retained and still runs at startup for stream probing
+  (the _probe_ code path), but is no longer required for viewing streams
+
 ## 1.4.4
 - Critical fix: JPEG frame parser was broken — SOI (0xff 0xd8) and EOI (0xff 0xd9)
   markers were stored in source as double-escaped strings (\xff\xd8) meaning

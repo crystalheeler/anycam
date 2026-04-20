@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.4.4"  # must match config.yaml
+CURRENT_VERSION = "1.5.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3203,10 +3203,14 @@ async def go2rtc_register_all():
 
 async def handle_stream(request: web.Request) -> web.StreamResponse:
     """
-    Hybrid streaming: go2rtc proxies the camera RTSP (handling auth,
-    reconnection, ONVIF), then we run ffmpeg against go2rtc's local RTSP
-    server at localhost:8554 (no auth required).  This separates camera
-    connectivity concerns (go2rtc) from MJPEG transcoding (ffmpeg).
+    Direct streaming: ffmpeg connects straight to the camera RTSP URL and
+    outputs MJPEG to stdout.  Frames are parsed from the raw byte stream
+    using JPEG SOI (0xFF 0xD8) and EOI (0xFF 0xD9) markers and forwarded
+    as multipart/x-mixed-replace to the browser.
+
+    Hardware decode is attempted first (v4l2m2m on ARM); on empty output or
+    timeout it immediately retries with software decode.  A concurrent asyncio
+    task drains stderr so the pipe never fills and deadlocks ffmpeg.
     """
     camera_id = request.match_info["camera_id"]
     camera    = CAMERAS.get(camera_id)
@@ -3219,31 +3223,22 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     if not url:
         return web.Response(status=503)
 
-    proto = camera.get("protocol", "RTSP")
-
-    # Ensure stream is registered with go2rtc
-    if not await go2rtc_ensure(camera_id, url, camera):
-        log.warning(f"Stream {camera_id}: go2rtc registration failed")
-        return web.Response(status=503)
-
-    # go2rtc's local RTSP proxy — no auth needed, no network issues
-    local_rtsp = f"rtsp://127.0.0.1:{GO2RTC_RTSP_PORT}/{camera_id}"
-
-    # Choose output resolution/fps based on stored stream details
+    proto        = camera.get("protocol", "RTSP")
     stream_codec = camera.get("stream_codec", "").lower()
     stream_w     = camera.get("stream_width") or 0
     is_hevc      = stream_codec in ("hevc", "h265")
 
+    # Scale + fps limits: 4K HEVC → 480p@4fps, other HEVC → 640p@8fps, else 640p@10fps
+    # yuvj420p (not yuv420p) is the JPEG full-range pixel format mjpeg encoder expects;
+    # using yuv420p causes deprecation warnings that fill the stderr pipe.
     if is_hevc and stream_w >= 3840:
-        out_vf = "fps=4,scale=480:-2,format=yuv420p"
+        out_vf = "fps=4,scale=480:-2,format=yuvj420p"
     elif is_hevc:
-        out_vf = "fps=8,scale=640:-2,format=yuv420p"
+        out_vf = "fps=8,scale=640:-2,format=yuvj420p"
     else:
-        out_vf = "fps=10,scale=640:-2,format=yuv420p"
+        out_vf = "fps=10,scale=640:-2,format=yuvj420p"
 
-    ffwrap = camera.get("stream_codec","").lower() in ("hevc","h265")
-    log.info(f"Stream [{proto}] {camera_id} "
-             f"{'go2rtc(ffmpeg-wrapped)' if ffwrap else 'go2rtc'}→ffmpeg "
+    log.info(f"Stream [{proto}] {camera_id} direct ffmpeg "
              f"codec={stream_codec or '?'} res={stream_w or '?'}px vf={out_vf}")
 
     response = web.StreamResponse(headers={
@@ -3252,83 +3247,139 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     })
     await response.prepare(request)
 
+    # JPEG frame delimiters as runtime byte objects — defined once, unambiguous.
+    SOI = bytes([0xFF, 0xD8])   # Start Of Image
+    EOI = bytes([0xFF, 0xD9])   # End Of Image
+    CRLF = bytes([0x0D, 0x0A])  # Carriage Return + Line Feed
+
     async def _launch(hw_dec=""):
+        """Spawn ffmpeg; point it directly at the camera RTSP URL."""
         hw_args = ["-c:v", hw_dec] if hw_dec else []
         return await asyncio.create_subprocess_exec(
-            "ffmpeg", "-loglevel", "warning",
-            "-rtsp_transport", "tcp",     # local RTSP to go2rtc
+            "ffmpeg",
+            "-nostdin",                    # never read from stdin
+            "-loglevel", "warning",
+            "-rtsp_transport", "tcp",      # force TCP for RTSP (avoids UDP packet loss)
+            "-timeout", "8000000",         # connection timeout: 8 s (microseconds, before -i)
             *hw_args,
-            "-i", local_rtsp,
+            "-i", url,                     # authenticated camera URL directly
+            "-an",                         # drop audio — video only
             "-vf", out_vf,
-            "-q:v", "5", "-f", "mjpeg", "pipe:1",
+            "-vcodec", "mjpeg",
+            "-q:v", "5",
+            "-f", "image2pipe",            # raw concatenated JPEGs on stdout
+            "pipe:1",
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
-    # Try hardware decode first (Pi 4 VideoCore VI), fall back to software
-    hw_dec     = "hevc_v4l2m2m" if is_hevc else ("h264_v4l2m2m" if stream_codec == "h264" else "")
-    proc       = await _launch(hw_dec)
-    buf        = b""
-    frames     = 0
-    hw_tried   = bool(hw_dec)
+    async def _drain_stderr(proc, label):
+        """Consume stderr continuously so it never fills and deadlocks ffmpeg."""
+        lines = []
+        try:
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace").rstrip()
+                if decoded:
+                    lines.append(decoded)
+        except Exception:
+            pass
+        if lines:
+            joined = " | ".join(lines)[:500]
+            log.warning(f"Stream {label} ffmpeg stderr: {joined}")
+
+    # Try hardware decode first; on ARM this is hevc_v4l2m2m / h264_v4l2m2m.
+    hw_dec   = "hevc_v4l2m2m" if is_hevc else ("h264_v4l2m2m" if stream_codec == "h264" else "")
+    proc     = await _launch(hw_dec)
+    stderr_t = asyncio.create_task(_drain_stderr(proc, camera_id))
+    buf      = b""
+    frames   = 0
+    hw_tried = bool(hw_dec)
 
     try:
         while True:
-            # Short first-read timeout when hw decode in play — switch fast if nothing comes
-            timeout = 3.0 if (hw_tried and frames == 0) else 30
+            # Use a short timeout on the very first read when hw decode is active;
+            # if nothing arrives quickly the hardware codec is likely unsupported.
+            timeout = 3.0 if (hw_tried and frames == 0) else 30.0
             try:
-                chunk = await asyncio.wait_for(proc.stdout.read(32768), timeout=timeout)
+                chunk = await asyncio.wait_for(proc.stdout.read(65536), timeout=timeout)
             except asyncio.TimeoutError:
                 if hw_tried and frames == 0:
+                    stderr_t.cancel()
                     try: proc.kill()
                     except Exception: pass
                     try: await asyncio.wait_for(proc.wait(), timeout=2)
                     except Exception: pass
                     log.info(f"Stream {camera_id}: hw decode timeout, retrying software")
-                    proc, hw_tried = await _launch(), False
+                    proc     = await _launch()
+                    stderr_t = asyncio.create_task(_drain_stderr(proc, camera_id))
+                    hw_tried = False
                     continue
-                log.warning(f"Stream {camera_id}: 30s timeout ({frames} frames sent)")
+                log.warning(f"Stream {camera_id}: 30s read timeout ({frames} frames sent)")
                 break
+
             if not chunk:
+                # EOF from ffmpeg stdout
                 if hw_tried and frames == 0:
+                    stderr_t.cancel()
                     try: proc.kill()
                     except Exception: pass
                     try: await asyncio.wait_for(proc.wait(), timeout=2)
                     except Exception: pass
                     log.info(f"Stream {camera_id}: hw decode EOF, retrying software")
-                    proc, hw_tried = await _launch(), False
+                    proc     = await _launch()
+                    stderr_t = asyncio.create_task(_drain_stderr(proc, camera_id))
+                    hw_tried = False
                     continue
                 break
+
             buf += chunk
+
+            # Safety cap: if buf grows beyond 4 MB without a complete frame,
+            # corrupted data has accumulated — discard and wait for next SOI.
+            if len(buf) > 4_000_000:
+                log.warning(f"Stream {camera_id}: buf overflow ({len(buf)} bytes), discarding")
+                buf = b""
+                continue
+
+            # Extract all complete JPEG frames from the accumulated buffer.
             while True:
-                s = buf.find(b"\xff\xd8")
-                if s < 0: break
-                e = buf.find(b"\xff\xd9", s + 2)
-                if e < 0: break
-                frame = buf[s:e+2]
-                buf   = buf[e+2:]
+                s = buf.find(SOI)
+                if s < 0:
+                    buf = b""   # no SOI anywhere — discard prefix bytes
+                    break
+                e = buf.find(EOI, s + 2)
+                if e < 0:
+                    # SOI found but EOI not yet received — keep buf, wait for more data
+                    if s > 0:
+                        buf = buf[s:]   # discard bytes before SOI
+                    break
+                frame = buf[s : e + 2]
+                buf   = buf[e + 2:]
                 frames += 1
                 try:
-                    CRLF2 = b"\r\n"
-                    hdr = (b"--frame" + CRLF2
-                           + b"Content-Type: image/jpeg" + CRLF2
-                           + b"Content-Length: " + str(len(frame)).encode() + CRLF2 + CRLF2)
-                    await response.write(hdr + frame + CRLF2)
+                    hdr = (
+                        b"--frame" + CRLF
+                        + b"Content-Type: image/jpeg" + CRLF
+                        + b"Content-Length: " + str(len(frame)).encode() + CRLF
+                        + CRLF
+                    )
+                    await response.write(hdr + frame + CRLF)
                 except (ConnectionResetError, ConnectionAbortedError):
                     return response
+
     except Exception as ex:
         log.warning(f"Stream {camera_id}: {ex}")
     finally:
+        stderr_t.cancel()
         try: proc.kill()
         except Exception: pass
-        try:
-            _, err = await asyncio.wait_for(proc.communicate(), timeout=3)
-            if err and err.strip():
-                log.warning(f"Stream {camera_id} ffmpeg: "
-                            + err.decode("utf-8", errors="replace").strip()[:300])
+        try: await asyncio.wait_for(proc.wait(), timeout=3)
         except Exception: pass
     return response
-
 
 async def handle_stream_test(request: web.Request) -> web.Response:
     """
