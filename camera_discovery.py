@@ -58,7 +58,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.4.1"  # must match config.yaml
+CURRENT_VERSION = "1.4.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2506,15 +2506,42 @@ async def run_verification_scan():
     await run_scan()   # run_scan sets running=False when done
 
 
-async def probe_stream_details(url: str, proto: str) -> dict:
+async def probe_stream_details(url: str, proto: str,
+                               cid: str = "") -> dict:
     """
-    Run ffprobe on a confirmed stream URL to extract codec, resolution,
-    FPS, and audio info.  Called after credentials are accepted so we know
-    the URL works.  Returns a flat dict of stream_* fields.
+    Get stream codec/resolution/FPS details by registering with go2rtc
+    and querying its streams API.  Falls back to ffprobe if go2rtc is
+    unavailable.  Returns a flat dict of stream_* fields.
     """
+    # Register with go2rtc so it connects and learns the stream details
+    _tmp_name = cid or ("_probe_" + hashlib.md5(url.encode()).hexdigest()[:8])
+    registered = await go2rtc_add(_tmp_name, url)
+
+    if registered:
+        # Give go2rtc a moment to connect and probe the stream
+        await asyncio.sleep(2.0)
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(f"{GO2RTC_API}/api/streams",
+                                    timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status == 200:
+                        streams_data = await r.json()
+                        info = streams_data.get(_tmp_name, {})
+                        # go2rtc reports producers with track info
+                        result = _parse_go2rtc_stream_info(info)
+                        if result:
+                            log.info(f"  Stream details (go2rtc): {result}")
+                            if not cid:
+                                await go2rtc_remove(_tmp_name)
+                            return result
+        except Exception as e:
+            log.debug(f"probe_stream_details go2rtc query: {e}")
+        if not cid:
+            await go2rtc_remove(_tmp_name)
+
+    # Fallback: ffprobe (works even if go2rtc unavailable)
     extra = ["-rtsp_transport", "tcp"] if proto in ("RTSP", "DVR", "ONVIF") else []
     try:
-        loop = asyncio.get_event_loop()
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error", *extra,
             "-show_streams", "-print_format", "json", "-i", url,
@@ -2537,22 +2564,40 @@ async def probe_stream_details(url: str, proto: str) -> dict:
             except Exception:
                 fps = 0
             result.update({
-                "stream_codec":  video.get("codec_name", ""),
-                "stream_width":  video.get("width"),
-                "stream_height": video.get("height"),
-                "stream_fps":    fps,
+                "stream_codec":   video.get("codec_name", ""),
+                "stream_width":   video.get("width"),
+                "stream_height":  video.get("height"),
+                "stream_fps":     fps,
                 "stream_profile": video.get("profile", ""),
             })
         if audio:
             result["stream_audio"] = audio.get("codec_name", "")
-        log.info(f"  Stream details: {result}")
+        log.info(f"  Stream details (ffprobe fallback): {result}")
         return result
-    except asyncio.TimeoutError:
-        log.debug("probe_stream_details timed out")
-        return {}
     except Exception as e:
-        log.debug(f"probe_stream_details: {e}")
+        log.debug(f"probe_stream_details ffprobe: {e}")
         return {}
+
+
+def _parse_go2rtc_stream_info(info: dict) -> dict:
+    """Extract stream_* fields from go2rtc's /api/streams entry."""
+    result = {}
+    producers = info.get("producers", [])
+    for prod in producers:
+        for track in prod.get("tracks", []):
+            kind = track.get("kind", "")
+            codec = (track.get("codec") or "").lower()
+            if kind == "video" and codec and "stream_codec" not in result:
+                result["stream_codec"] = codec.replace("h264", "h264").replace("h265", "hevc")
+                w = track.get("width")
+                h = track.get("height")
+                fps = track.get("fps")
+                if w: result["stream_width"]  = w
+                if h: result["stream_height"] = h
+                if fps: result["stream_fps"]  = fps
+            elif kind == "audio" and codec and "stream_audio" not in result:
+                result["stream_audio"] = codec
+    return result
 
 
 async def run_scan():
@@ -3175,48 +3220,75 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
 
 
 async def handle_stream_test(request: web.Request) -> web.Response:
-    """ffprobe diagnostic — tells us codec, resolution, whether the stream URL works."""
+    """
+    Diagnostic endpoint: checks stream connectivity and returns codec/resolution.
+    Uses the pure Python RTSP socket probe first (fast, no subprocesses),
+    then queries go2rtc for detailed stream info.
+    """
     camera_id = request.match_info["camera_id"]
     camera    = CAMERAS.get(camera_id)
     if not camera:
         return web.json_response({"error": "Camera not found"}, status=404)
+
     url = build_authenticated_url(camera)
     if not url:
-        return web.json_response({"error": "No stream URL"}, status=400)
+        return web.json_response({"error": "No stream URL configured"}, status=400)
+
     proto = camera.get("protocol", "RTSP")
-    extra = ["-rtsp_transport", "tcp"] if proto in ("RTSP", "DVR", "ONVIF") else []
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", *extra,
-            "-show_streams", "-print_format", "json", "-i", url,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=15)
-        if proc.returncode == 0:
-            import json as _j
-            data    = _j.loads(out.decode("utf-8", errors="replace"))
-            streams = data.get("streams", [])
-            video   = next((s for s in streams if s.get("codec_type") == "video"), None)
-            result  = {
-                "success": True, "url": _strip_creds(url),
-                "codec":   video.get("codec_name","?") if video else "no video",
-                "width":   video.get("width") if video else None,
-                "height":  video.get("height") if video else None,
-                "fps":     video.get("avg_frame_rate","?") if video else None,
-            }
-        else:
-            result = {"success": False, "url": _strip_creds(url),
-                      "error": err.decode("utf-8", errors="replace").strip()[:400]}
-    except asyncio.TimeoutError:
+
+    # Fast connectivity check via pure Python socket probe
+    from urllib.parse import urlparse as _up
+    p    = _up(url)
+    host = p.hostname or camera.get("ip","")
+    port = p.port or 554
+    path = p.path or "/"
+    u    = p.username or ""
+    pw   = p.password or ""
+
+    connected = await asyncio.get_event_loop().run_in_executor(
+        None, probe_rtsp_socket, host, port, path, u, pw, 8.0)
+
+    if not connected:
         result = {"success": False, "url": _strip_creds(url),
-                  "error": "ffprobe timed out — camera may be unreachable"}
-    except Exception as e:
-        result = {"success": False, "url": _strip_creds(url), "error": str(e)}
+                  "error": "RTSP DESCRIBE failed — check credentials and network"}
+        log.info(f"Stream test [{camera_id}]: {result}")
+        return web.json_response(result)
+
+    # Get codec info from stored details or go2rtc
+    result = {
+        "success": True,
+        "url":     _strip_creds(url),
+        "codec":   camera.get("stream_codec") or "?",
+        "width":   camera.get("stream_width"),
+        "height":  camera.get("stream_height"),
+        "fps":     camera.get("stream_fps"),
+    }
+
+    # If codec not known, try go2rtc (may already be registered)
+    if not result["codec"] or result["codec"] == "?":
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(f"{GO2RTC_API}/api/streams",
+                                    timeout=aiohttp.ClientTimeout(total=3)) as r:
+                    if r.status == 200:
+                        info = (await r.json()).get(camera_id, {})
+                        g2 = _parse_go2rtc_stream_info(info)
+                        if g2:
+                            result.update({
+                                "codec":  g2.get("stream_codec", result["codec"]),
+                                "width":  g2.get("stream_width",  result["width"]),
+                                "height": g2.get("stream_height", result["height"]),
+                                "fps":    g2.get("stream_fps",    result["fps"]),
+                            })
+        except Exception:
+            pass
+
     log.info(f"Stream test [{camera_id}]: {result}")
     return web.json_response(result)
 
 
 async def handle_snapshot(request: web.Request) -> web.Response:
+    """Return a still JPEG via go2rtc's snapshot endpoint (no ffmpeg needed)."""
     camera_id = request.match_info["camera_id"]
     camera    = CAMERAS.get(camera_id)
     if not camera:
@@ -3224,20 +3296,19 @@ async def handle_snapshot(request: web.Request) -> web.Response:
     url = build_authenticated_url(camera)
     if not url:
         return web.Response(status=503)
-    proto = camera.get("protocol", "RTSP")
-    extra = ["-rtsp_transport", "tcp"] if proto in ("RTSP", "DVR") else []
+    # Ensure registered with go2rtc
+    await go2rtc_ensure(camera_id, url)
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-loglevel", "error", *extra, "-i", url,
-            "-vframes", "1", "-q:v", "3", "-f", "image2", "pipe:1",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=12)
-        if stdout:
-            return web.Response(body=stdout, content_type="image/jpeg")
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(
+                f"{GO2RTC_API}/{camera_id}.jpg",
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                if r.status == 200:
+                    body = await r.read()
+                    return web.Response(body=body, content_type="image/jpeg")
     except Exception as ex:
-        log.warning(f"Snapshot: {ex}")
+        log.warning(f"Snapshot {camera_id}: {ex}")
     return web.Response(status=503)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3416,8 +3487,10 @@ async def api_rename_camera(request):
     return web.json_response({"status": "ok"})
 
 async def api_delete_camera(request):
-    CAMERAS.pop(request.match_info["camera_id"], None)
+    cid = request.match_info["camera_id"]
+    CAMERAS.pop(cid, None)
     save_cameras()
+    asyncio.create_task(go2rtc_remove(cid))
     return web.json_response({"status": "ok"})
 
 async def api_confirm_camera(request):
@@ -3902,7 +3975,7 @@ function cardActions(cam, clearBtn, notCamBtn) {
          + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(\'' + cam.id + '\')">Remove</button>';
   }
   const testBtn = (cam.status === 'ready' && ['proxy','hls'].includes(cam.display || 'proxy'))
-    ? '<button class="btn btn-ghost btn-sm" onclick="testStream(event,\'' + cam.id + '\')" title="Run ffprobe on stream URL">Test Stream</button>'
+    ? '<button class="btn btn-ghost btn-sm" onclick="testStream(event,\'' + cam.id + '\')" title="Test stream connectivity">Test Stream</button>'
     : '';
   return testBtn + clearBtn + notCamBtn
        + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(\'' + cam.id + '\')">Remove</button>';

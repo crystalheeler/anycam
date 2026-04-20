@@ -1,5 +1,18 @@
 # AnyCam — Changelog
 
+## 1.4.2
+- probe_stream_details: now queries go2rtc's /api/streams after registering
+  the stream, then falls back to ffprobe only if go2rtc reports no track info;
+  this avoids ffprobe entirely for cameras already known to go2rtc
+- handle_stream_test (Test Stream button): replaced ffprobe with pure Python
+  RTSP socket probe for connectivity check; queries go2rtc for codec/resolution
+  details if not already stored on the camera; no subprocess needed
+- handle_snapshot: replaced ffmpeg one-frame grab with go2rtc's /{id}.jpg
+  snapshot endpoint; go2rtc handles the frame extraction natively
+- api_delete_camera: now removes camera from go2rtc on deletion
+- probe_stream_details: accepts optional cid param so caller-supplied stream
+  name is used for go2rtc registration rather than a temp hash name
+
 ## 1.4.1
 - Architecture change: replaced custom ffmpeg/ffprobe pipeline with go2rtc
   go2rtc is a purpose-built Go binary used by Frigate and HA's camera stack;
