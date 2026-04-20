@@ -1,5 +1,16 @@
 # AnyCam — Changelog
 
+## 1.5.1
+- Add diagnostic logging to handle_stream: log the ffmpeg command (creds
+  stripped), the sanitized RTSP URL, ffmpeg exit code, and a warning on
+  every ffmpeg EOF so silent failures are now visible in the HA log
+- Fix stderr drain in finally block: previously stderr_t was cancelled
+  before it could flush collected lines when ffmpeg crashed quickly; now
+  we kill ffmpeg first, wait for it to exit, then await stderr_t (up to
+  2s) so all ffmpeg error output is always captured and logged
+- Handle asyncio.CancelledError in _drain_stderr: on cancellation, attempt
+  one final read of any remaining buffered stderr bytes before exiting
+
 ## 1.5.0
 - Remove go2rtc from streaming hot path (Option B architectural fix)
   ffmpeg now connects directly to the authenticated camera RTSP URL and
