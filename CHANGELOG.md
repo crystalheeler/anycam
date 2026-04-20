@@ -1,5 +1,17 @@
 # AnyCam — Changelog
 
+## 1.3.5
+- Critical fix: replaced -stimeout with -timeout in ffmpeg command;
+  -stimeout was deprecated and removed in newer ffmpeg versions — it caused
+  ffmpeg to exit immediately with 'Unrecognized option stimeout / Option not found',
+  producing zero frames and instant stream failure; -timeout is the correct
+  option for modern ffmpeg RTSP connection timeout
+- Critical fix: verification scan codec probe now uses build_authenticated_url()
+  to get the credential-embedded URL for ffprobe; previously it used the bare
+  saved stream_url which has credentials stripped by save_cameras(), causing
+  ffprobe to get a 401 Unauthorized and return an empty dict, leaving
+  stream_codec empty and hardware decode never triggered
+
 ## 1.3.4
 - Critical bug fix: NameError 'hw_flags is not defined' crashed every stream
   request; hw_flags was renamed to hw_flags_inner inside _make_proc_args during

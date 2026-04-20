@@ -58,7 +58,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.3.4"  # must match config.yaml
+CURRENT_VERSION = "1.3.5"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2358,14 +2358,16 @@ async def run_verification_scan():
             url = cam.get("stream_url","")
             if url:
                 found = await loop.run_in_executor(None, probe_rtsp, url, u, p)
-                # Populate codec info if not yet stored
-                if url and not cam.get("stream_codec"):
-                    details = await probe_stream_details(url, "RTSP")
-                    if details:
-                        cam.update(details)
-                        log.info(f"  Stream details: "
-                                 f"{cam.get('stream_codec','?')} "
-                                 f"{cam.get('stream_width','?')}x{cam.get('stream_height','?')}")
+                # Populate codec info using authenticated URL if not yet stored
+                if not cam.get("stream_codec"):
+                    _auth_url = build_authenticated_url(cam) or url
+                    if _auth_url:
+                        _details = await probe_stream_details(_auth_url, "RTSP")
+                        if _details:
+                            cam.update(_details)
+                            log.info(f"  Stream details: "
+                                     f"{cam.get('stream_codec','?')} "
+                                     f"{cam.get('stream_width','?')}x{cam.get('stream_height','?')}")
             if not found:
                 found = await loop.run_in_executor(None, probe_rtsp_options, ip, port)
         elif proto == "MJPEG":
@@ -3027,7 +3029,7 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
 
     async def _launch_ffmpeg(extra_flags):
         return await asyncio.create_subprocess_exec(
-            "ffmpeg", "-loglevel", "warning", "-stimeout", "8000000",
+            "ffmpeg", "-loglevel", "warning", "-timeout", "8000000",
             *flags, *extra_flags, "-i", url,
             "-vf", out_vf,
             "-q:v", "5", "-f", "mjpeg", "pipe:1",
