@@ -28,6 +28,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from aiohttp import web
+import aiohttp
 from cryptography.fernet import Fernet
 
 log = logging.getLogger("anycam")
@@ -58,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.4.2"  # must match config.yaml
+CURRENT_VERSION = "1.4.3"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1635,19 +1636,22 @@ def probe_rtsp_socket(host: str, port: int, path: str,
         sock = socket.create_connection((host, port), timeout=timeout)
         sock.settimeout(timeout)
 
+        CRLF = chr(13) + chr(10)
+        CRLFCRLF = (chr(13) + chr(10)) * 2
+
         def roundtrip(method: str, cseq: int, extra: dict = {}) -> str:
-            hdr_lines = "".join(k + ": " + v + "\r\n" for k, v in extra.items())
-            req = method + " " + rtsp_url + " RTSP/1.0\r\nCSeq: " + str(cseq) + "\r\n" + hdr_lines + "\r\n"
+            hdr = "".join(k + ": " + v + CRLF for k, v in extra.items())
+            req = method + " " + rtsp_url + " RTSP/1.0" + CRLF
+            req += "CSeq: " + str(cseq) + CRLF + hdr + CRLF
             sock.sendall(req.encode())
             buf = b""
-            while b"\r\n\r\n" not in buf and len(buf) < 32768:
+            while CRLFCRLF.encode() not in buf and len(buf) < 32768:
                 chunk = sock.recv(4096)
                 if not chunk:
                     break
                 buf += chunk
             return buf.decode("utf-8", errors="replace")
 
-        # OPTIONS — always succeeds without auth
         resp = roundtrip("OPTIONS", 1)
         if "RTSP/1.0 2" not in resp:
             return False

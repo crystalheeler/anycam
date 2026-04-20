@@ -1,5 +1,19 @@
 # AnyCam — Changelog
 
+## 1.4.3
+- Critical fix: added 'import aiohttp' to module imports; go2rtc_add/remove
+  functions use aiohttp.ClientSession() but the module only had
+  'from aiohttp import web' — every go2rtc API call failed with
+  'NameError: name aiohttp is not defined', causing all streams to show
+  unavailable even after credentials were accepted
+- Critical fix: probe_rtsp_socket roundtrip() function was sending malformed
+  RTSP requests because the CRLF separator used escaped backslash-r-backslash-n
+  literal characters instead of actual carriage-return + line-feed bytes;
+  rewrote using chr(13)+chr(10) which is unambiguous regardless of Python
+  string escaping; the camera was receiving an invalid request, sending nothing
+  back, and probe_rtsp_socket was timing out (taking the full 6 seconds) before
+  returning False — causing all credential attempts to fail
+
 ## 1.4.2
 - probe_stream_details: now queries go2rtc's /api/streams after registering
   the stream, then falls back to ffprobe only if go2rtc reports no track info;
