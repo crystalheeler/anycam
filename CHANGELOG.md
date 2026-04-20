@@ -1,5 +1,28 @@
 # AnyCam — Changelog
 
+## 1.3.1
+- Stream diagnostics: ffmpeg stderr is now ALWAYS captured and logged as WARNING
+  when the stream ends (previously only logged on timeout); this makes silent
+  failures visible — e.g. 'H.265 decoder not found' or 'RTSP auth failed'
+- Stream log: stream URL logged at INFO level (credentials redacted) so you can
+  see exactly what ffmpeg is connecting to
+- ONVIF protocol now correctly gets -rtsp_transport tcp and -allowed_media_types video
+  flags in ffmpeg (was only applied to RTSP and DVR); fixes Hikvision PTZ cameras
+  that kept stream_url as ONVIF protocol after credential submission
+- ffmpeg -stimeout 8000000 (8s connection timeout) and 30s per-frame read timeout
+- New: GET /stream/{id}/test diagnostic endpoint — runs ffprobe on the stream URL
+  and returns JSON with codec, resolution, FPS; 'Test Stream' button on each ready
+  camera card opens an alert with this info, or the error message if unreachable
+  Use this to diagnose 'Stream unavailable': if ffprobe succeeds but live view
+  fails, the issue is ffmpeg decoding (usually H.265 on a Pi that only supports
+  H.264 in software) — fix by setting the camera to H.264 720p
+- Port scan timer: shows 'X:XX elapsed' at start (before nmap gives ETA),
+  then 'estimated X:XX remaining' once nmap sends its first timing update,
+  then 'Completed in X:XX' when done — now matches main scan timer behavior
+- Port scan timer: uses .scan-timer-badge CSS class for consistent blue styling
+- ETA unified: _total_estimate variable persists across all stages and only
+  ever decreases; per-host updates use the same reference point (scan_start)
+
 ## 1.3.0
 - ETA fix: eliminated per-stage ETA resets — a single _total_estimate variable
   is maintained from scan start and only ever refined downward; each stage

@@ -58,7 +58,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.3.0"  # must match config.yaml
+CURRENT_VERSION = "1.3.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2736,10 +2736,9 @@ async def run_scan():
     completion_msg = f"Scan complete — {len(CAMERAS)} device(s), {ready} streaming."
     SCAN_STATE.update(
         running=False, progress=100, stage=0, stage_label="",
-        message=completion_msg,
-        elapsed=elapsed_secs, eta=0,
-    )
-    log.info(completion_msg)
+        message=completion_msg, elapsed=elapsed_secs, eta=0)
+    log.info(f"{completion_msg} Completed in {elapsed_str}.")
+    _rt = load_runtime(); _rt["last_scan_duration"] = elapsed_secs; save_runtime(_rt)
 
     # Persist actual duration so next scan can use it as the initial ETA
     _runtime_save = load_runtime()
@@ -2997,6 +2996,48 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
         except Exception:
             pass
     return response
+
+
+async def handle_stream_test(request: web.Request) -> web.Response:
+    """ffprobe diagnostic — tells us codec, resolution, whether the stream URL works."""
+    camera_id = request.match_info["camera_id"]
+    camera    = CAMERAS.get(camera_id)
+    if not camera:
+        return web.json_response({"error": "Camera not found"}, status=404)
+    url = build_authenticated_url(camera)
+    if not url:
+        return web.json_response({"error": "No stream URL"}, status=400)
+    proto = camera.get("protocol", "RTSP")
+    extra = ["-rtsp_transport", "tcp"] if proto in ("RTSP", "DVR", "ONVIF") else []
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", *extra,
+            "-show_streams", "-print_format", "json", "-i", url,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=15)
+        if proc.returncode == 0:
+            import json as _j
+            data    = _j.loads(out.decode("utf-8", errors="replace"))
+            streams = data.get("streams", [])
+            video   = next((s for s in streams if s.get("codec_type") == "video"), None)
+            result  = {
+                "success": True, "url": _strip_creds(url),
+                "codec":   video.get("codec_name","?") if video else "no video",
+                "width":   video.get("width") if video else None,
+                "height":  video.get("height") if video else None,
+                "fps":     video.get("avg_frame_rate","?") if video else None,
+            }
+        else:
+            result = {"success": False, "url": _strip_creds(url),
+                      "error": err.decode("utf-8", errors="replace").strip()[:400]}
+    except asyncio.TimeoutError:
+        result = {"success": False, "url": _strip_creds(url),
+                  "error": "ffprobe timed out — camera may be unreachable"}
+    except Exception as e:
+        result = {"success": False, "url": _strip_creds(url), "error": str(e)}
+    log.info(f"Stream test [{camera_id}]: {result}")
+    return web.json_response(result)
 
 
 async def handle_snapshot(request: web.Request) -> web.Response:
@@ -3626,13 +3667,29 @@ function credFormHTML(cam) {
 }
 
 function cardActions(cam, clearBtn, notCamBtn) {
-  // Post-upgrade missing: offer keep or remove
   if (cam.upgrade_missing) {
-    return '<button class="btn btn-ghost btn-sm" onclick="confirmCamera(\'' + cam.id + '\')">✓ Keep (may be offline)</button>'
+    return '<button class="btn btn-ghost btn-sm" onclick="confirmCamera(\'' + cam.id + '\')">Keep (may be offline)</button>'
          + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(\'' + cam.id + '\')">Remove</button>';
   }
-  return clearBtn + notCamBtn
+  const testBtn = (cam.status === 'ready' && ['proxy','hls'].includes(cam.display || 'proxy'))
+    ? '<button class="btn btn-ghost btn-sm" onclick="testStream(event,\'' + cam.id + '\')" title="Run ffprobe on stream URL">Test Stream</button>'
+    : '';
+  return testBtn + clearBtn + notCamBtn
        + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(\'' + cam.id + '\')">Remove</button>';
+}
+
+async function testStream(ev, cid) {
+  const btn = ev.target, orig = btn.textContent;
+  btn.textContent = 'Testing...'; btn.disabled = true;
+  try {
+    const r = await fetch(BASE + '/stream/' + cid + '/test');
+    const d = await r.json();
+    const msg = d.success
+      ? 'Stream OK  Codec:' + (d.codec||'?') + '  ' + (d.width||'?') + 'x' + (d.height||'?') + ' FPS:' + (d.fps||'?') + '\n\nIf live view fails, try H.264 720p on the camera.'
+      : 'Stream test failed\n' + (d.error||'Unknown') + '\nURL: ' + (d.url||'');
+    alert(msg);
+  } catch(e) { alert('Test failed: ' + e); }
+  finally { btn.textContent = orig; btn.disabled = false; }
 }
 
 function cardHTML(cam) {
@@ -3887,16 +3944,24 @@ async function pollPscan() {
     const timerEl = document.getElementById('ps-timer');
     msgEl.textContent = s.message;
 
-    if (s.running && s.eta > 0 && s.scan_start) {
-      const clientElap  = (Date.now()/1000) - s.scan_start;
-      const serverElap  = s.elapsed || 0;
-      const drift       = Math.max(0, clientElap - serverElap);
-      const etaAdj      = Math.max(0, Math.round(s.eta - drift));
-      const etaM = Math.floor(etaAdj/60), etaSec = etaAdj % 60;
-      timerEl.textContent = 'estimated ' + etaM + ':' + String(etaSec).padStart(2,'0') + ' remaining';
+    if (s.running && s.scan_start) {
+      const clientElap = (Date.now()/1000) - s.scan_start;
+      if (s.eta > 0) {
+        const drift  = Math.max(0, clientElap - (s.elapsed || 0));
+        const etaAdj = Math.max(0, Math.round(s.eta - drift));
+        const etaM = Math.floor(etaAdj/60), etaSec = etaAdj % 60;
+        timerEl.textContent = 'estimated ' + etaM + ':' + String(etaSec).padStart(2,'0') + ' remaining';
+      } else {
+        // No nmap ETA yet — show elapsed instead
+        const m = Math.floor(clientElap/60), sec = Math.floor(clientElap) % 60;
+        timerEl.textContent = m + ':' + String(sec).padStart(2,'0') + ' elapsed';
+      }
       timerEl.style.display = '';
-    } else if (!s.running && s.elapsed) {
-      timerEl.style.display = 'none';  // message already has elapsed time
+    } else if (!s.running && s.scan_start) {
+      const elapsed = Math.round(s.elapsed || 0);
+      const m = Math.floor(elapsed/60), sec = elapsed % 60;
+      timerEl.textContent = 'Completed in ' + m + ':' + String(sec).padStart(2,'0');
+      timerEl.style.display = '';
     } else {
       timerEl.style.display = 'none';
     }
@@ -4147,6 +4212,7 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .dot-uncertain{{background:var(--orange);box-shadow:0 0 5px var(--orange)}}
 .dot-error{{background:var(--red);box-shadow:0 0 5px var(--red)}}
 .dot-upgrade{{background:var(--orange);box-shadow:0 0 8px var(--orange);animation:pulse 2s infinite}}
+.scan-timer-badge{{font-size:.74rem;color:var(--primary);font-weight:700;white-space:nowrap}}
 .arp-host-section{{padding:14px 18px 0;display:flex;flex-direction:column;gap:6px}}
 .arp-section-label{{font-size:.75rem;font-weight:600;color:var(--text-dim);letter-spacing:.04em}}
 .arp-host-list{{background:var(--surface);border:1px solid var(--border);border-radius:8px;
@@ -4437,6 +4503,7 @@ def make_app() -> web.Application:
     app.router.add_delete("/api/cameras/{camera_id}",             api_delete_camera)
     app.router.add_post(  "/api/cameras/add",                     api_add_camera)
     app.router.add_get(   "/stream/{camera_id}",                  handle_stream)
+    app.router.add_get(   "/stream/{camera_id}/test",             handle_stream_test)
     app.router.add_get(   "/snapshot/{camera_id}",                handle_snapshot)
     app.router.add_get(   "/api/arp_hosts",                        api_arp_hosts)
     app.router.add_post(  "/api/pscan/start",                     api_pscan_start)
