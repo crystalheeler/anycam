@@ -58,7 +58,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.2.9"  # must match config.yaml
+CURRENT_VERSION = "1.3.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2420,21 +2420,17 @@ async def run_verification_scan():
 async def run_scan():
     _scan_start = time.time()
 
-    # Initial ETA estimate: use last scan duration if available, otherwise
-    # estimate based on subnet size (rough: /24 = ~240s, /23 = ~480s etc.)
-    _runtime    = load_runtime()
-    _last_dur   = _runtime.get("last_scan_duration", 0)
-    if _last_dur > 10:
-        _initial_eta = int(_last_dur)
-    else:
-        # First scan: estimate ~4 minutes for a typical /24 home network
-        _initial_eta = 240
+    # _total_estimate: running estimate of total scan duration in seconds.
+    # Starts from last scan or 240s. Only ever decreases as we get more info.
+    _runtime        = load_runtime()
+    _last_dur       = _runtime.get("last_scan_duration", 0)
+    _total_estimate = int(_last_dur) if _last_dur > 10 else 240
 
     SCAN_STATE.update(running=True, progress=0, stage=1,
                       stage_label="Stage 1/4 — Live host & multicast discovery",
                       message="ARP scan + ONVIF/SSDP/mDNS discovery running…",
                       started_at=_scan_start, elapsed=0.0,
-                      eta=_initial_eta)
+                      eta=_total_estimate)
     loop = asyncio.get_event_loop()
 
     subnet  = await loop.run_in_executor(None, get_local_subnet)
@@ -2473,16 +2469,16 @@ async def run_scan():
     if mdns_ips:    disc_summary.append(f"{len(mdns_ips)} via mDNS")
     disc_str = ", ".join(disc_summary) or "none"
     log.info(f"Live hosts: {len(all_live)} ({disc_str})")
-    _stage1_elapsed = time.time() - _scan_start
-    # After ARP: we know host count → refine estimate
-    # Stage 1 ≈ 10% of work; each additional host ≈ 8s for focused scan + probing
-    _refined_total = max(_stage1_elapsed * 10,
-                         _stage1_elapsed + len(all_live) * 8)
-    _eta_after_s1  = max(0, int(_refined_total - _stage1_elapsed))
+    _s1_elapsed = time.time() - _scan_start
+    # Refine total estimate using host count; Stage 1 ~ 10% of work.
+    # Estimate: ~10s per host for focused scan + probing is a reasonable heuristic.
+    _host_based  = _s1_elapsed + len(all_live) * 10
+    _total_estimate = max(_total_estimate, _host_based)  # never go higher if host count is small
+    _total_estimate = min(_total_estimate, _host_based * 2)  # cap at 2x host-based
     SCAN_STATE.update(
         message=f"{len(all_live)} live host(s) found ({disc_str}). Starting port scan…",
-        elapsed=round(_stage1_elapsed, 1),
-        eta=_eta_after_s1)
+        elapsed=round(_s1_elapsed, 1),
+        eta=max(0, int(_total_estimate - _s1_elapsed)))
 
     # Populate ARP_HOSTS for Port Scan UI — resolve hostnames from nmap results later;
     # for now, store IPs sorted numerically with empty hostname to be filled in
@@ -2502,18 +2498,17 @@ async def run_scan():
     responding_ips = {h["ip"] for h in nmap_results}
 
     # ── Stage 3: Stream probing ───────────────────────────────────────────────
-    _stage2_done = time.time()
-    _s2_elapsed  = _stage2_done - _scan_start
-    # Stage 2 complete ≈ 55% of work done; extrapolate remaining
-    _est_total   = _s2_elapsed / 0.55
-    _eta_secs    = max(0, int(_est_total - _s2_elapsed))
-    # Also factor in responding host count (each takes ~15s to probe)
-    _eta_secs    = max(_eta_secs, len(nmap_results) * 15)
+    _s2_elapsed = time.time() - _scan_start
+    # Stage 2 complete ≈ 55% of work done; extrapolate total from actual elapsed.
+    # Use the larger of: extrapolated-from-elapsed OR responding-hosts * 15s remaining.
+    _extrap_total = _s2_elapsed / 0.55
+    _host_remain  = len(nmap_results) * 15
+    _total_estimate = min(_total_estimate, max(_extrap_total, _s2_elapsed + _host_remain))
     SCAN_STATE.update(progress=55, stage=3,
                       stage_label="Stage 3/4 — Stream probing",
                       message=f"Probing {len(nmap_results)} responding host(s)…",
                       elapsed=round(_s2_elapsed, 1),
-                      eta=_eta_secs)
+                      eta=max(0, int(_total_estimate - _s2_elapsed)))
 
     # Update ARP_HOSTS hostnames from nmap results
     nmap_hostnames = {h["ip"]: h["hostname"] for h in nmap_results}
@@ -2539,11 +2534,8 @@ async def run_scan():
     total = max(len(nmap_results), 1)
     for idx, host in enumerate(nmap_results):
         ip, hostname = host["ip"], host["hostname"]
-        _now = time.time()
-        _elapsed_now = _now - _scan_start
-        _pct = (55 + int(25 * idx / max(total, 1))) / 100
-        _est_total = _elapsed_now / max(_pct, 0.01)
-        _eta_remain = max(0, int(_est_total - _elapsed_now))
+        _elapsed_now = time.time() - _scan_start
+        _eta_remain  = max(0, int(_total_estimate - _elapsed_now))
         SCAN_STATE.update(
             progress=55 + int(25 * idx / total),
             message=f"Probing {ip} ({idx+1}/{len(nmap_results)})…",
@@ -2941,7 +2933,11 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
         return web.Response(status=503)
 
     proto = camera.get("protocol", "RTSP")
-    flags = (["-rtsp_transport", "tcp"] if proto in ("RTSP", "DVR")
+    # ONVIF streams are RTSP under the hood — include them in TCP transport.
+    # TCP is required for Hikvision and many other cameras (avoids UDP packet loss).
+    flags = (["-rtsp_transport", "tcp",
+              "-allowed_media_types", "video"]
+             if proto in ("RTSP", "DVR", "ONVIF")
              else ["-re"] if proto == "HLS" else [])
 
     response = web.StreamResponse(headers={
@@ -2951,17 +2947,18 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     await response.prepare(request)
 
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-loglevel", "error",
+        "ffmpeg", "-loglevel", "warning",
+        "-stimeout", "8000000",     # 8s RTSP connection timeout
         *flags, "-i", url,
         "-vf", "fps=10,scale=640:-2", "-q:v", "5", "-f", "mjpeg", "pipe:1",
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
     log.info(f"Stream [{proto}] {camera_id}")
     buf = b""
     try:
         while True:
-            chunk = await asyncio.wait_for(proc.stdout.read(16384), timeout=15)
+            chunk = await asyncio.wait_for(proc.stdout.read(16384), timeout=30)
             if not chunk:
                 break
             buf += chunk
@@ -2983,9 +2980,16 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
                 except (ConnectionResetError, ConnectionAbortedError):
                     return response
     except asyncio.TimeoutError:
-        pass
+        # Log any ffmpeg stderr for debugging
+        try:
+            _, err = await asyncio.wait_for(proc.communicate(), timeout=2)
+            if err and err.strip():
+                log.warning(f"Stream [{proto}] {camera_id} ffmpeg: "
+                            + err.decode("utf-8", errors="replace").strip()[:300])
+        except Exception:
+            pass
     except Exception as ex:
-        log.warning(f"Stream error: {ex}")
+        log.warning(f"Stream error [{proto}] {camera_id}: {ex}")
     finally:
         try:
             proc.kill()

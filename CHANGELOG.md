@@ -1,5 +1,26 @@
 # AnyCam — Changelog
 
+## 1.3.0
+- ETA fix: eliminated per-stage ETA resets — a single _total_estimate variable
+  is maintained from scan start and only ever refined downward; each stage
+  updates the estimate based on new information but the countdown never jumps
+  back up; eta is always computed as max(0, total_estimate - elapsed_since_start)
+  Stage 1: refines using actual S1 time + live host count (10s/host heuristic)
+  Stage 2: refines using actual S1+S2 elapsed / 0.55 (stage 2 = ~55% of work),
+  floored at responding_hosts * 15s; takes the smaller of old vs new estimate
+  Per-host: continuously updated using same total_estimate reference
+- ONVIF stream fix: handle_stream now includes 'ONVIF' in the protocol list
+  that gets -rtsp_transport tcp; Hikvision and many other cameras require TCP
+  transport for RTSP — without it ffmpeg uses UDP which is often dropped
+- Added -allowed_media_types video to RTSP/ONVIF/DVR ffmpeg flags to avoid
+  stalling on audio-only streams before video frames arrive
+- Added -stimeout 8000000 (8 seconds) RTSP connection timeout to ffmpeg so
+  unreachable streams fail fast rather than hanging until the 30s read timeout
+- ffmpeg stderr now captured and logged as WARNING on stream timeout so future
+  stream failures are visible in the log for diagnosis
+- Per-frame read timeout increased from 15s to 30s to accommodate cameras that
+  take longer to start sending frames after connection is established
+
 ## 1.2.9
 - Removed duplicate 'Completed in X:XX' from grey status bar message;
   completion time now shown only in the blue timer element to the right
