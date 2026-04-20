@@ -1,5 +1,19 @@
 # AnyCam — Changelog
 
+## 1.3.6
+- Added -pix_fmt yuvj420p to ffmpeg output — yuvj420p is the JPEG full-range
+  YUV pixel format that MJPEG encoding expects natively; without it, ffmpeg runs
+  swscaler to convert pixel formats on every frame which is slower and was
+  causing 'deprecated pixel format' warnings; forcing it eliminates the extra
+  conversion step and ensures frames flush correctly
+- Replaced blocking 4-second early-fail check for hardware decode with a fast
+  2-second first-read timeout — the old approach spent 4 seconds doing nothing
+  before switching to software, giving the HA ingress proxy time to drop the
+  connection before the first MJPEG frame arrived; now if hardware produces no
+  data in 2 seconds, we immediately kill it and retry software; if software
+  produces no data in 30 seconds, we give up; total wait before first frame
+  is now at most 2-3 seconds instead of potentially 10+ seconds
+
 ## 1.3.5
 - Critical fix: replaced -stimeout with -timeout in ffmpeg command;
   -stimeout was deprecated and removed in newer ffmpeg versions — it caused

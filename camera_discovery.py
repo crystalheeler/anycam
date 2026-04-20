@@ -58,7 +58,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.3.5"  # must match config.yaml
+CURRENT_VERSION = "1.3.6"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3032,51 +3032,46 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
             "ffmpeg", "-loglevel", "warning", "-timeout", "8000000",
             *flags, *extra_flags, "-i", url,
             "-vf", out_vf,
+            "-pix_fmt", "yuvj420p",   # JPEG-range YUV = native MJPEG pixel format
             "-q:v", "5", "-f", "mjpeg", "pipe:1",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
     proc = await _launch_ffmpeg(hw_flags)
-    buf = b""
+    buf          = b""
     _hw_failed   = False
     _frames_seen = 0
 
-    async def _check_early_fail(p, timeout_s=5.0):
-        """Return True if process exits with error within timeout_s seconds."""
-        try:
-            await asyncio.wait_for(p.wait(), timeout=timeout_s)
-            return p.returncode not in (None, 0)
-        except asyncio.TimeoutError:
-            return False  # still running = not an early fail
-
-    # For hw decode: do a quick check — if it exits immediately with an error,
-    # fall back to software right away rather than waiting 30s.
-    if hw_dec:
-        failed_early = await _check_early_fail(proc, timeout_s=4.0)
-        if failed_early:
-            try:
-                _, err = await asyncio.wait_for(proc.communicate(), timeout=2)
-                log.warning(f"Stream hw decode early fail ({hw_dec}): "
-                            + err.decode("utf-8", errors="replace").strip()[:200])
-            except Exception:
-                pass
-            log.info(f"Stream [{proto}] {camera_id} — hw {hw_dec} unavailable, using software")
-            proc = await _launch_ffmpeg([])
-            _hw_failed = True
-
     try:
         while True:
-            chunk = await asyncio.wait_for(proc.stdout.read(16384), timeout=30)
+            # Use a short timeout for the very first read when trying hardware decode
+            # so we fall back to software quickly if hw produces nothing, keeping
+            # the browser connection alive.
+            _first_read_timeout = 2.0 if (hw_dec and not _hw_failed and _frames_seen == 0) else 30
+            try:
+                chunk = await asyncio.wait_for(
+                    proc.stdout.read(16384), timeout=_first_read_timeout)
+            except asyncio.TimeoutError:
+                if hw_dec and not _hw_failed and _frames_seen == 0:
+                    # Hardware produced nothing in 2s — switch to software immediately
+                    try: proc.kill()
+                    except Exception: pass
+                    try: await asyncio.wait_for(proc.wait(), timeout=2)
+                    except Exception: pass
+                    log.info(f"Stream [{proto}] {camera_id} — hw decode timeout, switching to software")
+                    proc     = await _launch_ffmpeg([])
+                    _hw_failed = True
+                    continue
+                break  # 30-second timeout on software = give up
             if not chunk:
-                # If hw decode ran (not early-failed) but produced no frames, retry sw
                 if hw_dec and not _hw_failed and _frames_seen == 0:
                     _hw_failed = True
                     try: proc.kill()
                     except Exception: pass
                     try: await asyncio.wait_for(proc.wait(), timeout=2)
                     except Exception: pass
-                    log.info(f"Stream [{proto}] {camera_id} — hw decode no frames, retrying software")
+                    log.info(f"Stream [{proto}] {camera_id} — hw decode no output, switching to software")
                     proc = await _launch_ffmpeg([])
                     continue
                 break
