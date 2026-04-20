@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.5.2"  # must match config.yaml
+CURRENT_VERSION = "1.5.3"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3275,6 +3275,7 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
             "-an",
             "-vf", out_vf,
             "-vcodec", "mjpeg",
+            "-pix_fmt", "yuv420p",  # tell encoder to accept yuv420p directly (ffmpeg 5+)
             "-q:v", "5",
             "-color_range", "2",     # full (PC/JPEG) range for mjpeg encoder
             "-f", "image2pipe",

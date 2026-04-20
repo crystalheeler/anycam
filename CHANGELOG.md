@@ -1,5 +1,10 @@
 # AnyCam — Changelog
 
+## 1.5.3
+- Fix swscaler deprecated pixel format warning: adding -pix_fmt yuv420p
+  tells the mjpeg encoder to accept yuv420p directly (ffmpeg 5.0+),
+  bypassing the internal conversion that triggered the swscaler warning
+
 ## 1.5.2
 - Add X-Accel-Buffering: no response header: HA ingress is an nginx proxy;
   without this header nginx buffers the entire multipart/x-mixed-replace
