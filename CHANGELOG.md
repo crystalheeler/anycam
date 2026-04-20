@@ -1,5 +1,15 @@
 # AnyCam — Changelog
 
+## 1.3.4
+- Critical bug fix: NameError 'hw_flags is not defined' crashed every stream
+  request; hw_flags was renamed to hw_flags_inner inside _make_proc_args during
+  a refactor but the _launch_ffmpeg(hw_flags) call site was not updated; streams
+  always showed 'Stream unavailable' because of this exception
+- Verification scan codec probing: fixed indentation error that prevented
+  probe_stream_details() from running during the post-upgrade verification scan;
+  codec info now correctly stored for all cameras missing stream_codec on startup;
+  save_cameras() called after verification so codec data persists across restarts
+
 ## 1.3.3
 - Critical fix: stream codec (HEVC/H.264) now populated during the post-upgrade
   verification scan for cameras that were saved before 1.3.2 was installed;

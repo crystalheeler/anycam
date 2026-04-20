@@ -58,7 +58,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.3.3"  # must match config.yaml
+CURRENT_VERSION = "1.3.4"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2358,12 +2358,13 @@ async def run_verification_scan():
             url = cam.get("stream_url","")
             if url:
                 found = await loop.run_in_executor(None, probe_rtsp, url, u, p)
-                # If verified OK and codec not yet stored, probe stream details now
-                if found and not cam.get("stream_codec"):
+                # Populate codec info if not yet stored
+                if url and not cam.get("stream_codec"):
                     details = await probe_stream_details(url, "RTSP")
                     if details:
                         cam.update(details)
-                        log.info(f"  Stream details populated: {cam.get('stream_codec','?')} "
+                        log.info(f"  Stream details: "
+                                 f"{cam.get('stream_codec','?')} "
                                  f"{cam.get('stream_width','?')}x{cam.get('stream_height','?')}")
             if not found:
                 found = await loop.run_in_executor(None, probe_rtsp_options, ip, port)
@@ -2397,6 +2398,7 @@ async def run_verification_scan():
             # Don't delete — let the user decide
             log.info(f"  Not found after upgrade: {cam.get('name', ip)} @ {ip}:{port}")
 
+    save_cameras()   # persist any newly-probed stream_codec fields
     if now_missing:
         log.info(f"Verification: {len(still_present)} OK, {len(now_missing)} not found")
         SCAN_STATE["message"] = (
@@ -3007,7 +3009,8 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     # Hardware decoders for Pi 4 VideoCore VI (v4l2m2m)
     hw_decoders  = {"hevc":"hevc_v4l2m2m","h265":"hevc_v4l2m2m",
                     "h264":"h264_v4l2m2m","avc":"h264_v4l2m2m"}
-    hw_dec = hw_decoders.get(stream_codec, "")
+    hw_dec    = hw_decoders.get(stream_codec, "")
+    hw_flags  = (["-c:v", hw_dec] if hw_dec else [])   # used by _launch_ffmpeg
 
     # Scale + fps strategy based on codec and source resolution
     if stream_codec in ("hevc","h265") and stream_w >= 3840:
