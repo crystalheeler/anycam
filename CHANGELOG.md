@@ -1,5 +1,40 @@
 # AnyCam — Changelog
 
+## 1.4.1
+- Architecture change: replaced custom ffmpeg/ffprobe pipeline with go2rtc
+  go2rtc is a purpose-built Go binary used by Frigate and HA's camera stack;
+  it handles RTSP/ONVIF/HLS/RTMP, all codecs (HEVC/H.264/etc), auth (Basic/
+  Digest/ONVIF), and reconnection natively; no more URL encoding fights,
+  probesize limits, or hardware decode guesswork
+  go2rtc runs as a sidecar on port 1984; streams are registered via its REST
+  API and MJPEG output is proxied through the AnyCam server to the browser
+  go2rtc binary auto-downloaded for the correct architecture in Dockerfile
+  (arm64/armv6/amd64/386) using the BUILD_ARCH build arg
+- Architecture change: replaced ffprobe stream verification with a pure Python
+  RTSP socket probe (probe_rtsp_socket); sends RTSP OPTIONS + DESCRIBE with
+  proper Digest and Basic auth negotiation via raw TCP socket; no external
+  processes, no probesize limits, no URL encoding issues, works with any codec
+  Credentials are never embedded in a URL string — passed as separate strings
+  and encoded only into the RTSP Authorization header where needed
+- go2rtc stream lifecycle: cameras are registered with go2rtc on startup,
+  when credentials are accepted (both ONVIF profile cards and direct RTSP),
+  and removed when cameras are deleted
+- run.sh: go2rtc started before Python server with API readiness check
+
+## 1.4.0
+- probe_rtsp: removed -analyzeduration 1000000 -probesize 200000 flags that
+  were causing RTSP verification to fail for high-res HEVC cameras; a single
+  4K HEVC IDR frame can easily exceed the 200KB probesize limit, causing
+  ffprobe to exit with error even on a valid stream; removed limits let ffprobe
+  use its defaults (5MB / 5s) which are sufficient for any camera
+- probe_rtsp: timeout increased from 4s to 8s (subprocess timeout 11s) to
+  give HEVC streams time to deliver their first IDR frame
+- probe_rtsp: stderr now logged as WARNING with redacted URL when ffprobe
+  returns non-zero; exact ffprobe error message now visible in the log so
+  future failures will explain themselves rather than just showing False
+- probe_rtsp: credentials URL-encoded with the correct safe set (sub-delims
+  kept literal, only @ : / ? # encoded) — consistent with build_authenticated_url
+
 ## 1.3.9
 - Added full diagnostic logging to api_set_credentials — every step now logs
   at INFO/WARNING so credential failures are visible in the log:
