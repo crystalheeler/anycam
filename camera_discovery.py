@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.6.0"  # must match config.yaml
+CURRENT_VERSION = "1.6.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3258,6 +3258,52 @@ async def go2rtc_register_all():
                 await go2rtc_add(cam["id"], src)
 
 
+async def _drain_stderr(proc: object, label: str) -> None:
+    """
+    Module-level stderr drain coroutine — shared by handle_stream and snap_loop.
+
+    Reads ffmpeg's stderr line-by-line throughout the process lifetime so the
+    OS pipe buffer never fills (which would deadlock ffmpeg).  Filters out the
+    cosmetic 'deprecated pixel format' swscaler warning that fires on every
+    new scale context when using yuvj420p.  On exit, logs all collected lines
+    as a single WARNING and auto-detects v4l2m2m unavailability.
+
+    label examples:
+      "10.0.0.33_onvif"          — from handle_stream
+      "SNAP:10.0.0.33_onvif"     — from snap_loop
+    """
+    lines = []
+    try:
+        while True:
+            line = await proc.stderr.readline()
+            if not line:
+                break
+            decoded = line.decode("utf-8", errors="replace").rstrip()
+            # Filter cosmetic swscaler deprecation warning — unavoidable with
+            # yuvj420p on this ffmpeg build, not an error, very spammy.
+            if decoded and "deprecated pixel format" not in decoded:
+                lines.append(decoded)
+    except asyncio.CancelledError:
+        # On cancellation, grab any remaining buffered bytes before exiting.
+        try:
+            remaining = await proc.stderr.read(8192)
+            for ln in remaining.decode("utf-8", errors="replace").splitlines():
+                if ln.strip() and "deprecated pixel format" not in ln:
+                    lines.append(ln.strip())
+        except Exception:
+            pass
+    except Exception:
+        pass
+    if lines:
+        joined = " | ".join(lines)[:600]
+        log.warning(f"Stream {label} ffmpeg stderr: {joined}")
+        # Auto-detect v4l2m2m hardware decoder unavailability.
+        for hw in ("hevc_v4l2m2m", "h264_v4l2m2m"):
+            if hw in joined and "Could not find a valid device" in joined:
+                _HW_UNAVAILABLE.add(hw)
+                log.info(f"Marked {hw} as unavailable on this system")
+
+
 async def handle_stream(request: web.Request) -> web.StreamResponse:
     """
     Direct streaming: ffmpeg connects straight to the camera RTSP URL and
@@ -3341,39 +3387,7 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
             stderr=asyncio.subprocess.PIPE,
         )
 
-    async def _drain_stderr(proc, label):
-        """Consume stderr continuously and log it when the stream ends."""
-        lines = []
-        try:
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
-                decoded = line.decode("utf-8", errors="replace").rstrip()
-                # swscaler "deprecated pixel format" is cosmetic-only with yuvj420p;
-                # filter it so it does not spam the HA log.
-                if decoded and "deprecated pixel format" not in decoded:
-                    lines.append(decoded)
-        except asyncio.CancelledError:
-            # Collect any remaining buffered lines before exiting
-            try:
-                remaining = await proc.stderr.read(8192)
-                for l in remaining.decode("utf-8", errors="replace").splitlines():
-                    if l.strip():
-                        lines.append(l.strip())
-            except Exception:
-                pass
-        except Exception:
-            pass
-        if lines:
-            joined = " | ".join(lines)[:600]
-            log.warning(f"Stream {label} ffmpeg stderr: {joined}")
-            # Detect v4l2m2m unavailability and mark it globally so future
-            # stream requests skip hw decode without wasting 3 seconds.
-            for hw in ("hevc_v4l2m2m", "h264_v4l2m2m"):
-                if hw in joined and "Could not find a valid device" in joined:
-                    _HW_UNAVAILABLE.add(hw)
-                    log.info(f"Marked {hw} as unavailable on this system")
+    # _drain_stderr is a module-level coroutine — see below handle_stream
 
     # Try hardware decode first; on ARM this is hevc_v4l2m2m / h264_v4l2m2m.
     # Skip hw decode immediately if we already know it's unavailable on this system.

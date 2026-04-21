@@ -1,5 +1,13 @@
 # AnyCam — Changelog
 
+## 1.6.1
+- Critical fix: _drain_stderr was defined as a nested function inside
+  handle_stream, making it invisible to snap_loop; every snap_loop call
+  crashed immediately with NameError on the first _drain_stderr call,
+  causing rapid restart loops and zero frames delivered; promoted
+  _drain_stderr to module-level so both handle_stream and snap_loop
+  can call it; this is the only thing preventing camera feeds from showing
+
 ## 1.6.0
 - Architectural fix: replace long-lived multipart stream with snapshot polling.
   The browser now calls GET /snapshot/{id}?t=... every 125ms via JS setInterval.
