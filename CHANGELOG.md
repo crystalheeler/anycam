@@ -1,5 +1,21 @@
 # AnyCam — Changelog
 
+## 1.5.4
+- Revert pixel format to yuvj420p: this ffmpeg build's mjpeg encoder
+  explicitly rejects yuv420p ('Incompatible pixel format') and only accepts
+  yuvj420p (full-range JPEG format); -pix_fmt yuvj420p now set explicitly
+  and -color_range 2 removed (redundant with yuvj420p)
+- Filter swscaler deprecation lines from stderr log: the 'deprecated pixel
+  format' warning is cosmetic-only and unavoidable with yuvj420p on this
+  ffmpeg build; filtered in _drain_stderr so it no longer spams the HA log
+- Add frame-sent logging: logs 'sent frame 1 (N bytes)' on the first frame
+  and every 100 frames thereafter, confirming data is flowing from ffmpeg
+  stdout through response.write() to the HTTP layer; also logs 'client
+  disconnected after N frames' on ConnectionResetError/Aborted
+- Note: 10.0.0.22 RTSP probe returning False is likely camera-side rate
+  limiting from repeated connection attempts during debugging; re-entering
+  credentials after a brief wait should restore it
+
 ## 1.5.3
 - Fix swscaler deprecated pixel format warning: adding -pix_fmt yuv420p
   tells the mjpeg encoder to accept yuv420p directly (ffmpeg 5.0+),

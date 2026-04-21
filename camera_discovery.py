@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.5.3"  # must match config.yaml
+CURRENT_VERSION = "1.5.4"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3236,11 +3236,11 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     # Scale + fps limits: 4K HEVC -> 480p@4fps, other HEVC -> 640p@8fps, else 640p@10fps
     # yuv420p in the vf chain; -color_range 2 tells the mjpeg encoder to use full range.
     if is_hevc and stream_w >= 3840:
-        out_vf = "fps=4,scale=480:-2,format=yuv420p"
+        out_vf = "fps=4,scale=480:-2,format=yuvj420p"
     elif is_hevc:
-        out_vf = "fps=8,scale=640:-2,format=yuv420p"
+        out_vf = "fps=8,scale=640:-2,format=yuvj420p"
     else:
-        out_vf = "fps=10,scale=640:-2,format=yuv420p"
+        out_vf = "fps=10,scale=640:-2,format=yuvj420p"
 
     safe_url = _strip_creds(url)
     log.info(f"Stream [{proto}] {camera_id} -> {safe_url} "
@@ -3275,9 +3275,8 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
             "-an",
             "-vf", out_vf,
             "-vcodec", "mjpeg",
-            "-pix_fmt", "yuv420p",  # tell encoder to accept yuv420p directly (ffmpeg 5+)
+            "-pix_fmt", "yuvj420p",  # mjpeg encoder requires full-range yuvj420p
             "-q:v", "5",
-            "-color_range", "2",     # full (PC/JPEG) range for mjpeg encoder
             "-f", "image2pipe",
             "pipe:1",
         ]
@@ -3299,7 +3298,9 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
                 if not line:
                     break
                 decoded = line.decode("utf-8", errors="replace").rstrip()
-                if decoded:
+                # swscaler "deprecated pixel format" is cosmetic-only with yuvj420p;
+                # filter it so it does not spam the HA log.
+                if decoded and "deprecated pixel format" not in decoded:
                     lines.append(decoded)
         except asyncio.CancelledError:
             # Collect any remaining buffered lines before exiting
@@ -3401,7 +3402,11 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
                         + CRLF
                     )
                     await response.write(hdr + frame + CRLF)
+                    if frames == 1 or frames % 100 == 0:
+                        log.info(f"Stream {camera_id}: sent frame {frames} "
+                                 f"({len(frame)} bytes)")
                 except (ConnectionResetError, ConnectionAbortedError):
+                    log.info(f"Stream {camera_id}: client disconnected after {frames} frames")
                     return response
 
     except Exception as ex:
