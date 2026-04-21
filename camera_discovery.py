@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.5.4"  # must match config.yaml
+CURRENT_VERSION = "1.6.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -71,6 +71,30 @@ GO2RTC_API       = f"http://127.0.0.1:{GO2RTC_PORT}"
 # When v4l2m2m reports "Could not find a valid device", the decoder name
 # is added here so future stream requests skip hw decode immediately.
 _HW_UNAVAILABLE: set = set()
+
+# Per-camera snapshot state for the background ffmpeg processes that feed
+# handle_snapshot.  Key = camera_id.
+# Each value dict: frame(bytes|None), frame_time(float), frame_count(int),
+#                  proc(Process|None), task(Task|None), restart_count(int)
+_SNAP: dict = {}
+
+# Timestamp of most recent handle_snapshot call per camera.
+# snap_loop uses this to detect idle (>30s) and stop automatically.
+_snap_last_access: dict = {}
+
+
+def _snap_state(camera_id: str) -> dict:
+    """Return (and lazily create) the snapshot state dict for a camera."""
+    if camera_id not in _SNAP:
+        _SNAP[camera_id] = {
+            "frame":         None,
+            "frame_time":    0.0,
+            "frame_count":   0,
+            "proc":          None,
+            "task":          None,
+            "restart_count": 0,
+        }
+    return _SNAP[camera_id]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # State
@@ -1632,12 +1656,24 @@ def _initial_protocol(port: int, service: str, product: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────
 def probe_rtsp_socket(host: str, port: int, path: str,
                       username: str = "", password: str = "",
-                      timeout: float = 6.0) -> bool:
+                      timeout: float = 6.0,
+                      label: str = "") -> bool:
     """
     Verify an RTSP stream is accessible.  Returns True if DESCRIBE
     succeeds (with or without auth).  Never touches ffprobe.
+    Pass label="" for silent (debug-only) logging, or a non-empty
+    string (e.g. camera_id/profile) for verbose INFO-level logging
+    of each RTSP round-trip — useful when diagnosing credential failures.
     """
     rtsp_url = f"rtsp://{host}:{port}{path}"
+    pfx = f"  [probe_rtsp {label or host + ':' + str(port) + path}]"
+
+    def _log(msg: str) -> None:
+        if label:
+            log.info(pfx + " " + msg)
+        else:
+            log.debug(pfx + " " + msg)
+
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
         sock.settimeout(timeout)
@@ -1659,15 +1695,22 @@ def probe_rtsp_socket(host: str, port: int, path: str,
             return buf.decode("utf-8", errors="replace")
 
         resp = roundtrip("OPTIONS", 1)
+        status_line = resp.split(chr(13))[0].strip()
         if "RTSP/1.0 2" not in resp:
+            _log(f"OPTIONS → {status_line!r} (not 2xx — giving up)")
             return False
+        _log(f"OPTIONS → OK")
 
         # DESCRIBE — may trigger 401
         resp = roundtrip("DESCRIBE", 2, {"Accept": "application/sdp"})
+        status_line = resp.split(chr(13))[0].strip()
         if "RTSP/1.0 200" in resp:
+            _log("DESCRIBE → 200 OK (no auth required)")
             return True
         if "401" not in resp or not username:
-            return "RTSP/1.0 2" in resp  # some cams return 200 on DESCRIBE without auth
+            ok = "RTSP/1.0 2" in resp
+            _log(f"DESCRIBE → {status_line!r} (no 401; result={ok})")
+            return ok
 
         # Parse WWW-Authenticate
         auth_line = next(
@@ -1678,8 +1721,10 @@ def probe_rtsp_socket(host: str, port: int, path: str,
             realm_m = re.search(r'realm="([^"]*)"', auth_val)
             nonce_m = re.search(r'nonce="([^"]*)"', auth_val)
             if not (realm_m and nonce_m):
+                _log(f"DESCRIBE → 401 Digest but no realm/nonce in: {auth_val[:80]!r}")
                 return False
             realm, nonce = realm_m.group(1), nonce_m.group(1)
+            _log(f"DESCRIBE → 401 Digest (realm={realm!r}, nonce={nonce[:8]!r}...)")
             ha1 = hashlib.md5(f"{username}:{realm}:{password}".encode()).hexdigest()
             ha2 = hashlib.md5(f"DESCRIBE:{rtsp_url}".encode()).hexdigest()
             rsp = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
@@ -1687,16 +1732,21 @@ def probe_rtsp_socket(host: str, port: int, path: str,
                     f'nonce="{nonce}", uri="{rtsp_url}", response="{rsp}"')
         elif auth_val.lower().startswith("basic"):
             import base64 as _b64
+            _log("DESCRIBE → 401 Basic")
             auth = "Basic " + _b64.b64encode(f"{username}:{password}".encode()).decode()
         else:
+            _log(f"DESCRIBE → 401 unknown auth method: {auth_val[:60]!r} — giving up")
             return False
 
         resp = roundtrip("DESCRIBE", 3,
                          {"Accept": "application/sdp", "Authorization": auth})
-        return "RTSP/1.0 200" in resp
+        ok = "RTSP/1.0 200" in resp
+        status_line = resp.split(chr(13))[0].strip()
+        _log(f"DESCRIBE (authenticated) → {'200 OK' if ok else status_line!r}")
+        return ok
 
     except Exception as e:
-        log.debug(f"probe_rtsp_socket {host}:{port}{path}: {e}")
+        _log(f"exception: {e}")
         return False
     finally:
         try:
@@ -1706,8 +1756,9 @@ def probe_rtsp_socket(host: str, port: int, path: str,
 
 
 def probe_rtsp(url: str, username: str = "", password: str = "",
-               timeout: int = 6) -> bool:
-    """Thin wrapper — parses URL and delegates to probe_rtsp_socket."""
+               timeout: int = 6, label: str = "") -> bool:
+    """Thin wrapper — parses URL and delegates to probe_rtsp_socket.
+    Pass label (e.g. camera_id/profile_name) to get verbose INFO-level logging."""
     try:
         from urllib.parse import urlparse
         p    = urlparse(url)
@@ -1715,9 +1766,10 @@ def probe_rtsp(url: str, username: str = "", password: str = "",
         port = p.port or 554
         path = p.path or "/"
         # Prefer caller-supplied credentials over any embedded in the URL
-        u = username or p.username or ""
+        u  = username or p.username or ""
         pw = password or p.password or ""
-        return probe_rtsp_socket(host, port, path, u, pw, timeout=timeout)
+        return probe_rtsp_socket(host, port, path, u, pw,
+                                 timeout=timeout, label=label)
     except Exception as e:
         log.debug(f"probe_rtsp: {e}")
         return False
@@ -3490,29 +3542,289 @@ async def handle_stream_test(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def snap_loop(camera_id: str, url: str, camera: dict) -> None:
+    """
+    Background task: keeps ffmpeg running for one camera, continuously
+    decoding and storing the latest JPEG frame in _SNAP[camera_id]['frame'].
+    Restarts automatically on ffmpeg exit/error.
+    Stops when no handle_snapshot call has been made in 30 seconds (idle).
+
+    Debug logging:
+      SNAP [id]: ffmpeg starting (codec=..., hw=..., vf=...)
+      SNAP [id]: frame N — X bytes (last poll Ys ago)   [every 50 frames]
+      SNAP [id]: hw timeout/EOF → sw                    [hw→sw fallback]
+      SNAP [id]: ffmpeg EOF after N frames (rc=N)        [unexpected exit]
+      SNAP [id]: 30s timeout after N frames              [no data from ffmpeg]
+      SNAP [id]: idle Ns — stopping                      [idle shutdown]
+      SNAP [id]: restarting in 2s (#N)                   [before each restart]
+      SNAP [id]: loop done                               [final exit]
+    """
+    state        = _snap_state(camera_id)
+    stream_codec = camera.get("stream_codec", "").lower()
+    stream_w     = camera.get("stream_width") or 0
+    is_hevc      = stream_codec in ("hevc", "h265")
+
+    if is_hevc and stream_w >= 3840:
+        out_vf = "fps=4,scale=480:-2,format=yuvj420p"
+    elif is_hevc:
+        out_vf = "fps=8,scale=640:-2,format=yuvj420p"
+    else:
+        out_vf = "fps=10,scale=640:-2,format=yuvj420p"
+
+    SOI = bytes([0xFF, 0xD8])
+    EOI = bytes([0xFF, 0xD9])
+
+    async def _launch_snap(hw_dec: str = ""):
+        hw_args  = ["-c:v", hw_dec] if hw_dec else []
+        hw_label = f"hw:{hw_dec}" if hw_dec else "sw"
+        log.info(f"SNAP [{camera_id}]: ffmpeg starting "
+                 f"(codec={stream_codec or '?'}, {hw_label}, vf={out_vf})")
+        return await asyncio.create_subprocess_exec(
+            "ffmpeg", "-nostdin", "-loglevel", "warning",
+            "-rtsp_transport", "tcp", "-timeout", "8000000",
+            *hw_args,
+            "-i", url,
+            "-an", "-vf", out_vf,
+            "-vcodec", "mjpeg", "-pix_fmt", "yuvj420p",
+            "-q:v", "5", "-f", "image2pipe", "pipe:1",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+    try:
+        while True:   # outer restart loop
+            # Idle check — stop if nobody has polled recently
+            last   = _snap_last_access.get(camera_id, 0)
+            idle_s = time.monotonic() - last
+            if state["frame_count"] > 0 and idle_s > 30:
+                log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s — stopping")
+                return
+
+            # Select decoder (skip hw if known unavailable)
+            wanted_hw = ("hevc_v4l2m2m" if is_hevc else
+                         ("h264_v4l2m2m" if stream_codec == "h264" else ""))
+            hw_dec    = "" if wanted_hw in _HW_UNAVAILABLE else wanted_hw
+            if wanted_hw and not hw_dec:
+                log.info(f"SNAP [{camera_id}]: skipping {wanted_hw} (known unavailable)")
+
+            proc     = await _launch_snap(hw_dec)
+            state["proc"] = proc
+            stderr_t = asyncio.create_task(_drain_stderr(proc, f"SNAP:{camera_id}"))
+            buf      = b""
+            frames   = 0
+            hw_tried = bool(hw_dec)
+
+            try:
+                while True:
+                    # Idle check inside the read loop
+                    last   = _snap_last_access.get(camera_id, 0)
+                    idle_s = time.monotonic() - last
+                    if frames > 10 and idle_s > 30:
+                        log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s — stopping")
+                        return
+
+                    timeout = 3.0 if (hw_tried and frames == 0) else 30.0
+                    try:
+                        chunk = await asyncio.wait_for(
+                            proc.stdout.read(65536), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        if hw_tried and frames == 0:
+                            try: proc.kill()
+                            except Exception: pass
+                            try: await asyncio.wait_for(proc.wait(), timeout=2)
+                            except Exception: pass
+                            log.info(f"SNAP [{camera_id}]: hw decode timeout → sw")
+                            _HW_UNAVAILABLE.add(hw_dec)
+                            proc     = await _launch_snap()
+                            state["proc"] = proc
+                            stderr_t.cancel()
+                            stderr_t = asyncio.create_task(
+                                _drain_stderr(proc, f"SNAP:{camera_id}"))
+                            buf      = b""
+                            hw_tried = False
+                            continue
+                        log.warning(f"SNAP [{camera_id}]: "
+                                    f"30s read timeout after {frames} frames")
+                        break
+
+                    if not chunk:
+                        rc = proc.returncode
+                        if hw_tried and frames == 0:
+                            try: proc.kill()
+                            except Exception: pass
+                            try: await asyncio.wait_for(proc.wait(), timeout=2)
+                            except Exception: pass
+                            log.info(f"SNAP [{camera_id}]: hw EOF (rc={rc}) → sw")
+                            _HW_UNAVAILABLE.add(hw_dec)
+                            proc     = await _launch_snap()
+                            state["proc"] = proc
+                            stderr_t.cancel()
+                            stderr_t = asyncio.create_task(
+                                _drain_stderr(proc, f"SNAP:{camera_id}"))
+                            buf      = b""
+                            hw_tried = False
+                            continue
+                        log.warning(f"SNAP [{camera_id}]: "
+                                    f"ffmpeg EOF after {frames} frames (rc={rc})")
+                        break
+
+                    buf += chunk
+                    if len(buf) > 4_000_000:
+                        log.warning(f"SNAP [{camera_id}]: "
+                                    f"buf overflow ({len(buf)} bytes) — discarding")
+                        buf = b""
+                        continue
+
+                    while True:
+                        s = buf.find(SOI)
+                        if s < 0:
+                            buf = b""
+                            break
+                        e = buf.find(EOI, s + 2)
+                        if e < 0:
+                            if s > 0:
+                                buf = buf[s:]
+                            break
+                        frame    = buf[s : e + 2]
+                        buf      = buf[e + 2:]
+                        frames  += 1
+                        hw_tried = False   # got a frame → hw decode worked
+                        state["frame"]       = frame
+                        state["frame_time"]  = time.monotonic()
+                        state["frame_count"] += 1
+                        if frames == 1 or frames % 50 == 0:
+                            poll_ago = time.monotonic() -                                        _snap_last_access.get(camera_id, time.monotonic())
+                            log.info(f"SNAP [{camera_id}]: frame {frames} "
+                                     f"— {len(frame)} bytes "
+                                     f"(last poll {poll_ago:.1f}s ago)")
+
+            except asyncio.CancelledError:
+                log.info(f"SNAP [{camera_id}]: task cancelled")
+                raise
+            except Exception as ex:
+                log.warning(f"SNAP [{camera_id}]: inner exception: {ex}")
+            finally:
+                stderr_t.cancel()
+                try: proc.kill()
+                except Exception: pass
+                try: await asyncio.wait_for(proc.wait(), timeout=3)
+                except Exception: pass
+                try: await asyncio.wait_for(stderr_t, timeout=2)
+                except Exception: pass
+
+            # Before restarting, check idle
+            last   = _snap_last_access.get(camera_id, 0)
+            idle_s = time.monotonic() - last
+            if frames > 0 and idle_s > 30:
+                log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s after exit — not restarting")
+                return
+
+            state["restart_count"] += 1
+            log.info(f"SNAP [{camera_id}]: restarting in 2s "
+                     f"(#{state['restart_count']})")
+            await asyncio.sleep(2)
+
+    finally:
+        state["proc"] = None
+        state["task"] = None
+        log.info(f"SNAP [{camera_id}]: loop done")
+
+
 async def handle_snapshot(request: web.Request) -> web.Response:
-    """Return a still JPEG via go2rtc's snapshot endpoint (no ffmpeg needed)."""
+    """
+    Return the latest JPEG frame for a camera.
+    Starts the background snap_loop if not already running.
+    Called by the JS polling loop every ~125ms for live video display.
+
+    The snap_loop runs persistently in the background, continuously decoding
+    the camera stream and storing the latest frame.  This endpoint just
+    returns whatever is in the buffer — each response is a fast,
+    complete HTTP round-trip that HA's ingress proxy handles cleanly
+    (unlike long-lived multipart streams which nginx terminates early).
+
+    Debug logging (server side):
+      SNAP [id]: starting background process       — on first call per camera
+      SNAP [id]: waiting for first frame...         — before first frame arrives
+      SNAP [id]: no frame available after 5s        — timeout on first frame
+      SNAP [id]: serving stale frame (age=Ns)       — ffmpeg died, cached frame
+    """
     camera_id = request.match_info["camera_id"]
     camera    = CAMERAS.get(camera_id)
     if not camera:
         return web.Response(status=404)
+    if camera.get("display") in ("webrtc", "wsrtsp", "info"):
+        return web.Response(status=400, text="Not streamable")
+
     url = build_authenticated_url(camera)
     if not url:
-        return web.Response(status=503)
-    # Ensure registered with go2rtc
-    await go2rtc_ensure(camera_id, url)
-    try:
-        async with aiohttp.ClientSession() as sess:
-            async with sess.get(
-                f"{GO2RTC_API}/{camera_id}.jpg",
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as r:
-                if r.status == 200:
-                    body = await r.read()
-                    return web.Response(body=body, content_type="image/jpeg")
-    except Exception as ex:
-        log.warning(f"Snapshot {camera_id}: {ex}")
-    return web.Response(status=503)
+        return web.Response(status=503, text="No stream URL")
+
+    # Record access time so snap_loop knows we're still watching
+    _snap_last_access[camera_id] = time.monotonic()
+
+    state = _snap_state(camera_id)
+
+    # Start background snap process if not already running
+    if state.get("task") is None or state["task"].done():
+        log.info(f"SNAP [{camera_id}]: starting background process "
+                 f"(codec={camera.get('stream_codec') or '?'}, "
+                 f"res={camera.get('stream_width') or '?'}px)")
+        state["task"] = asyncio.create_task(snap_loop(camera_id, url, camera))
+
+    # Wait up to 5s for the very first frame (subsequent calls return instantly)
+    if state["frame"] is None:
+        log.info(f"SNAP [{camera_id}]: waiting for first frame...")
+        loop     = asyncio.get_event_loop()
+        deadline = loop.time() + 5.0
+        while state["frame"] is None:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                log.info(f"SNAP [{camera_id}]: no frame available after 5s")
+                return web.Response(status=503, text="No frame yet — starting up")
+            await asyncio.sleep(0.05)
+
+    frame = state["frame"]
+    age   = time.monotonic() - state["frame_time"]
+    if age > 3.0:
+        log.info(f"SNAP [{camera_id}]: serving stale frame (age={age:.1f}s)")
+
+    return web.Response(
+        body=frame,
+        content_type="image/jpeg",
+        headers={
+            "Cache-Control":    "no-cache, no-store, must-revalidate",
+            "Pragma":           "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def handle_snap_status(request: web.Request) -> web.Response:
+    """
+    GET /snap/status — JSON health check for all active snapshot processes.
+    Useful for debugging without reading logs.
+    Example response:
+      {"10.0.0.33_onvif": {"running": true, "pid": 1247, "frame_count": 350,
+                           "frame_bytes": 6234, "frame_age_s": 0.08,
+                           "last_poll_s": 0.1, "restarts": 0}}
+    """
+    now    = time.monotonic()
+    result = {}
+    for cid, state in _SNAP.items():
+        proc   = state.get("proc")
+        result[cid] = {
+            "running":      proc is not None and proc.returncode is None,
+            "pid":          proc.pid if proc else None,
+            "frame_count":  state.get("frame_count", 0),
+            "frame_bytes":  len(state["frame"]) if state.get("frame") else 0,
+            "frame_age_s":  round(now - state["frame_time"], 2)
+                            if state.get("frame_time") else None,
+            "last_poll_s":  round(now - _snap_last_access[cid], 1)
+                            if cid in _snap_last_access else None,
+            "restarts":     state.get("restart_count", 0),
+        }
+    return web.json_response(result)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # REST API
@@ -3593,10 +3905,16 @@ async def api_set_credentials(request):
                 log.info(f"  Profile '{prof['name']}' stream_url: {stream_url}")
                 if not stream_url:
                     continue
-                ok = await loop.run_in_executor(None, probe_rtsp, stream_url, username, password)
+                ok = await loop.run_in_executor(
+                    None, probe_rtsp, stream_url, username, password,
+                    6, f"{camera_id}/{prof['name']}")
                 log.info(f"  probe_rtsp OK: {ok}")
                 if not ok:
-                    continue
+                    # ONVIF SOAP already confirmed credentials are valid —
+                    # create the card anyway and let streaming reveal any issue
+                    log.warning(f"  probe_rtsp returned False for ONVIF profile "
+                                f"'{prof['name']}' — creating card anyway "
+                                f"(ONVIF SOAP confirmed credentials)")
                 details = await probe_stream_details(stream_url, "RTSP")
                 cid = f"{ip}_onvif_{prof['token']}"
                 CAMERAS[cid] = {
@@ -4028,6 +4346,64 @@ async function loadCameras() {
   }
 }
 
+/* ── Snapshot polling ──────────────────────────────────────────────────────── */
+/* Instead of one long-lived multipart/x-mixed-replace stream (which HA's
+   nginx ingress terminates after a short time), we poll /snapshot/{id}?t=...
+   every 125ms.  Each request is a normal fast HTTP round-trip.
+   Debug info is logged to the browser console (open DevTools → Console). */
+const _snapTimers  = {};   // camId → setTimeout handle
+const _snapErrors  = {};   // camId → consecutive error count
+
+function startSnap(camId) {
+  stopSnap(camId);
+  _snapErrors[camId] = 0;
+  const poll = () => {
+    const display = document.querySelector('[data-snap="' + camId + '"]');
+    if (!display) { stopSnap(camId); return; }   // card was removed
+    const loader = new Image();
+    loader.onload = () => {
+      _snapErrors[camId] = 0;
+      // Show img, hide placeholder
+      display.src         = loader.src;
+      display.style.display = '';
+      const ph = document.getElementById('ph-' + camId);
+      if (ph) ph.style.display = 'none';
+      // Next poll: 125ms (~8fps) matches server vf=fps=8
+      _snapTimers[camId] = setTimeout(poll, 125);
+    };
+    loader.onerror = () => {
+      _snapErrors[camId] = (_snapErrors[camId] || 0) + 1;
+      const errs = _snapErrors[camId];
+      console.warn('[AnyCam] snapshot error #' + errs + ' for ' + camId);
+      if (errs === 3) {
+        // After 3 consecutive errors, show placeholder
+        display.style.display = 'none';
+        const ph = document.getElementById('ph-' + camId);
+        if (ph) { ph.querySelector('span').textContent = 'Stream unavailable'; ph.style.display = 'flex'; }
+      }
+      // Back off: 500ms for first few errors, 2s after 5 errors
+      _snapTimers[camId] = setTimeout(poll, errs > 5 ? 2000 : 500);
+    };
+    loader.src = BASE + '/snapshot/' + camId + '?t=' + Date.now();
+  };
+  poll();   // start immediately
+}
+
+function stopSnap(camId) {
+  if (_snapTimers[camId]) { clearTimeout(_snapTimers[camId]); delete _snapTimers[camId]; }
+}
+
+function stopAllSnaps() {
+  Object.keys(_snapTimers).forEach(stopSnap);
+}
+
+/* Called after renderGrid() to start polling for all visible snap cameras */
+function initSnaps() {
+  document.querySelectorAll('[data-snap]').forEach(img => {
+    startSnap(img.dataset.snap);
+  });
+}
+
 /* ── Camera grid ───────────────────────────────────────────────────────────── */
 function renderGrid() {
   const grid  = document.getElementById('cam-grid');
@@ -4047,6 +4423,7 @@ function renderGrid() {
     else                         grid.appendChild(buildCard(cam));
   });
   grid.querySelectorAll('video[data-hls]').forEach(v => { if (!v._hls) initHls(v); });
+  initSnaps();   // start polling for any newly added data-snap images
 }
 
 function buildCard(cam) {
@@ -4058,7 +4435,11 @@ function buildCard(cam) {
 }
 function updateCard(cam) {
   const c = document.querySelector('[data-id="' + cam.id + '"]');
-  if (c) c.innerHTML = cardHTML(cam);
+  if (c) {
+    stopSnap(cam.id);   // stop any existing snap loop for this card
+    c.innerHTML = cardHTML(cam);
+    initSnaps();        // restart if card now has a data-snap image
+  }
 }
 
 function dotClass(cam) {
@@ -4096,12 +4477,15 @@ function feedHTML(cam) {
          + 'May be offline, removed, or a false positive from the previous version.</small></span></div>';
 
   if (d === 'proxy' && cam.status === 'ready')
-    return '<img class="live" src="' + BASE + '/stream/' + cam.id + '" alt="Live" onerror="imgError(this)">'
-         + '<div class="feed-placeholder" style="display:none">'
+    // Snapshot polling: JS calls /snapshot/{id}?t=... every 125ms via startSnap().
+    // Each request is a normal short HTTP round-trip — nginx/ingress handles it
+    // correctly unlike long-lived multipart streams which ingress terminates early.
+    return '<img class="live" data-snap="' + esc(cam.id) + '" alt="Live" style="display:none">'
+         + '<div class="feed-placeholder" id="ph-' + esc(cam.id) + '">'
          + '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">'
          + '<path d="M15 10l4.553-2.069A1 1 0 0121 8.87v6.26a1 1 0 01-1.447.9L15 14"/>'
          + '<rect x="1" y="7" width="14" height="10" rx="2" ry="2"/></svg>'
-         + '<span>Stream unavailable</span></div>';
+         + '<span>Connecting...</span></div>';
 
   if (d === 'hls' && cam.status === 'ready')
     return '<video data-hls="' + esc(cam.stream_url) + '" autoplay muted playsinline></video>';
@@ -5013,6 +5397,7 @@ def make_app() -> web.Application:
     app.router.add_get(   "/stream/{camera_id}",                  handle_stream)
     app.router.add_get(   "/stream/{camera_id}/test",             handle_stream_test)
     app.router.add_get(   "/snapshot/{camera_id}",                handle_snapshot)
+    app.router.add_get(   "/snap/status",                         handle_snap_status)
     app.router.add_get(   "/api/arp_hosts",                        api_arp_hosts)
     app.router.add_post(  "/api/pscan/start",                     api_pscan_start)
     app.router.add_get(   "/api/pscan/status",                    api_pscan_status)

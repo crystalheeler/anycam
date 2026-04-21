@@ -1,5 +1,61 @@
 # AnyCam — Changelog
 
+## 1.6.0
+- Architectural fix: replace long-lived multipart stream with snapshot polling.
+  The browser now calls GET /snapshot/{id}?t=... every 125ms via JS setInterval.
+  Each request is a normal short HTTP round-trip that HA's nginx ingress proxy
+  handles correctly. Previously, one long-lived multipart/x-mixed-replace
+  connection was used; nginx terminates these after a short burst (typically
+  10-24 frames, ~1-3 seconds), causing "client disconnected" and blank cards.
+  The /stream/{id} endpoint is kept but no longer used for live display.
+
+- New background snap_loop task per camera: one persistent ffmpeg process runs
+  per camera in the background, continuously decoding HEVC/H.264 and storing
+  the latest JPEG frame in _SNAP[camera_id]['frame']. handle_snapshot returns
+  whatever is in the buffer instantly — no ffmpeg startup cost per request.
+  snap_loop auto-restarts on ffmpeg exit/crash (2s delay). Stops automatically
+  after 30 seconds of no handle_snapshot calls (idle shutdown).
+
+- New GET /snap/status endpoint: returns JSON health info for all active
+  snapshot processes — pid, frame_count, frame_bytes, frame_age_s,
+  last_poll_s, restarts. Open in browser to debug without reading logs.
+
+- probe_rtsp_socket verbose label logging: pass label=camera_id/profile_name
+  to get INFO-level logging of every RTSP round-trip (OPTIONS → result,
+  DESCRIBE → 401 Digest realm/nonce, DESCRIBE authenticated → result).
+  Previously all steps were silent on success and debug-only on failure.
+  api_set_credentials now passes label so every probe step is visible in log.
+
+- ONVIF credential flow: probe_rtsp no longer blocks card creation.
+  When ONVIF GetProfiles SOAP returns profiles (proving credentials are valid),
+  profile cards are created even if probe_rtsp returns False for the stream URL.
+  A warning is logged explaining this. The probe_rtsp call is kept for
+  informational logging but no longer gates card creation. Previously, probe_rtsp
+  returning False (e.g. due to camera quirks in Digest auth negotiation, or
+  rate-limiting after repeated debug sessions) would silently discard all
+  profile cards even with correct credentials.
+
+- Snap debug logging (server-side):
+    SNAP [id]: starting background process (codec=..., res=...px)
+    SNAP [id]: ffmpeg starting (codec=..., hw=hw:hevc_v4l2m2m OR sw, vf=...)
+    SNAP [id]: frame N — X bytes (last poll Y.Zs ago)   [every 50 frames]
+    SNAP [id]: hw decode timeout/EOF → sw               [hw fallback]
+    SNAP [id]: ffmpeg EOF after N frames (rc=N)          [unexpected exit]
+    SNAP [id]: 30s read timeout after N frames           [ffmpeg stalled]
+    SNAP [id]: idle Ns — stopping                        [idle shutdown]
+    SNAP [id]: restarting in 2s (#N)                     [before restart]
+    SNAP [id]: loop done                                 [final exit]
+
+- Snap debug logging (browser-side, open DevTools Console):
+    [AnyCam] snapshot error #N for camera_id            [on failed frame fetch]
+    After 3 consecutive errors: placeholder shown with "Stream unavailable"
+    Error backoff: 500ms for errors 1-5, 2s for errors 6+
+
+- probe_rtsp_socket verbose logging (when label supplied):
+    [probe_rtsp id/profile] OPTIONS → OK
+    [probe_rtsp id/profile] DESCRIBE → 401 Digest (realm=..., nonce=...)
+    [probe_rtsp id/profile] DESCRIBE (authenticated) → 200 OK / error
+
 ## 1.5.4
 - Revert pixel format to yuvj420p: this ffmpeg build's mjpeg encoder
   explicitly rejects yuv420p ('Incompatible pixel format') and only accepts
