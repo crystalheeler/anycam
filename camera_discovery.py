@@ -59,13 +59,32 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.6.1"  # must match config.yaml
+CURRENT_VERSION = "1.7.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
 GO2RTC_PORT      = 1984
 GO2RTC_RTSP_PORT = 8554
 GO2RTC_API       = f"http://127.0.0.1:{GO2RTC_PORT}"
+
+# ── HA add-on configuration options (set in the HA UI Config tab) ─────────────
+# Read from env vars set by the HA supervisor from config.yaml options.
+# Defaults mirror the config.yaml defaults so the server works without HA too.
+CFG_LOW_FPS        = os.environ.get("LOW_FPS_MODE",   "true").lower()  == "true"
+CFG_SKIP_NONREF    = os.environ.get("SKIP_NONREF",    "false").lower() == "true"
+CFG_LIMIT_THREADS  = os.environ.get("LIMIT_THREADS",  "true").lower()  == "true"
+CFG_STAGGER_POLL   = os.environ.get("STAGGER_POLLING","false").lower() == "true"
+CFG_HW_DECODE      = os.environ.get("HW_DECODE",      "false").lower() == "true"
+CFG_RECORDINGS     = os.environ.get("RECORDINGS_PATH", "/media/anycam")
+CFG_MOTION_SENS    = int(os.environ.get("MOTION_SENSITIVITY",       "15"))
+CFG_MOTION_COOL    = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
+CFG_MOTION_PAD     = int(os.environ.get("MOTION_CLIP_PADDING_SECS", "3"))
+
+MEDIA_DIR = Path(CFG_RECORDINGS)
+
+# Currently focused camera for full-screen enhanced view.
+# When set, all other snap_loops throttle to 1fps; focused loop runs native res.
+_FOCUSED_CAMERA: str | None = None
 
 # Hardware decoder names unavailable on this system (detected at runtime).
 # When v4l2m2m reports "Could not find a valid device", the decoder name
@@ -2805,12 +2824,12 @@ async def run_scan():
             if cam:
                 CAMERAS[cam["id"]] = cam
 
-    # ── Stage 4 (optional): Broad sweep on silent live hosts ──────────────────
+    # ── Stage 4 (optional): Deeper Scan on silent live hosts ──────────────────
     silent = sorted(all_live - responding_ips)
     if SCAN_OPTIONS.get("broad_sweep") and silent:
         SCAN_STATE.update(progress=82, stage=4,
-                          stage_label="Stage 4/4 — Broad sweep (0–10000)",
-                          message=f"Broad sweep on {len(silent)} unresponsive host(s)…")
+                          stage_label="Stage 4/4 — Deeper Scan (0–10000)",
+                          message=f"Deeper Scan on {len(silent)} unresponsive host(s)…")
         broad_results = await loop.run_in_executor(
             None, broad_nmap_scan, silent)
         for host in broad_results:
@@ -3556,7 +3575,7 @@ async def handle_stream_test(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
-async def snap_loop(camera_id: str, url: str, camera: dict) -> None:
+async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = False) -> None:
     """
     Background task: keeps ffmpeg running for one camera, continuously
     decoding and storing the latest JPEG frame in _SNAP[camera_id]['frame'].
@@ -3575,9 +3594,12 @@ async def snap_loop(camera_id: str, url: str, camera: dict) -> None:
     """
     state        = _snap_state(camera_id)
     stream_codec = camera.get("stream_codec", "").lower()
-    stream_w     = camera.get("stream_width") or 0
+    stream_w     = camera.get("stream_width")  or 0
+    stream_h     = camera.get("stream_height") or 0
+    stream_fps   = camera.get("stream_fps")    or 0
     is_hevc      = stream_codec in ("hevc", "h265")
 
+    # Normal (card) output filters — low_fps_mode adjusts fps inside _launch_snap
     if is_hevc and stream_w >= 3840:
         out_vf = "fps=4,scale=480:-2,format=yuvj420p"
     elif is_hevc:
@@ -3588,17 +3610,40 @@ async def snap_loop(camera_id: str, url: str, camera: dict) -> None:
     SOI = bytes([0xFF, 0xD8])
     EOI = bytes([0xFF, 0xD9])
 
-    async def _launch_snap(hw_dec: str = ""):
-        hw_args  = ["-c:v", hw_dec] if hw_dec else []
-        hw_label = f"hw:{hw_dec}" if hw_dec else "sw"
+    async def _launch_snap(hw_dec: str = "", native_res: bool = False):
+        """Launch ffmpeg for snapshot polling.
+        native_res=True: use camera's native resolution/fps (for focus view).
+        Respects CFG_ options: thread limiting, skip_nonref, low_fps_mode.
+        """
+        hw_args     = ["-c:v", hw_dec] if hw_dec else []
+        thread_args = ["-threads", "2"] if CFG_LIMIT_THREADS else []
+        skip_args   = ["-skip_frame", "nonref"] if CFG_SKIP_NONREF else []
+        hw_label    = f"hw:{hw_dec}" if hw_dec else "sw"
+
+        if native_res:
+            # Focus mode: run at camera's native resolution and fps
+            native_vf = f"format=yuvj420p"
+            vf_used   = native_vf
+            fps_label = f"native ({stream_fps or '?'}fps, {stream_w or '?'}px)"
+        elif CFG_LOW_FPS and is_hevc:
+            # Low-fps mode for HEVC — 2fps output (decode cost unchanged,
+            # encode/pipe cost drastically reduced)
+            vf_used   = out_vf.replace(f"fps={8 if stream_w < 3840 else 4}", "fps=2")
+            fps_label = "low-fps"
+        else:
+            vf_used   = out_vf
+            fps_label = "normal"
+
         log.info(f"SNAP [{camera_id}]: ffmpeg starting "
-                 f"(codec={stream_codec or '?'}, {hw_label}, vf={out_vf})")
+                 f"(codec={stream_codec or '?'}, {hw_label}, {fps_label}, vf={vf_used})")
         return await asyncio.create_subprocess_exec(
             "ffmpeg", "-nostdin", "-loglevel", "warning",
             "-rtsp_transport", "tcp", "-timeout", "8000000",
+            *skip_args,
             *hw_args,
             "-i", url,
-            "-an", "-vf", out_vf,
+            "-an", "-vf", vf_used,
+            *thread_args,
             "-vcodec", "mjpeg", "-pix_fmt", "yuvj420p",
             "-q:v", "5", "-f", "image2pipe", "pipe:1",
             stdin=asyncio.subprocess.DEVNULL,
@@ -3615,14 +3660,30 @@ async def snap_loop(camera_id: str, url: str, camera: dict) -> None:
                 log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s — stopping")
                 return
 
-            # Select decoder (skip hw if known unavailable)
+            # Focus-mode throttle: if another camera has focus, sleep most of
+            # the time so the focused camera gets the CPU.
+            if _FOCUSED_CAMERA and _FOCUSED_CAMERA != camera_id:
+                await asyncio.sleep(1.0)   # ~1fps while another cam is focused
+                continue
+
+            # Stagger polling start times across cameras to spread CPU spikes.
+            if CFG_STAGGER_POLL and state["frame_count"] == 0:
+                idx = list(_SNAP.keys()).index(camera_id) if camera_id in _SNAP else 0
+                await asyncio.sleep(idx * 0.04)   # 40ms offset per camera
+
+            # Select decoder
+            # Respect CFG_HW_DECODE toggle: if disabled, skip hw entirely.
             wanted_hw = ("hevc_v4l2m2m" if is_hevc else
                          ("h264_v4l2m2m" if stream_codec == "h264" else ""))
-            hw_dec    = "" if wanted_hw in _HW_UNAVAILABLE else wanted_hw
-            if wanted_hw and not hw_dec:
+            if not CFG_HW_DECODE:
+                hw_dec = ""
+            elif wanted_hw in _HW_UNAVAILABLE:
+                hw_dec = ""
                 log.info(f"SNAP [{camera_id}]: skipping {wanted_hw} (known unavailable)")
+            else:
+                hw_dec = wanted_hw
 
-            proc     = await _launch_snap(hw_dec)
+            proc     = await _launch_snap(hw_dec, native_res=native_res)
             state["proc"] = proc
             stderr_t = asyncio.create_task(_drain_stderr(proc, f"SNAP:{camera_id}"))
             buf      = b""
@@ -3712,6 +3773,31 @@ async def snap_loop(camera_id: str, url: str, camera: dict) -> None:
                             log.info(f"SNAP [{camera_id}]: frame {frames} "
                                      f"— {len(frame)} bytes "
                                      f"(last poll {poll_ago:.1f}s ago)")
+
+                        # Motion detection — runs only when enabled for this camera.
+                        # Uses JPEG size comparison: a scene with motion has more
+                        # high-frequency content and compresses to a larger file.
+                        ms = _MOTION.get(camera_id)
+                        if ms and ms["enabled"]:
+                            motion = _detect_motion(
+                                ms.get("prev_frame"), frame, CFG_MOTION_SENS)
+                            ms["prev_frame"] = frame
+                            now_m = time.monotonic()
+                            if motion:
+                                ms["last_motion"] = now_m
+                                if not ms["recording"]:
+                                    cam_url = build_authenticated_url(
+                                        CAMERAS.get(camera_id, {}))
+                                    if cam_url:
+                                        asyncio.create_task(
+                                            _start_recording(camera_id,
+                                                CAMERAS[camera_id], cam_url))
+                            elif ms["recording"]:
+                                # Stop after cooldown + padding with no motion
+                                idle = now_m - ms.get("last_motion", 0)
+                                if idle > CFG_MOTION_COOL + CFG_MOTION_PAD:
+                                    asyncio.create_task(
+                                        _stop_recording(camera_id))
 
             except asyncio.CancelledError:
                 log.info(f"SNAP [{camera_id}]: task cancelled")
@@ -3839,6 +3925,313 @@ async def handle_snap_status(request: web.Request) -> web.Response:
             "restarts":     state.get("restart_count", 0),
         }
     return web.json_response(result)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Focus view endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def handle_focus_set(request: web.Request) -> web.Response:
+    """POST /snap/focus/{camera_id} — enter full-screen focus mode."""
+    global _FOCUSED_CAMERA
+    camera_id = request.match_info["camera_id"]
+    if camera_id not in CAMERAS:
+        return web.json_response({"error": "Camera not found"}, status=404)
+    _FOCUSED_CAMERA = camera_id
+    log.info(f"Focus: entering enhanced view for {camera_id}")
+    # Ensure snap_loop is running for this camera in native-res mode
+    camera = CAMERAS[camera_id]
+    url    = build_authenticated_url(camera)
+    if url:
+        state = _snap_state(camera_id)
+        if state.get("task") is None or state["task"].done():
+            state["task"] = asyncio.create_task(
+                snap_loop(camera_id, url, camera, native_res=True))
+    return web.json_response({"status": "ok", "focused": camera_id})
+
+
+async def handle_focus_clear(request: web.Request) -> web.Response:
+    """DELETE /snap/focus — exit full-screen focus mode."""
+    global _FOCUSED_CAMERA
+    log.info(f"Focus: leaving enhanced view (was: {_FOCUSED_CAMERA})")
+    _FOCUSED_CAMERA = None
+    return web.json_response({"status": "ok"})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Motion detection + recording
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Per-camera motion state
+_MOTION: dict = {}   # camera_id → {enabled, recording, last_motion, proc, clip_path}
+
+def _motion_state(camera_id: str) -> dict:
+    if camera_id not in _MOTION:
+        _MOTION[camera_id] = {
+            "enabled":      False,
+            "recording":    False,
+            "last_motion":  0.0,
+            "proc":         None,
+            "clip_path":    None,
+            "prev_frame":   None,   # bytes of previous JPEG for comparison
+        }
+    return _MOTION[camera_id]
+
+
+def _detect_motion(prev_jpeg: bytes, curr_jpeg: bytes, sensitivity: int) -> bool:
+    """
+    Fast motion detection by comparing JPEG file sizes.
+    JPEG size is strongly correlated with image entropy — a scene with motion
+    has more high-frequency content and compresses less.  Size difference
+    > threshold% of the smaller size → motion detected.
+
+    sensitivity: 1-100 (higher = more sensitive, triggers on smaller changes)
+    threshold%  = (100 - sensitivity) / 10  → sensitivity=15 → 8.5% threshold
+    """
+    if not prev_jpeg or not curr_jpeg:
+        return False
+    small = min(len(prev_jpeg), len(curr_jpeg))
+    diff  = abs(len(curr_jpeg) - len(prev_jpeg))
+    threshold_pct = (101 - sensitivity) / 10.0   # sensitivity=15 → 8.6%
+    return (diff / max(small, 1)) * 100 > threshold_pct
+
+
+def _cam_folder_name(camera: dict) -> str:
+    """Derive a short filesystem-safe folder name from the camera display name."""
+    name = camera.get("name", "") or camera.get("ip", "unknown")
+    # Strip common useless prefixes
+    for prefix in ("Generic IP Camera", "Generic", "Unknown Camera", "Unknown"):
+        if name.startswith(prefix):
+            name = name[len(prefix):].lstrip(" ()")
+    # Strip parenthetical IP: "(10.0.0.22)"
+    import re as _re
+    name = _re.sub(r"\(\d+\.\d+\.\d+\.\d+\)", "", name)
+    # Replace em-dash profile separator
+    name = name.replace(" — ", "_").replace("—", "_")
+    # Keep only alphanumeric + underscore
+    name = _re.sub(r"[^a-zA-Z0-9_]", "_", name)
+    name = _re.sub(r"_+", "_", name).strip("_").lower()
+    if not name:
+        name = camera.get("ip", "camera").replace(".", "_")
+    # Ensure uniqueness via IP last octet suffix if name is generic
+    if len(name) < 4 or name in ("main", "sub", "stream"):
+        ip = camera.get("ip", "")
+        suffix = ip.split(".")[-1] if ip else ""
+        if suffix:
+            name = f"{name}_{suffix}"
+    return name[:30]
+
+
+async def _ensure_cam_dir(camera: dict) -> Path:
+    """Create and return the recording directory for a camera."""
+    folder = _cam_folder_name(camera)
+    path   = MEDIA_DIR / folder
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
+    """Start an ffmpeg recording subprocess for this camera (stream-copy, full quality)."""
+    ms = _motion_state(camera_id)
+    if ms["recording"] and ms["proc"] and ms["proc"].returncode is None:
+        return  # already recording
+    cam_dir  = await _ensure_cam_dir(camera)
+    ts       = time.strftime("%Y%m%d_%H%M%S")
+    clip     = cam_dir / f"motion_{ts}.mp4"
+    ms["clip_path"] = clip
+    log.info(f"Motion [{camera_id}]: recording started → {clip}")
+    try:
+        ms["proc"] = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-nostdin", "-loglevel", "warning",
+            "-rtsp_transport", "tcp", "-timeout", "8000000",
+            "-i", url,
+            "-c", "copy",   # stream-copy: no decode/encode — nearly zero CPU
+            "-movflags", "+faststart",
+            str(clip),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        ms["recording"] = True
+    except Exception as ex:
+        log.warning(f"Motion [{camera_id}]: failed to start recording: {ex}")
+
+
+async def _stop_recording(camera_id: str) -> None:
+    """Gracefully stop the recording ffmpeg process."""
+    ms = _motion_state(camera_id)
+    if not ms["recording"]:
+        return
+    proc = ms.get("proc")
+    if proc and proc.returncode is None:
+        try:
+            proc.stdin  # just accessing it is harmless
+            proc.terminate()
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except Exception:
+            try: proc.kill()
+            except Exception: pass
+    log.info(f"Motion [{camera_id}]: recording stopped → {ms.get('clip_path')}")
+    ms["recording"] = False
+    ms["proc"]      = None
+
+
+async def api_motion_toggle(request: web.Request) -> web.Response:
+    """POST /api/cameras/{camera_id}/motion — toggle motion detection on/off."""
+    camera_id = request.match_info["camera_id"]
+    camera    = CAMERAS.get(camera_id)
+    if not camera:
+        return web.json_response({"error": "Not found"}, status=404)
+    ms = _motion_state(camera_id)
+    ms["enabled"] = not ms["enabled"]
+    if not ms["enabled"]:
+        await _stop_recording(camera_id)
+    log.info(f"Motion [{camera_id}]: {'enabled' if ms['enabled'] else 'disabled'}")
+    return web.json_response({"motion_enabled": ms["enabled"]})
+
+
+async def api_motion_status(request: web.Request) -> web.Response:
+    """GET /api/cameras/{camera_id}/motion — current motion detection state."""
+    camera_id = request.match_info["camera_id"]
+    ms = _motion_state(camera_id)
+    return web.json_response({
+        "motion_enabled": ms["enabled"],
+        "recording":      ms["recording"],
+        "clip_path":      str(ms["clip_path"]) if ms.get("clip_path") else None,
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Storage browser
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def handle_storage_page(request: web.Request) -> web.Response:
+    """GET /storage — redirect to main app; storage is a JS view within the SPA."""
+    raise web.HTTPFound(INGRESS_PATH + "/")
+
+
+async def api_storage_list(request: web.Request) -> web.Response:
+    """GET /api/storage — list cameras/files in the recordings directory."""
+    import shutil as _shutil
+    try:
+        du  = _shutil.disk_usage(str(MEDIA_DIR.parent if not MEDIA_DIR.exists()
+                                     else MEDIA_DIR))
+        pct = round(du.used / du.total * 100, 1) if du.total else 0
+        disk = {
+            "total_gb": round(du.total / 1e9, 1),
+            "used_gb":  round(du.used  / 1e9, 1),
+            "free_gb":  round(du.free  / 1e9, 1),
+            "pct_used": pct,
+        }
+    except Exception:
+        disk = {"total_gb": 0, "used_gb": 0, "free_gb": 0, "pct_used": 0}
+
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    folders = []
+    for cam_dir in sorted(MEDIA_DIR.iterdir()):
+        if not cam_dir.is_dir():
+            continue
+        files = []
+        for f in sorted(cam_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+            if f.is_file() and f.suffix in (".mp4", ".mkv", ".jpg", ".jpeg"):
+                st = f.stat()
+                files.append({
+                    "name":     f.name,
+                    "size_mb":  round(st.st_size / 1e6, 2),
+                    "mtime":    int(st.st_mtime),
+                    "path":     str(f.relative_to(MEDIA_DIR)),
+                })
+        folders.append({
+            "folder":   cam_dir.name,
+            "files":    files,
+            "count":    len(files),
+            "size_mb":  round(sum(f["size_mb"] for f in files), 1),
+        })
+    return web.json_response({"disk": disk, "folders": folders})
+
+
+async def api_storage_rename(request: web.Request) -> web.Response:
+    """POST /api/storage/rename — rename a file or folder."""
+    try:
+        data     = await request.json()
+        old_rel  = Path(data["old_path"])
+        new_name = data["new_name"].strip()
+    except Exception:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    if not new_name or "/" in new_name or chr(92) in new_name:
+        return web.json_response({"error": "Invalid name"}, status=400)
+    old_abs = MEDIA_DIR / old_rel
+    new_abs = old_abs.parent / new_name
+    if not old_abs.exists():
+        return web.json_response({"error": "Not found"}, status=404)
+    if new_abs.exists():
+        return web.json_response({"error": "Name already exists"}, status=409)
+    try:
+        old_abs.rename(new_abs)
+        log.info(f"Storage: renamed {old_abs} → {new_abs}")
+        return web.json_response({"status": "ok"})
+    except Exception as ex:
+        return web.json_response({"error": str(ex)}, status=500)
+
+
+async def api_storage_move(request: web.Request) -> web.Response:
+    """POST /api/storage/move — move a file to a different camera folder."""
+    import shutil as _shutil
+    try:
+        data       = await request.json()
+        src_rel    = Path(data["src_path"])
+        dst_folder = data["dst_folder"].strip()
+    except Exception:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    src_abs = MEDIA_DIR / src_rel
+    dst_abs = MEDIA_DIR / dst_folder / src_abs.name
+    if not src_abs.exists() or not src_abs.is_file():
+        return web.json_response({"error": "Source not found"}, status=404)
+    dst_abs.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _shutil.move(str(src_abs), str(dst_abs))
+        log.info(f"Storage: moved {src_abs} → {dst_abs}")
+        return web.json_response({"status": "ok"})
+    except Exception as ex:
+        return web.json_response({"error": str(ex)}, status=500)
+
+
+async def api_storage_delete(request: web.Request) -> web.Response:
+    """DELETE /api/storage/file — delete a recording file."""
+    try:
+        data    = await request.json()
+        rel     = Path(data["path"])
+    except Exception:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    abs_path = MEDIA_DIR / rel
+    # Safety: only allow deleting files inside MEDIA_DIR
+    try:
+        abs_path.resolve().relative_to(MEDIA_DIR.resolve())
+    except ValueError:
+        return web.json_response({"error": "Forbidden"}, status=403)
+    if not abs_path.is_file():
+        return web.json_response({"error": "Not found"}, status=404)
+    try:
+        abs_path.unlink()
+        log.info(f"Storage: deleted {abs_path}")
+        return web.json_response({"status": "ok"})
+    except Exception as ex:
+        return web.json_response({"error": str(ex)}, status=500)
+
+
+async def api_storage_download(request: web.Request) -> web.Response:
+    """GET /api/storage/download?path=folder/file.mp4"""
+    rel  = request.rel_url.query.get("path", "")
+    if not rel:
+        return web.Response(status=400)
+    abs_path = MEDIA_DIR / Path(rel)
+    try:
+        abs_path.resolve().relative_to(MEDIA_DIR.resolve())
+    except ValueError:
+        return web.Response(status=403)
+    if not abs_path.is_file():
+        return web.Response(status=404)
+    return web.FileResponse(abs_path)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # REST API
@@ -4262,11 +4655,12 @@ let cameras=[], pollT=null, pscanT=null, renameId=null, _paused=false;
 /* ── View switching ────────────────────────────────────────────────────────── */
 function switchView(v) {
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
-  document.getElementById(
-    v === 'cameras' ? 'cameras-view' : v === 'pscan' ? 'pscan-view' : 'add-view'
-  ).classList.add('active');
+  const viewMap = {cameras: 'cameras-view', pscan: 'pscan-view', add: 'add-view', storage: 'storage-view'};
+  document.getElementById(viewMap[v] || 'cameras-view').classList.add('active');
   document.getElementById('pscan-btn').classList.toggle('active', v === 'pscan');
   document.getElementById('add-btn').classList.toggle('active', v === 'add');
+  document.getElementById('storage-btn').classList.toggle('active', v === 'storage');
+  if (v === 'storage') loadStorage();
   if (v === 'pscan') {
     loadArpHosts();
     fetch(BASE + '/api/pscan/status').then(r => r.json()).then(s => {
@@ -4417,15 +4811,257 @@ function initSnaps() {
     startSnap(img.dataset.snap);
   });
 }
+/* Called after renderGrid() to start polling for all visible snap cameras */
+function initSnaps() {
+  document.querySelectorAll('[data-snap]').forEach(img => {
+    // Click-to-focus: open enhanced view on click
+    img.style.cursor = 'pointer';
+    img.onclick = () => openFocus(img.dataset.snap);
+    startSnap(img.dataset.snap);
+  });
+}
+
+/* ── Motion detection state (mirrored from server) ──────────────────────── */
+const _motionEnabled = {};   // camId → bool
+const _recording     = {};   // camId → bool
+
+async function toggleMotion(camId) {
+  try {
+    const r = await fetch(BASE + '/api/cameras/' + camId + '/motion', {method: 'POST'});
+    const d = await r.json();
+    _motionEnabled[camId] = d.motion_enabled;
+    _recording[camId]     = d.recording || false;
+    // Rebuild just this card
+    const cam = cameras.find(c => c.id === camId);
+    if (cam) updateCard(cam);
+  } catch(e) { console.error('toggleMotion error:', e); }
+}
+
+/* Poll motion status for all ready cameras every 3s */
+function pollMotion() {
+  cameras.filter(c => c.status === 'ready' && _motionEnabled[c.id]).forEach(async cam => {
+    try {
+      const d = await (await fetch(BASE + '/api/cameras/' + cam.id + '/motion')).json();
+      const wasRec = _recording[cam.id];
+      _recording[cam.id] = d.recording;
+      if (wasRec !== d.recording) updateCard(cam);   // refresh button state
+    } catch(e) {}
+  });
+}
+setInterval(pollMotion, 3000);
+
+/* ── Focus / enhanced view ───────────────────────────────────────────────── */
+let _focusCamId   = null;
+let _focusTimer   = null;
+let _focusWarnOK  = {};   // camId → bool (user acknowledged warning this session)
+
+function _estimateCpuPct(cam) {
+  // Rough heuristic: hevc cost based on pixels × fps relative to Pi 4 capacity
+  const codec = (cam.stream_codec || '').toLowerCase();
+  const w     = cam.stream_width  || 1280;
+  const h     = cam.stream_height || 720;
+  const fps   = cam.stream_fps    || 10;
+  const isH   = codec === 'hevc' || codec === 'h265';
+  // Pi 4 baseline: hevc 1920×1080×30 ≈ 50% of 4 cores = 200% cpu equiv
+  const basePx = 1920 * 1080 * 30;
+  const thisPx = w * h * fps * (isH ? 2.5 : 1.0);   // hevc costs ~2.5× h264
+  return Math.round((thisPx / basePx) * 50);
+}
+
+async function openFocus(camId) {
+  const cam = cameras.find(c => c.id === camId);
+  if (!cam || cam.status !== 'ready') return;
+
+  // CPU warning if this stream will likely overload the Pi
+  const pct = _estimateCpuPct(cam);
+  if (pct > 80 && !_focusWarnOK[camId]) {
+    const fps = cam.stream_fps || '?';
+    const res = (cam.stream_width || '?') + 'x' + (cam.stream_height || '?');
+    const warnEl = document.getElementById('focus-warning');
+    document.getElementById('focus-warn-text').textContent =
+      'This view runs at maximum quality: ' + fps + ' fps @ ' + res
+      + '. Estimated CPU load: ~' + pct + '%. This may overload your system.';
+    // Show overlay first, then show warning
+    document.getElementById('focus-overlay').style.display = 'flex';
+    warnEl.style.display = 'flex';
+    // OK button handler
+    const okBtn = warnEl.querySelector('button');
+    okBtn.onclick = () => {
+      _focusWarnOK[camId] = true;
+      warnEl.style.display = 'none';
+      _startFocusPoll(camId, cam);
+    };
+    return;
+  }
+
+  document.getElementById('focus-overlay').style.display = 'flex';
+  _startFocusPoll(camId, cam);
+}
+
+async function _startFocusPoll(camId, cam) {
+  _focusCamId = camId;
+  // Tell server: enter focus mode (other cams throttle, this cam goes native res)
+  await fetch(BASE + '/snap/focus/' + camId, {method: 'POST'}).catch(() => {});
+
+  const img     = document.getElementById('focus-img');
+  const infoEl  = document.getElementById('focus-info');
+  const fps     = cam.stream_fps    || '?';
+  const res     = (cam.stream_width || '?') + 'x' + (cam.stream_height || '?');
+  const codec   = (cam.stream_codec || '?').toUpperCase();
+  infoEl.textContent = (cam.name || cam.ip) + ' — ' + res + ' · ' + fps + ' fps · ' + codec;
+
+  // Fast polling: 60ms intervals (~16fps attempt at native res)
+  const poll = () => {
+    if (_focusCamId !== camId) return;
+    const loader  = new Image();
+    loader.onload = () => { img.src = loader.src; };
+    loader.src    = BASE + '/snapshot/' + camId + '?t=' + Date.now() + '&focus=1';
+    _focusTimer   = setTimeout(poll, 60);
+  };
+  poll();
+}
+
+async function closeFocus() {
+  _focusCamId = null;
+  clearTimeout(_focusTimer);
+  await fetch(BASE + '/snap/focus', {method: 'DELETE'}).catch(() => {});
+  document.getElementById('focus-overlay').style.display = 'none';
+  document.getElementById('focus-img').src = '';
+  document.getElementById('focus-warning').style.display = 'none';
+}
+
+// Close focus on Escape key
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && _focusCamId) closeFocus();
+});
+
+/* ── Storage browser ─────────────────────────────────────────────────────── */
+let _storageData    = null;
+let _dragSrc        = null;   // {path, folder} of file being dragged
+
+async function loadStorage() {
+  document.getElementById('storage-list').innerHTML
+    = '<p style="color:var(--text-dim);padding:24px">Loading...</p>';
+  try {
+    const d = await (await fetch(BASE + '/api/storage')).json();
+    _storageData = d;
+    renderStorage(d);
+  } catch(e) {
+    document.getElementById('storage-list').innerHTML
+      = '<p style="color:var(--red)">Error loading storage: ' + esc(String(e)) + '</p>';
+  }
+}
+
+function renderStorage(d) {
+  const disk  = d.disk || {};
+  const pct   = disk.pct_used || 0;
+  const label = document.getElementById('disk-label');
+  const fill  = document.getElementById('disk-bar-fill');
+  label.textContent = 'Storage: ' + pct + '% used — '
+    + (disk.free_gb || 0) + ' GB free of ' + (disk.total_gb || 0) + ' GB';
+  fill.style.width = Math.min(pct, 100) + '%';
+  fill.style.background = pct > 90 ? 'var(--red)' : pct > 70 ? 'var(--orange)' : 'var(--primary)';
+
+  const list = document.getElementById('storage-list');
+  if (!d.folders || !d.folders.length) {
+    list.innerHTML = '<p style="color:var(--text-dim);padding:24px">No recordings yet. Enable motion detection on a camera to start recording.</p>';
+    return;
+  }
+
+  list.innerHTML = d.folders.map(folder => `
+    <div class="stor-folder" id="sf-${esc(folder.folder)}"
+         ondragover="e=>e.preventDefault()"
+         ondrop="storDrop(event, '${esc(folder.folder)}')">
+      <div class="stor-folder-hdr">
+        <span class="stor-folder-name" title="Click to rename"
+              ondblclick="storRenameFolder('${esc(folder.folder)}')">${esc(folder.folder)}</span>
+        <span class="stor-folder-meta">${folder.count} clip${folder.count !== 1 ? 's' : ''} · ${folder.size_mb} MB</span>
+      </div>
+      <div class="stor-files">
+        ${folder.files.length ? folder.files.map(f => `
+          <div class="stor-file" draggable="true"
+               ondragstart="storDragStart(event,'${esc(folder.folder + '/' + f.name)}','${esc(folder.folder)}')">
+            <span class="stor-file-icon">🎬</span>
+            <span class="stor-file-name" title="Double-click to rename"
+                  ondblclick="storRenameFile('${esc(folder.folder + '/' + f.name)}', '${esc(f.name)}')">${esc(f.name)}</span>
+            <span class="stor-file-size">${f.size_mb} MB</span>
+            <span class="stor-file-date">${new Date(f.mtime * 1000).toLocaleString()}</span>
+            <a class="btn btn-ghost btn-xs" href="${BASE}/api/storage/download?path=${encodeURIComponent(folder.folder + '/' + f.name)}" download>&#x2B07;</a>
+            <button class="btn btn-danger btn-xs" onclick="storDeleteFile('${esc(folder.folder + '/' + f.name)}')">&#x1F5D1;</button>
+          </div>`).join('')
+        : '<span class="stor-empty">No recordings</span>'}
+      </div>
+    </div>`).join('');
+}
+
+function storDragStart(e, path, folder) {
+  _dragSrc = {path, folder};
+  e.dataTransfer.effectAllowed = 'move';
+}
+
+async function storDrop(e, dstFolder) {
+  e.preventDefault();
+  if (!_dragSrc || _dragSrc.folder === dstFolder) return;
+  const r = await fetch(BASE + '/api/storage/move', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({src_path: _dragSrc.path, dst_folder: dstFolder})
+  });
+  if (r.ok) { showToast('Moved to ' + dstFolder); loadStorage(); }
+  else showToast('Move failed', true);
+  _dragSrc = null;
+}
+
+async function storDeleteFile(path) {
+  if (!confirm('Delete ' + path.split('/').pop() + '?')) return;
+  const r = await fetch(BASE + '/api/storage/file', {
+    method: 'DELETE', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path})
+  });
+  if (r.ok) { showToast('Deleted'); loadStorage(); }
+  else showToast('Delete failed', true);
+}
+
+function storRenameFile(path, oldName) {
+  const newName = prompt('Rename file:', oldName);
+  if (!newName || newName === oldName) return;
+  fetch(BASE + '/api/storage/rename', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({old_path: path, new_name: newName})
+  }).then(r => { if (r.ok) { showToast('Renamed'); loadStorage(); } else showToast('Rename failed', true); });
+}
+
+function storRenameFolder(folder) {
+  const newName = prompt('Rename folder:', folder);
+  if (!newName || newName === folder) return;
+  fetch(BASE + '/api/storage/rename', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({old_path: folder, new_name: newName})
+  }).then(r => { if (r.ok) { showToast('Renamed'); loadStorage(); } else showToast('Rename failed', true); });
+}
+
+/* ── Toast notification ──────────────────────────────────────────────────── */
+let _toastTimer = null;
+function showToast(msg, isError = false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.background  = isError ? 'var(--red)' : 'var(--primary)';
+  t.style.display     = 'block';
+  t.style.opacity     = '1';
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => {
+    t.style.opacity = '0';
+    setTimeout(() => { t.style.display = 'none'; }, 300);
+  }, 2500);
+}
+
+
 
 /* ── Camera grid ───────────────────────────────────────────────────────────── */
 function renderGrid() {
   const grid  = document.getElementById('cam-grid');
   const empty = document.getElementById('empty-state');
   const count = document.getElementById('cam-count');
-  count.textContent = cameras.length
-    ? cameras.length + ' device' + (cameras.length !== 1 ? 's' : '') + ' found'
-    : '';
+  count.textContent = '';   // device count shown in scan status bar — not duplicated here
   empty.style.display = cameras.length ? 'none' : '';
 
   const existingIds = new Set([...grid.querySelectorAll('.camera-card')].map(c => c.dataset.id));
@@ -4580,10 +5216,16 @@ function cardActions(cam, clearBtn, notCamBtn) {
   const testBtn = (cam.status === 'ready' && ['proxy','hls'].includes(cam.display || 'proxy'))
     ? '<button class="btn btn-ghost btn-sm" onclick="testStream(event,\'' + cam.id + '\')" title="Test stream connectivity">Test Stream</button>'
     : '';
-  return testBtn + clearBtn + notCamBtn
+  const motOn = !!_motionEnabled[cam.id];
+  const recOn = !!_recording[cam.id];
+  const recBtn = (cam.status === 'ready' && ['proxy'].includes(cam.display || 'proxy'))
+    ? '<button class="btn btn-sm ' + (recOn ? 'btn-rec-active' : (motOn ? 'btn-rec-on' : 'btn-rec-off'))
+      + '" onclick="toggleMotion(\'' + cam.id + '\')" title="' + (motOn ? 'Motion recording on' : 'Enable motion recording') + '">'
+      + (recOn ? '⏺ REC' : (motOn ? '⏺ Armed' : '⏺ Record')) + '</button>'
+    : '';
+  return testBtn + clearBtn + notCamBtn + recBtn
        + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(\'' + cam.id + '\')">Remove</button>';
 }
-
 async function testStream(ev, cid) {
   const btn = ev.target, orig = btn.textContent;
   btn.textContent = 'Testing...'; btn.disabled = true;
@@ -5185,6 +5827,45 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 #add-view h2{{font-size:.95rem;font-weight:600;margin-bottom:14px}}
 .fgrid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
 .fgrid .full{{grid-column:1/-1}}
+/* ── Record button variants ── */
+.btn-rec-off{{background:#2a2a2a;color:#888;border:1px solid #444}}
+.btn-rec-on{{background:#1e3a1e;color:#6fcf97;border:1px solid #2d5a2d}}
+.btn-rec-active{{background:#4a1a1a;color:#ff6b6b;border:1px solid #8b2020;animation:rec-pulse 1.2s ease-in-out infinite}}
+@keyframes rec-pulse{{0%,100%{{opacity:1}}50%{{opacity:.6}}}}
+/* ── Storage view ── */
+#storage-view{{padding:20px}}
+#storage-header{{display:flex;align-items:center;gap:16px;margin-bottom:20px;padding:14px 18px;background:var(--card-bg);border-radius:10px;border:1px solid var(--border)}}
+#disk-bar-wrap{{flex:1}}
+#disk-label{{font-size:.82rem;color:var(--text-dim);display:block;margin-bottom:6px}}
+#disk-bar-track{{height:8px;background:#2a2a2a;border-radius:4px;overflow:hidden}}
+#disk-bar-fill{{height:100%;border-radius:4px;transition:width .4s,background .4s}}
+#storage-list{{display:flex;flex-direction:column;gap:14px}}
+.stor-folder{{background:var(--card-bg);border:2px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .2s}}
+.stor-folder[ondragover]{{border-color:var(--primary)}}
+.stor-folder-hdr{{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:#1a1a1a;border-bottom:1px solid var(--border)}}
+.stor-folder-name{{font-weight:600;cursor:pointer;color:var(--text)}}
+.stor-folder-name:hover{{color:var(--primary)}}
+.stor-folder-meta{{font-size:.78rem;color:var(--text-dim)}}
+.stor-files{{padding:8px}}
+.stor-file{{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;cursor:grab;transition:background .15s}}
+.stor-file:hover{{background:#1e2a1e}}
+.stor-file-icon{{font-size:1.1rem;flex-shrink:0}}
+.stor-file-name{{flex:1;font-size:.84rem;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}}
+.stor-file-name:hover{{color:var(--primary)}}
+.stor-file-size{{font-size:.74rem;color:var(--text-dim);white-space:nowrap}}
+.stor-file-date{{font-size:.74rem;color:var(--text-dim);white-space:nowrap}}
+.stor-empty{{font-size:.8rem;color:var(--text-dim);padding:8px 10px;display:block}}
+.btn-xs{{padding:3px 8px;font-size:.72rem}}
+/* ── Focus overlay ── */
+#focus-overlay{{position:fixed;inset:0;background:#000;z-index:9000;display:flex;flex-direction:column;align-items:center;justify-content:center}}
+#focus-close{{position:absolute;top:16px;right:20px;background:#222;border:1px solid #444;color:#fff;font-size:1.4rem;width:40px;height:40px;border-radius:50%;cursor:pointer;z-index:9001;line-height:1}}
+#focus-close:hover{{background:#444}}
+#focus-img{{max-width:100%;max-height:calc(100vh - 60px);object-fit:contain;display:block}}
+#focus-info{{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);font-size:.8rem;color:#aaa;background:rgba(0,0,0,.6);padding:4px 12px;border-radius:20px;white-space:nowrap}}
+#focus-warning{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a1a;border:1px solid var(--orange);border-radius:10px;padding:24px;max-width:480px;text-align:center;z-index:9002;display:flex;flex-direction:column;gap:14px;align-items:center}}
+#focus-warn-text{{color:#f5b942;font-size:.9rem;line-height:1.5}}
+/* ── Toast ── */
+#toast{{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);padding:10px 22px;border-radius:24px;color:#fff;font-size:.85rem;z-index:9100;pointer-events:none;transition:opacity .3s}}
 .field label{{display:block;font-size:.7rem;color:var(--text-dim);font-weight:600;letter-spacing:.04em;margin-bottom:3px}}
 .field input,.field select{{width:100%;background:var(--surface);border:1px solid var(--border);
   color:var(--text);border-radius:8px;padding:7px 10px;font-size:.84rem;outline:none}}
@@ -5239,11 +5920,12 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
   <span id="cam-count" style="color:var(--text-dim);font-size:.78rem"></span>
   <label class="sweep-toggle" title="Scan ports 0-10000 on live hosts that don't respond to camera ports">
     <input type="checkbox" id="broad-sweep">
-    <span>Broad sweep<br><small style="font-weight:400;opacity:.6;font-size:.68rem">Ports 1&#x2013;10,000</small></span>
+    <span>Deeper Scan<br><small style="font-weight:400;opacity:.6;font-size:.68rem">Ports 1&#x2013;10,000</small></span>
   </label>
   <button class="btn btn-primary"   id="scan-btn"  onclick="startScan()">&#x1F50D; Scan Network</button>
-  <button class="btn btn-secondary" id="pscan-btn" onclick="switchView('pscan')">&#x1F50E; Port Scan</button>
-  <button class="btn btn-secondary" id="add-btn"   onclick="switchView('add')">&#x2795; Connect Camera</button>
+  <button class="btn btn-secondary" id="pscan-btn"    onclick="switchView('pscan')">&#x1F50E; Port Scan</button>
+  <button class="btn btn-secondary" id="add-btn"      onclick="switchView('add')">&#x2795; Connect Camera</button>
+  <button class="btn btn-secondary" id="storage-btn"  onclick="switchView('storage')">&#x1F4BE; Storage</button>
 </header>
 
 <div id="status-bar">
@@ -5380,6 +6062,32 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 <script>
 """ + js_code + """
 </script>
+<!-- ── Storage view ───────────────────────────────────────────────────────── -->
+<div class="view" id="storage-view">
+  <div id="storage-header">
+    <div id="disk-bar-wrap">
+      <span id="disk-label">Loading storage info...</span>
+      <div id="disk-bar-track"><div id="disk-bar-fill"></div></div>
+    </div>
+    <button class="btn btn-secondary btn-sm" onclick="loadStorage()">&#x21BB; Refresh</button>
+  </div>
+  <div id="storage-list"></div>
+</div>
+
+<!-- ── Focus / full-screen enhanced view overlay ──────────────────────────── -->
+<div id="focus-overlay" style="display:none">
+  <button id="focus-close" onclick="closeFocus()" title="Exit enhanced view">&#x2715;</button>
+  <div id="focus-warning" style="display:none">
+    <span id="focus-warn-text"></span>
+    <button onclick="document.getElementById('focus-warning').style.display='none'">OK</button>
+  </div>
+  <img id="focus-img" alt="Enhanced view">
+  <div id="focus-info"></div>
+</div>
+
+<!-- ── Toast notification ─────────────────────────────────────────────────── -->
+<div id="toast" style="display:none"></div>
+
 </body>
 </html>"""
 
@@ -5412,6 +6120,15 @@ def make_app() -> web.Application:
     app.router.add_get(   "/stream/{camera_id}/test",             handle_stream_test)
     app.router.add_get(   "/snapshot/{camera_id}",                handle_snapshot)
     app.router.add_get(   "/snap/status",                         handle_snap_status)
+    app.router.add_post(  "/snap/focus/{camera_id}",              handle_focus_set)
+    app.router.add_delete("/snap/focus",                          handle_focus_clear)
+    app.router.add_post(  "/api/cameras/{camera_id}/motion",      api_motion_toggle)
+    app.router.add_get(   "/api/cameras/{camera_id}/motion",      api_motion_status)
+    app.router.add_get(   "/api/storage",                         api_storage_list)
+    app.router.add_post(  "/api/storage/rename",                  api_storage_rename)
+    app.router.add_post(  "/api/storage/move",                    api_storage_move)
+    app.router.add_delete("/api/storage/file",                    api_storage_delete)
+    app.router.add_get(   "/api/storage/download",                api_storage_download)
     app.router.add_get(   "/api/arp_hosts",                        api_arp_hosts)
     app.router.add_post(  "/api/pscan/start",                     api_pscan_start)
     app.router.add_get(   "/api/pscan/status",                    api_pscan_status)

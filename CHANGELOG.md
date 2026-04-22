@@ -1,5 +1,56 @@
 # AnyCam — Changelog
 
+## 1.7.0
+- Performance toggles (A-F) in HA App Configuration tab:
+  A: low_fps_mode (default ON) — reduces HEVC output to 2fps while ffmpeg
+     still decodes at source rate; dramatically cuts CPU encode/pipe cost;
+     recommended for multi-camera Pi setups
+  B: skip_nonref (default OFF) — adds -skip_frame nonref to ffmpeg input;
+     skips B/P frames during HEVC decode (~40% CPU reduction, slightly choppy)
+  C: limit_threads (default ON) — adds -threads 2 per ffmpeg process; prevents
+     any single stream from monopolizing all 4 Pi cores
+  D: stagger_polling (default OFF) — offsets each camera's snap_loop start by
+     40ms * camera_index to spread CPU spikes across time
+  F: hw_decode (default OFF) — enables hevc_v4l2m2m / h264_v4l2m2m hardware
+     decoders; works on native Pi installs with V4L2 device access; not
+     available in HA Docker containers; when enabled, failed decoders are
+     NOT permanently marked unavailable (retried each stream start)
+  Also: recordings_path, motion_sensitivity, motion_cooldown_secs,
+        motion_clip_padding_secs configurable from the HA Config tab
+
+- Motion detection + recording: toggle per-camera with the ⏺ Record button
+  on each card; uses JPEG size comparison (fast, zero extra subprocess);
+  when motion detected, spawns ffmpeg -c copy directly from camera RTSP URL
+  for full-quality stream-copy recording (near-zero CPU); saves to
+  /media/anycam/{camera_folder}/ as motion_YYYYMMDD_HHMMSS.mp4; stops
+  recording after motion_cooldown_secs + motion_clip_padding_secs of
+  no motion; button shows ⏺ Record (off) / ⏺ Armed (on, no motion) /
+  ⏺ REC (active, pulsing red); motion state polled every 3s
+
+- Click-to-focus enhanced view: click any live camera feed to enter
+  full-screen mode; server sets _FOCUSED_CAMERA global, all other
+  snap_loops throttle to 1fps, focused camera runs at native camera
+  resolution/fps; CPU warning toast shown if estimated load >80% of Pi 4
+  capacity (based on codec×pixels×fps heuristic); press Escape or X to exit;
+  focus endpoints: POST /snap/focus/{id}, DELETE /snap/focus
+
+- Built-in storage browser (Storage button in header):
+  Shows disk usage bar (total/used/free/percent) for /media/anycam;
+  lists per-camera folders with clip count and total size; shows each
+  recording with size, date, download button, delete button; supports
+  drag-and-drop to move clips between camera folders; double-click any
+  filename or folder name to rename inline; folder names derived from
+  camera display name (strips "Generic IP Camera", "(IP)", truncates to
+  30 chars, filesystem-safe); storage endpoints: GET /api/storage,
+  POST /api/storage/rename, POST /api/storage/move,
+  DELETE /api/storage/file, GET /api/storage/download
+
+- Removed duplicate device count from header (scan status bar already shows it)
+- Renamed "Broad sweep" to "Deeper Scan" throughout UI and log messages
+- Added Storage button to header bar (between Connect Camera and right edge)
+- Toast notification system for storage actions (move, delete, rename)
+- /snap/status endpoint updated with focus state info
+
 ## 1.6.1
 - Critical fix: _drain_stderr was defined as a nested function inside
   handle_stream, making it invisible to snap_loop; every snap_loop call
