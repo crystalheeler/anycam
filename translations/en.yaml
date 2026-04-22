@@ -1,29 +1,29 @@
 configuration:
   low_fps_mode:
-    name: Low FPS Mode (Option A)
+    name: Low FPS Mode
     description: >-
       Recommended ON. Reduces HEVC output to 2 fps while ffmpeg still
       decodes at source rate. Dramatically cuts CPU encode/pipe cost with
       minimal visual impact for security monitoring.
   skip_nonref:
-    name: Skip Non-Reference Frames (Option B)
+    name: Skip Non-Reference Frames
     description: >-
       Default OFF. Adds -skip_frame nonref to ffmpeg input. Skips B/P
       frames during HEVC decode, reducing CPU ~40%. Causes slight choppiness.
       Use if streams still degrade with Low FPS Mode.
   limit_threads:
-    name: Limit Threads (Option C)
+    name: Limit Threads
     description: >-
       Recommended ON. Limits each ffmpeg process to 2 threads, preventing
       any one stream from monopolizing all 4 Pi cores and starving other cameras.
   stagger_polling:
-    name: Stagger Polling (Option D)
+    name: Stagger Polling
     description: >-
       Default OFF. Offsets each camera's decode loop start by 40ms per
       camera index, spreading CPU spikes across time instead of all hitting
       simultaneously. Most useful with 4 or more cameras.
   hw_decode:
-    name: Hardware Decode (Option F)
+    name: Hardware Decode
     description: >-
       Default OFF. Enables hevc_v4l2m2m / h264_v4l2m2m hardware decoders.
       Works on native Pi installs with V4L2 device access. Not available in

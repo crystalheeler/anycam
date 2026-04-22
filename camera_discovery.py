@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.7.1"  # must match config.yaml
+CURRENT_VERSION = "1.7.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -4717,12 +4717,11 @@ let cameras=[], pollT=null, pscanT=null, renameId=null, _paused=false;
 /* ── View switching ────────────────────────────────────────────────────────── */
 function switchView(v) {
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
-  const viewMap = {cameras: 'cameras-view', pscan: 'pscan-view', add: 'add-view', storage: 'storage-view', logs: 'logs-view'};
+  const viewMap = {cameras: 'cameras-view', pscan: 'pscan-view', add: 'add-view', storage: 'storage-view'};
   document.getElementById(viewMap[v] || 'cameras-view').classList.add('active');
   document.getElementById('pscan-btn').classList.toggle('active', v === 'pscan');
   document.getElementById('add-btn').classList.toggle('active', v === 'add');
   document.getElementById('storage-btn').classList.toggle('active', v === 'storage');
-  if (v === 'logs') renderLogView();
   if (v === 'storage') loadStorage();
   if (v === 'pscan') {
     loadArpHosts();
@@ -4874,6 +4873,108 @@ async function cancelScan() {
   await fetch(BASE + '/api/scan/cancel', {method: 'POST'}).catch(() => {});
 }
 
+/* ── Open HA addon log page ─────────────────────────────────────────────────── */
+function openHALog() {
+  // HA addon log URL: /hassio/addon/{slug}/logs
+  // Our slug is "camera_discovery" — derive the base HA URL from current location.
+  // When running under ingress, window.location is something like:
+  //   https://ha-host/api/hassio_ingress/TOKEN/
+  // The HA frontend root is the same host without the ingress path.
+  const haBase = window.location.origin;
+  window.open(haBase + '/hassio/addon/camera_discovery/logs', '_blank');
+}
+
+/* ── Camera page opener (Firefox addon or direct) ────────────────────────────── */
+// Firefox addon slug — if installed, its ingress is at /api/hassio_ingress/...
+// We detect it by trying the supervisor addon info endpoint via a known pattern.
+// Since we don't have hassio_api, we probe the Firefox ingress panel URL.
+const FIREFOX_SLUG = 'firefox';
+let _firefoxIngress = null;   // cached ingress path once found
+
+async function _detectFirefox() {
+  // Try the HA frontend addon page to see if firefox panel exists
+  try {
+    const r = await fetch(window.location.origin + '/hassio/addon/' + FIREFOX_SLUG, {
+      method: 'GET', redirect: 'follow',
+    });
+    // If we get a 200 (the HA page rendered), Firefox is installed
+    return r.ok || r.status === 200;
+  } catch(e) {
+    return false;
+  }
+}
+
+async function openCameraPage(ip) {
+  const cameraUrl = 'http://' + ip;
+  // Always show the modal with options
+  _showBrowserModal(ip, cameraUrl);
+}
+
+async function _showBrowserModal(ip, cameraUrl) {
+  document.getElementById('browser-modal')?.remove();
+  const firefoxInstalled = await _detectFirefox();
+  const modal = document.createElement('div');
+  modal.id = 'browser-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9500;display:flex;align-items:center;justify-content:center';
+  const ffLabel = firefoxInstalled ? '🦊 Open in Firefox' : '🦊 Get Firefox for HA';
+  const inner = document.createElement('div');
+  inner.style.cssText = 'background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:28px 32px;max-width:420px;width:90%;text-align:center';
+  inner.innerHTML = '<div style="font-size:1.5rem;margin-bottom:10px">🌐</div>'
+    + '<div style="font-weight:600;margin-bottom:6px">Open Camera Page</div>'
+    + '<div style="font-size:.82rem;color:var(--text-dim);margin-bottom:20px">' + esc(cameraUrl) + '</div>'
+    + '<div style="display:flex;flex-direction:column;gap:10px">'
+    + '<a class="btn btn-primary" id="bmNewTab" href="' + esc(cameraUrl) + '" target="_blank" rel="noopener">↗ Open in New Tab</a>'
+    + '<button class="btn btn-secondary" id="bmFirefox">' + ffLabel + '</button>'
+    + '<button class="btn btn-ghost" id="bmCancel">Cancel</button>'
+    + '</div>';
+  modal.appendChild(inner);
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.querySelector('#bmNewTab').addEventListener('click', close);
+  modal.querySelector('#bmCancel').addEventListener('click', close);
+  modal.querySelector('#bmFirefox').addEventListener('click', () => {
+    close();
+    if (firefoxInstalled) _openInFirefox(ip);
+    else _promptGetFirefox();
+  });
+  modal.addEventListener('click', e => { if (e.target === modal) close(); });
+}
+
+function _openInFirefox(ip) {
+  // Navigate to the Firefox HA addon panel — user can then type the camera IP
+  // (we cannot inject a URL into Firefox via ingress directly)
+  const ffUrl = window.location.origin + '/hassio/ingress/' + FIREFOX_SLUG;
+  const win = window.open(ffUrl, '_blank');
+  // Show a toast telling the user to navigate to the IP
+  setTimeout(() => showToast('Firefox opened — navigate to http://' + ip), 600);
+}
+
+function _promptGetFirefox() {
+  document.getElementById('browser-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'browser-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9500;display:flex;align-items:center;justify-content:center';
+  const inner = document.createElement('div');
+  inner.style.cssText = 'background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:28px 32px;max-width:420px;width:90%;text-align:center';
+  inner.innerHTML = '<div style="font-size:1.5rem;margin-bottom:10px">🦊</div>'
+    + '<div style="font-weight:600;margin-bottom:8px">Firefox not installed</div>'
+    + '<div style="font-size:.82rem;color:var(--text-dim);margin-bottom:20px">'
+    + 'The Firefox add-on lets you browse camera pages inside Home Assistant. '
+    + 'Add the repository from mincka/ha-addons and install Firefox.</div>'
+    + '<div style="display:flex;gap:10px;justify-content:center">'
+    + '<a class="btn btn-primary" id="ffGetIt" href="' + window.location.origin + '/hassio/store" target="_blank">Go Get It</a>'
+    + '<button class="btn btn-ghost" id="ffCancel">Cancel</button>'
+    + '</div>';
+  modal.appendChild(inner);
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.querySelector('#ffGetIt').addEventListener('click', close);
+  modal.querySelector('#ffCancel').addEventListener('click', close);
+  modal.addEventListener('click', e => { if (e.target === modal) close(); });
+}
+
+
+
 /* ── Status dot ────────────────────────────────────────────────────────────── */
 let _lastLogTime = 0;
 async function pollStatusDot() {
@@ -4882,14 +4983,14 @@ async function pollStatusDot() {
     const dot = document.getElementById('status-dot');
     if (!dot) return;
     if (d.status === 'error') {
-      dot.style.background = '#f44336';
-      dot.style.boxShadow  = '0 0 0 2px rgba(244,67,54,.3)';
+      dot.style.background = '#e53935';   // red — errors
+      dot.style.boxShadow  = '0 0 0 2px rgba(229,57,53,.35)';
     } else if (d.status === 'warning') {
-      dot.style.background = '#ff9800';
-      dot.style.boxShadow  = '0 0 0 2px rgba(255,152,0,.3)';
+      dot.style.background = '#f9c700';   // yellow — warnings
+      dot.style.boxShadow  = '0 0 0 2px rgba(249,199,0,.35)';
     } else {
-      dot.style.background = '#4caf50';
-      dot.style.boxShadow  = '0 0 0 2px rgba(76,175,80,.25)';
+      dot.style.background = '#43a047';   // green — all clear
+      dot.style.boxShadow  = '0 0 0 2px rgba(67,160,71,.25)';
     }
     if (d.entries && d.entries.length) {
       _lastLogTime = d.entries[d.entries.length - 1].t;
@@ -4908,27 +5009,6 @@ function _updateCancelBtn(running) {
 }
 
 /* ── Log view ──────────────────────────────────────────────────────────────── */
-async function renderLogView() {
-  const el    = document.getElementById('log-entries');
-  const badge = document.getElementById('log-status-badge');
-  if (!el) return;
-  try {
-    const d = await (await fetch(BASE + '/api/logs')).json();
-    badge.textContent  = d.status === 'error' ? '🔴 Errors detected'
-                       : d.status === 'warning' ? '🟡 Warnings present' : '🟢 All clear';
-    badge.style.fontSize = '.78rem';
-    if (!d.entries || !d.entries.length) {
-      el.innerHTML = '<span style="color:var(--text-dim)">No warnings or errors logged.</span>';
-      return;
-    }
-    el.innerHTML = d.entries.slice().reverse().map(e => {
-      const col = e.level === 'error' ? '#f44336' : '#ff9800';
-      return '<div style="color:' + col + ';margin-bottom:2px">' + esc(e.msg) + '</div>';
-    }).join('');
-  } catch(err) {
-    el.innerHTML = '<span style="color:var(--text-dim)">Could not load logs.</span>';
-  }
-}
 
 /* ── Storage navigation state ─────────────────────────────────────────────── */
 let _storHistory  = [null];   // null = root, string = folder name
@@ -5463,7 +5543,11 @@ function cardActions(cam, clearBtn, notCamBtn) {
       + '" onclick="toggleMotion(\'' + cam.id + '\')" title="' + (motOn ? 'Motion recording on' : 'Enable motion recording') + '">'
       + (recOn ? '⏺ REC' : (motOn ? '⏺ Armed' : '⏺ Record')) + '</button>'
     : '';
-  return testBtn + clearBtn + notCamBtn + recBtn
+  // Globe button: opens camera web page (via Firefox addon or new tab)
+  const webBtn = (cam.status === 'ready' && cam.ip)
+    ? '<button class="btn btn-ghost btn-sm" onclick="openCameraPage(\'' + cam.ip + '\')" title="Open camera web page">🌐</button>'
+    : '';
+  return testBtn + clearBtn + notCamBtn + recBtn + webBtn
        + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(\'' + cam.id + '\')">Remove</button>';
 }
 async function testStream(ev, cid) {
@@ -6122,7 +6206,6 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .stor-folder-meta{{font-size:.72rem;color:var(--text-dim)}}
 .stor-files-list{{display:flex;flex-direction:column;gap:4px}}
 /* ── Logs view ── */
-#logs-view{{padding:20px}}
 /* ── header h1 cursor ── */
 header h1{{cursor:pointer}}
 .field label{{display:block;font-size:.7rem;color:var(--text-dim);font-weight:600;letter-spacing:.04em;margin-bottom:3px}}
@@ -6176,10 +6259,11 @@ header h1{{cursor:pointer}}
     </svg>
     AnyCam
   </h1>
-  <span id="status-dot" title="System Stability" onclick="switchView('logs')"
-        style="width:10px;height:10px;border-radius:50%;background:#4caf50;
+  <span id="status-dot" title="System Stability"
+        onclick="openHALog()"
+        style="width:10px;height:10px;border-radius:50%;background:#43a047;
                display:inline-block;cursor:pointer;margin-left:4px;flex-shrink:0;
-               box-shadow:0 0 0 2px rgba(76,175,80,.25)"></span>
+               box-shadow:0 0 0 2px rgba(67,160,71,.25)"></span>
   <span id="cam-count" style="color:var(--text-dim);font-size:.78rem"></span>
   <label class="sweep-toggle" title="Scan ports 0-10000 on live hosts that don't respond to camera ports">
     <input type="checkbox" id="broad-sweep">
@@ -6351,17 +6435,7 @@ header h1{{cursor:pointer}}
   <div id="storage-list"></div>
 </div>
 
-<!-- ── Logs view ──────────────────────────────────────────────────────────── -->
-<div class="view" id="logs-view">
-  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-    <button class="btn btn-ghost btn-sm" onclick="switchView('cameras')">&#x2190; Back to Cameras</button>
-    <h2 style="font-size:.95rem;font-weight:600;margin:0">System Log</h2>
-    <span id="log-status-badge"></span>
-  </div>
-  <div id="log-entries" style="font-family:monospace;font-size:.75rem;line-height:1.6;
-       max-height:calc(100vh - 160px);overflow-y:auto;background:#0d0d0d;
-       border:1px solid var(--border);border-radius:8px;padding:12px"></div>
-</div>
+
 
 <!-- ── Focus / full-screen enhanced view overlay ──────────────────────────── -->
 <div id="focus-overlay" style="display:none">

@@ -1,5 +1,20 @@
 # AnyCam — Changelog
 
+## 1.7.2
+- Remove (Option X) labels from Config tab toggle names
+- Status dot colors: yellow (#f9c700) for warnings, red (#e53935) for errors,
+  green (#43a047) for all clear — previously used orange for warnings
+- Status dot click: opens actual HA addon log page at /hassio/addon/camera_discovery/logs
+  in a new tab, rather than a custom in-app log view
+- Removed custom System Log view and renderLogView JS — HA's built-in log is better
+- Camera web page button: 🌐 button on each ready camera card; opens a modal offering
+  to open the camera's IP in a new tab (always available) or in Firefox (if installed);
+  Firefox detection probes /hassio/addon/firefox; if not installed, shows a Get It
+  prompt linking to /hassio/store with a note to add mincka/ha-addons repository;
+  if installed, opens the Firefox ingress panel in a new tab with a toast reminding
+  the user to navigate to the camera IP manually (Firefox ingress does not accept
+  URL injection from external callers)
+
 ## 1.7.1
 - Fixes and improvements following 1.7.0 testing:
 
