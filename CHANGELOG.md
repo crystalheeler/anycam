@@ -1,5 +1,28 @@
 # AnyCam — Changelog
 
+## 1.7.3
+- Status dot moved inside <h1> tag, right after AnyCam text, so it appears
+  immediately next to the logo as shown in screenshot (not as a separate
+  sibling element after the h1)
+- Status dot onclick now opens the real HA addon log page
+  (/hassio/addon/camera_discovery/logs) in a new tab; event.stopPropagation()
+  prevents the h1 click-home handler from also firing
+- Storage view redesigned as Windows Explorer style:
+  - Separate dark nav bar removed; nav controls (← → ↑ + path breadcrumb)
+    now embedded inside the white explorer pane as its top toolbar
+  - White (#fff) background for the file pane with light grey column headers
+  - Four columns: Name | Date Modified | Type | Size — sortable by clicking
+    any header, with ascending/descending arrow indicator
+  - Folders listed at top, files below; hover highlight (#cce8ff, Windows blue)
+  - Action buttons (⬇ download, 🗑 delete) appear on row hover only
+  - Double-click any name to rename inline; folder rows navigate on single click
+  - Drag-and-drop file move built with DOM event listeners (no quote collisions)
+  - Empty state watermark centered in the white pane
+- H.265+ warning badge: amber ⚠ H.265+ badge appears on Hikvision camera cards
+  when the stream is detected as multi-layer HEVC (Hikvision proprietary codec);
+  tooltip explains the fix (change H.265+ → H.265 in camera web UI)
+- Removed duplicate "Not found after upgrade" badge that was rendering twice
+
 ## 1.7.2
 - Remove (Option X) labels from Config tab toggle names
 - Status dot colors: yellow (#f9c700) for warnings, red (#e53935) for errors,

@@ -59,6 +59,2585 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
+CURRENT_VERSION = "1.7.3"  # must match config.yaml
+
+INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
+PORT         = int(os.environ.get("INGRESS_PORT", 8099))
+GO2RTC_PORT      = 1984
+GO2RTC_RTSP_PORT = 8554
+GO2RTC_API       = f"http://127.0.0.1:{GO2RTC_PORT}"
+
+# ── HA add-on configuration options (set in the HA UI Config tab) ─────────────
+# Read from env vars set by the HA supervisor from config.yaml options.
+# Defaults mirror the config.yaml defaults so the server works without HA too.
+CFG_LOW_FPS        = os.environ.get("LOW_FPS_MODE",   "true").lower()  == "true"
+CFG_SKIP_NONREF    = os.environ.get("SKIP_NONREF",    "false").lower() == "true"
+CFG_LIMIT_THREADS  = os.environ.get("LIMIT_THREADS",  "true").lower()  == "true"
+CFG_STAGGER_POLL   = os.environ.get("STAGGER_POLLING","false").lower() == "true"
+CFG_HW_DECODE      = os.environ.get("HW_DECODE",      "false").lower() == "true"
+CFG_RECORDINGS     = os.environ.get("RECORDINGS_PATH", "/media/anycam")
+CFG_MOTION_SENS    = int(os.environ.get("MOTION_SENSITIVITY",       "15"))
+CFG_MOTION_COOL    = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
+CFG_MOTION_PAD     = int(os.environ.get("MOTION_CLIP_PADDING_SECS", "3"))
+
+MEDIA_DIR = Path(CFG_RECORDINGS)
+
+# Currently focused camera for full-screen enhanced view.
+# When set, all other snap_loops throttle to 1fps; focused loop runs native res.
+_FOCUSED_CAMERA: str | None = None
+
+# Hardware decoder names unavailable on this system (detected at runtime).
+# When v4l2m2m reports "Could not find a valid device", the decoder name
+# is added here so future stream requests skip hw decode immediately.
+_HW_UNAVAILABLE: set = set()
+
+# Circular log buffer — last 200 WARNING/ERROR entries for the status dot.
+# Structure: [{"level": "warning"|"error", "msg": str, "t": float}, ...]
+_LOG_BUFFER: list = []
+
+class _BufHandler(logging.Handler):
+    def emit(self, record):
+        if record.levelno >= logging.WARNING:
+            _LOG_BUFFER.append({
+                "level": "error" if record.levelno >= logging.ERROR else "warning",
+                "msg":   self.format(record),
+                "t":     record.created,
+            })
+            if len(_LOG_BUFFER) > 200:
+                _LOG_BUFFER.pop(0)
+
+_buf_handler = _BufHandler()
+_buf_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
+                                             datefmt="%H:%M:%S"))
+logging.getLogger().addHandler(_buf_handler)
+
+# Per-camera snapshot state for the background ffmpeg processes that feed
+# handle_snapshot.  Key = camera_id.
+# Each value dict: frame(bytes|None), frame_time(float), frame_count(int),
+#                  proc(Process|None), task(Task|None), restart_count(int)
+_SNAP: dict = {}
+
+# Timestamp of most recent handle_snapshot call per camera.
+# snap_loop uses this to detect idle (>30s) and stop automatically.
+_snap_last_access: dict = {}
+
+
+def _snap_state(camera_id: str) -> dict:
+    """Return (and lazily create) the snapshot state dict for a camera."""
+    if camera_id not in _SNAP:
+        _SNAP[camera_id] = {
+            "frame":         None,
+            "frame_time":    0.0,
+            "frame_count":   0,
+            "proc":          None,
+            "task":          None,
+            "restart_count": 0,
+        }
+    return _SNAP[camera_id]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# State
+# ─────────────────────────────────────────────────────────────────────────────
+
+CAMERAS    = {}
+BLACKLIST  = set()
+_SCAN_CANCELLED = False   # set to True to request graceful scan abort
+SCAN_STATE = {"running": False, "progress": 0, "message": "Idle. Click Scan to begin.",
+               "stage": 0, "stage_label": "",
+               "started_at": 0.0, "elapsed": 0.0, "eta": ""}
+SCAN_OPTIONS = {"broad_sweep": False}
+_FERNET    = None
+
+PSCAN = {
+    "running":    False, "paused": False, "ip": "",
+    "progress":   0, "message": "", "results": [], "proc_pid": None,
+    "live_ports": [],    # ports found so far during active scan
+    "scan_start": 0.0,   # timestamp scan began
+    "eta":        0,     # seconds remaining (from nmap --stats-every)
+    "percent":    0.0,   # % done (from nmap)
+}
+
+# Last ARP-discovered hosts — populated by run_scan(), consumed by Port Scan UI
+ARP_HOSTS: list[dict] = []   # [{ip, hostname}, ...]
+PSCAN_QUEUE: list[str] = []  # IPs queued for sequential batch scan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Protocol constants
+# ─────────────────────────────────────────────────────────────────────────────
+
+CAMERA_PORTS = [
+    554, 8554, 10554,
+    1935, 1936,
+    80, 8080, 8000, 8888,
+    443, 8443,
+    2020, 37777, 34567,
+    8765,
+]
+
+RTSP_PATHS = [
+    "/", "/stream", "/stream1", "/stream2", "/live", "/live/ch00_0",
+    "/live/main", "/h264", "/h264/ch1/main/av_stream", "/video",
+    "/video1", "/cam", "/cam/realmonitor?channel=1&subtype=0",
+    "/Streaming/Channels/101", "/Streaming/Channels/1",
+    "/av0_0", "/av0_1", "/11", "/12", "/MediaInput/h264",
+    "/ch0_unicast.sdp", "/onvif1", "/profile1/media.smp",
+    "/channel1", "/mpeg4/media.amp",
+]
+
+MJPEG_PATHS = [
+    "/video", "/mjpeg", "/stream", "/stream.mjpeg", "/stream.jpg",
+    "/image.mjpeg", "/mjpg/video.mjpg", "/cgi-bin/mjpg/video.cgi",
+    "/videostream.cgi", "/mjpeg.cgi", "/video.cgi", "/live.jpg",
+    "/snapshot.cgi?count=0", "/video0.mjpeg", "/.mjpg",
+    "/cgi-bin/video.cgi", "/axis-cgi/mjpg/video.cgi",
+]
+
+HLS_PATHS = [
+    "/index.m3u8", "/stream.m3u8", "/live/stream.m3u8",
+    "/hls/stream.m3u8", "/hls/index.m3u8", "/live.m3u8",
+    "/playlist.m3u8", "/channel1/index.m3u8", "/live/index.m3u8",
+    "/streams/live.m3u8", "/hls/live/index.m3u8",
+]
+
+WEBRTC_PATHS = [
+    "/whep", "/webrtc", "/api/webrtc", "/webrtc/offer",
+    "/api/whep", "/offer", "/api/offer", "/live/webrtc", "/stream/webrtc",
+]
+
+WS_RTSP_PATHS = [
+    "/api/ws", "/ws", "/stream/ws", "/live/ws",
+    "/ws/stream", "/websocket", "/stream",
+]
+
+NON_CAMERA_KEYWORDS = [
+    "router", "gateway", "firewall", "switch", "access point",
+    "printer", "print server", "jetdirect", "brother", "epson", "canon printer",
+    "nas", "synology", "qnap", "drobo", "buffalo",
+    "smart tv", "television", "blu-ray", "media player",
+    "ups", "power management", "voip", "pbx", "phone",
+    "thermostat", "hvac", "mikrotik", "ubiquiti", "edgerouter",
+    "openwrt", "dd-wrt", "cisco", "juniper", "fortinet", "modem",
+]
+
+CAMERA_KEYWORDS = [
+    "camera", "ipcam", "ipcamera", "cam", "dvr", "nvr", "cctv",
+    "hikvision", "dahua", "reolink", "axis", "hanwha",
+    "amcrest", "uniview", "vivotek", "bosch", "pelco",
+    "rtsp", "onvif", "video server", "webcam",
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Camera manufacturer / model database
+#
+# Each entry:
+#   "name"     : canonical display name
+#   "aliases"  : alternate spellings / brand families
+#   "http_titles"  : substrings to match in HTML <title> (case-insensitive)
+#   "http_body"    : substrings to match anywhere in page body (case-insensitive)
+#   "http_headers" : substrings to match in any HTTP response header value
+#   "nmap_products": substrings to match in nmap service product/version field
+#   "onvif_scopes" : substrings to match in ONVIF WS-Discovery scope strings
+#   "default_ports": hint ports commonly used by this manufacturer
+#   "notes"        : human-readable notes shown in Identity section
+# ─────────────────────────────────────────────────────────────────────────────
+
+CAMERA_DB: list[dict] = [
+    {
+        "name": "Hikvision",
+        "aliases": ["hik", "hikvision", "ds-2"],
+        "http_titles": ["hikvision", "ds-2", "network camera", "ivms"],
+        "http_body":   ["hikvision", "ivms-4200", "ds-2cd", "ds-2de", "hik-connect"],
+        "http_headers":["hikvision", "webs/hikvision"],
+        "nmap_products":["hikvision", "hikvision ip camera"],
+        "onvif_scopes": ["hikvision"],
+        "default_ports": [554, 8000, 80],
+        "notes": "Hikvision IP camera or NVR/DVR",
+    },
+    {
+        "name": "Dahua",
+        "aliases": ["dahua", "dhip", "dh-ipc", "imou"],
+        "http_titles": ["dahua", "ipc", "nvr", "xvr", "imou"],
+        "http_body":   ["dahua technology", "dahua", "imou", "lechange", "dh-ipc"],
+        "http_headers":["dahua", "dh-"],
+        "nmap_products":["dahua"],
+        "onvif_scopes": ["dahua"],
+        "default_ports": [37777, 80, 554],
+        "notes": "Dahua Technology IP camera, NVR/DVR or IMOU device",
+    },
+    {
+        "name": "Lorex",
+        "aliases": ["lorex", "flir lorex", "flirlorex"],
+        "http_titles": ["lorex", "lorex nvr", "lorex dvr", "flirlorex"],
+        "http_body":   ["lorex", "lorextechnology", "lorex technology",
+                        "flirlorex", "flir lorex"],
+        "http_headers":["lorex", "flirlorex"],
+        "nmap_products":["lorex"],
+        "onvif_scopes": ["lorex"],
+        "default_ports": [80, 443, 8080, 8888, 554, 34567],
+        "notes": "Lorex (FLIR) NVR/DVR or IP camera",
+    },
+    {
+        "name": "Reolink",
+        "aliases": ["reolink"],
+        "http_titles": ["reolink"],
+        "http_body":   ["reolink", "reolink app"],
+        "http_headers":["reolink"],
+        "nmap_products":["reolink"],
+        "onvif_scopes": ["reolink"],
+        "default_ports": [554, 80, 8080, 9000],
+        "notes": "Reolink IP camera or NVR",
+    },
+    {
+        "name": "Axis",
+        "aliases": ["axis communications", "axis network"],
+        "http_titles": ["axis", "axis network camera", "axis video"],
+        "http_body":   ["axis communications", "axis network camera", "axiscam"],
+        "http_headers":["axis", "boa/"],
+        "nmap_products":["axis network camera", "axis"],
+        "onvif_scopes": ["axis"],
+        "default_ports": [554, 80, 443],
+        "notes": "Axis Communications IP camera or encoder",
+    },
+    {
+        "name": "Hanwha / Samsung Techwin",
+        "aliases": ["hanwha", "samsung techwin", "wisenet", "qnv", "xnv"],
+        "http_titles": ["wisenet", "hanwha", "samsung techwin", "snv-", "qnv-"],
+        "http_body":   ["hanwha", "wisenet", "samsung techwin"],
+        "http_headers":["hanwha", "wisenet"],
+        "nmap_products":["hanwha", "wisenet", "samsung techwin"],
+        "onvif_scopes": ["hanwha", "samsung"],
+        "default_ports": [554, 80, 8080],
+        "notes": "Hanwha Vision (formerly Samsung Techwin) — Wisenet series",
+    },
+    {
+        "name": "Amcrest",
+        "aliases": ["amcrest", "amcrest technologies"],
+        "http_titles": ["amcrest", "amcrest ip"],
+        "http_body":   ["amcrest", "amcrestsecurity"],
+        "http_headers":["amcrest"],
+        "nmap_products":["amcrest"],
+        "onvif_scopes": ["amcrest"],
+        "default_ports": [37777, 80, 554],
+        "notes": "Amcrest IP camera or NVR (Dahua-based OEM)",
+    },
+    {
+        "name": "Uniview (UNV)",
+        "aliases": ["uniview", "unv", "univideo"],
+        "http_titles": ["uniview", "unv", "network camera"],
+        "http_body":   ["uniview", "univideo", "unv camera"],
+        "http_headers":["uniview", "unv"],
+        "nmap_products":["uniview", "unv"],
+        "onvif_scopes": ["uniview"],
+        "default_ports": [554, 80],
+        "notes": "Uniview (UNV) IP camera or NVR",
+    },
+    {
+        "name": "Vivotek",
+        "aliases": ["vivotek"],
+        "http_titles": ["vivotek", "network camera", "ip camera"],
+        "http_body":   ["vivotek", "vvtk"],
+        "http_headers":["vivotek", "vvtk-http"],
+        "nmap_products":["vivotek"],
+        "onvif_scopes": ["vivotek"],
+        "default_ports": [554, 80, 8080],
+        "notes": "Vivotek IP camera or NVR",
+    },
+    {
+        "name": "Bosch",
+        "aliases": ["bosch security", "bosch camera", "autodome", "flexidome", "dinion"],
+        "http_titles": ["bosch", "autodome", "flexidome", "dinion"],
+        "http_body":   ["bosch security", "bosch camera", "dinion", "flexidome", "autodome"],
+        "http_headers":["bosch"],
+        "nmap_products":["bosch"],
+        "onvif_scopes": ["bosch"],
+        "default_ports": [554, 80, 443],
+        "notes": "Bosch Security Systems IP camera",
+    },
+    {
+        "name": "Pelco",
+        "aliases": ["pelco", "sarix", "spectra", "optera"],
+        "http_titles": ["pelco", "sarix", "spectra enhanced"],
+        "http_body":   ["pelco", "sarix", "pelco.com"],
+        "http_headers":["pelco"],
+        "nmap_products":["pelco"],
+        "onvif_scopes": ["pelco"],
+        "default_ports": [554, 80],
+        "notes": "Pelco IP camera (Motorola Solutions)",
+    },
+    {
+        "name": "Sony",
+        "aliases": ["sony ipela", "sony security", "snc-"],
+        "http_titles": ["sony", "sony ipela", "snc-"],
+        "http_body":   ["sony ipela", "sony security", "snc-rz", "snc-ep", "snc-vb"],
+        "http_headers":["sony"],
+        "nmap_products":["sony network camera", "sony ipela"],
+        "onvif_scopes": ["sony"],
+        "default_ports": [554, 80, 443],
+        "notes": "Sony IPELA IP camera",
+    },
+    {
+        "name": "Panasonic / i-PRO",
+        "aliases": ["panasonic", "i-pro", "ipro", "wv-"],
+        "http_titles": ["panasonic", "i-pro", "network camera", "wv-"],
+        "http_body":   ["panasonic", "i-pro", "wv-sc", "wv-sf", "wv-sp"],
+        "http_headers":["panasonic", "i-pro"],
+        "nmap_products":["panasonic network camera", "i-pro"],
+        "onvif_scopes": ["panasonic"],
+        "default_ports": [554, 80, 443],
+        "notes": "Panasonic / i-PRO IP camera",
+    },
+    {
+        "name": "Avigilon",
+        "aliases": ["avigilon", "motorola solutions"],
+        "http_titles": ["avigilon"],
+        "http_body":   ["avigilon", "avigilon corporation"],
+        "http_headers":["avigilon"],
+        "nmap_products":["avigilon"],
+        "onvif_scopes": ["avigilon"],
+        "default_ports": [554, 80, 443],
+        "notes": "Avigilon (Motorola Solutions) IP camera or NVR",
+    },
+    {
+        "name": "FLIR",
+        "aliases": ["flir systems", "flir camera"],
+        "http_titles": ["flir", "flir systems"],
+        "http_body":   ["flir systems", "flir camera", "flir.com"],
+        "http_headers":["flir"],
+        "nmap_products":["flir"],
+        "onvif_scopes": ["flir"],
+        "default_ports": [554, 80, 443],
+        "notes": "FLIR Systems thermal/optical camera",
+    },
+    {
+        "name": "Mobotix",
+        "aliases": ["mobotix"],
+        "http_titles": ["mobotix", "mx-"],
+        "http_body":   ["mobotix", "mx-q", "mx-s", "mobotix.com"],
+        "http_headers":["mobotix", "mx-httpd"],
+        "nmap_products":["mobotix"],
+        "onvif_scopes": ["mobotix"],
+        "default_ports": [554, 80, 443],
+        "notes": "Mobotix IP camera",
+    },
+    {
+        "name": "ACTi",
+        "aliases": ["acti", "acti corporation"],
+        "http_titles": ["acti"],
+        "http_body":   ["acti corporation", "acti camera"],
+        "http_headers":["acti"],
+        "nmap_products":["acti"],
+        "onvif_scopes": ["acti"],
+        "default_ports": [554, 80, 443],
+        "notes": "ACTi IP camera",
+    },
+    {
+        "name": "GeoVision",
+        "aliases": ["geovision", "gv-"],
+        "http_titles": ["geovision", "gv-"],
+        "http_body":   ["geovision", "geo vision", "gv-bx", "gv-ptz"],
+        "http_headers":["geovision"],
+        "nmap_products":["geovision"],
+        "onvif_scopes": ["geovision"],
+        "default_ports": [554, 80, 4550],
+        "notes": "GeoVision IP camera or NVR",
+    },
+    {
+        "name": "Foscam",
+        "aliases": ["foscam"],
+        "http_titles": ["foscam", "ip camera"],
+        "http_body":   ["foscam", "foscam digital technologies"],
+        "http_headers":["foscam"],
+        "nmap_products":["foscam"],
+        "onvif_scopes": ["foscam"],
+        "default_ports": [554, 88, 80, 443],
+        "notes": "Foscam IP camera",
+    },
+    {
+        "name": "Annke",
+        "aliases": ["annke"],
+        "http_titles": ["annke"],
+        "http_body":   ["annke", "annke.com"],
+        "http_headers":["annke"],
+        "nmap_products":["annke"],
+        "onvif_scopes": ["annke"],
+        "default_ports": [554, 80, 8000],
+        "notes": "Annke IP camera or NVR/DVR (Hikvision-based OEM)",
+    },
+    {
+        "name": "Swann",
+        "aliases": ["swann", "swann communications"],
+        "http_titles": ["swann"],
+        "http_body":   ["swann", "swann security", "swann communications"],
+        "http_headers":["swann"],
+        "nmap_products":["swann"],
+        "onvif_scopes": ["swann"],
+        "default_ports": [554, 80, 34567],
+        "notes": "Swann security camera or NVR/DVR",
+    },
+    {
+        "name": "TP-Link Tapo / Kasa",
+        "aliases": ["tapo", "kasa", "tp-link"],
+        "http_titles": ["tapo", "kasa", "tp-link"],
+        "http_body":   ["tapo", "tp-link tapo", "kasa camera"],
+        "http_headers":["tp-link", "tapo"],
+        "nmap_products":["tp-link", "tapo"],
+        "onvif_scopes": ["tapo", "tp-link"],
+        "default_ports": [554, 80, 2020],
+        "notes": "TP-Link Tapo / Kasa smart camera",
+    },    {
+        "name": "Night Owl",
+        "aliases": ["night owl", "nightowl"],
+        "http_titles": ["night owl"],
+        "http_body":   ["night owl", "nightowl security"],
+        "http_headers":["night owl"],
+        "nmap_products":["night owl"],
+        "onvif_scopes": ["nightowl"],
+        "default_ports": [554, 80, 34567],
+        "notes": "Night Owl security camera or NVR/DVR",
+    },
+    {
+        "name": "iENSO",
+        "aliases": ["ienso", "ienso inc", "ienso camera"],
+        "http_titles": ["ienso", "ienso camera", "ienso inc"],
+        "http_body":   ["ienso", "ienso inc", "ienso.com", "made in canada"],
+        "http_headers":["ienso"],
+        "nmap_products":["ienso"],
+        "onvif_scopes": ["ienso"],
+        "default_ports": [554, 80, 8080],
+        "notes": "iENSO embedded IP camera (Canada)",
+    },
+    {
+        "name": "Digital Watchdog",
+        "aliases": ["digital watchdog", "dw-"],
+        "http_titles": ["digital watchdog", "dw megazip"],
+        "http_body":   ["digital watchdog", "dwipnetwork", "dw.com"],
+        "http_headers":["digital watchdog"],
+        "nmap_products":["digital watchdog"],
+        "onvif_scopes": ["digitalwatchdog"],
+        "default_ports": [554, 80],
+        "notes": "Digital Watchdog IP camera or NVR",
+    },
+    {
+        "name": "March Networks",
+        "aliases": ["march networks", "marchnetworks"],
+        "http_titles": ["march networks"],
+        "http_body":   ["march networks", "marchnetworks.com"],
+        "http_headers":["march networks"],
+        "nmap_products":["march networks"],
+        "onvif_scopes": ["marchnetworks"],
+        "default_ports": [554, 80],
+        "notes": "March Networks IP camera or NVR",
+    },
+    {
+        "name": "Nest / Google",
+        "aliases": ["nest", "google nest"],
+        "http_titles": ["nest", "dropcam"],
+        "http_body":   ["nest labs", "google nest", "dropcam"],
+        "http_headers":["nest"],
+        "nmap_products":["nest", "dropcam"],
+        "onvif_scopes": ["nest"],
+        "default_ports": [554, 443, 80],
+        "notes": "Google Nest / Dropcam IP camera",
+    },
+    {
+        "name": "Ring",
+        "aliases": ["ring", "ring doorbell", "ring camera"],
+        "http_titles": ["ring"],
+        "http_body":   ["ring.com", "ring video", "ring doorbell"],
+        "http_headers":["ring"],
+        "nmap_products":["ring"],
+        "onvif_scopes": ["ring"],
+        "default_ports": [554, 443, 80],
+        "notes": "Ring doorbell or security camera (Amazon)",
+    },
+    {
+        "name": "Wyze",
+        "aliases": ["wyze", "wyze cam"],
+        "http_titles": ["wyze"],
+        "http_body":   ["wyze", "wyzecam", "wyze cam"],
+        "http_headers":["wyze"],
+        "nmap_products":["wyze"],
+        "onvif_scopes": ["wyze"],
+        "default_ports": [554, 80],
+        "notes": "Wyze IP camera",
+    },
+    {
+        "name": "Eufy / Anker",
+        "aliases": ["eufy", "anker", "eufysecurity"],
+        "http_titles": ["eufy", "eufysecurity"],
+        "http_body":   ["eufy", "eufysecurity", "anker innovations"],
+        "http_headers":["eufy"],
+        "nmap_products":["eufy"],
+        "onvif_scopes": ["eufy"],
+        "default_ports": [554, 80, 443],
+        "notes": "Eufy (Anker) IP camera",
+    },
+    {
+        "name": "Arlo",
+        "aliases": ["arlo", "arlo technologies"],
+        "http_titles": ["arlo"],
+        "http_body":   ["arlo", "arlo technologies", "netgear arlo"],
+        "http_headers":["arlo"],
+        "nmap_products":["arlo"],
+        "onvif_scopes": ["arlo"],
+        "default_ports": [554, 443, 80],
+        "notes": "Arlo wireless IP camera",
+    },
+    {
+        "name": "Verkada",
+        "aliases": ["verkada"],
+        "http_titles": ["verkada"],
+        "http_body":   ["verkada", "verkada command"],
+        "http_headers":["verkada"],
+        "nmap_products":["verkada"],
+        "onvif_scopes": ["verkada"],
+        "default_ports": [443, 80],
+        "notes": "Verkada cloud-managed IP camera",
+    },
+    {
+        "name": "Luxonis / OAK",
+        "aliases": ["luxonis", "oak-d", "oak camera", "depthAI"],
+        "http_titles": ["luxonis", "oak"],
+        "http_body":   ["luxonis", "oak-d", "depthai", "oak camera"],
+        "http_headers":["luxonis"],
+        "nmap_products":["luxonis", "mediamtx", "oak"],
+        "onvif_scopes": ["luxonis"],
+        "default_ports": [8765, 554, 80],
+        "notes": "Luxonis OAK-D depth/AI camera",
+    },
+    {
+        "name": "Tiandy",
+        "aliases": ["tiandy"],
+        "http_titles": ["tiandy"],
+        "http_body":   ["tiandy", "tiandy technologies", "tiandy.com"],
+        "http_headers":["tiandy"],
+        "nmap_products":["tiandy"],
+        "onvif_scopes": ["tiandy"],
+        "default_ports": [554, 80, 8000],
+        "notes": "Tiandy Technologies IP camera or NVR",
+    },
+    {
+        "name": "IndigoVision",
+        "aliases": ["indigovision"],
+        "http_titles": ["indigovision"],
+        "http_body":   ["indigovision", "indigovision.com"],
+        "http_headers":["indigovision"],
+        "nmap_products":["indigovision"],
+        "onvif_scopes": ["indigovision"],
+        "default_ports": [554, 80, 443],
+        "notes": "IndigoVision IP camera or NVR (Scotland)",
+    },
+    {
+        "name": "Q-See",
+        "aliases": ["q-see", "qsee"],
+        "http_titles": ["q-see", "qsee"],
+        "http_body":   ["q-see", "qsee", "q-see technologies"],
+        "http_headers":["q-see"],
+        "nmap_products":["q-see", "qsee"],
+        "onvif_scopes": ["qsee"],
+        "default_ports": [554, 80, 34567],
+        "notes": "Q-See consumer DVR/NVR or IP camera",
+    },
+    {
+        "name": "LaView",
+        "aliases": ["laview"],
+        "http_titles": ["laview"],
+        "http_body":   ["laview", "laview technology", "laview.us"],
+        "http_headers":["laview"],
+        "nmap_products":["laview"],
+        "onvif_scopes": ["laview"],
+        "default_ports": [554, 80, 8080],
+        "notes": "LaView IP camera or NVR",
+    },
+    {
+        "name": "Zosi",
+        "aliases": ["zosi"],
+        "http_titles": ["zosi"],
+        "http_body":   ["zosi", "zosi security", "zositechnology"],
+        "http_headers":["zosi"],
+        "nmap_products":["zosi"],
+        "onvif_scopes": ["zosi"],
+        "default_ports": [554, 80, 34567],
+        "notes": "Zosi budget security camera or NVR/DVR",
+    },
+    {
+        "name": "Sricam / Srihome",
+        "aliases": ["sricam", "srihome"],
+        "http_titles": ["sricam", "srihome"],
+        "http_body":   ["sricam", "srihome", "sricam.com"],
+        "http_headers":["sricam", "srihome"],
+        "nmap_products":["sricam", "srihome"],
+        "onvif_scopes": ["sricam", "srihome"],
+        "default_ports": [554, 80, 8080],
+        "notes": "Sricam / Srihome budget IP camera",
+    },
+    {
+        "name": "Vstarcam",
+        "aliases": ["vstarcam"],
+        "http_titles": ["vstarcam"],
+        "http_body":   ["vstarcam", "vstarcam.com"],
+        "http_headers":["vstarcam"],
+        "nmap_products":["vstarcam"],
+        "onvif_scopes": ["vstarcam"],
+        "default_ports": [554, 80, 8080],
+        "notes": "Vstarcam budget WiFi IP camera",
+    },
+    {
+        "name": "Wansview",
+        "aliases": ["wansview"],
+        "http_titles": ["wansview"],
+        "http_body":   ["wansview", "wansview.com"],
+        "http_headers":["wansview"],
+        "nmap_products":["wansview"],
+        "onvif_scopes": ["wansview"],
+        "default_ports": [554, 80, 8080],
+        "notes": "Wansview budget IP camera",
+    },
+    {
+        "name": "Tenvis",
+        "aliases": ["tenvis"],
+        "http_titles": ["tenvis"],
+        "http_body":   ["tenvis", "tenvis technology"],
+        "http_headers":["tenvis"],
+        "nmap_products":["tenvis"],
+        "onvif_scopes": ["tenvis"],
+        "default_ports": [554, 80, 8080],
+        "notes": "Tenvis IP camera",
+    },
+    {
+        "name": "Instar",
+        "aliases": ["instar"],
+        "http_titles": ["instar"],
+        "http_body":   ["instar", "instar gmbh", "instar.de"],
+        "http_headers":["instar"],
+        "nmap_products":["instar"],
+        "onvif_scopes": ["instar"],
+        "default_ports": [554, 80, 8080, 443],
+        "notes": "Instar IP camera (Germany — popular in Europe)",
+    },
+    {
+        "name": "Luma Surveillance",
+        "aliases": ["luma surveillance", "luma", "snapav"],
+        "http_titles": ["luma surveillance", "luma"],
+        "http_body":   ["luma surveillance", "snapav", "luma.com"],
+        "http_headers":["luma"],
+        "nmap_products":["luma surveillance", "luma"],
+        "onvif_scopes": ["luma"],
+        "default_ports": [554, 80, 443],
+        "notes": "Luma Surveillance IP camera or NVR (SnapAV) — Hikvision OEM",
+    },
+    {
+        "name": "Speco Technologies",
+        "aliases": ["speco", "speco technologies"],
+        "http_titles": ["speco"],
+        "http_body":   ["speco technologies", "speco", "specotech.com"],
+        "http_headers":["speco"],
+        "nmap_products":["speco"],
+        "onvif_scopes": ["speco"],
+        "default_ports": [554, 80, 443],
+        "notes": "Speco Technologies IP camera or NVR",
+    },
+    {
+        "name": "Oncam",
+        "aliases": ["oncam", "oncam grandeye"],
+        "http_titles": ["oncam", "grandeye"],
+        "http_body":   ["oncam", "grandeye", "oncam.com"],
+        "http_headers":["oncam"],
+        "nmap_products":["oncam", "grandeye"],
+        "onvif_scopes": ["oncam"],
+        "default_ports": [554, 80, 443],
+        "notes": "Oncam 360-degree fisheye IP camera",
+    },
+    {
+        "name": "Illustra (Johnson Controls)",
+        "aliases": ["illustra", "johnson controls", "tyco security"],
+        "http_titles": ["illustra", "johnson controls"],
+        "http_body":   ["illustra", "tyco security", "johnson controls"],
+        "http_headers":["illustra", "tyco"],
+        "nmap_products":["illustra", "johnson controls"],
+        "onvif_scopes": ["illustra", "johnsoncontrols"],
+        "default_ports": [554, 80, 443],
+        "notes": "Illustra IP camera (Johnson Controls / Tyco Security)",
+    },
+    {
+        "name": "Milesight",
+        "aliases": ["milesight", "milesight iot"],
+        "http_titles": ["milesight"],
+        "http_body":   ["milesight", "milesight-iot.com"],
+        "http_headers":["milesight"],
+        "nmap_products":["milesight"],
+        "onvif_scopes": ["milesight"],
+        "default_ports": [554, 80, 8080, 443],
+        "notes": "Milesight IP camera or NVR",
+    },
+    {
+        "name": "Sunell",
+        "aliases": ["sunell"],
+        "http_titles": ["sunell"],
+        "http_body":   ["sunell", "sunell technology", "sunell.com"],
+        "http_headers":["sunell"],
+        "nmap_products":["sunell"],
+        "onvif_scopes": ["sunell"],
+        "default_ports": [554, 80, 8000],
+        "notes": "Sunell IP camera or NVR",
+    },
+    {
+        "name": "TVT",
+        "aliases": ["tvt", "tvt digital technology"],
+        "http_titles": ["tvt", "tvt digital"],
+        "http_body":   ["tvt digital", "tvt technology", "tvt-ip.com"],
+        "http_headers":["tvt"],
+        "nmap_products":["tvt"],
+        "onvif_scopes": ["tvt"],
+        "default_ports": [554, 80, 8000, 34567],
+        "notes": "TVT Digital Technology IP camera or NVR (common OEM base)",
+    },
+    {
+        "name": "Kedacom",
+        "aliases": ["kedacom"],
+        "http_titles": ["kedacom"],
+        "http_body":   ["kedacom", "kedacom.com"],
+        "http_headers":["kedacom"],
+        "nmap_products":["kedacom"],
+        "onvif_scopes": ["kedacom"],
+        "default_ports": [554, 80, 443],
+        "notes": "Kedacom IP camera or NVR",
+    },
+    {
+        "name": "VideoIQ (Avigilon)",
+        "aliases": ["videoiq"],
+        "http_titles": ["videoiq"],
+        "http_body":   ["videoiq", "videoiq.com"],
+        "http_headers":["videoiq"],
+        "nmap_products":["videoiq"],
+        "onvif_scopes": ["videoiq"],
+        "default_ports": [554, 80, 443],
+        "notes": "VideoIQ analytics camera (absorbed by Avigilon/Motorola)",
+    },
+    {
+        "name": "Samsung (standalone)",
+        "aliases": ["samsung camera", "sno-", "snd-", "snh-"],
+        "http_titles": ["samsung", "sno-", "snd-", "snh-"],
+        "http_body":   ["samsung camera", "samsung techwin", "sno-", "snd-", "snh-"],
+        "http_headers":["samsung"],
+        "nmap_products":["samsung network camera"],
+        "onvif_scopes": ["samsung"],
+        "default_ports": [554, 80, 443],
+        "notes": "Samsung standalone IP camera (pre-Hanwha rebranding)",
+    },
+    {
+        "name": "Generic IP Camera",
+        "aliases": ["webcam", "ipcam", "network camera"],
+        "http_titles": ["ip camera", "network camera", "webcam", "ipcam",
+                        "video server", "live view", "camera login"],
+        "http_body":   ["ip camera", "network camera", "video surveillance",
+                        "live view", "ptz control"],
+        "http_headers":[],
+        "nmap_products":["ip camera", "network camera", "video server", "webcam"],
+        "onvif_scopes": [],
+        "default_ports": [554, 80, 8080],
+        "notes": "Generic IP camera (manufacturer unidentified)",
+    },
+]
+
+# Build fast lookup structures from the DB
+_DB_MANUFACTURERS: set[str] = set()   # all lowercase match strings for is_camera_positive
+_DB_ENTRIES_BY_KEY: dict[str, dict] = {}  # pattern → db_entry for identify_manufacturer
+
+for _entry in CAMERA_DB:
+    for _field in ("http_titles", "http_body", "http_headers",
+                   "nmap_products", "onvif_scopes", "aliases"):
+        for _kw in _entry.get(_field, []):
+            _k = _kw.lower()
+            _DB_MANUFACTURERS.add(_k)
+            _DB_ENTRIES_BY_KEY[_k] = _entry
+
+
+import re as _re_mod
+
+def _kw_matches(kw: str, text_l: str) -> bool:
+    """
+    Match a keyword against text.
+    Short keywords (< 6 chars) require word-boundary match to prevent
+    false positives from substring matches (e.g. 'acti' matching 'interactive').
+    Long keywords use plain substring matching.
+    """
+    if len(kw) < 6:
+        # Word boundary: kw must be preceded and followed by non-alphanumeric
+        pattern = r'(?<![a-z0-9])' + _re_mod.escape(kw) + r'(?![a-z0-9])'
+        return bool(_re_mod.search(pattern, text_l))
+    return kw in text_l
+
+
+def identify_manufacturer(text: str) -> dict | None:
+    """
+    Given a blob of text (HTTP body, nmap banner, etc.), return the best-matching
+    CAMERA_DB entry, or None if no match found.
+    Best match = entry with the most keyword hits.
+    Short keywords (< 6 chars) require word-boundary matching to avoid false
+    positives (e.g. 'acti' matching 'interactive' on HP printer pages).
+    """
+    text_l = text.lower()
+    scores: dict[str, int] = {}
+    for kw, entry in _DB_ENTRIES_BY_KEY.items():
+        if _kw_matches(kw, text_l):
+            name = entry["name"]
+            scores[name] = scores.get(name, 0) + 1
+    if not scores:
+        return None
+    best_name = max(scores, key=lambda n: scores[n])
+    for entry in CAMERA_DB:
+        if entry["name"] == best_name:
+            return entry
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OUI (MAC address) database
+# ─────────────────────────────────────────────────────────────────────────────
+
+# In-memory OUI lookup: "XX:XX:XX" (uppercase, colon-separated) → vendor string
+_OUI_DB: dict[str, str] = {}
+_OUI_DB_LOADED = False
+
+# Curated embedded OUI entries for known camera and non-camera vendors.
+# Used as fallback when the IEEE cache is unavailable, and to seed the
+# camera/non-camera classification even before the full DB loads.
+_CAMERA_OUI_VENDORS = {
+    # Hikvision
+    "1C:C3:16", "28:57:BE", "3C:E8:24", "44:19:B6", "48:EA:63",
+    "4C:11:BF", "54:C4:15", "70:A7:41", "80:18:44", "84:EB:18",
+    "A0:AC:1B", "B4:A3:82", "BC:AD:28", "C8:02:8F", "D8:69:73",
+    "E8:EA:6A", "C8:C2:FA", "50:2A:8B", "D4:56:B0",
+    # Dahua
+    "70:62:B8", "90:02:A9", "98:03:D8", "A8:6B:7C",
+    "C8:02:10", "E0:50:8B", "F4:AA:2C",
+    # Axis Communications
+    "00:40:8C", "AC:CC:8E", "B8:A4:4F", "F4:4D:30",
+    # Hanwha / Samsung Techwin
+    "00:09:18", "00:16:6C", "34:FC:EF",
+    # Reolink
+    "EC:71:DB", "DC:A6:32",
+    # Amcrest / Dahua OEM
+    "98:03:D8", "70:62:B8",
+    # Mobotix
+    "00:4A:E0",
+    # ACTi
+    "00:1F:9F",
+    # Vivotek
+    "00:02:D1",
+    # GeoVision
+    "00:13:E2",
+    # Pelco
+    "00:07:CB",
+    # Bosch
+    "00:04:63",
+    # Sony (network cameras)
+    "00:01:4A", "00:90:C6",
+    # Panasonic
+    "00:80:45", "04:B1:67",
+    # Foscam
+    "C4:D9:87", "E0:AE:5E",
+    # TP-Link (Tapo cameras)
+    "50:3E:AA", "98:DA:C4", "C0:06:C3",
+    # Uniview (UNV)
+    "E8:73:2E",
+    # Lorex / FLIR
+    "00:1C:F0", "C0:03:EF",
+    # Milesight
+    "2C:41:38",
+    # Luxonis
+    "44:A9:2C",
+    # iENSO
+    # (OUI not widely published — identified via HTTP)
+}
+
+# OUI prefixes of devices that are almost certainly NOT cameras
+_NON_CAMERA_OUI_VENDORS: set[str] = {
+    # Cisco Systems
+    "00:00:0C", "00:01:42", "00:01:43", "00:01:96", "00:01:97",
+    "00:03:6B", "00:03:E3", "00:0A:8A", "00:0E:38", "00:14:BF",
+    "00:17:94", "00:19:E7", "00:1A:2F", "00:1B:2B", "00:1E:49",
+    "00:1F:27", "00:21:A0", "00:22:BD", "00:23:AC", "00:24:14",
+    "00:25:83", "00:26:0B", "00:27:0D", "00:60:2F",
+    # Juniper Networks
+    "00:05:85", "00:10:DB", "00:12:1E", "00:14:F6", "00:17:CB",
+    "00:19:E2", "00:1F:12", "00:21:59", "00:23:9C", "00:24:DC",
+    # MikroTik
+    "00:0C:42", "2C:C8:1B", "4C:5E:0C", "6C:3B:6B", "74:4D:28",
+    "8C:22:50", "B8:69:F4", "CC:2D:E0", "D4:CA:6D", "DC:2C:6E",
+    "E4:8D:8C", "18:FD:74",
+    # Ubiquiti Networks
+    "00:15:6D", "00:27:22", "04:18:D6", "0C:80:63", "18:E8:29",
+    "24:A4:3C", "44:D9:E7", "68:72:51", "80:2A:A8", "B4:FB:E4",
+    "DC:9F:DB", "F0:9F:C2",
+    # HP / Hewlett-Packard
+    "00:01:E6", "00:02:A5", "00:0D:9D", "00:11:0A", "00:13:21",
+    "00:17:08", "00:18:71", "00:1E:0B", "00:1F:29", "00:21:5A",
+    "00:23:7D", "00:24:81", "00:25:B3", "00:26:55", "3C:D9:2B",
+    # Dell
+    "00:06:5B", "00:08:74", "00:0B:DB", "00:0F:1F", "00:11:43",
+    "00:12:3F", "00:13:72", "00:14:22", "00:15:C5", "00:16:F0",
+    "00:18:8B", "00:19:B9", "00:1A:A0", "00:1C:23", "00:1D:09",
+    # Apple
+    "00:03:93", "00:0A:27", "00:0A:95", "00:0D:93", "00:11:24",
+    "00:14:51", "00:16:CB", "00:17:F2", "00:19:E3", "00:1B:63",
+    "00:1C:B3", "00:1D:4F", "00:1E:52", "00:1E:C2", "00:1F:5B",
+    "00:1F:F3", "00:21:E9", "00:22:41", "00:23:12", "00:23:32",
+    "00:23:6C", "00:23:DF", "00:24:36", "00:25:00", "00:25:4B",
+    "00:25:BC", "00:26:08", "00:26:4A", "00:26:B9", "00:26:BB",
+    # Netgear
+    "00:09:5B", "00:0F:B5", "00:14:6C", "00:18:4D", "00:1B:2F",
+    "00:1E:2A", "00:1F:33", "00:22:3F", "00:24:B2", "00:26:F2",
+    # ASUS
+    "00:0C:6E", "00:11:2F", "00:13:D4", "00:15:F2", "00:17:31",
+    "00:18:F3", "00:1A:92", "00:1B:FC", "00:1D:60", "00:1E:8C",
+    "00:1F:C6", "00:22:15", "00:23:54", "00:24:8C", "00:26:18",
+    # Brother (printers)
+    "00:0C:29", "00:1B:A9", "00:80:77",
+    # Epson (printers)
+    "00:26:AB",
+    # Synology (NAS)
+    "00:11:32",
+    # QNAP (NAS)
+    "00:08:9B",
+}
+
+
+def _oui_key(mac: str) -> str:
+    """Normalise a MAC address to XX:XX:XX uppercase OUI key."""
+    mac = mac.upper().replace("-", ":").replace(".", ":")
+    parts = mac.split(":")
+    return ":".join(parts[:3]) if len(parts) >= 3 else ""
+
+
+def load_oui_db():
+    """
+    Load the OUI database from /data/oui_cache.json into _OUI_DB.
+    The cache is downloaded asynchronously by refresh_oui_db() on first run.
+    """
+    global _OUI_DB_LOADED
+    if _OUI_DB_LOADED:
+        return
+    if OUI_CACHE_FILE.exists():
+        try:
+            _OUI_DB.update(json.loads(OUI_CACHE_FILE.read_text()))
+            log.info(f"OUI DB loaded: {len(_OUI_DB)} entries")
+        except Exception as e:
+            log.warning(f"OUI cache load error: {e}")
+    _OUI_DB_LOADED = True
+
+
+async def refresh_oui_db():
+    """
+    Download the IEEE OUI CSV and cache it to /data/oui_cache.json.
+    Runs once on startup if cache is missing or older than OUI_MAX_AGE_DAYS.
+    Non-blocking — runs as a background task.
+    """
+    import csv, io, urllib.request
+
+    needs_refresh = True
+    if OUI_CACHE_FILE.exists():
+        age_days = (time.time() - OUI_CACHE_FILE.stat().st_mtime) / 86400
+        if age_days < OUI_MAX_AGE_DAYS:
+            needs_refresh = False
+            log.info(f"OUI cache is {age_days:.0f} days old — no refresh needed")
+
+    if not needs_refresh:
+        return
+
+    log.info(f"Downloading IEEE OUI database from {OUI_CSV_URL}…")
+    try:
+        loop = asyncio.get_event_loop()
+
+        def _download():
+            req = urllib.request.Request(OUI_CSV_URL)
+            req.add_header("User-Agent", "AnyCam/1.0")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+
+        raw = await loop.run_in_executor(None, _download)
+
+        # Parse CSV: Registry, Assignment (OUI hex), Organization Name, Address
+        oui_map: dict[str, str] = {}
+        reader = csv.reader(io.StringIO(raw))
+        next(reader, None)  # skip header
+        for row in reader:
+            if len(row) < 3:
+                continue
+            assignment = row[1].strip().upper()  # e.g. "1CC316"
+            org        = row[2].strip()
+            if len(assignment) == 6:
+                key = f"{assignment[0:2]}:{assignment[2:4]}:{assignment[4:6]}"
+                oui_map[key] = org
+
+        DATA_DIR.mkdir(exist_ok=True)
+        OUI_CACHE_FILE.write_text(json.dumps(oui_map))
+        _OUI_DB.update(oui_map)
+        log.info(f"OUI DB refreshed: {len(oui_map)} entries cached")
+    except Exception as e:
+        log.warning(f"OUI DB download failed: {e} — will use embedded fallback")
+
+
+def lookup_oui(mac: str) -> str:
+    """
+    Return the vendor name for a MAC address.
+    Checks the full downloaded OUI DB first, then falls back to
+    camera/non-camera embedded sets (returns prefix like 'Hikvision (OUI)').
+    Returns empty string if unknown.
+    """
+    key = _oui_key(mac)
+    if not key:
+        return ""
+    # Full downloaded DB
+    if key in _OUI_DB:
+        return _OUI_DB[key]
+    # Curated embedded fallback label
+    if key in _CAMERA_OUI_VENDORS:
+        return "(known camera manufacturer)"
+    if key in _NON_CAMERA_OUI_VENDORS:
+        return "(known non-camera device)"
+    return ""
+
+
+def oui_is_camera(mac: str) -> bool | None:
+    """
+    Return True if OUI is a known camera manufacturer,
+    False if a known non-camera device, None if unknown.
+    """
+    key = _oui_key(mac)
+    if not key:
+        return None
+    # Check full DB vendor name against CAMERA_DB
+    vendor = _OUI_DB.get(key, "").lower()
+    if vendor:
+        # Match against camera DB aliases
+        for entry in CAMERA_DB:
+            for alias in entry.get("aliases", []):
+                if alias.lower() in vendor:
+                    return True
+        # Match against known non-camera keywords
+        for kw in NON_CAMERA_KEYWORDS:
+            if kw in vendor:
+                return False
+    # Curated embedded sets
+    if key in _CAMERA_OUI_VENDORS:
+        return True
+    if key in _NON_CAMERA_OUI_VENDORS:
+        return False
+    return None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Encryption
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_fernet() -> Fernet:
+    global _FERNET
+    if _FERNET:
+        return _FERNET
+    DATA_DIR.mkdir(exist_ok=True)
+    key = KEY_FILE.read_bytes() if KEY_FILE.exists() else Fernet.generate_key()
+    if not KEY_FILE.exists():
+        KEY_FILE.write_bytes(key)
+        KEY_FILE.chmod(0o600)
+    _FERNET = Fernet(key)
+    return _FERNET
+
+def encrypt_creds(u: str, p: str) -> str:
+    return get_fernet().encrypt(json.dumps({"u": u, "p": p}).encode()).decode()
+
+def decrypt_creds(token: str) -> tuple[str, str]:
+    d = json.loads(get_fernet().decrypt(token.encode()).decode())
+    return d["u"], d["p"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Persistent stores
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_cameras():
+    if not CAMS_FILE.exists():
+        return
+    try:
+        for cam in json.loads(CAMS_FILE.read_text()):
+            CAMERAS[cam["id"]] = cam
+        log.info(f"Loaded {len(CAMERAS)} camera(s)")
+    except Exception as e:
+        log.warning(f"Load cameras: {e}")
+
+def save_cameras():
+    DATA_DIR.mkdir(exist_ok=True)
+    safe = []
+    for cam in CAMERAS.values():
+        s = dict(cam)
+        if s.get("credentials") and s.get("stream_url"):
+            s["stream_url"] = _strip_creds(s["stream_url"])
+        safe.append(s)
+    CAMS_FILE.write_text(json.dumps(safe, indent=2))
+
+def load_blacklist():
+    if not BLACKLIST_FILE.exists():
+        return
+    try:
+        BLACKLIST.update(json.loads(BLACKLIST_FILE.read_text()))
+    except Exception:
+        pass
+
+def save_blacklist():
+    DATA_DIR.mkdir(exist_ok=True)
+    BLACKLIST_FILE.write_text(json.dumps(list(BLACKLIST)))
+
+# In-memory feedback store: cid → rich fingerprint record
+FEEDBACK: dict = {}
+
+def load_feedback():
+    if not FEEDBACK_FILE.exists():
+        return
+    try:
+        FEEDBACK.update(json.loads(FEEDBACK_FILE.read_text()))
+        log.info(f"Loaded {len(FEEDBACK)} feedback record(s)")
+    except Exception as e:
+        log.warning(f"Feedback load: {e}")
+
+def save_feedback():
+    DATA_DIR.mkdir(exist_ok=True)
+    FEEDBACK_FILE.write_text(json.dumps(FEEDBACK, indent=2))
+
+def build_fingerprint(cam: dict) -> dict:
+    """
+    Build a shareable device fingerprint from a camera dict.
+    Contains NO IP addresses or personally identifying information —
+    only hardware/service signatures useful for pattern matching.
+    """
+    return {
+        "oui":          cam.get("mac_addr","")[:8].upper(),  # first 3 octets only
+        "mac_vendor":   cam.get("mac_vendor",""),
+        "port":         cam.get("port"),
+        "protocol":     cam.get("protocol",""),
+        "service":      cam.get("server_header",""),
+        "page_title":   cam.get("page_title",""),
+        "manufacturer": cam.get("manufacturer",""),
+    }
+
+async def submit_to_community(record: dict):
+    """
+    Fire-and-forget submission to the community endpoint.
+    Silently fails if the endpoint is unavailable or not configured.
+    """
+    if not COMMUNITY_ENDPOINT:
+        return
+    import urllib.request, urllib.error
+    try:
+        body = json.dumps(record).encode()
+        req  = urllib.request.Request(
+            COMMUNITY_ENDPOINT + "/api/v1/report",
+            data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", f"AnyCam/{CURRENT_VERSION}")
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            log.info(f"Community report submitted: {resp.status}")
+    except Exception as e:
+        log.debug(f"Community submit failed (non-fatal): {e}")
+
+
+def load_runtime() -> dict:
+    """Load persisted runtime state (last run version, etc.)."""
+    if not RUNTIME_FILE.exists():
+        return {}
+    try:
+        return json.loads(RUNTIME_FILE.read_text())
+    except Exception:
+        return {}
+
+def save_runtime(data: dict):
+    DATA_DIR.mkdir(exist_ok=True)
+    RUNTIME_FILE.write_text(json.dumps(data, indent=2))
+
+def get_startup_mode() -> str:
+    """
+    Determine what kind of startup this is.
+
+    Returns:
+      "new_install"   — no saved cameras and no prior version recorded
+      "routine"       — same version as last run (reboot / HA restart)
+      "post_upgrade"  — version differs from last run
+    """
+    runtime = load_runtime()
+    last_version = runtime.get("version")
+
+    if last_version is None:
+        # First ever run — could be new install or pre-1.1.8 upgrade
+        if CAMS_FILE.exists():
+            # Cameras were saved by an older version that didn't write runtime.json
+            return "post_upgrade"
+        return "new_install"
+
+    if last_version == CURRENT_VERSION:
+        return "routine"
+
+    return "post_upgrade"
+
+def _strip_creds(url: str) -> str:
+    return re.sub(r"(://)[^@]+@", r"\1", url) if url else url
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Network helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_local_subnet() -> str:
+    try:
+        r = subprocess.run(["ip", "route", "show", "default"],
+                           capture_output=True, text=True, timeout=5)
+        m = re.search(r"dev\s+(\S+)", r.stdout)
+        if m:
+            r2 = subprocess.run(["ip", "addr", "show", m.group(1)],
+                                capture_output=True, text=True, timeout=5)
+            m2 = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+/\d+)", r2.stdout)
+            if m2:
+                return str(ipaddress.ip_interface(m2.group(1)).network)
+    except Exception as e:
+        log.warning(f"Subnet: {e}")
+    return "192.168.1.0/24"
+
+def get_default_gateway() -> str | None:
+    try:
+        r = subprocess.run(["ip", "route", "show", "default"],
+                           capture_output=True, text=True, timeout=5)
+        m = re.search(r"via\s+(\d+\.\d+\.\d+\.\d+)", r.stdout)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# False-positive classifier
+# ─────────────────────────────────────────────────────────────────────────────
+
+def classify_device(nmap_info: dict) -> tuple[str, str]:
+    all_text = " ".join([
+        nmap_info.get("hostname", ""),
+        " ".join(p.get("service", "") + " " + p.get("product", "")
+                 for p in nmap_info.get("open_ports", [])),
+    ]).lower()
+
+    cam_hits = [k for k in CAMERA_KEYWORDS if k in all_text]
+    if cam_hits:
+        return "camera", f"Matched: {', '.join(cam_hits)}"
+
+    non_hits = [k for k in NON_CAMERA_KEYWORDS if k in all_text]
+    if non_hits:
+        return "not_camera", f"Detected as: {', '.join(non_hits)}"
+
+    ports = [p["port"] for p in nmap_info.get("open_ports", [])]
+    if any(p in (554, 8554, 10554, 2020, 8765) for p in ports):
+        return "camera", "RTSP port found"
+
+    if all(p in (80, 443, 8080, 8443, 8000, 8888) for p in ports):
+        return "uncertain", "HTTP only — no camera service identified"
+
+    return "uncertain", "Unknown device type"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1a — ARP ping scan (finds live hosts without full port scan)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_local_ip() -> str | None:
+    """Return this machine's primary LAN IP."""
+    try:
+        # Connect a UDP socket to find the default route interface IP
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return None
+
+
+def discover_live_hosts(subnet: str) -> set[str]:
+    """
+    Stage 1a: ARP ping scan to find live hosts without triggering port scan
+    timeouts on dead IPs.  Falls back to ICMP ping if ARP returns nothing
+    (can happen when nmap lacks raw-socket privileges in some containers).
+    Always includes the local machine's own IP so the OAK Camera addon
+    (RTSP on port 8765) is always scanned.
+    """
+    log.info(f"ARP ping scan: {subnet}")
+    live = set()
+    try:
+        r = subprocess.run(
+            ["nmap", "-sn", "-PR", "-T4", "--host-timeout", "8s", "-oX", "-", subnet],
+            capture_output=True, text=True, timeout=60,
+        )
+        root = ET.fromstring(r.stdout)
+        for host in root.findall("host"):
+            st = host.find("status")
+            if st is not None and st.get("state") == "up":
+                addr = host.find("address[@addrtype='ipv4']")
+                if addr is not None:
+                    live.add(addr.get("addr"))
+        log.info(f"ARP scan: {len(live)} live host(s)")
+    except Exception as e:
+        log.warning(f"ARP scan error: {e}")
+
+    # Fallback: if ARP found very few hosts (< 3), supplement with ICMP ping scan
+    if len(live) < 3:
+        log.info("ARP returned few results — supplementing with ICMP ping scan")
+        try:
+            r = subprocess.run(
+                ["nmap", "-sn", "-PE", "-T4", "--host-timeout", "8s", "-oX", "-", subnet],
+                capture_output=True, text=True, timeout=90,
+            )
+            root = ET.fromstring(r.stdout)
+            for host in root.findall("host"):
+                st = host.find("status")
+                if st is not None and st.get("state") == "up":
+                    addr = host.find("address[@addrtype='ipv4']")
+                    if addr is not None:
+                        live.add(addr.get("addr"))
+            log.info(f"After ICMP fallback: {len(live)} live host(s)")
+        except Exception as e:
+            log.warning(f"ICMP ping fallback error: {e}")
+
+    # Always include this machine's own IP — the OAK Camera addon serves
+    # RTSP on port 8765 on the Pi itself, which wouldn't be found otherwise.
+    local_ip = get_local_ip()
+    if local_ip:
+        live.add(local_ip)
+        log.info(f"Added local IP: {local_ip}")
+
+    return live
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1b — SSDP / UPnP discovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SSDP_PROBE = (
+    "M-SEARCH * HTTP/1.1\r\n"
+    "HOST: 239.255.255.250:1900\r\n"
+    'MAN: "ssdp:discover"\r\n'
+    "MX: 3\r\n"
+    "ST: ssdp:all\r\n"
+    "\r\n"
+)
+
+def ssdp_discover(timeout: int = 5) -> list[dict]:
+    """
+    UPnP/SSDP M-SEARCH on 239.255.255.250:1900.
+    Many IP cameras, NVRs and video encoders announce themselves via SSDP.
+    Returns all responding devices, flagging likely cameras.
+    """
+    results, seen = [], set()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.settimeout(timeout)
+        sock.sendto(_SSDP_PROBE.encode(), ("239.255.255.250", 1900))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data, addr = sock.recvfrom(65535)
+                ip = addr[0]
+                if ip in seen:
+                    continue
+                seen.add(ip)
+                text     = data.decode("utf-8", errors="replace")
+                combined = text.lower()
+                is_camera = any(k in combined for k in (
+                    "camera", "ipcam", "nvr", "dvr", "onvif", "rtsp",
+                    "hikvision", "dahua", "reolink", "axis", "amcrest",
+                    "networkvideoserver", "networkcamera", "videoserver",
+                ))
+                server_m = re.search(r"server:\s*([^\r\n]+)", text, re.I)
+                name     = server_m.group(1).strip() if server_m else ip
+                results.append({"ip": ip, "name": name[:80], "is_camera": is_camera})
+                log.info(f"  SSDP: {ip} — {name[:60]} {'[camera]' if is_camera else ''}")
+            except socket.timeout:
+                break
+        sock.close()
+    except Exception as e:
+        log.debug(f"SSDP: {e}")
+    return results
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1c — mDNS / Bonjour discovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_mdns_query(service: str) -> bytes:
+    """Minimal DNS PTR query for mDNS (RFC 6762)."""
+    header = struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0)
+    qname  = b""
+    for label in service.encode().split(b"."):
+        if label:
+            qname += bytes([len(label)]) + label
+    qname += b"\x00"
+    footer = struct.pack(">HH", 12, 0x8001)   # PTR, multicast class
+    return header + qname + footer
+
+
+def mdns_discover(timeout: int = 5) -> list[dict]:
+    """
+    mDNS (Bonjour) discovery on 224.0.0.251:5353.
+    Queries _rtsp._tcp, _onvif._tcp, _camera._tcp and passively collects
+    any responses that reference camera-related service names.
+    Falls back gracefully if port 5353 is already in use by avahi.
+    """
+    CAMERA_SERVICES = [
+        "_rtsp._tcp.local", "_onvif._tcp.local",
+        "_camera._tcp.local", "_nvr._tcp.local",
+    ]
+    CAMERA_BYTES = [b"_rtsp", b"_onvif", b"_camera", b"_nvr", b"camera", b"ipcam"]
+
+    results, seen = [], set()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.settimeout(timeout)
+        try:
+            sock.bind(("", 5353))
+        except OSError:
+            # Port already bound (avahi) — use ephemeral port for sending only
+            sock.bind(("", 0))
+
+        mreq = struct.pack("4sL", socket.inet_aton("224.0.0.251"), socket.INADDR_ANY)
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        except OSError:
+            pass
+
+        for svc in CAMERA_SERVICES:
+            try:
+                sock.sendto(_build_mdns_query(svc), ("224.0.0.251", 5353))
+            except Exception:
+                pass
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data, addr = sock.recvfrom(65535)
+                ip = addr[0]
+                if ip not in seen and any(cb in data for cb in CAMERA_BYTES):
+                    seen.add(ip)
+                    results.append({"ip": ip, "name": ip, "source": "mDNS"})
+                    log.info(f"  mDNS camera: {ip}")
+            except socket.timeout:
+                break
+        sock.close()
+    except Exception as e:
+        log.debug(f"mDNS: {e}")
+    return results
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1d — ONVIF WS-Discovery (already present, kept here for completeness)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_WS_PROBE = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<e:Envelope xmlns:e="http://www.w3.org/2003/05/soap-envelope"'
+    ' xmlns:w="http://schemas.xmlsoap.org/ws/2004/08/addressing"'
+    ' xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery"'
+    ' xmlns:dn="http://www.onvif.org/ver10/network/wsdl">'
+    "<e:Header>"
+    "<w:MessageID>uuid:{mid}</w:MessageID>"
+    "<w:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</w:To>"
+    "<w:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</w:Action>"
+    "</e:Header>"
+    "<e:Body><d:Probe><d:Types>dn:NetworkVideoTransmitter</d:Types></d:Probe></e:Body>"
+    "</e:Envelope>"
+)
+
+def onvif_discover(timeout: int = 5) -> list[dict]:
+    results, seen = [], set()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
+        sock.settimeout(timeout)
+        sock.sendto(_WS_PROBE.replace("{mid}", str(uuid.uuid4())).encode(),
+                    ("239.255.255.250", 3702))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data, addr = sock.recvfrom(65535)
+                ip = addr[0]
+                if ip in seen:
+                    continue
+                seen.add(ip)
+                text   = data.decode("utf-8", errors="replace")
+                xaddrs = re.findall(r"<[^>]*XAddrs[^>]*>([^<]+)<", text)
+                scopes = re.findall(r"<[^>]*Scopes[^>]*>([^<]+)<", text)
+                m      = re.search(r"onvif://www\.onvif\.org/name/([^\s]+)",
+                                   " ".join(scopes))
+                name   = m.group(1).replace("%20", " ") if m else ip
+                results.append({"ip": ip, "name": name,
+                                 "xaddrs": xaddrs[0].strip() if xaddrs else ""})
+                log.info(f"  ONVIF: {name} @ {ip}")
+            except socket.timeout:
+                break
+        sock.close()
+    except Exception as e:
+        log.debug(f"ONVIF WS-Discovery: {e}")
+    return results
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2 — nmap scans
+# ─────────────────────────────────────────────────────────────────────────────
+
+def focused_nmap_scan(host_list: list[str]) -> list[dict]:
+    """
+    Scan only known-live hosts on the top 1000 most common ports.
+    Using nmap --top-ports 1000 covers all standard camera ports plus
+    thousands of other well-known ports, catching cameras on non-standard
+    ports and identifying devices by service banner even without a camera
+    protocol.  Because hosts are pre-confirmed alive via ARP, no timeout
+    waste on dead IPs.
+    Typical time: 30-90 seconds for 20 hosts.
+    """
+    if not host_list:
+        return []
+    log.info(f"Focused scan: {len(host_list)} host(s), top 1000 ports")
+    try:
+        r = subprocess.run(
+            ["nmap", "-sV", "--open", "--top-ports", "1000",
+             "--host-timeout", "30s", "-T4", "-oX", "-"] + host_list,
+            capture_output=True, text=True, timeout=360,
+        )
+        hosts = _parse_nmap_xml(r.stdout)
+        log.info(f"Focused scan: {len(hosts)} host(s) responded")
+        return hosts
+    except Exception as e:
+        log.warning(f"Focused nmap: {e}")
+        return []
+
+
+def broad_nmap_scan(host_list: list[str]) -> list[dict]:
+    """
+    Broader scan (ports 0-10000) on hosts that were alive but didn't
+    respond to camera ports.  Only runs if user enables broad sweep.
+    Typical time: 1-4 minutes depending on host count.
+    """
+    if not host_list:
+        return []
+    log.info(f"Broad scan (0-10000): {len(host_list)} host(s)")
+    try:
+        r = subprocess.run(
+            ["nmap", "-sV", "--open", "-p", "0-10000",
+             "--host-timeout", "90s", "-T4", "-oX", "-"] + host_list,
+            capture_output=True, text=True, timeout=600,
+        )
+        hosts = _parse_nmap_xml(r.stdout)
+        log.info(f"Broad scan: {len(hosts)} host(s) responded")
+        return hosts
+    except Exception as e:
+        log.warning(f"Broad nmap: {e}")
+        return []
+
+
+def _parse_nmap_xml(xml_text: str) -> list[dict]:
+    results = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return results
+    for host in root.findall("host"):
+        st = host.find("status")
+        if st is None or st.get("state") != "up":
+            continue
+        addr_el = host.find("address[@addrtype='ipv4']")
+        if addr_el is None:
+            continue
+        ip = addr_el.get("addr")
+        hn = host.find("hostnames/hostname")
+        hostname = hn.get("name", ip) if hn is not None else ip
+
+        # Extract MAC address + nmap's built-in OUI vendor (ARP scan only)
+        mac_el  = host.find("address[@addrtype='mac']")
+        mac_addr   = mac_el.get("addr", "")   if mac_el is not None else ""
+        mac_vendor = mac_el.get("vendor", "") if mac_el is not None else ""
+
+        # Supplement nmap vendor with our full OUI DB if nmap didn't identify it
+        if mac_addr and not mac_vendor:
+            mac_vendor = lookup_oui(mac_addr)
+
+        open_ports = []
+        for p in host.findall("ports/port"):
+            pst = p.find("state")
+            if pst is None or pst.get("state") != "open":
+                continue
+            svc = p.find("service")
+            open_ports.append({
+                "port":    int(p.get("portid")),
+                "service": svc.get("name", "")    if svc is not None else "",
+                "product": svc.get("product", "") if svc is not None else "",
+            })
+        if open_ports:
+            results.append({
+                "ip": ip, "hostname": hostname, "open_ports": open_ports,
+                "mac_addr": mac_addr, "mac_vendor": mac_vendor,
+            })
+    return results
+
+
+def _initial_protocol(port: int, service: str, product: str) -> str:
+    c = (service + " " + product).lower()
+    if port in (554, 8554, 10554, 2020, 8765):
+        return "RTSP"
+    if port in (1935, 1936):
+        return "RTMP"
+    if port in (80, 8080, 8000, 8888, 443, 8443):
+        return "RTSP" if ("rtsp" in c or "camera" in c) else "HTTP"
+    if port in (37777, 34567):
+        return "DVR"
+    return service.upper() or "UNKNOWN"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Protocol probers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────
+# Pure-Python RTSP probe — no ffprobe dependency, no probesize limits,
+# no URL-encoding workarounds.  Implements RFC 2326 (RTSP) OPTIONS +
+# DESCRIBE with Digest and Basic auth negotiation.
+# ─────────────────────────────────────────────────────────────────────────
+def probe_rtsp_socket(host: str, port: int, path: str,
+                      username: str = "", password: str = "",
+                      timeout: float = 6.0,
+                      label: str = "") -> bool:
+    """
+    Verify an RTSP stream is accessible.  Returns True if DESCRIBE
+    succeeds (with or without auth).  Never touches ffprobe.
+    Pass label="" for silent (debug-only) logging, or a non-empty
+    string (e.g. camera_id/profile) for verbose INFO-level logging
+    of each RTSP round-trip — useful when diagnosing credential failures.
+    """
+    rtsp_url = f"rtsp://{host}:{port}{path}"
+    pfx = f"  [probe_rtsp {label or host + ':' + str(port) + path}]"
+
+    def _log(msg: str) -> None:
+        if label:
+            log.info(pfx + " " + msg)
+        else:
+            log.debug(pfx + " " + msg)
+
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.settimeout(timeout)
+
+        CRLF = chr(13) + chr(10)
+        CRLFCRLF = (chr(13) + chr(10)) * 2
+
+        def roundtrip(method: str, cseq: int, extra: dict = {}) -> str:
+            hdr = "".join(k + ": " + v + CRLF for k, v in extra.items())
+            req = method + " " + rtsp_url + " RTSP/1.0" + CRLF
+            req += "CSeq: " + str(cseq) + CRLF + hdr + CRLF
+            sock.sendall(req.encode())
+            buf = b""
+            while CRLFCRLF.encode() not in buf and len(buf) < 32768:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            return buf.decode("utf-8", errors="replace")
+
+        resp = roundtrip("OPTIONS", 1)
+        status_line = resp.split(chr(13))[0].strip()
+        if "RTSP/1.0 2" not in resp:
+            _log(f"OPTIONS → {status_line!r} (not 2xx — giving up)")
+            return False
+        _log(f"OPTIONS → OK")
+
+        # DESCRIBE — may trigger 401
+        resp = roundtrip("DESCRIBE", 2, {"Accept": "application/sdp"})
+        status_line = resp.split(chr(13))[0].strip()
+        if "RTSP/1.0 200" in resp:
+            _log("DESCRIBE → 200 OK (no auth required)")
+            return True
+        if "401" not in resp or not username:
+            ok = "RTSP/1.0 2" in resp
+            _log(f"DESCRIBE → {status_line!r} (no 401; result={ok})")
+            return ok
+
+        # Parse WWW-Authenticate
+        auth_line = next(
+            (l for l in resp.splitlines() if l.lower().startswith("www-authenticate:")), "")
+        auth_val  = auth_line.split(":", 1)[-1].strip()
+
+        if auth_val.lower().startswith("digest"):
+            realm_m = re.search(r'realm="([^"]*)"', auth_val)
+            nonce_m = re.search(r'nonce="([^"]*)"', auth_val)
+            if not (realm_m and nonce_m):
+                _log(f"DESCRIBE → 401 Digest but no realm/nonce in: {auth_val[:80]!r}")
+                return False
+            realm, nonce = realm_m.group(1), nonce_m.group(1)
+            _log(f"DESCRIBE → 401 Digest (realm={realm!r}, nonce={nonce[:8]!r}...)")
+            ha1 = hashlib.md5(f"{username}:{realm}:{password}".encode()).hexdigest()
+            ha2 = hashlib.md5(f"DESCRIBE:{rtsp_url}".encode()).hexdigest()
+            rsp = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
+            auth = (f'Digest username="{username}", realm="{realm}", '
+                    f'nonce="{nonce}", uri="{rtsp_url}", response="{rsp}"')
+        elif auth_val.lower().startswith("basic"):
+            import base64 as _b64
+            _log("DESCRIBE → 401 Basic")
+            auth = "Basic " + _b64.b64encode(f"{username}:{password}".encode()).decode()
+        else:
+            _log(f"DESCRIBE → 401 unknown auth method: {auth_val[:60]!r} — giving up")
+            return False
+
+        resp = roundtrip("DESCRIBE", 3,
+                         {"Accept": "application/sdp", "Authorization": auth})
+        ok = "RTSP/1.0 200" in resp
+        status_line = resp.split(chr(13))[0].strip()
+        _log(f"DESCRIBE (authenticated) → {'200 OK' if ok else status_line!r}")
+        return ok
+
+    except Exception as e:
+        _log(f"exception: {e}")
+        return False
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def probe_rtsp(url: str, username: str = "", password: str = "",
+               timeout: int = 6, label: str = "") -> bool:
+    """Thin wrapper — parses URL and delegates to probe_rtsp_socket.
+    Pass label (e.g. camera_id/profile_name) to get verbose INFO-level logging."""
+    try:
+        from urllib.parse import urlparse
+        p    = urlparse(url)
+        host = p.hostname or ""
+        port = p.port or 554
+        path = p.path or "/"
+        # Prefer caller-supplied credentials over any embedded in the URL
+        u  = username or p.username or ""
+        pw = password or p.password or ""
+        return probe_rtsp_socket(host, port, path, u, pw,
+                                 timeout=timeout, label=label)
+    except Exception as e:
+        log.debug(f"probe_rtsp: {e}")
+        return False
+
+
+def find_rtsp_path(ip: str, port: int,
+                   username: str = "", password: str = "") -> str | None:
+    for path in RTSP_PATHS:
+        url = f"rtsp://{ip}:{port}{path}"
+        if probe_rtsp(url, username, password):
+            log.info(f"  RTSP OK: {url}")
+            return url
+    return None
+
+
+def probe_mjpeg_http(ip: str, port: int, username: str = "",
+                     password: str = "", timeout: int = 4) -> str | None:
+    import urllib.request
+    scheme = "https" if port in (443, 8443) else "http"
+    auth   = (f"Basic {base64.b64encode(f'{username}:{password}'.encode()).decode()}"
+              if username else None)
+    for path in MJPEG_PATHS:
+        url = f"{scheme}://{ip}:{port}{path}"
+        try:
+            req = urllib.request.Request(url)
+            if auth:
+                req.add_header("Authorization", auth)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                ct = resp.headers.get("Content-Type", "")
+                if any(k in ct.lower() for k in
+                       ("multipart/x-mixed-replace", "image/jpeg", "mjpeg", "mjpg")):
+                    log.info(f"  MJPEG OK: {url}")
+                    return url
+        except Exception:
+            pass
+    return None
+
+
+def probe_hls(ip: str, port: int, username: str = "",
+              password: str = "", timeout: int = 4) -> str | None:
+    import urllib.request
+    scheme = "https" if port in (443, 8443) else "http"
+    auth   = (f"Basic {base64.b64encode(f'{username}:{password}'.encode()).decode()}"
+              if username else None)
+    for path in HLS_PATHS:
+        url = f"{scheme}://{ip}:{port}{path}"
+        try:
+            req = urllib.request.Request(url)
+            if auth:
+                req.add_header("Authorization", auth)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                ct   = resp.headers.get("Content-Type", "")
+                body = resp.read(64).decode("utf-8", errors="replace")
+                if ("m3u8" in ct.lower() or "mpegurl" in ct.lower() or
+                        body.strip().startswith("#EXTM3U")):
+                    log.info(f"  HLS OK: {url}")
+                    return url
+        except Exception:
+            pass
+    return None
+
+
+def probe_rtmp(ip: str, port: int, timeout: int = 3) -> bool:
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as sock:
+            sock.sendall(b"\x03")
+            sock.settimeout(timeout)
+            data = sock.recv(4)
+            return bool(data and data[0] in (0x03, 0x06))
+    except Exception:
+        return False
+
+
+def probe_webrtc(ip: str, port: int, timeout: int = 4) -> str | None:
+    import urllib.request, urllib.error
+    scheme = "https" if port in (443, 8443) else "http"
+    sdp_offer = (
+        "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
+        "m=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\n"
+        "a=sendrecv\r\na=rtpmap:96 H264/90000\r\n"
+    )
+    for path in WEBRTC_PATHS:
+        url = f"{scheme}://{ip}:{port}{path}"
+        try:
+            req = urllib.request.Request(url, data=sdp_offer.encode(), method="POST")
+            req.add_header("Content-Type", "application/sdp")
+            req.add_header("Accept",       "application/sdp")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status in (200, 201) and "sdp" in resp.headers.get("Content-Type","").lower():
+                    return url
+        except urllib.error.HTTPError as e:
+            if any(h in e.headers.get("Content-Type","").lower() for h in ("sdp","webrtc","ice")):
+                return url
+        except Exception:
+            pass
+    return None
+
+
+def probe_ws_rtsp(ip: str, port: int, timeout: int = 4) -> str | None:
+    scheme_ws = "wss" if port in (443, 8443) else "ws"
+    key_b64   = "dGhlIHNhbXBsZSBub25jZQ=="
+    for path in WS_RTSP_PATHS:
+        try:
+            with socket.create_connection((ip, port), timeout=timeout) as sock:
+                hs = (
+                    f"GET {path} HTTP/1.1\r\nHost: {ip}:{port}\r\n"
+                    "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: {key_b64}\r\nSec-WebSocket-Version: 13\r\n"
+                    "Sec-WebSocket-Protocol: rtsp\r\n\r\n"
+                ).encode()
+                sock.sendall(hs)
+                sock.settimeout(timeout)
+                buf = b""
+                while b"\r\n\r\n" not in buf:
+                    chunk = sock.recv(1024)
+                    if not chunk:
+                        break
+                    buf += chunk
+                if "101" in buf.decode("utf-8", errors="replace") and \
+                        b"websocket" in buf.lower():
+                    return f"{scheme_ws}://{ip}:{port}{path}"
+        except Exception:
+            pass
+    return None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Active camera-positive probes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def probe_rtsp_options(ip: str, port: int, timeout: int = 3) -> bool:
+    """
+    Send RTSP OPTIONS via raw TCP and check for an RTSP response header.
+    Works even when auth is required — a 401 is still camera-positive.
+    This is the fastest and most reliable camera litmus test.
+    Routers, printers, NAS devices do NOT speak RTSP and will close the
+    connection or return HTTP/garbage.
+    """
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as sock:
+            request = (
+                f"OPTIONS rtsp://{ip}:{port}/ RTSP/1.0\r\n"
+                f"CSeq: 1\r\n"
+                f"User-Agent: AnyCam/1.0\r\n"
+                f"\r\n"
+            )
+            sock.sendall(request.encode())
+            sock.settimeout(timeout)
+            response = sock.recv(256).decode("utf-8", errors="replace")
+            # Any RTSP response = camera
+            if response.startswith("RTSP/"):
+                log.info(f"  RTSP OPTIONS confirm: {ip}:{port} -> {response.split(chr(13))[0]}")
+                return True
+    except Exception:
+        pass
+    return False
+
+
+# Additional paths to try for identity probing beyond root /
+_IDENTITY_PATHS = [
+    "/", "/index.html", "/index.htm", "/login.htm", "/login.html",
+    "/web/", "/web/index.html", "/cgi-bin/main-cgi", "/view/index.shtml",
+    "/live", "/admin/",
+]
+
+
+def _make_ssl_ctx():
+    """SSL context that ignores self-signed certificates (common on cameras/NVRs)."""
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode    = ssl.CERT_NONE
+    return ctx
+
+
+def probe_http_identity(ip: str, port: int, timeout: int = 5) -> dict:
+    """
+    Fetch HTTP pages from a device and extract identity info:
+      - Page title, Server header
+      - Manufacturer matched against CAMERA_DB
+      - is_camera flag
+
+    Key improvements over naive fetch:
+      - SSL certificate errors ignored (cameras use self-signed certs)
+      - Both http:// and https:// tried on every port
+      - Multiple paths probed (/, /login.htm, /web/, etc.)
+      - Script src attributes scanned — catches JS SPAs where the logo
+        is an image but the manufacturer name appears in asset paths
+        (e.g. Lorex's /flirLorex/js/... paths)
+      - Up to 16KB of body read for better coverage
+    """
+    import urllib.request, urllib.error, re as _re, ssl as _ssl
+
+    result = {
+        "is_camera": False,
+        "title": "", "server": "",
+        "manufacturer": "", "notes": "", "raw_snippet": "",
+    }
+
+    GENERIC_CAM_BODY = [
+        "camera", "ipcam", "webcam", "nvr", "dvr", "cctv",
+        "onvif", "rtsp", "video", "stream", "live view",
+        "network camera", "ip camera", "surveillance",
+        "channel", "ptz", "pan tilt",
+    ]
+
+    ssl_ctx = _make_ssl_ctx()
+
+    def _extract(body_bytes: bytes, headers_str: str, url: str) -> bool:
+        """Returns True if a match was found (stop probing further paths)."""
+        body = body_bytes.decode("utf-8", errors="replace")
+        if not result["raw_snippet"]:
+            result["raw_snippet"] = body[:500]
+
+        # Page title
+        if not result["title"]:
+            m = _re.search(r"<title[^>]*>([^<]{1,120})</title>", body, _re.I)
+            if m:
+                result["title"] = m.group(1).strip()
+
+        # Include script src paths — SPAs like Lorex put the manufacturer
+        # name in asset paths (e.g. src="/flirLorex/js/...")
+        # Extract all attribute values from the HTML
+        attr_values = " ".join(_re.findall(r'(?:src|href|action)=["\']([^"\']{3,120})["\']',
+                                           body, _re.I))
+
+        combined = headers_str + " " + body[:16384] + " " + attr_values
+
+        # CAMERA_DB match (rich, manufacturer-specific)
+        entry = identify_manufacturer(combined)
+        if entry and entry["name"] != "Generic IP Camera":
+            result["manufacturer"] = entry["name"]
+            result["notes"]        = entry["notes"]
+            result["is_camera"]    = True
+            log.info(f"  HTTP identity: {ip}:{port}{url} → {entry['name']}")
+            return True
+
+        # Generic camera keyword fallback
+        combined_l = combined.lower()
+        for kw in GENERIC_CAM_BODY:
+            if kw in combined_l:
+                result["is_camera"] = True
+                if entry:
+                    result["manufacturer"] = entry["name"]
+                    result["notes"]        = entry["notes"]
+                log.info(f"  HTTP camera keyword: {ip}:{port} ({kw})")
+                return True
+
+        return False
+
+    def _fetch_and_extract(url: str) -> bool:
+        """Fetch a URL (with SSL bypass) and run _extract. Returns True on match."""
+        try:
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "Mozilla/5.0 AnyCam/1.0")
+            with urllib.request.urlopen(req, timeout=timeout,
+                                        context=ssl_ctx) as resp:
+                server = resp.headers.get("Server", "")
+                if not result["server"]:
+                    result["server"] = server
+                all_headers = str(resp.headers)
+                body = resp.read(16384)
+                return _extract(body, all_headers + " " + server, url)
+        except urllib.error.HTTPError as e:
+            # 401/403: headers may still identify the device
+            server = e.headers.get("Server", "")
+            if not result["server"]:
+                result["server"] = server
+            all_headers = str(e.headers)
+            try:
+                body = e.read(16384)
+            except Exception:
+                body = b""
+            return _extract(body, all_headers + " " + server, url)
+        except Exception:
+            return False
+
+    # Try both schemes; cameras often redirect http→https
+    schemes = []
+    if port in (443, 8443):
+        schemes = ["https"]
+    elif port in (80, 8080, 8000, 8888):
+        schemes = ["http", "https"]
+    else:
+        schemes = ["http", "https"]
+
+    for scheme in schemes:
+        for path in _IDENTITY_PATHS:
+            url = f"{scheme}://{ip}:{port}{path}"
+            if _fetch_and_extract(url):
+                return result  # found a match — stop
+
+    return result
+
+
+def probe_http_for_camera(ip: str, port: int, timeout: int = 4) -> bool:
+    """Thin wrapper — returns True if probe_http_identity says is_camera."""
+    return probe_http_identity(ip, port, timeout).get("is_camera", False)
+
+
+def probe_http_for_camera(ip: str, port: int, timeout: int = 4) -> bool:
+    """Thin wrapper — returns True if probe_http_identity says is_camera."""
+    return probe_http_identity(ip, port, timeout).get("is_camera", False)
+
+
+# Quick probe path lists — shorter than the full probers, used only for
+# the is_camera_positive gate check where speed matters more than coverage.
+_QUICK_MJPEG_PATHS = ["/video", "/mjpeg", "/stream", "/mjpg/video.mjpg",
+                      "/cgi-bin/mjpg/video.cgi", "/videostream.cgi"]
+_QUICK_HLS_PATHS   = ["/index.m3u8", "/stream.m3u8", "/live.m3u8",
+                      "/hls/stream.m3u8", "/live/stream.m3u8"]
+
+
+def probe_mjpeg_quick(ip: str, port: int, timeout: int = 3) -> bool:
+    """
+    Check a handful of common MJPEG paths for multipart/x-mixed-replace
+    or image/jpeg Content-Type.  Used as a fast gate check; the full
+    probe_mjpeg_http() runs later if this passes.
+    """
+    import urllib.request
+    scheme = "https" if port in (443, 8443) else "http"
+    for path in _QUICK_MJPEG_PATHS:
+        url = f"{scheme}://{ip}:{port}{path}"
+        try:
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "AnyCam/1.0")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                ct = resp.headers.get("Content-Type", "").lower()
+                if any(k in ct for k in ("multipart/x-mixed-replace",
+                                         "image/jpeg", "mjpeg", "mjpg")):
+                    log.info(f"  MJPEG gate confirm: {ip}:{port}{path}")
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def probe_hls_quick(ip: str, port: int, timeout: int = 3) -> bool:
+    """
+    Check a handful of common HLS paths for an M3U8 playlist response
+    (#EXTM3U header or mpegurl Content-Type).  Used as a fast gate check.
+    """
+    import urllib.request
+    scheme = "https" if port in (443, 8443) else "http"
+    for path in _QUICK_HLS_PATHS:
+        url = f"{scheme}://{ip}:{port}{path}"
+        try:
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "AnyCam/1.0")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                ct   = resp.headers.get("Content-Type", "").lower()
+                body = resp.read(32).decode("utf-8", errors="replace")
+                if ("mpegurl" in ct or "m3u8" in ct or
+                        body.strip().startswith("#EXTM3U")):
+                    log.info(f"  HLS gate confirm: {ip}:{port}{path}")
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def is_camera_positive(ip: str, port: int, service: str, product: str,
+                        verdict: str, onvif_ips: set, ssdp_cam_ips: set,
+                        mdns_ips: set, mac_addr: str = "") -> bool:
+    """
+    Gate function: returns True only if at least one active probe or
+    multicast discovery confirms this device is likely a camera.
+
+    Probes run in priority order — fastest / most definitive first,
+    slower / less certain probes only tried if earlier ones fail.
+
+    Protocol coverage:
+      RTSP    — raw OPTIONS handshake (~100ms, definitive, works through auth)
+      RTMP    — C0 handshake byte check (~50ms, definitive)
+      MJPEG   — Content-Type multipart/x-mixed-replace on common paths (~200ms)
+      HLS     — #EXTM3U body or mpegurl Content-Type on common paths (~200ms)
+      WebRTC  — WHEP POST + heuristic GET on signaling paths (~300ms)
+      WS-RTSP — WebSocket upgrade with Sec-WebSocket-Protocol: rtsp (~200ms)
+      HTTP    — full page body + header scan for camera strings (~500ms)
+      ONVIF   — already confirmed by multicast Stage 1 (instant)
+      SSDP    — already confirmed by multicast Stage 1 (instant)
+      mDNS    — already confirmed by multicast Stage 1 (instant)
+      DVR     — ports 37777/34567 assumed positive by definition
+    """
+    # ── 1. Multicast-confirmed (instant, already done in Stage 1) ──────────
+    if ip in onvif_ips or ip in ssdp_cam_ips or ip in mdns_ips:
+        return True
+
+    # ── 1b. OUI camera-positive (MAC address manufacturer lookup) ─────────
+    if mac_addr:
+        oui_result = oui_is_camera(mac_addr)
+        if oui_result is True:
+            log.info(f"  OUI camera confirm: {ip} MAC {mac_addr} → {lookup_oui(mac_addr)}")
+            return True
+        if oui_result is False:
+            log.info(f"  OUI non-camera reject: {ip} MAC {mac_addr} → {lookup_oui(mac_addr)}")
+            return False
+
+    # ── 1c. Respect nmap not_camera verdict ────────────────────────────────
+    # If nmap's service/product banner identified this as a non-camera device
+    # (printer, router, NAS, etc.) AND OUI didn't confirm it's a camera,
+    # skip probing entirely.  A camera that somehow has a generic service
+    # banner would still be found via ONVIF/SSDP/mDNS in Stage 1.
+    if verdict == "not_camera":
+        log.info(f"  nmap verdict reject: {ip}:{port} — not_camera verdict")
+        return False
+
+    # ── 2. RTSP OPTIONS — raw TCP, ~100ms, works through auth ─────────────
+    if port in (554, 8554, 10554, 2020, 8765):
+        if probe_rtsp_options(ip, port):
+            return True
+        # Fall through: camera may have broken RTSP but working web UI
+
+    # ── 3. RTMP C0 handshake — ~50ms, definitively identifies RTMP server ─
+    if port in (1935, 1936):
+        if probe_rtmp(ip, port):
+            log.info(f"  RTMP gate confirm: {ip}:{port}")
+            return True
+
+    # ── 4. DVR ports — Dahua (37777) and generic DVR (34567) ──────────────
+    if port in (37777, 34567):
+        return True
+
+    # ── 5–8. HTTP-family probes (all run on HTTP/HTTPS ports) ──────────────
+    if port in (80, 8080, 8000, 8888, 443, 8443):
+
+        # 5. MJPEG Content-Type check — fast, definitive for MJPEG cameras
+        if probe_mjpeg_quick(ip, port):
+            return True
+
+        # 6. HLS M3U8 check — fast, definitive for HLS cameras/NVRs
+        if probe_hls_quick(ip, port):
+            return True
+
+        # 7. WebRTC WHEP probe — POST SDP offer, look for SDP answer or hints
+        if probe_webrtc(ip, port):
+            log.info(f"  WebRTC gate confirm: {ip}:{port}")
+            return True
+
+        # 8. HTTP body/header content scan — broadest net, catches web UIs
+        if probe_http_for_camera(ip, port):
+            return True
+
+    # ── 9. WS-RTSP upgrade — try on any port not already covered ──────────
+    #       go2rtc typically serves on 8554, mediamtx on 8888 or custom;
+    #       we try after the port-specific checks above.
+    if probe_ws_rtsp(ip, port):
+        log.info(f"  WS-RTSP gate confirm: {ip}:{port}")
+        return True
+
+    # ── 10. nmap banner: check against CAMERA_DB (much richer than CAMERA_KEYWORDS)
+    combined = (service + " " + product).lower()
+    if combined.strip():
+        if identify_manufacturer(combined) is not None:
+            log.info(f"  nmap DB match: {ip}:{port} — {combined.strip()}")
+            return True
+        # Fallback to simple keyword list
+        if any(k in combined for k in CAMERA_KEYWORDS):
+            return True
+
+    # ── 11. DB alias check against hostname ────────────────────────────────
+    # Sometimes the device hostname itself contains a manufacturer name
+    # (e.g. "lorex-nvr.local", "hikvision-123.lan")
+    if any(k in combined for k in _DB_MANUFACTURERS):
+        return True
+
+    return False
+
+
+# ONVIF SOAP (multi-stream NVR support)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _onvif_soap(url: str, body: str,
+                username: str = "", password: str = "", timeout: int = 6) -> str | None:
+    import urllib.request
+    security = ""
+    if username:
+        nonce_raw = os.urandom(16)
+        nonce_b64 = base64.b64encode(nonce_raw).decode()
+        created   = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        digest    = base64.b64encode(
+            hashlib.sha1(nonce_raw + created.encode() + password.encode()).digest()
+        ).decode()
+        security = (
+            '<s:Header><Security xmlns="http://docs.oasis-open.org/wss/2004/01/'
+            'oasis-200401-wss-wssecurity-secext-1.0.xsd"><UsernameToken>'
+            f'<Username>{username}</Username>'
+            f'<Password Type="...#PasswordDigest">{digest}</Password>'
+            f'<Nonce EncodingType="...#Base64Binary">{nonce_b64}</Nonce>'
+            f'<Created xmlns="...wssecurity-utility-1.0.xsd">{created}</Created>'
+            '</UsernameToken></Security></s:Header>'
+        )
+    envelope = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"'
+        ' xmlns:trt="http://www.onvif.org/ver10/media/wsdl"'
+        ' xmlns:tt="http://www.onvif.org/ver10/schema">'
+        f"{security}<s:Body>{body}</s:Body></s:Envelope>"
+    )
+    try:
+        req = urllib.request.Request(url, envelope.encode(), method="POST")
+        req.add_header("Content-Type", "application/soap+xml; charset=utf-8")
+        req.add_header("SOAPAction", "")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        log.debug(f"ONVIF SOAP ({url}): {e}")
+        return None
+
+
+def onvif_get_profiles(onvif_url: str, username: str, password: str) -> list[dict]:
+    xml = _onvif_soap(onvif_url, "<trt:GetProfiles/>", username, password)
+    if not xml:
+        return []
+    profiles = []
+    try:
+        root = ET.fromstring(xml)
+        ns   = {"trt": "http://www.onvif.org/ver10/media/wsdl",
+                "tt":  "http://www.onvif.org/ver10/schema"}
+        for p in root.findall(".//trt:Profiles", ns):
+            token = p.get("token", "")
+            name_el = p.find("tt:Name", ns)
+            name = name_el.text if name_el is not None else token
+            if token:
+                profiles.append({"token": token, "name": name})
+    except Exception as e:
+        log.debug(f"GetProfiles parse: {e}")
+    return profiles
+
+
+def onvif_get_stream_uri(onvif_url: str, token: str,
+                         username: str, password: str) -> str | None:
+    body = (
+        f"<trt:GetStreamUri>"
+        f"<trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream>"
+        f"<tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup>"
+        f"<trt:ProfileToken>{token}</trt:ProfileToken>"
+        f"</trt:GetStreamUri>"
+    )
+    xml = _onvif_soap(onvif_url, body, username, password)
+    if not xml:
+        return None
+    try:
+        root   = ET.fromstring(xml)
+        uri_el = root.find(".//{http://www.onvif.org/ver10/schema}Uri")
+        return uri_el.text.strip() if uri_el is not None else None
+    except Exception:
+        return None
+
+
+def _onvif_media_url(ip: str, port: int, xaddrs: str) -> str:
+    if xaddrs:
+        return xaddrs.rstrip("/").replace("device_service", "media").replace("Device", "Media")
+    scheme = "https" if port in (443, 8443) else "http"
+    return f"{scheme}://{ip}:{port}/onvif/media"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Full-range port scanner (user-initiated, separate from camera scan)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def run_port_scan(ip: str):
+    """
+    Full 65535-port scan with live discovery feed.
+
+    Uses nmap -v so it emits 'Discovered open port X/tcp on Y' lines
+    as ports are found, and --stats-every 10s for ETA lines.
+    Results are written to a temp XML file; parsed for the final table.
+    """
+    import os as _os
+
+    # Load initial ETA estimate from last port scan duration
+    _runtime    = load_runtime()
+    _last_p_dur = _runtime.get("last_port_scan_duration", 0)
+    _init_eta   = int(_last_p_dur) if _last_p_dur > 10 else 300  # 5 min fallback
+
+    PSCAN.update(
+        running=True, paused=False, ip=ip, progress=2,
+        message=f"Scanning all 65535 ports on {ip}…",
+        results=[], live_ports=[], proc_pid=None,
+        scan_start=time.time(), eta=_init_eta, percent=0.0,
+    )
+
+    xml_path = f"/tmp/anycam_pscan_{ip.replace('.','_')}.xml"
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "nmap", "-sV", "-sC", "-A", "--open", "-p-",
+            "-v", "--stats-every", "10s",
+            "--host-timeout", "600s", "-T3",
+            "-oX", xml_path, ip,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,  # merge stderr so we capture stats
+        )
+        PSCAN["proc_pid"] = proc.pid
+
+        # Stream stdout line by line for live port discovery + ETA
+        async for raw_line in proc.stdout:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+
+            # "Discovered open port 554/tcp on 192.168.50.3"
+            m_port = re.search(r"Discovered open port (\d+)/(\w+)", line)
+            if m_port:
+                port_num = int(m_port.group(1))
+                proto    = m_port.group(2)
+                PSCAN["live_ports"].append({"port": port_num, "proto": proto})
+                PSCAN["message"] = (
+                    f"Scanning {ip}… {len(PSCAN['live_ports'])} open port(s) found")
+                continue
+
+            # "About 34.56% done; ETC: 13:45 (0:03:12 remaining)"
+            m_pct = re.search(r"About ([\d.]+)% done", line)
+            if m_pct:
+                pct = float(m_pct.group(1))
+                PSCAN["percent"]  = pct
+                PSCAN["progress"] = max(2, min(95, int(pct)))
+
+            m_eta = re.search(r"(\d+):(\d+):(\d+) remaining", line)
+            if m_eta:
+                h, m, s = int(m_eta.group(1)), int(m_eta.group(2)), int(m_eta.group(3))
+                PSCAN["eta"] = h * 3600 + m * 60 + s
+
+        await asyncio.wait_for(proc.wait(), timeout=30)
+
+        # Parse the XML temp file for rich service details
+        results = []
+        if _os.path.exists(xml_path):
+            try:
+                with open(xml_path) as f:
+                    xml_text = f.read()
+                root = ET.fromstring(xml_text)
+                for host in root.findall("host"):
+                    for port_el in host.findall("ports/port"):
+                        pst = port_el.find("state")
+                        if pst is None or pst.get("state") != "open":
+                            continue
+                        svc     = port_el.find("service")
+                        scripts = {sc.get("id",""):sc.get("output","")
+                                   for sc in port_el.findall("script")}
+                        results.append({
+                            "port":    int(port_el.get("portid")),
+                            "proto":   port_el.get("protocol","tcp"),
+                            "service": svc.get("name","")      if svc is not None else "",
+                            "product": svc.get("product","")   if svc is not None else "",
+                            "version": svc.get("version","")   if svc is not None else "",
+                            "extra":   svc.get("extrainfo","") if svc is not None else "",
+                            "scripts": scripts,
+                        })
+            except Exception as e:
+                log.warning(f"Port scan XML parse: {e}")
+            finally:
+                try:
+                    _os.unlink(xml_path)
+                except Exception:
+                    pass
+
+        elapsed = round(time.time() - PSCAN["scan_start"])
+        # Save for next scan's ETA
+        _rt = load_runtime()
+        _rt["last_port_scan_duration"] = elapsed
+        save_runtime(_rt)
+
+        PSCAN.update(
+            running=False, progress=100, results=results,
+            live_ports=[],   # clear — final table takes over
+            eta=0, percent=100.0,
+            message=f"Scan complete — {len(results)} open port(s) on {ip}. "
+                    f"({elapsed//60}:{elapsed%60:02d})",
+        )
+
+    except asyncio.TimeoutError:
+        PSCAN.update(running=False, progress=100, message="Scan timed out.", live_ports=[])
+    except Exception as e:
+        PSCAN.update(running=False, progress=100, message=f"Scan error: {e}", live_ports=[])
+    finally:
+        PSCAN["proc_pid"] = None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main scan orchestration — 4-stage pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def run_verification_scan():
+    """
+    Post-upgrade verification scan.
+    Runs after saved cameras are loaded.
+
+    For each saved camera:
+      - Probe it with is_camera_positive() + the appropriate stream prober
+      - If still reachable → keep as-is, status unchanged
+      - If unreachable    → mark as "unverified_after_upgrade" so the user
+                            can decide whether to keep or remove it
+
+    After verifying saved cameras, runs a fresh full scan to discover
+    any new cameras that upgraded detection capabilities might now find.
+    """
+    SCAN_STATE.update(
+        running=True, progress=0, stage=1,
+        stage_label="Post-upgrade verification",
+        message="Post-upgrade: verifying previously saved cameras…"
+    )
+    loop = asyncio.get_event_loop()
+    log.info(f"Post-upgrade verification scan (was: {load_runtime().get('version','?')} → now: {CURRENT_VERSION})")
+
+    # ── Verify each saved camera ──────────────────────────────────────────
+    still_present = []
+    now_missing   = []
+
+    for cid, cam in list(CAMERAS.items()):
+        if not cam.get("user_saved"):
+            continue
+        ip   = cam.get("ip","")
+        port = cam.get("port", 554)
+        proto = cam.get("protocol","RTSP")
+        SCAN_STATE["message"] = f"Verifying {cam.get('name', ip)}…"
+
+        found = False
+        creds = cam.get("credentials")
+        u = p = ""
+        if creds:
+            try:
+                u, p = decrypt_creds(creds)
+            except Exception:
+                pass
+
+        # Quick probe appropriate to the protocol
+        if proto in ("RTSP", "DVR", "ONVIF"):
+            url = cam.get("stream_url","")
+            if url:
+                found = await loop.run_in_executor(None, probe_rtsp, url, u, p)
+                # Populate codec info using authenticated URL if not yet stored
+                if not cam.get("stream_codec"):
+                    _auth_url = build_authenticated_url(cam) or url
+                    if _auth_url:
+                        _details = await probe_stream_details(_auth_url, "RTSP")
+                        if _details:
+                            cam.update(_details)
+                            log.info(f"  Stream details: "
+                                     f"{cam.get('stream_codec','?')} "
+                                     f"{cam.get('stream_width','?')}x{cam.get('stream_height','?')}")
+            if not found:
+                found = await loop.run_in_executor(None, probe_rtsp_options, ip, port)
+        elif proto == "MJPEG":
+            result = await loop.run_in_executor(None, probe_mjpeg_quick, ip, port)
+            found = bool(result)
+        elif proto == "HLS":
+            result = await loop.run_in_executor(None, probe_hls_quick, ip, port)
+            found = bool(result)
+        elif proto == "RTMP":
+            found = await loop.run_in_executor(None, probe_rtmp, ip, port)
+        else:
+            # WebRTC / WS-RTSP / HTTP — just check TCP reachability
+            try:
+                _, w = await asyncio.wait_for(
+                    asyncio.open_connection(ip, port), timeout=3)
+                w.close()
+                found = True
+            except Exception:
+                found = False
+
+        if found:
+            still_present.append(cid)
+            # Clear any stale unverified flag from a previous upgrade
+            cam.pop("upgrade_missing", None)
+            log.info(f"  Verified OK: {cam.get('name', ip)}")
+        else:
+            now_missing.append(cid)
+            cam["upgrade_missing"] = True
+            cam["upgrade_missing_version"] = CURRENT_VERSION
+            # Don't delete — let the user decidein/env python3
+"""
+AnyCam — Home Assistant Add-on  v1.1.4
+4-stage intelligent camera discovery:
+  Stage 1 — ARP scan (live hosts only) + ONVIF/SSDP/mDNS multicast
+  Stage 2 — Focused camera port scan on live hosts
+  Stage 3 — Stream probing (RTSP/MJPEG/HLS/RTMP/WebRTC/WS-RTSP)
+  Stage 4 — Optional broad sweep (0-10000) on unresponsive live hosts
+"""
+
+import asyncio
+import base64
+import datetime
+import hashlib
+import ipaddress
+import json
+import logging
+import os
+import re
+import signal
+import socket
+import struct
+import subprocess
+import time
+import uuid
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from urllib.parse import urlparse
+
+from aiohttp import web
+import aiohttp
+from cryptography.fernet import Fernet
+
+log = logging.getLogger("anycam")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paths & runtime config
+# ─────────────────────────────────────────────────────────────────────────────
+
+DATA_DIR       = Path("/data")
+KEY_FILE       = DATA_DIR / "secret.key"
+CAMS_FILE      = DATA_DIR / "cameras.json"
+BLACKLIST_FILE = DATA_DIR / "blacklist.json"
+RUNTIME_FILE   = DATA_DIR / "runtime.json"
+OUI_CACHE_FILE  = DATA_DIR / "oui_cache.json"
+FEEDBACK_FILE   = DATA_DIR / "not_camera_feedback.json"
+
+# IEEE OUI CSV download URL (official source, ~37k entries, refreshed periodically)
+OUI_CSV_URL      = "https://standards-oui.ieee.org/oui/oui.csv"
+OUI_MAX_AGE_DAYS = 30  # re-download once a month
+
+# Community verdicts endpoint — leave empty to disable sharing.
+# When a community AnyCam server exists, set this URL and shared
+# fingerprints will be submitted automatically.
+COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
+
 CURRENT_VERSION = "1.7.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
@@ -5043,6 +7622,23 @@ function storNavUp() {
   _storNavTo(null);
 }
 
+/* Sort state */
+let _storSortKey = 'name', _storSortAsc = true;
+
+function storSort(key) {
+  if (_storSortKey === key) _storSortAsc = !_storSortAsc;
+  else { _storSortKey = key; _storSortAsc = key === 'name'; }
+  // Update header arrows
+  ['name','date','type','size'].forEach(k => {
+    const el = document.getElementById('sorth-' + k);
+    if (!el) return;
+    const base = k.charAt(0).toUpperCase() + k.slice(1);
+    const labels = {name:'Name',date:'Date Modified',type:'Type',size:'Size'};
+    el.innerHTML = labels[k] + (k === _storSortKey ? (' ' + (_storSortAsc ? '&#x25B2;' : '&#x25BC;')) : '');
+  });
+  _renderStorageView();
+}
+
 function _updateNavButtons() {
   const back = document.getElementById('stor-back-btn');
   const fwd  = document.getElementById('stor-forward-btn');
@@ -5052,12 +7648,12 @@ function _updateNavButtons() {
   back.disabled = _storHistIdx <= 0;
   fwd.disabled  = _storHistIdx >= _storHistory.length - 1;
   up.disabled   = _storCurrent === null;
-  // Build clickable path breadcrumbs
-  if (_storCurrent === null) {
-    path.innerHTML = '<span style="opacity:.5">/ media / anycam</span>';
-  } else {
-    path.innerHTML = '<span style="cursor:pointer;opacity:.6" onclick="_storNavTo(null)">/ media / anycam</span>'
-      + ' / <strong>' + esc(_storCurrent) + '</strong>';
+  if (path) {
+    if (_storCurrent === null) {
+      path.textContent = '/media/anycam';
+    } else {
+      path.textContent = '/media/anycam/' + _storCurrent;
+    }
   }
 }
 
@@ -5076,6 +7672,20 @@ function renderStorage(d) {
   _renderStorageView();
 }
 
+function _sortRows(rows) {
+  return rows.slice().sort((a, b) => {
+    let av, bv;
+    if (_storSortKey === 'name')      { av = a.name.toLowerCase(); bv = b.name.toLowerCase(); }
+    else if (_storSortKey === 'date') { av = a.mtime || 0;         bv = b.mtime || 0; }
+    else if (_storSortKey === 'size') { av = a.size_mb || 0;        bv = b.size_mb || 0; }
+    else if (_storSortKey === 'type') { av = a._type || '';         bv = b._type || ''; }
+    else { av = ''; bv = ''; }
+    if (av < bv) return _storSortAsc ? -1 :  1;
+    if (av > bv) return _storSortAsc ?  1 : -1;
+    return 0;
+  });
+}
+
 function _renderStorageView() {
   _updateNavButtons();
   const list = document.getElementById('storage-list');
@@ -5083,45 +7693,74 @@ function _renderStorageView() {
   const folders = _storageData.folders || [];
 
   if (_storCurrent === null) {
-    // Root view: show camera folders
+    // Root: show all camera folders as rows
     if (!folders.length) {
-      list.innerHTML = '<div style="text-align:center;padding:60px 20px;color:var(--text-dim);opacity:.5">'
-        + '<div style="font-size:2.5rem;margin-bottom:12px">📁</div>'
-        + '<div>No recordings yet.<br>Enable motion detection on a camera to start recording.</div></div>';
+      list.innerHTML = '<div class="stor-empty-msg">📁<br><br>No recordings yet.<br>'
+        + 'Enable motion detection on a camera card to start recording.</div>';
       return;
     }
-    list.innerHTML = '<div class="stor-grid">'
-      + folders.map(folder => `
-        <div class="stor-folder-card" onclick="_storNavTo('${esc(folder.folder)}')" draggable="false">
-          <div class="stor-folder-icon">📁</div>
-          <div class="stor-folder-name" title="Double-click to rename"
-               ondblclick="event.stopPropagation();storRenameFolder('${esc(folder.folder)}')">${esc(folder.folder)}</div>
-          <div class="stor-folder-meta">${folder.count} clip${folder.count !== 1 ? 's' : ''} · ${folder.size_mb} MB</div>
-        </div>`).join('')
-      + '</div>';
+    // Annotate for sorting
+    const rows = folders.map(f => ({
+      name: f.folder, _type: 'Folder', size_mb: f.size_mb, mtime: 0,
+      count: f.count, _isFolder: true
+    }));
+    const folderFrag = document.createDocumentFragment();
+    _sortRows(rows).forEach(f => {
+      const row = document.createElement('div');
+      row.className = 'stor-row stor-row-folder';
+      row.innerHTML = '<div class="stor-row-name"><span>📁</span>'
+        + '<span class="stor-row-name-text editable">' + esc(f.name) + '</span></div>'
+        + '<div class="stor-row-date"></div>'
+        + '<div class="stor-row-type">Folder</div>'
+        + '<div class="stor-row-size"></div>'
+        + '<div class="stor-row-acts"><span style="font-size:.72rem;color:#888">'
+        + f.count + ' clip' + (f.count !== 1 ? 's' : '') + '</span></div>';
+      const nameEl = row.querySelector('.stor-row-name-text');
+      nameEl.addEventListener('click',   () => _storNavTo(f.name));
+      nameEl.addEventListener('dblclick',() => storRenameFolder(f.name));
+      row.addEventListener('dragover', e => e.preventDefault());
+      row.addEventListener('drop',     e => storDrop(e, f.name));
+      folderFrag.appendChild(row);
+    });
+    list.innerHTML = '';
+    list.appendChild(folderFrag);
   } else {
-    // Folder view: show files inside this folder
+    // Folder view: show files
     const folder = folders.find(f => f.folder === _storCurrent);
     const files  = folder ? folder.files : [];
     if (!files.length) {
-      list.innerHTML = '<div style="text-align:center;padding:60px 20px;color:var(--text-dim);opacity:.5">'
-        + '<div style="font-size:2rem;margin-bottom:10px">🎬</div>'
-        + '<div>No recordings in this folder.</div></div>';
+      list.innerHTML = '<div class="stor-empty-msg">🎬<br><br>No recordings in this folder.</div>';
       return;
     }
-    list.innerHTML = '<div class="stor-files-list">'
-      + files.map(f => `
-        <div class="stor-file" draggable="true"
-             ondragstart="storDragStart(event,'${esc(_storCurrent + '/' + f.name)}','${esc(_storCurrent)}')">
-          <span class="stor-file-icon">🎬</span>
-          <span class="stor-file-name" title="Double-click to rename"
-                ondblclick="storRenameFile('${esc(_storCurrent + '/' + f.name)}','${esc(f.name)}')">${esc(f.name)}</span>
-          <span class="stor-file-size">${f.size_mb} MB</span>
-          <span class="stor-file-date">${new Date(f.mtime * 1000).toLocaleString()}</span>
-          <a class="btn btn-ghost btn-xs" href="${BASE}/api/storage/download?path=${encodeURIComponent(_storCurrent + '/' + f.name)}" download title="Download">&#x2B07;</a>
-          <button class="btn btn-danger btn-xs" onclick="storDeleteFile('${esc(_storCurrent + '/' + f.name)}')" title="Delete">&#x1F5D1;</button>
-        </div>`).join('')
-      + '</div>';
+    const rows = files.map(f => ({
+      ...f, _type: f.name.endsWith('.mp4') ? 'MP4 Video' : f.name.endsWith('.mkv') ? 'MKV Video' : 'File',
+      _isFolder: false
+    }));
+    const fileFrag = document.createDocumentFragment();
+    _sortRows(rows).forEach(f => {
+      const path = _storCurrent + '/' + f.name;
+      const dt   = f.mtime ? new Date(f.mtime * 1000).toLocaleString() : '';
+      const sz   = f.size_mb ? f.size_mb + ' MB' : '';
+      const row  = document.createElement('div');
+      row.className = 'stor-row';
+      row.draggable = true;
+      row.innerHTML = '<div class="stor-row-name"><span>🎬</span>'
+        + '<span class="stor-row-name-text editable">' + esc(f.name) + '</span></div>'
+        + '<div class="stor-row-date">' + dt + '</div>'
+        + '<div class="stor-row-type">' + esc(f._type) + '</div>'
+        + '<div class="stor-row-size">' + sz + '</div>'
+        + '<div class="stor-row-acts">'
+        + '<a class="stor-dl" href="' + BASE + '/api/storage/download?path='
+        + encodeURIComponent(path) + '" download title="Download" style="font-size:.9rem;text-decoration:none">⬇</a>'
+        + '&nbsp;<span class="stor-del" title="Delete" style="cursor:pointer;font-size:.9rem;color:#c00">🗑</span>'
+        + '</div>';
+      row.querySelector('.stor-row-name-text').addEventListener('dblclick', () => storRenameFile(path, f.name));
+      row.querySelector('.stor-del').addEventListener('click', () => storDeleteFile(path));
+      row.addEventListener('dragstart', e => storDragStart(e, path, _storCurrent));
+      fileFrag.appendChild(row);
+    });
+    list.innerHTML = '';
+    list.appendChild(fileFrag);
   }
 }
 
@@ -5578,9 +8217,11 @@ function cardHTML(cam) {
   const notCamBtn =
     '<button class="btn btn-ghost btn-sm" onclick="markNotCamera(\'' + cam.id + '\')"'
     + ' title="Permanently hide — not a camera">🚫 Not a Camera</button>';
-
   const upgradeBdg = cam.upgrade_missing
     ? '<span class="badge" style="background:#3a2a10;color:var(--orange)">⚠ Not found after upgrade</span>' : '';
+  const hevcPlusBdg = cam.hevc_plus_warning
+    ? '<span class="badge" style="background:#3a1a1a;color:#ff7070" title="Camera streams H.265+ (Hikvision proprietary). Fix: camera web UI → Video → Encoding → change H.265+ to H.265">⚠ H.265+</span>'
+    : '';
 
   return '<div class="feed-wrap">' + feedHTML(cam) + '</div>'
     + '<div class="card-info">'
@@ -5591,16 +8232,13 @@ function cardHTML(cam) {
     + '<div class="badges">' + protoBadge(cam.protocol)
     + '<span class="badge" style="background:#1e2d1e;color:#6fcf97">:' + cam.port + '</span>'
     + '<span class="badge" style="background:#2d2020;color:#e88">' + cam.ip + '</span>'
-    + onvifBdg + credBdg + uncBdg + upgradeBdg + '</div>'
-    + '<span class="badge" style="background:#3a2a10;color:var(--orange)">' 
-      + (cam.upgrade_missing ? '⚠ Not found after upgrade' : '') + '</span>'
+    + onvifBdg + credBdg + uncBdg + upgradeBdg + hevcPlusBdg + '</div>'
     + '</div>'
     + identityHTML(cam)
     + credFormHTML(cam)
     + '<div class="card-actions">' + cardActions(cam, clearBtn, notCamBtn)
     + '</div>';
 }
-
 /* ── HLS init ──────────────────────────────────────────────────────────────── */
 function initHls(video) {
   video._hls = true;
@@ -6158,27 +8796,11 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 @keyframes rec-pulse{{0%,100%{{opacity:1}}50%{{opacity:.6}}}}
 /* ── Storage view ── */
 #storage-view{{padding:20px}}
-#storage-header{{display:flex;align-items:center;gap:16px;margin-bottom:20px;padding:14px 18px;background:var(--card-bg);border-radius:10px;border:1px solid var(--border)}}
 #disk-bar-wrap{{flex:1}}
 #disk-label{{font-size:.82rem;color:var(--text-dim);display:block;margin-bottom:6px}}
 #disk-bar-track{{height:8px;background:#2a2a2a;border-radius:4px;overflow:hidden}}
 #disk-bar-fill{{height:100%;border-radius:4px;transition:width .4s,background .4s}}
-#storage-list{{display:flex;flex-direction:column;gap:14px}}
-.stor-folder{{background:var(--card-bg);border:2px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .2s}}
-.stor-folder[ondragover]{{border-color:var(--primary)}}
-.stor-folder-hdr{{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:#1a1a1a;border-bottom:1px solid var(--border)}}
-.stor-folder-name{{font-weight:600;cursor:pointer;color:var(--text)}}
-.stor-folder-name:hover{{color:var(--primary)}}
-.stor-folder-meta{{font-size:.78rem;color:var(--text-dim)}}
 .stor-files{{padding:8px}}
-.stor-file{{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;cursor:grab;transition:background .15s}}
-.stor-file:hover{{background:#1e2a1e}}
-.stor-file-icon{{font-size:1.1rem;flex-shrink:0}}
-.stor-file-name{{flex:1;font-size:.84rem;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}}
-.stor-file-name:hover{{color:var(--primary)}}
-.stor-file-size{{font-size:.74rem;color:var(--text-dim);white-space:nowrap}}
-.stor-file-date{{font-size:.74rem;color:var(--text-dim);white-space:nowrap}}
-.stor-empty{{font-size:.8rem;color:var(--text-dim);padding:8px 10px;display:block}}
 .btn-xs{{padding:3px 8px;font-size:.72rem}}
 /* ── Focus overlay ── */
 #focus-overlay{{position:fixed;inset:0;background:#000;z-index:9000;display:flex;flex-direction:column;align-items:stretch;justify-content:center;padding:0}}
@@ -6190,21 +8812,35 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 #focus-warn-text{{color:#f5b942;font-size:.9rem;line-height:1.5}}
 /* ── Toast ── */
 #toast{{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);padding:10px 22px;border-radius:24px;color:#fff;font-size:.85rem;z-index:9100;pointer-events:none;transition:opacity .3s}}
-/* ── Storage navigation bar ── */
-#storage-topbar{{display:flex;align-items:center;gap:12px;padding:10px 0 14px;flex-wrap:wrap}}
-#stor-nav-bar{{display:flex;align-items:center;gap:6px;flex:1;min-width:200px;background:#111;border:1px solid var(--border);border-radius:8px;padding:5px 10px}}
-#stor-nav-bar button{{background:#1a1a1a;border:1px solid #333;color:var(--text);border-radius:5px;width:26px;height:26px;cursor:pointer;font-size:.85rem;display:flex;align-items:center;justify-content:center}}
-#stor-nav-bar button:disabled{{opacity:.3;cursor:default}}
-#stor-nav-bar button:not(:disabled):hover{{background:#2a2a2a}}
-#stor-path-display{{font-size:.8rem;color:var(--text-dim);margin-left:6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-/* ── Storage grid/list ── */
-.stor-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;padding:4px}}
-.stor-folder-card{{background:var(--card-bg);border:1px solid var(--border);border-radius:10px;padding:16px 12px;cursor:pointer;text-align:center;transition:border-color .15s,background .15s}}
-.stor-folder-card:hover{{border-color:var(--primary);background:#151515}}
-.stor-folder-icon{{font-size:2.2rem;margin-bottom:8px}}
-.stor-folder-name{{font-size:.84rem;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:4px}}
-.stor-folder-meta{{font-size:.72rem;color:var(--text-dim)}}
-.stor-files-list{{display:flex;flex-direction:column;gap:4px}}
+/* ── Storage view layout ── */
+#storage-view{{padding:16px 18px}}
+#storage-topbar{{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}}
+/* ── Explorer pane (white box with nav inside) ── */
+#stor-explorer{{background:#fff;border:1px solid #d0d0d0;border-radius:4px;overflow:hidden;color:#000}}
+#stor-nav-bar{{display:flex;align-items:center;gap:4px;padding:6px 8px;background:#f3f3f3;border-bottom:1px solid #d0d0d0}}
+#stor-nav-bar button{{background:none;border:1px solid transparent;color:#333;border-radius:3px;width:28px;height:24px;cursor:pointer;font-size:.85rem;line-height:1;transition:background .1s}}
+#stor-nav-bar button:disabled{{opacity:.35;cursor:default}}
+#stor-nav-bar button:not(:disabled):hover{{background:#e0e0e0;border-color:#c0c0c0}}
+#stor-path-display{{flex:1;background:#fff;border:1px solid #c0c0c0;border-radius:2px;padding:2px 8px;font-size:.82rem;color:#111;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:4px}}
+/* ── Column headers ── */
+#stor-col-headers{{display:grid;grid-template-columns:1fr 180px 130px 90px 80px;gap:0;padding:5px 8px;background:#f3f3f3;border-bottom:1px solid #d0d0d0;font-size:.78rem;font-weight:600;color:#333}}
+#stor-col-headers span{{cursor:pointer;user-select:none;padding:2px 4px;border-radius:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+#stor-col-headers span:hover{{background:#e0e0e0}}
+#stor-col-headers .stor-col-acts{{cursor:default}}
+#stor-col-headers .stor-col-acts:hover{{background:none}}
+/* ── File/folder rows ── */
+#storage-list{{max-height:calc(100vh - 260px);overflow-y:auto}}
+.stor-row{{display:grid;grid-template-columns:1fr 180px 130px 90px 80px;gap:0;padding:3px 8px;font-size:.82rem;color:#111;align-items:center;border-bottom:1px solid #f0f0f0;cursor:default}}
+.stor-row:hover{{background:#cce8ff}}
+.stor-row:last-child{{border-bottom:none}}
+.stor-row-name{{display:flex;align-items:center;gap:6px;overflow:hidden}}
+.stor-row-name-text{{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.stor-row-name-text.editable:hover{{color:#0066cc;cursor:pointer;text-decoration:underline}}
+.stor-row-date,.stor-row-type,.stor-row-size{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#444;font-size:.78rem}}
+.stor-row-acts{{display:flex;gap:4px;justify-content:flex-end;opacity:0}}
+.stor-row:hover .stor-row-acts{{opacity:1}}
+.stor-row-folder{{font-weight:500}}
+.stor-empty-msg{{text-align:center;padding:60px 20px;color:#888;font-size:.9rem}}
 /* ── Logs view ── */
 /* ── header h1 cursor ── */
 header h1{{cursor:pointer}}
@@ -6258,12 +8894,13 @@ header h1{{cursor:pointer}}
       <rect x="1" y="7" width="14" height="10" rx="2" ry="2"/>
     </svg>
     AnyCam
+    <span id="status-dot" title="System Stability"
+          onclick="openHALog();event.stopPropagation()"
+          style="width:9px;height:9px;border-radius:50%;background:#43a047;
+                 display:inline-block;cursor:pointer;margin-left:6px;
+                 vertical-align:middle;flex-shrink:0;
+                 box-shadow:0 0 0 2px rgba(67,160,71,.25)"></span>
   </h1>
-  <span id="status-dot" title="System Stability"
-        onclick="openHALog()"
-        style="width:10px;height:10px;border-radius:50%;background:#43a047;
-               display:inline-block;cursor:pointer;margin-left:4px;flex-shrink:0;
-               box-shadow:0 0 0 2px rgba(67,160,71,.25)"></span>
   <span id="cam-count" style="color:var(--text-dim);font-size:.78rem"></span>
   <label class="sweep-toggle" title="Scan ports 0-10000 on live hosts that don't respond to camera ports">
     <input type="checkbox" id="broad-sweep">
@@ -6418,21 +9055,29 @@ header h1{{cursor:pointer}}
 <div class="view" id="storage-view">
   <div id="storage-topbar">
     <button class="btn btn-ghost btn-sm" onclick="switchView('cameras')">&#x2190; Back to Cameras</button>
+    <div id="disk-bar-wrap">
+      <span id="disk-label">Loading...</span>
+      <div id="disk-bar-track"><div id="disk-bar-fill"></div></div>
+    </div>
+    <button class="btn btn-secondary btn-sm" onclick="loadStorage()">&#x21BB; Refresh</button>
+  </div>
+  <!-- Explorer pane: nav bar + column headers + file list all inside white box -->
+  <div id="stor-explorer">
     <div id="stor-nav-bar">
       <button id="stor-back-btn"    onclick="storNavBack()"    title="Back"    disabled>&#x2190;</button>
       <button id="stor-forward-btn" onclick="storNavForward()" title="Forward" disabled>&#x25B6;</button>
       <button id="stor-up-btn"      onclick="storNavUp()"      title="Up"      disabled>&#x2191;</button>
-      <span id="stor-path-display"></span>
+      <div id="stor-path-display"></div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center">
-      <div id="disk-bar-wrap">
-        <span id="disk-label">Loading...</span>
-        <div id="disk-bar-track"><div id="disk-bar-fill"></div></div>
-      </div>
-      <button class="btn btn-secondary btn-sm" onclick="loadStorage()">&#x21BB; Refresh</button>
+    <div id="stor-col-headers">
+      <span class="stor-col-name"  onclick="storSort('name')"  id="sorth-name">Name &#x25B2;</span>
+      <span class="stor-col-date"  onclick="storSort('date')"  id="sorth-date">Date Modified</span>
+      <span class="stor-col-type"  onclick="storSort('type')"  id="sorth-type">Type</span>
+      <span class="stor-col-size"  onclick="storSort('size')"  id="sorth-size">Size</span>
+      <span class="stor-col-acts"></span>
     </div>
+    <div id="storage-list"></div>
   </div>
-  <div id="storage-list"></div>
 </div>
 
 
