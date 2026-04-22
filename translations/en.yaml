@@ -1,0 +1,51 @@
+configuration:
+  low_fps_mode:
+    name: Low FPS Mode (Option A)
+    description: >-
+      Recommended ON. Reduces HEVC output to 2 fps while ffmpeg still
+      decodes at source rate. Dramatically cuts CPU encode/pipe cost with
+      minimal visual impact for security monitoring.
+  skip_nonref:
+    name: Skip Non-Reference Frames (Option B)
+    description: >-
+      Default OFF. Adds -skip_frame nonref to ffmpeg input. Skips B/P
+      frames during HEVC decode, reducing CPU ~40%. Causes slight choppiness.
+      Use if streams still degrade with Low FPS Mode.
+  limit_threads:
+    name: Limit Threads (Option C)
+    description: >-
+      Recommended ON. Limits each ffmpeg process to 2 threads, preventing
+      any one stream from monopolizing all 4 Pi cores and starving other cameras.
+  stagger_polling:
+    name: Stagger Polling (Option D)
+    description: >-
+      Default OFF. Offsets each camera's decode loop start by 40ms per
+      camera index, spreading CPU spikes across time instead of all hitting
+      simultaneously. Most useful with 4 or more cameras.
+  hw_decode:
+    name: Hardware Decode (Option F)
+    description: >-
+      Default OFF. Enables hevc_v4l2m2m / h264_v4l2m2m hardware decoders.
+      Works on native Pi installs with V4L2 device access. Not available in
+      HA Docker containers. Decoder failures are not permanently cached.
+  recordings_path:
+    name: Recordings Path
+    description: >-
+      Base directory for motion-triggered recording clips. Defaults to
+      /media/anycam which is exposed via HA Media Browser and Samba share.
+      Each camera gets a sub-folder named after its display name.
+  motion_sensitivity:
+    name: Motion Sensitivity
+    description: >-
+      How sensitive motion detection is, from 1 (least) to 100 (most).
+      Uses JPEG size comparison. Default 15 works well for outdoor cameras.
+  motion_cooldown_secs:
+    name: Motion Cooldown (seconds)
+    description: >-
+      Seconds of no detected motion before recording stops. Default 10.
+      Increase for cameras with intermittent motion such as PTZ patrol.
+  motion_clip_padding_secs:
+    name: Recording Tail Padding (seconds)
+    description: >-
+      Extra seconds recorded after the cooldown ends, to capture the
+      tail of a motion event. Default 3.
