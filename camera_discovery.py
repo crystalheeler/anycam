@@ -2703,6 +2703,7 @@ def _parse_go2rtc_stream_info(info: dict) -> dict:
 
 
 async def run_scan():
+    global _SCAN_CANCELLED
     _scan_start = time.time()
 
     # _total_estimate: running estimate of total scan duration in seconds.
