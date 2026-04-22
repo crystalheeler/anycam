@@ -1,6 +1,6 @@
 name: "AnyCam"
 description: "Scans the local network for IP cameras (RTSP, ONVIF, MJPEG, HLS, RTMP, WebRTC, WS-RTSP) and displays live feeds in a card grid."
-version: "1.7.0"
+version: "1.7.1"
 slug: "camera_discovery"
 init: false
 host_network: true
@@ -20,15 +20,58 @@ options:
   motion_clip_padding_secs: 3
 
 schema:
-  low_fps_mode: bool
-  skip_nonref: bool
-  limit_threads: bool
-  stagger_polling: bool
-  hw_decode: bool
-  recordings_path: str
-  motion_sensitivity: int(1,100)
-  motion_cooldown_secs: int(1,300)
-  motion_clip_padding_secs: int(0,30)
+  low_fps_mode:
+    type: bool
+    description: >
+      (A) Recommended ON. Reduces HEVC output to 2 fps while ffmpeg still
+      decodes at source rate. Dramatically cuts CPU encode/pipe cost with
+      minimal visual impact for security monitoring.
+  skip_nonref:
+    type: bool
+    description: >
+      (B) Default OFF. Adds -skip_frame nonref to ffmpeg input. Skips B/P
+      frames during HEVC decode, reducing CPU ~40%. Causes slight choppiness.
+      Use if streams still degrade with Option A.
+  limit_threads:
+    type: bool
+    description: >
+      (C) Recommended ON. Limits each ffmpeg process to 2 threads, preventing
+      any one stream from monopolizing all 4 Pi cores and starving other cameras.
+  stagger_polling:
+    type: bool
+    description: >
+      (D) Default OFF. Offsets each camera's decode loop start by 40ms per
+      camera index, spreading CPU spikes across time instead of all hitting
+      simultaneously. Most useful with 4+ cameras.
+  hw_decode:
+    type: bool
+    description: >
+      (F) Default OFF. Enables hevc_v4l2m2m / h264_v4l2m2m hardware decoders.
+      Works on native Pi installs with V4L2 device access. Not available in
+      HA Docker containers. When enabled, decoder failures are NOT permanently
+      cached — the hardware will be retried on each stream start.
+  recordings_path:
+    type: str
+    description: >
+      Base directory for motion-triggered recording clips. Defaults to
+      /media/anycam which is exposed via HA Media Browser and Samba share.
+      Each camera gets a sub-folder named after its display name.
+  motion_sensitivity:
+    type: int(1,100)
+    description: >
+      How sensitive motion detection is (1=least sensitive, 100=most).
+      Uses JPEG size comparison: higher sensitivity triggers on smaller
+      scene changes. Default 15 works well for outdoor cameras.
+  motion_cooldown_secs:
+    type: int(1,300)
+    description: >
+      Seconds of no detected motion before recording stops. Default 10.
+      Increase for cameras with intermittent motion (e.g. PTZ patrol).
+  motion_clip_padding_secs:
+    type: int(0,30)
+    description: >
+      Extra seconds recorded after the cooldown period ends, to capture
+      the tail of a motion event. Default 3.
 
 map:
   - type: media

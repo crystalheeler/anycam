@@ -1,5 +1,39 @@
 # AnyCam — Changelog
 
+## 1.7.1
+- Fixes and improvements following 1.7.0 testing:
+
+- Fix scan cancel logic: _SCAN_CANCELLED check at stage 1→2 was misplaced
+  inside a nested if block causing IndentationError; fixed to check at top
+  of each stage boundary as intended
+- Add _LOG_BUFFER + _BufHandler: in-memory circular buffer of last 200
+  WARNING/ERROR log entries; enables status dot to read health without
+  requiring any external log access
+- Status dot: green/amber/red circle next to AnyCam logo in header; polls
+  /api/logs every 5s; amber = recent warnings, red = recent errors, green
+  = all clear; click dot to open log view; title "System Stability"
+- Logs view: new view showing recent warning/error entries in monochrome
+  terminal style; accessible via status dot click or logs view
+- AnyCam logo: clickable (→ cameras view) with title "Home"
+- Scan cancel button: red × Cancel button appears in status bar while scan
+  is running; POST /api/scan/cancel requests graceful abort at stage
+  boundaries (between stages 1→2 and 3→4)
+- Storage view: path navigation bar with Back / Forward / Up buttons and
+  breadcrumb path display; root view shows camera folders as grid cards;
+  folder view shows files as list; double-click name to rename
+- Storage view: Back to Cameras button added
+- H.265+ detection: when Hikvision (or other) camera streams in multi-layer
+  HEVC (H.265+), _drain_stderr detects the ffmpeg "Multi-layer HEVC coding
+  is not implemented" message and sets camera["hevc_plus_warning"] = True;
+  Fix: camera web UI → Video → Encoding → change H.265+ to H.265
+- -err_detect ignore_err added to snap_loop ffmpeg command; extends stream
+  life before crash when camera sends malformed/partial HEVC frames
+- Folder naming uses dashes not underscores (e.g. mainStreamProfile →
+  main-stream-profile, hikvision-ds2de4a425iw-de)
+- Focus view: image now fills full viewport (100vw × calc(100vh-50px)) with
+  object-fit:contain; previously only occupied a small portion of screen
+- Config descriptions added for all options A-F in HA Config tab
+
 ## 1.7.0
 - Performance toggles (A-F) in HA App Configuration tab:
   A: low_fps_mode (default ON) — reduces HEVC output to 2fps while ffmpeg

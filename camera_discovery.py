@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.7.0"  # must match config.yaml
+CURRENT_VERSION = "1.7.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -91,6 +91,26 @@ _FOCUSED_CAMERA: str | None = None
 # is added here so future stream requests skip hw decode immediately.
 _HW_UNAVAILABLE: set = set()
 
+# Circular log buffer — last 200 WARNING/ERROR entries for the status dot.
+# Structure: [{"level": "warning"|"error", "msg": str, "t": float}, ...]
+_LOG_BUFFER: list = []
+
+class _BufHandler(logging.Handler):
+    def emit(self, record):
+        if record.levelno >= logging.WARNING:
+            _LOG_BUFFER.append({
+                "level": "error" if record.levelno >= logging.ERROR else "warning",
+                "msg":   self.format(record),
+                "t":     record.created,
+            })
+            if len(_LOG_BUFFER) > 200:
+                _LOG_BUFFER.pop(0)
+
+_buf_handler = _BufHandler()
+_buf_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
+                                             datefmt="%H:%M:%S"))
+logging.getLogger().addHandler(_buf_handler)
+
 # Per-camera snapshot state for the background ffmpeg processes that feed
 # handle_snapshot.  Key = camera_id.
 # Each value dict: frame(bytes|None), frame_time(float), frame_count(int),
@@ -121,6 +141,7 @@ def _snap_state(camera_id: str) -> dict:
 
 CAMERAS    = {}
 BLACKLIST  = set()
+_SCAN_CANCELLED = False   # set to True to request graceful scan abort
 SCAN_STATE = {"running": False, "progress": 0, "message": "Idle. Click Scan to begin.",
                "stage": 0, "stage_label": "",
                "started_at": 0.0, "elapsed": 0.0, "eta": ""}
@@ -2751,6 +2772,11 @@ async def run_scan():
         ARP_HOSTS.append({"ip": ip, "hostname": ""})
 
     # ── Stage 2: Focused camera port scan on live hosts only ─────────────────
+    if _SCAN_CANCELLED:
+        _SCAN_CANCELLED = False
+        SCAN_STATE.update(running=False, progress=0, stage=0, stage_label="",
+                          message="Scan cancelled.", eta=0)
+        return
     SCAN_STATE.update(progress=25, stage=2,
                       stage_label="Stage 2/4 — Camera port scan",
                       message=f"Scanning camera ports on {len(all_live)} live host(s)…",
@@ -2826,6 +2852,11 @@ async def run_scan():
 
     # ── Stage 4 (optional): Deeper Scan on silent live hosts ──────────────────
     silent = sorted(all_live - responding_ips)
+    if _SCAN_CANCELLED:
+        _SCAN_CANCELLED = False
+        SCAN_STATE.update(running=False, progress=0, stage=0, stage_label="",
+                          message="Scan cancelled.", eta=0)
+        return
     if SCAN_OPTIONS.get("broad_sweep") and silent:
         SCAN_STATE.update(progress=82, stage=4,
                           stage_label="Stage 4/4 — Deeper Scan (0–10000)",
@@ -3321,6 +3352,17 @@ async def _drain_stderr(proc: object, label: str) -> None:
             if hw in joined and "Could not find a valid device" in joined:
                 _HW_UNAVAILABLE.add(hw)
                 log.info(f"Marked {hw} as unavailable on this system")
+        # Detect Hikvision H.265+ (multi-layer HEVC) which ffmpeg cannot decode.
+        # H.265+ is Hikvision's proprietary scalable codec extension, NOT standard
+        # H.265. Fix: log into camera UI → Video → Encoding → change from H.265+
+        # to H.265. We flag the camera so the UI can show a warning badge.
+        if "Multi-layer HEVC" in joined:
+            cam_id = label.replace("SNAP:", "")
+            if cam_id in CAMERAS:
+                CAMERAS[cam_id]["hevc_plus_warning"] = True
+                log.warning(f"Camera {cam_id} is streaming H.265+ (Hikvision proprietary "
+                            f"multi-layer HEVC). FFmpeg cannot fully decode this. "
+                            f"Fix: camera UI → Video → Encoding → change H.265+ to H.265.")
 
 
 async def handle_stream(request: web.Request) -> web.StreamResponse:
@@ -3639,6 +3681,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         return await asyncio.create_subprocess_exec(
             "ffmpeg", "-nostdin", "-loglevel", "warning",
             "-rtsp_transport", "tcp", "-timeout", "8000000",
+            "-err_detect", "ignore_err",   # tolerate partial HEVC decode errors
             *skip_args,
             *hw_args,
             "-i", url,
@@ -3900,6 +3943,18 @@ async def handle_snapshot(request: web.Request) -> web.Response:
     )
 
 
+async def api_logs(request: web.Request) -> web.Response:
+    """GET /api/logs?since=T — recent warning/error entries from the in-memory buffer.
+    Used by the JS status dot to determine system health color (green/amber/red)."""
+    since   = float(request.rel_url.query.get("since", 0))
+    entries = [e for e in _LOG_BUFFER if e["t"] > since]
+    recent  = _LOG_BUFFER[-50:]
+    has_err = any(e["level"] == "error"   for e in recent)
+    has_wrn = any(e["level"] == "warning" for e in recent)
+    status  = "error" if has_err else ("warning" if has_wrn else "ok")
+    return web.json_response({"status": status, "entries": entries[-100:]})
+
+
 async def handle_snap_status(request: web.Request) -> web.Response:
     """
     GET /snap/status — JSON health check for all active snapshot processes.
@@ -3996,30 +4051,25 @@ def _detect_motion(prev_jpeg: bytes, curr_jpeg: bytes, sensitivity: int) -> bool
 
 
 def _cam_folder_name(camera: dict) -> str:
-    """Derive a short filesystem-safe folder name from the camera display name."""
+    """Derive a short filesystem-safe folder name from the camera display name.
+    Uses dashes (not underscores) per naming convention."""
+    import re as _re
     name = camera.get("name", "") or camera.get("ip", "unknown")
-    # Strip common useless prefixes
     for prefix in ("Generic IP Camera", "Generic", "Unknown Camera", "Unknown"):
         if name.startswith(prefix):
             name = name[len(prefix):].lstrip(" ()")
-    # Strip parenthetical IP: "(10.0.0.22)"
-    import re as _re
     name = _re.sub(r"\(\d+\.\d+\.\d+\.\d+\)", "", name)
-    # Replace em-dash profile separator
-    name = name.replace(" — ", "_").replace("—", "_")
-    # Keep only alphanumeric + underscore
-    name = _re.sub(r"[^a-zA-Z0-9_]", "_", name)
-    name = _re.sub(r"_+", "_", name).strip("_").lower()
+    name = name.replace(" — ", "-").replace("—", "-")
+    name = _re.sub(r"[^a-zA-Z0-9-]", "-", name)
+    name = _re.sub(r"-+", "-", name).strip("-").lower()
     if not name:
-        name = camera.get("ip", "camera").replace(".", "_")
-    # Ensure uniqueness via IP last octet suffix if name is generic
+        name = camera.get("ip", "camera").replace(".", "-")
     if len(name) < 4 or name in ("main", "sub", "stream"):
         ip = camera.get("ip", "")
         suffix = ip.split(".")[-1] if ip else ""
         if suffix:
-            name = f"{name}_{suffix}"
+            name = f"{name}-{suffix}"
     return name[:30]
-
 
 async def _ensure_cam_dir(camera: dict) -> Path:
     """Create and return the recording directory for a camera."""
@@ -4273,6 +4323,17 @@ async def api_scan(request):
 
 async def api_scan_status(request):
     return web.json_response(SCAN_STATE)
+
+
+async def api_scan_cancel(request):
+    """POST /api/scan/cancel — request graceful abort of running scan."""
+    global _SCAN_CANCELLED
+    if not SCAN_STATE["running"]:
+        return web.json_response({"error": "No scan running"}, status=400)
+    _SCAN_CANCELLED = True
+    log.info("Scan cancel requested by user")
+    SCAN_STATE.update(message="Cancelling scan…")
+    return web.json_response({"status": "cancelling"})
 
 
 async def api_set_credentials(request):
@@ -4655,11 +4716,12 @@ let cameras=[], pollT=null, pscanT=null, renameId=null, _paused=false;
 /* ── View switching ────────────────────────────────────────────────────────── */
 function switchView(v) {
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
-  const viewMap = {cameras: 'cameras-view', pscan: 'pscan-view', add: 'add-view', storage: 'storage-view'};
+  const viewMap = {cameras: 'cameras-view', pscan: 'pscan-view', add: 'add-view', storage: 'storage-view', logs: 'logs-view'};
   document.getElementById(viewMap[v] || 'cameras-view').classList.add('active');
   document.getElementById('pscan-btn').classList.toggle('active', v === 'pscan');
   document.getElementById('add-btn').classList.toggle('active', v === 'add');
   document.getElementById('storage-btn').classList.toggle('active', v === 'storage');
+  if (v === 'logs') renderLogView();
   if (v === 'storage') loadStorage();
   if (v === 'pscan') {
     loadArpHosts();
@@ -4731,6 +4793,7 @@ async function pollScan() {
     } else {
       timerEl.style.display = 'none';
     }
+    _updateCancelBtn(s.running);
     if (s.running) {
       pollT = setTimeout(pollScan, 1500);
     } else {
@@ -4803,6 +4866,182 @@ function stopSnap(camId) {
 
 function stopAllSnaps() {
   Object.keys(_snapTimers).forEach(stopSnap);
+}
+
+/* ── Scan cancel ───────────────────────────────────────────────────────────── */
+async function cancelScan() {
+  await fetch(BASE + '/api/scan/cancel', {method: 'POST'}).catch(() => {});
+}
+
+/* ── Status dot ────────────────────────────────────────────────────────────── */
+let _lastLogTime = 0;
+async function pollStatusDot() {
+  try {
+    const d   = await (await fetch(BASE + '/api/logs?since=' + _lastLogTime)).json();
+    const dot = document.getElementById('status-dot');
+    if (!dot) return;
+    if (d.status === 'error') {
+      dot.style.background = '#f44336';
+      dot.style.boxShadow  = '0 0 0 2px rgba(244,67,54,.3)';
+    } else if (d.status === 'warning') {
+      dot.style.background = '#ff9800';
+      dot.style.boxShadow  = '0 0 0 2px rgba(255,152,0,.3)';
+    } else {
+      dot.style.background = '#4caf50';
+      dot.style.boxShadow  = '0 0 0 2px rgba(76,175,80,.25)';
+    }
+    if (d.entries && d.entries.length) {
+      _lastLogTime = d.entries[d.entries.length - 1].t;
+    }
+  } catch(e) {}
+}
+setInterval(pollStatusDot, 5000);
+pollStatusDot();
+
+/* ── Cancel button visibility ─────────────────────────────────────────────── */
+/* Show the cancel button while scan is running */
+const _origPollScan = typeof pollScan !== 'undefined' ? pollScan : null;
+function _updateCancelBtn(running) {
+  const btn = document.getElementById('scan-cancel-btn');
+  if (btn) btn.style.display = running ? '' : 'none';
+}
+
+/* ── Log view ──────────────────────────────────────────────────────────────── */
+async function renderLogView() {
+  const el    = document.getElementById('log-entries');
+  const badge = document.getElementById('log-status-badge');
+  if (!el) return;
+  try {
+    const d = await (await fetch(BASE + '/api/logs')).json();
+    badge.textContent  = d.status === 'error' ? '🔴 Errors detected'
+                       : d.status === 'warning' ? '🟡 Warnings present' : '🟢 All clear';
+    badge.style.fontSize = '.78rem';
+    if (!d.entries || !d.entries.length) {
+      el.innerHTML = '<span style="color:var(--text-dim)">No warnings or errors logged.</span>';
+      return;
+    }
+    el.innerHTML = d.entries.slice().reverse().map(e => {
+      const col = e.level === 'error' ? '#f44336' : '#ff9800';
+      return '<div style="color:' + col + ';margin-bottom:2px">' + esc(e.msg) + '</div>';
+    }).join('');
+  } catch(err) {
+    el.innerHTML = '<span style="color:var(--text-dim)">Could not load logs.</span>';
+  }
+}
+
+/* ── Storage navigation state ─────────────────────────────────────────────── */
+let _storHistory  = [null];   // null = root, string = folder name
+let _storHistIdx  = 0;
+let _storCurrent  = null;     // null = root view, string = folder name
+
+function _storNavTo(folder) {
+  // Trim forward history when navigating to a new place
+  _storHistory = _storHistory.slice(0, _storHistIdx + 1);
+  _storHistory.push(folder);
+  _storHistIdx = _storHistory.length - 1;
+  _storCurrent = folder;
+  _renderStorageView();
+}
+
+function storNavBack() {
+  if (_storHistIdx <= 0) return;
+  _storHistIdx--;
+  _storCurrent = _storHistory[_storHistIdx];
+  _renderStorageView();
+}
+
+function storNavForward() {
+  if (_storHistIdx >= _storHistory.length - 1) return;
+  _storHistIdx++;
+  _storCurrent = _storHistory[_storHistIdx];
+  _renderStorageView();
+}
+
+function storNavUp() {
+  if (_storCurrent === null) return;
+  _storNavTo(null);
+}
+
+function _updateNavButtons() {
+  const back = document.getElementById('stor-back-btn');
+  const fwd  = document.getElementById('stor-forward-btn');
+  const up   = document.getElementById('stor-up-btn');
+  const path = document.getElementById('stor-path-display');
+  if (!back) return;
+  back.disabled = _storHistIdx <= 0;
+  fwd.disabled  = _storHistIdx >= _storHistory.length - 1;
+  up.disabled   = _storCurrent === null;
+  // Build clickable path breadcrumbs
+  if (_storCurrent === null) {
+    path.innerHTML = '<span style="opacity:.5">/ media / anycam</span>';
+  } else {
+    path.innerHTML = '<span style="cursor:pointer;opacity:.6" onclick="_storNavTo(null)">/ media / anycam</span>'
+      + ' / <strong>' + esc(_storCurrent) + '</strong>';
+  }
+}
+
+/* ── Storage render (replaces old renderStorage) ─────────────────────────── */
+function renderStorage(d) {
+  const disk = d.disk || {};
+  const pct  = disk.pct_used || 0;
+  const lbl  = document.getElementById('disk-label');
+  const fill = document.getElementById('disk-bar-fill');
+  if (lbl)  lbl.textContent = pct + '% used — ' + (disk.free_gb || 0) + ' GB free of ' + (disk.total_gb || 0) + ' GB';
+  if (fill) {
+    fill.style.width      = Math.min(pct, 100) + '%';
+    fill.style.background = pct > 90 ? 'var(--red)' : pct > 70 ? 'var(--orange)' : 'var(--primary)';
+  }
+  _storHistory = [null]; _storHistIdx = 0; _storCurrent = null;
+  _renderStorageView();
+}
+
+function _renderStorageView() {
+  _updateNavButtons();
+  const list = document.getElementById('storage-list');
+  if (!list || !_storageData) return;
+  const folders = _storageData.folders || [];
+
+  if (_storCurrent === null) {
+    // Root view: show camera folders
+    if (!folders.length) {
+      list.innerHTML = '<div style="text-align:center;padding:60px 20px;color:var(--text-dim);opacity:.5">'
+        + '<div style="font-size:2.5rem;margin-bottom:12px">📁</div>'
+        + '<div>No recordings yet.<br>Enable motion detection on a camera to start recording.</div></div>';
+      return;
+    }
+    list.innerHTML = '<div class="stor-grid">'
+      + folders.map(folder => `
+        <div class="stor-folder-card" onclick="_storNavTo('${esc(folder.folder)}')" draggable="false">
+          <div class="stor-folder-icon">📁</div>
+          <div class="stor-folder-name" title="Double-click to rename"
+               ondblclick="event.stopPropagation();storRenameFolder('${esc(folder.folder)}')">${esc(folder.folder)}</div>
+          <div class="stor-folder-meta">${folder.count} clip${folder.count !== 1 ? 's' : ''} · ${folder.size_mb} MB</div>
+        </div>`).join('')
+      + '</div>';
+  } else {
+    // Folder view: show files inside this folder
+    const folder = folders.find(f => f.folder === _storCurrent);
+    const files  = folder ? folder.files : [];
+    if (!files.length) {
+      list.innerHTML = '<div style="text-align:center;padding:60px 20px;color:var(--text-dim);opacity:.5">'
+        + '<div style="font-size:2rem;margin-bottom:10px">🎬</div>'
+        + '<div>No recordings in this folder.</div></div>';
+      return;
+    }
+    list.innerHTML = '<div class="stor-files-list">'
+      + files.map(f => `
+        <div class="stor-file" draggable="true"
+             ondragstart="storDragStart(event,'${esc(_storCurrent + '/' + f.name)}','${esc(_storCurrent)}')">
+          <span class="stor-file-icon">🎬</span>
+          <span class="stor-file-name" title="Double-click to rename"
+                ondblclick="storRenameFile('${esc(_storCurrent + '/' + f.name)}','${esc(f.name)}')">${esc(f.name)}</span>
+          <span class="stor-file-size">${f.size_mb} MB</span>
+          <span class="stor-file-date">${new Date(f.mtime * 1000).toLocaleString()}</span>
+          <a class="btn btn-ghost btn-xs" href="${BASE}/api/storage/download?path=${encodeURIComponent(_storCurrent + '/' + f.name)}" download title="Download">&#x2B07;</a>
+          <button class="btn btn-danger btn-xs" onclick="storDeleteFile('${esc(_storCurrent + '/' + f.name)}')" title="Delete">&#x1F5D1;</button>
+        </div>`).join('')
+      + '</div>';
+  }
 }
 
 /* Called after renderGrid() to start polling for all visible snap cameras */
@@ -5857,15 +6096,34 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .stor-empty{{font-size:.8rem;color:var(--text-dim);padding:8px 10px;display:block}}
 .btn-xs{{padding:3px 8px;font-size:.72rem}}
 /* ── Focus overlay ── */
-#focus-overlay{{position:fixed;inset:0;background:#000;z-index:9000;display:flex;flex-direction:column;align-items:center;justify-content:center}}
+#focus-overlay{{position:fixed;inset:0;background:#000;z-index:9000;display:flex;flex-direction:column;align-items:stretch;justify-content:center;padding:0}}
 #focus-close{{position:absolute;top:16px;right:20px;background:#222;border:1px solid #444;color:#fff;font-size:1.4rem;width:40px;height:40px;border-radius:50%;cursor:pointer;z-index:9001;line-height:1}}
 #focus-close:hover{{background:#444}}
-#focus-img{{max-width:100%;max-height:calc(100vh - 60px);object-fit:contain;display:block}}
+#focus-img{{width:100vw;height:calc(100vh - 50px);object-fit:contain;display:block}}
 #focus-info{{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);font-size:.8rem;color:#aaa;background:rgba(0,0,0,.6);padding:4px 12px;border-radius:20px;white-space:nowrap}}
 #focus-warning{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a1a;border:1px solid var(--orange);border-radius:10px;padding:24px;max-width:480px;text-align:center;z-index:9002;display:flex;flex-direction:column;gap:14px;align-items:center}}
 #focus-warn-text{{color:#f5b942;font-size:.9rem;line-height:1.5}}
 /* ── Toast ── */
 #toast{{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);padding:10px 22px;border-radius:24px;color:#fff;font-size:.85rem;z-index:9100;pointer-events:none;transition:opacity .3s}}
+/* ── Storage navigation bar ── */
+#storage-topbar{{display:flex;align-items:center;gap:12px;padding:10px 0 14px;flex-wrap:wrap}}
+#stor-nav-bar{{display:flex;align-items:center;gap:6px;flex:1;min-width:200px;background:#111;border:1px solid var(--border);border-radius:8px;padding:5px 10px}}
+#stor-nav-bar button{{background:#1a1a1a;border:1px solid #333;color:var(--text);border-radius:5px;width:26px;height:26px;cursor:pointer;font-size:.85rem;display:flex;align-items:center;justify-content:center}}
+#stor-nav-bar button:disabled{{opacity:.3;cursor:default}}
+#stor-nav-bar button:not(:disabled):hover{{background:#2a2a2a}}
+#stor-path-display{{font-size:.8rem;color:var(--text-dim);margin-left:6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+/* ── Storage grid/list ── */
+.stor-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;padding:4px}}
+.stor-folder-card{{background:var(--card-bg);border:1px solid var(--border);border-radius:10px;padding:16px 12px;cursor:pointer;text-align:center;transition:border-color .15s,background .15s}}
+.stor-folder-card:hover{{border-color:var(--primary);background:#151515}}
+.stor-folder-icon{{font-size:2.2rem;margin-bottom:8px}}
+.stor-folder-name{{font-size:.84rem;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:4px}}
+.stor-folder-meta{{font-size:.72rem;color:var(--text-dim)}}
+.stor-files-list{{display:flex;flex-direction:column;gap:4px}}
+/* ── Logs view ── */
+#logs-view{{padding:20px}}
+/* ── header h1 cursor ── */
+header h1{{cursor:pointer}}
 .field label{{display:block;font-size:.7rem;color:var(--text-dim);font-weight:600;letter-spacing:.04em;margin-bottom:3px}}
 .field input,.field select{{width:100%;background:var(--surface);border:1px solid var(--border);
   color:var(--text);border-radius:8px;padding:7px 10px;font-size:.84rem;outline:none}}
@@ -5910,13 +6168,17 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 <body>
 
 <header>
-  <h1>
+  <h1 onclick="switchView('cameras')" title="Home" style="cursor:pointer">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
       <path d="M15 10l4.553-2.069A1 1 0 0121 8.87v6.26a1 1 0 01-1.447.9L15 14"/>
       <rect x="1" y="7" width="14" height="10" rx="2" ry="2"/>
     </svg>
     AnyCam
   </h1>
+  <span id="status-dot" title="System Stability" onclick="switchView('logs')"
+        style="width:10px;height:10px;border-radius:50%;background:#4caf50;
+               display:inline-block;cursor:pointer;margin-left:4px;flex-shrink:0;
+               box-shadow:0 0 0 2px rgba(76,175,80,.25)"></span>
   <span id="cam-count" style="color:var(--text-dim);font-size:.78rem"></span>
   <label class="sweep-toggle" title="Scan ports 0-10000 on live hosts that don't respond to camera ports">
     <input type="checkbox" id="broad-sweep">
@@ -5935,6 +6197,11 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
     <div class="progress-fill" id="progress-fill"></div>
   </div>
   <span id="scan-timer" style="display:none;font-size:.74rem;color:var(--primary);font-weight:600;white-space:nowrap"></span>
+  <button id="scan-cancel-btn" onclick="cancelScan()"
+          style="display:none;margin-left:auto;padding:3px 12px;font-size:.75rem;
+                 background:#8b2020;color:#fff;border:none;border-radius:6px;cursor:pointer">
+    &#x2715; Cancel
+  </button>
 </div>
 
 <div class="view active" id="cameras-view">
@@ -6064,14 +6331,35 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 </script>
 <!-- ── Storage view ───────────────────────────────────────────────────────── -->
 <div class="view" id="storage-view">
-  <div id="storage-header">
-    <div id="disk-bar-wrap">
-      <span id="disk-label">Loading storage info...</span>
-      <div id="disk-bar-track"><div id="disk-bar-fill"></div></div>
+  <div id="storage-topbar">
+    <button class="btn btn-ghost btn-sm" onclick="switchView('cameras')">&#x2190; Back to Cameras</button>
+    <div id="stor-nav-bar">
+      <button id="stor-back-btn"    onclick="storNavBack()"    title="Back"    disabled>&#x2190;</button>
+      <button id="stor-forward-btn" onclick="storNavForward()" title="Forward" disabled>&#x25B6;</button>
+      <button id="stor-up-btn"      onclick="storNavUp()"      title="Up"      disabled>&#x2191;</button>
+      <span id="stor-path-display"></span>
     </div>
-    <button class="btn btn-secondary btn-sm" onclick="loadStorage()">&#x21BB; Refresh</button>
+    <div style="display:flex;gap:8px;align-items:center">
+      <div id="disk-bar-wrap">
+        <span id="disk-label">Loading...</span>
+        <div id="disk-bar-track"><div id="disk-bar-fill"></div></div>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="loadStorage()">&#x21BB; Refresh</button>
+    </div>
   </div>
   <div id="storage-list"></div>
+</div>
+
+<!-- ── Logs view ──────────────────────────────────────────────────────────── -->
+<div class="view" id="logs-view">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+    <button class="btn btn-ghost btn-sm" onclick="switchView('cameras')">&#x2190; Back to Cameras</button>
+    <h2 style="font-size:.95rem;font-weight:600;margin:0">System Log</h2>
+    <span id="log-status-badge"></span>
+  </div>
+  <div id="log-entries" style="font-family:monospace;font-size:.75rem;line-height:1.6;
+       max-height:calc(100vh - 160px);overflow-y:auto;background:#0d0d0d;
+       border:1px solid var(--border);border-radius:8px;padding:12px"></div>
 </div>
 
 <!-- ── Focus / full-screen enhanced view overlay ──────────────────────────── -->
@@ -6109,6 +6397,7 @@ def make_app() -> web.Application:
     app.router.add_get(   "/api/cameras",                         api_cameras)
     app.router.add_get(   "/api/scan/status",                     api_scan_status)
     app.router.add_post(  "/api/scan",                            api_scan)
+    app.router.add_post(  "/api/scan/cancel",                     api_scan_cancel)
     app.router.add_post(  "/api/credentials",                     api_set_credentials)
     app.router.add_delete("/api/cameras/{camera_id}/credentials", api_clear_credentials)
     app.router.add_post(  "/api/cameras/{camera_id}/name",        api_rename_camera)
@@ -6120,6 +6409,7 @@ def make_app() -> web.Application:
     app.router.add_get(   "/stream/{camera_id}/test",             handle_stream_test)
     app.router.add_get(   "/snapshot/{camera_id}",                handle_snapshot)
     app.router.add_get(   "/snap/status",                         handle_snap_status)
+    app.router.add_get(   "/api/logs",                            api_logs)
     app.router.add_post(  "/snap/focus/{camera_id}",              handle_focus_set)
     app.router.add_delete("/snap/focus",                          handle_focus_clear)
     app.router.add_post(  "/api/cameras/{camera_id}/motion",      api_motion_toggle)
