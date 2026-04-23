@@ -1,3 +1,33 @@
+## 1.7.8
+
+### Bug fixes
+- **Log link no longer duplicates HA sidebar**: clicking the status icon now navigates the top-level browser tab (window.top) instead of the ingress iframe, so the HA shell does not render inside itself
+- **Status icon moved to left of title**: the green camera icon is now the leftmost element of the header h1, acting as both logo and live status indicator; the separate white camera SVG is removed
+- **AnyCam — Home** added to header title text
+- **Full quality in enhanced view**: when clicking a card to open focus/enhanced view, Low FPS Mode and Limit Threads config settings are bypassed for that stream so ffmpeg runs uncapped — full resolution, full fps, no thread limit
+
+## 1.7.7
+
+### Multi-stream handling
+- **Single card per IP**: ONVIF cameras with multiple stream profiles (main + sub) now collapse into one card instead of creating separate cards per profile
+- **Thumbnail uses sub-stream**: Card thumbnail polling uses the lowest-resolution stream for lower CPU/bandwidth; click-to-focus view switches to the full main stream
+- **H.265+ badge suppressed**: If a working lower-res alternate stream is found, the H.265+ warning badge is automatically replaced with the green fallback badge
+
+### Stream database
+- **Embedded RTSP/MJPEG database**: Excel stream URL database converted to compact Python dict (STREAM_DB, 27 manufacturers) embedded in the addon for zero-I/O lookup
+- **Post-login silent probe**: After credentials are accepted, silently probes manufacturer-specific alternate stream paths to discover streams not advertised pre-login
+- **Manufacturer detection**: Heuristic matching on camera name/vendor/model to select the right URL patterns for probing
+
+### Storage browser
+- **Editable path bar**: Click anywhere on the breadcrumb bar to edit the path directly; Enter/blur navigates there; invalid paths show a popup then restore the previous valid path
+- **Up arrow one level**: Up button now navigates one directory level up (not just to root); greyed at the ceiling (/media/anycam in scoped mode, / in unrestricted mode)
+- **Unrestricted browser toggle**: New config option `unrestricted_storage_browser` (default: false) allows navigating the full filesystem instead of just /media/anycam
+
+### Status indicator
+- **Camera icon replaces dot**: The status indicator is now a camera SVG icon (50% larger, same shape as the AnyCam logo) with no fill — only the stroke colour changes
+- **AnyCam text shifted right**: ~26px extra spacing between the logo icon and the AnyCam text for cleaner separation  
+- **Same-tab log navigation**: Clicking the status icon now navigates in the same tab to Settings → Apps → AnyCam → Log (correct HA path), not a new tab
+
 # AnyCam — Changelog
 
 ## 1.7.6

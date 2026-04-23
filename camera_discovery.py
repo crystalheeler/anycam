@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.7.6"  # must match config.yaml
+CURRENT_VERSION = "1.7.8"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -70,17 +70,237 @@ GO2RTC_API       = f"http://127.0.0.1:{GO2RTC_PORT}"
 # ── HA add-on configuration options (set in the HA UI Config tab) ─────────────
 # Read from env vars set by the HA supervisor from config.yaml options.
 # Defaults mirror the config.yaml defaults so the server works without HA too.
-CFG_LOW_FPS        = os.environ.get("LOW_FPS_MODE",   "true").lower()  == "true"
-CFG_SKIP_NONREF    = os.environ.get("SKIP_NONREF",    "false").lower() == "true"
-CFG_LIMIT_THREADS  = os.environ.get("LIMIT_THREADS",  "true").lower()  == "true"
-CFG_STAGGER_POLL   = os.environ.get("STAGGER_POLLING","false").lower() == "true"
-CFG_HW_DECODE      = os.environ.get("HW_DECODE",      "false").lower() == "true"
-CFG_RECORDINGS     = os.environ.get("RECORDINGS_PATH", "/media/anycam")
-CFG_MOTION_SENS    = int(os.environ.get("MOTION_SENSITIVITY",       "15"))
-CFG_MOTION_COOL    = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
-CFG_MOTION_PAD     = int(os.environ.get("MOTION_CLIP_PADDING_SECS", "3"))
+CFG_LOW_FPS              = os.environ.get("LOW_FPS_MODE",   "true").lower()  == "true"
+CFG_SKIP_NONREF          = os.environ.get("SKIP_NONREF",    "false").lower() == "true"
+CFG_LIMIT_THREADS        = os.environ.get("LIMIT_THREADS",  "true").lower()  == "true"
+CFG_STAGGER_POLL         = os.environ.get("STAGGER_POLLING","false").lower() == "true"
+CFG_HW_DECODE            = os.environ.get("HW_DECODE",      "false").lower() == "true"
+CFG_RECORDINGS           = os.environ.get("RECORDINGS_PATH", "/media/anycam")
+CFG_MOTION_SENS          = int(os.environ.get("MOTION_SENSITIVITY",       "15"))
+CFG_MOTION_COOL          = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
+CFG_MOTION_PAD           = int(os.environ.get("MOTION_CLIP_PADDING_SECS", "3"))
+CFG_UNRESTRICTED_BROWSER = os.environ.get("UNRESTRICTED_STORAGE_BROWSER", "false").lower() == "true"
 
 MEDIA_DIR = Path(CFG_RECORDINGS)
+
+# ── Stream database — compact form of the RTSP/MJPEG URL database ─────────────
+# Keyed by lowercase manufacturer slug.  Used for:
+#   1. Post-login silent probe of alternate stream paths
+#   2. Pre-login heuristic probing when ONVIF returns no profiles
+#
+# Fields:
+#   match  — substrings to look for in camera name / vendor / model (lowercase)
+#   rtsp   — RTSP path candidates to probe (ordered: most likely first)
+#   mjpeg  — HTTP MJPEG stream path (None if not supported)
+#   snap   — HTTP JPEG snapshot path (None if not available)
+#   port   — default RTSP port (554 unless the brand uses something else)
+STREAM_DB: dict = {
+    "hikvision": {
+        "match": ["hikvision", "hikv", "ds-2", "ds-7", "ds-6", "isapi"],
+        "rtsp":  ["/Streaming/Channels/101", "/Streaming/Channels/102",
+                  "/Streaming/Channels/103",
+                  "/ISAPI/Streaming/channels/101", "/ISAPI/Streaming/channels/102",
+                  "/h.264/ch1/main/av_stream", "/h.264/ch1/sub/av_stream"],
+        "mjpeg": "/ISAPI/Streaming/channels/102/httpPreview",
+        "snap":  "/ISAPI/Streaming/channels/101/picture",
+        "port":  554,
+    },
+    "ezviz": {
+        "match": ["ezviz"],
+        "rtsp":  ["/Streaming/Channels/101", "/Streaming/Channels/102"],
+        "mjpeg": "/ISAPI/Streaming/channels/102/httpPreview",
+        "snap":  "/ISAPI/Streaming/channels/101/picture",
+        "port":  554,
+    },
+    "dahua": {
+        "match": ["dahua", "dh-ipc", "dh-sd", "ipc-hfw", "ipc-hdw", "ipc-hdb",
+                  "sd4", "sd5", "sd6", "hfw", "hdw"],
+        "rtsp":  ["/cam/realmonitor?channel=1&subtype=0",
+                  "/cam/realmonitor?channel=1&subtype=1",
+                  "/cam/realmonitor?channel=1&subtype=2"],
+        "mjpeg": "/cgi-bin/mjpg/video.cgi?channel=1&subtype=1",
+        "snap":  "/cgi-bin/snapshot.cgi",
+        "port":  554,
+    },
+    "imou": {
+        "match": ["imou"],
+        "rtsp":  ["/cam/realmonitor?channel=1&subtype=0",
+                  "/cam/realmonitor?channel=1&subtype=1"],
+        "mjpeg": "/cgi-bin/mjpg/video.cgi?channel=1&subtype=1",
+        "snap":  "/cgi-bin/snapshot.cgi",
+        "port":  554,
+    },
+    "amcrest": {
+        "match": ["amcrest"],
+        "rtsp":  ["/cam/realmonitor?channel=1&subtype=0",
+                  "/cam/realmonitor?channel=1&subtype=1"],
+        "mjpeg": "/cgi-bin/mjpg/video.cgi?channel=1&subtype=1",
+        "snap":  "/cgi-bin/snapshot.cgi",
+        "port":  554,
+    },
+    "axis": {
+        "match": ["axis"],
+        "rtsp":  ["/axis-media/media.amp", "/axis-media/media.amp?videocodec=h264",
+                  "/axis-media/media.amp?videocodec=h265"],
+        "mjpeg": "/axis-cgi/mjpg/video.cgi",
+        "snap":  "/axis-cgi/jpg/image.cgi",
+        "port":  554,
+    },
+    "hanwha": {
+        "match": ["hanwha", "wisenet", "samsung", "snv-", "xnv-", "qnv-", "pnv-",
+                  "qnd-", "xnd-", "pnd-"],
+        "rtsp":  ["/profile1/media.smp", "/profile2/media.smp",
+                  "/profile10/media.smp"],
+        "mjpeg": "/stw-cgi/video.cgi?msubmenu=stream&action=view&Profile=1&CodecType=MJPEG&Resolution=800x450&FrameRate=15&CompressionLevel=10",
+        "snap":  "/stw-cgi/image.cgi?msubmenu=snapshot&action=view",
+        "port":  554,
+    },
+    "reolink": {
+        "match": ["reolink", "rlc-", "rlk-", "rlp-", "rln-"],
+        "rtsp":  ["/h264Preview_01_main", "/h264Preview_01_sub",
+                  "/Preview_01_main", "/Preview_01_sub"],
+        "mjpeg": None,
+        "snap":  None,
+        "port":  554,
+    },
+    "foscam": {
+        "match": ["foscam", "fi8", "fi9", "r2", "r4"],
+        "rtsp":  ["/videoMain", "/videoSub"],
+        "mjpeg": "/videostream.cgi",
+        "snap":  "/cgi-bin/CGIProxy.fcgi?cmd=snapPicture2",
+        "port":  88,
+    },
+    "uniview": {
+        "match": ["uniview", "unv", "ipc3", "ipc6", "ipc8"],
+        "rtsp":  ["/media/video1", "/media/video2", "/media/video3"],
+        "mjpeg": None,
+        "snap":  "/images/snapshot.jpg",
+        "port":  554,
+    },
+    "vivotek": {
+        "match": ["vivotek", "vivo", "fd8", "fd9", "ip8", "ip9", "cc8", "ms8"],
+        "rtsp":  ["/live1s1", "/live1s2", "/live.sdp", "/live2.sdp"],
+        "mjpeg": "/video.mjpg",
+        "snap":  "/cgi-bin/viewer/video.jpg",
+        "port":  554,
+    },
+    "bosch": {
+        "match": ["bosch", "ndc-", "nti-", "nbn-", "nbe-", "nuc-"],
+        "rtsp":  ["/rtsp_tunnel", "/?inst=1", "/?inst=2"],
+        "mjpeg": None,
+        "snap":  "/snap.jpg",
+        "port":  554,
+    },
+    "pelco": {
+        "match": ["pelco", "sarix", "optera", "spectra"],
+        "rtsp":  ["/stream1", "/stream2", "/?video"],
+        "mjpeg": "/media/mjpeg",
+        "snap":  "/media/jpeg",
+        "port":  554,
+    },
+    "avigilon": {
+        "match": ["avigilon"],
+        "rtsp":  ["/defaultPrimary?streamType=u", "/defaultSecondary?streamType=u"],
+        "mjpeg": None,
+        "snap":  None,
+        "port":  554,
+    },
+    "mobotix": {
+        "match": ["mobotix", "mx-", "mxfb"],
+        "rtsp":  ["/mobotix.h264", "/stream/profile0", "/stream/profile1",
+                  "/onvif/stream0/mobotix.mjpeg"],
+        "mjpeg": "/cgi-bin/faststream.jpg?stream=MxPEG",
+        "snap":  "/cgi-bin/faststream.jpg?stream=snapshot",
+        "port":  554,
+    },
+    "geovision": {
+        "match": ["geovision", "gv-", "geo-"],
+        "rtsp":  ["/CH001.sdp", "/CH002.sdp", "/h264.sdp"],
+        "mjpeg": "/mjpeg?cam=1",
+        "snap":  "/PictureCatch.cgi?CH=1",
+        "port":  8554,
+    },
+    "panasonic": {
+        "match": ["panasonic", "wv-s", "wv-x", "wv-v", "wv-u", "wv-sc", "bl-c"],
+        "rtsp":  ["/MediaInput/h264/stream_1/ch_1", "/MediaInput/h264/stream_2/ch_1"],
+        "mjpeg": None,
+        "snap":  None,
+        "port":  554,
+    },
+    "acti": {
+        "match": ["acti", "tcm-", "kce-", "e21", "e22", "e23", "e24", "e31"],
+        "rtsp":  ["/track1", "/track2"],
+        "mjpeg": None,
+        "snap":  None,
+        "port":  554,
+    },
+    "tiandy": {
+        "match": ["tiandy", "tc-c", "tc-h", "tc-r"],
+        "rtsp":  ["/profile1", "/profile2"],
+        "mjpeg": None,
+        "snap":  None,
+        "port":  554,
+    },
+    "tplink": {
+        "match": ["tapo", "tp-link", "tplink", "c100", "c200", "c300", "c310", "c320"],
+        "rtsp":  ["/stream1", "/stream2"],
+        "mjpeg": None,
+        "snap":  None,
+        "port":  554,
+    },
+    "annke": {
+        "match": ["annke"],
+        "rtsp":  ["/H264/ch1/main/av_stream", "/H264/ch1/sub/av_stream",
+                  "/Streaming/channels/101", "/Streaming/channels/102"],
+        "mjpeg": "/ISAPI/Streaming/channels/102/httpPreview",
+        "snap":  "/ISAPI/Streaming/channels/101/picture",
+        "port":  554,
+    },
+    "trendnet": {
+        "match": ["trendnet", "tv-ip"],
+        "rtsp":  ["/channel1", "/channel2"],
+        "mjpeg": "/cgi/mjpg/mjpeg.cgi",
+        "snap":  None,
+        "port":  554,
+    },
+    "dlink": {
+        "match": ["d-link", "dlink", "dcs-"],
+        "rtsp":  ["/play1.sdp", "/play2.sdp"],
+        "mjpeg": "/video.cgi",
+        "snap":  None,
+        "port":  554,
+    },
+    "lorex": {
+        "match": ["lorex"],
+        "rtsp":  ["/cam/realmonitor?channel=1&subtype=0",
+                  "/cam/realmonitor?channel=1&subtype=1",
+                  "/ch01/0"],
+        "mjpeg": None,
+        "snap":  None,
+        "port":  554,
+    },
+    "grandstream": {
+        "match": ["grandstream", "gxv3"],
+        "rtsp":  ["/0", "/1"],
+        "mjpeg": None,
+        "snap":  None,
+        "port":  554,
+    },
+    "sricam": {
+        "match": ["sricam", "ipcam", "generic"],
+        "rtsp":  ["/11", "/12", "/1", "/2"],
+        "mjpeg": None,
+        "snap":  None,
+        "port":  554,
+    },
+    "microseven": {
+        "match": ["microseven", "m7d", "m7b", "m7t"],
+        "rtsp":  ["/11", "/12", "/13"],
+        "mjpeg": None,
+        "snap":  None,
+        "port":  554,
+    },
+}
 
 # Currently focused camera for full-screen enhanced view.
 # When set, all other snap_loops throttle to 1fps; focused loop runs native res.
@@ -5779,8 +5999,8 @@ async def _probe_host_port(ip, port, hostname, initial_protocol,
 # Stream / snapshot handlers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_authenticated_url(camera: dict) -> str | None:
-    url = camera.get("stream_url", "")
+def build_authenticated_url(camera: dict, url_key: str = "stream_url") -> str | None:
+    url = camera.get(url_key, "") or camera.get("stream_url", "")
     if not url:
         return None
     creds = camera.get("credentials")
@@ -6334,10 +6554,14 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         """Launch ffmpeg for snapshot polling.
         native_res=True: use camera's native resolution/fps (for focus view).
         Respects CFG_ options: thread limiting, skip_nonref, low_fps_mode.
+        In focus/native_res mode, Low FPS Mode and Limit Threads are bypassed
+        so the user gets full quality regardless of config settings.
         """
         hw_args     = ["-c:v", hw_dec] if hw_dec else []
-        thread_args = ["-threads", "2"] if CFG_LIMIT_THREADS else []
-        skip_args   = ["-skip_frame", "nonref"] if CFG_SKIP_NONREF else []
+        # In focus mode: lift thread cap and nonref-skip for full quality,
+        # even if CFG_LIMIT_THREADS / CFG_SKIP_NONREF are enabled in config.
+        thread_args = [] if native_res else (["-threads", "2"] if CFG_LIMIT_THREADS else [])
+        skip_args   = [] if native_res else (["-skip_frame", "nonref"] if CFG_SKIP_NONREF else [])
         hw_label    = f"hw:{hw_dec}" if hw_dec else "sw"
 
         if native_res:
@@ -6600,7 +6824,13 @@ async def handle_snapshot(request: web.Request) -> web.Response:
     if camera.get("display") in ("webrtc", "wsrtsp", "info"):
         return web.Response(status=400, text="Not streamable")
 
-    url = build_authenticated_url(camera)
+    # Thumbnail polling uses the sub-stream (lower res/bandwidth) when available;
+    # focus view (handle_focus_set) always uses the main stream_url.
+    sub_url = camera.get("sub_stream_url")
+    if sub_url:
+        url = build_authenticated_url(camera, url_key="sub_stream_url")
+    else:
+        url = build_authenticated_url(camera)
     if not url:
         return web.Response(status=503, text="No stream URL")
 
@@ -6694,9 +6924,9 @@ async def handle_focus_set(request: web.Request) -> web.Response:
         return web.json_response({"error": "Camera not found"}, status=404)
     _FOCUSED_CAMERA = camera_id
     log.info(f"Focus: entering enhanced view for {camera_id}")
-    # Ensure snap_loop is running for this camera in native-res mode
+    # Focus always uses the main (highest-res) stream_url, not sub_stream_url
     camera = CAMERAS[camera_id]
-    url    = build_authenticated_url(camera)
+    url    = build_authenticated_url(camera, url_key="stream_url")
     if url:
         state = _snap_state(camera_id)
         if state.get("task") is None or state["task"].done():
@@ -6708,8 +6938,19 @@ async def handle_focus_set(request: web.Request) -> web.Response:
 async def handle_focus_clear(request: web.Request) -> web.Response:
     """DELETE /snap/focus — exit full-screen focus mode."""
     global _FOCUSED_CAMERA
-    log.info(f"Focus: leaving enhanced view (was: {_FOCUSED_CAMERA})")
+    prev = _FOCUSED_CAMERA
+    log.info(f"Focus: leaving enhanced view (was: {prev})")
     _FOCUSED_CAMERA = None
+    # Cancel the native-res snap_loop task so the next thumbnail poll
+    # starts a fresh normal-quality task (CFG limits restored immediately).
+    if prev:
+        state = _SNAP.get(prev)
+        if state:
+            task = state.get("task")
+            if task and not task.done():
+                task.cancel()
+                log.info(f"Focus: cancelled native-res snap_loop for {prev} — "
+                         f"thumbnail polling will restart at normal quality")
     return web.json_response({"status": "ok"})
 
 
@@ -6992,8 +7233,11 @@ def _safe_cam(cam: dict) -> dict:
     s = dict(cam)
     if s.get("stream_url"):
         s["stream_url"] = _strip_creds(s["stream_url"])
+    if s.get("sub_stream_url"):
+        s["sub_stream_url"] = _strip_creds(s["sub_stream_url"])
     s["has_credentials"]  = bool(s.get("credentials"))
     s["upgrade_missing"]  = bool(s.get("upgrade_missing"))
+    s["has_sub_stream"]   = bool(s.get("sub_stream_url"))
     # Ensure identity fields always present
     for f in ("manufacturer", "device_notes", "page_title", "server_header",
               "mac_addr", "mac_vendor"):
@@ -7037,6 +7281,61 @@ async def api_scan_cancel(request):
     return web.json_response({"status": "cancelling"})
 
 
+def _match_stream_db(camera: dict) -> dict | None:
+    """Return the best-matching STREAM_DB entry for a camera, or None."""
+    haystack = " ".join([
+        camera.get("name", ""),
+        camera.get("vendor", ""),
+        camera.get("model", ""),
+        camera.get("verdict_reason", ""),
+        camera.get("hostname", ""),
+    ]).lower()
+    best_slug, best_len = None, 0
+    for slug, entry in STREAM_DB.items():
+        for kw in entry["match"]:
+            if kw in haystack and len(kw) > best_len:
+                best_slug, best_len = slug, len(kw)
+    return STREAM_DB[best_slug] if best_slug else None
+
+
+async def _probe_db_streams(ip: str, port: int, creds: str | None,
+                             db_entry: dict,
+                             existing_urls: set[str]) -> list[dict]:
+    """
+    Probe RTSP paths from a STREAM_DB entry.
+    Returns list of {url, width, height, codec} dicts for responding paths,
+    skipping any URLs already in existing_urls.
+    """
+    loop = asyncio.get_event_loop()
+    results = []
+    rtsp_port = db_entry.get("port", 554)
+
+    cred_pfx = ""
+    if creds:
+        try:
+            from urllib.parse import quote as _q
+            u, pw = decrypt_creds(creds)
+            _SAFE = "!$&'()*+,;=~-._"
+            cred_pfx = f"{_q(u, safe=_SAFE)}:{_q(pw, safe=_SAFE)}@"
+        except Exception:
+            pass
+
+    for path in db_entry.get("rtsp", []):
+        url = f"rtsp://{cred_pfx}{ip}:{rtsp_port}{path}"
+        bare = f"rtsp://{ip}:{rtsp_port}{path}"
+        if bare in existing_urls or url in existing_urls:
+            continue
+        try:
+            ok = await loop.run_in_executor(
+                None, probe_rtsp, url, "", "", 4, f"db_probe:{ip}{path}")
+            if ok:
+                det = await probe_stream_details(url, "RTSP")
+                results.append({"url": url, **det})
+        except Exception:
+            pass
+    return results
+
+
 async def api_set_credentials(request):
     try:
         data      = await request.json()
@@ -7067,7 +7366,8 @@ async def api_set_credentials(request):
         log.info(f"  ONVIF profiles found: {len(profiles)} — {[p['name'] for p in profiles]}")
         if profiles:
             enc_creds = encrypt_creds(username, password)
-            created   = []
+            # ── Collect all streams from ONVIF profiles ───────────────────────
+            stream_candidates = []   # list of {url, width, height, codec, token, name}
             for prof in profiles:
                 stream_url = await loop.run_in_executor(
                     None, onvif_get_stream_uri, media_url, prof["token"], username, password)
@@ -7079,37 +7379,69 @@ async def api_set_credentials(request):
                     6, f"{camera_id}/{prof['name']}")
                 log.info(f"  probe_rtsp OK: {ok}")
                 if not ok:
-                    # ONVIF SOAP already confirmed credentials are valid —
-                    # create the card anyway and let streaming reveal any issue
-                    log.warning(f"  probe_rtsp returned False for ONVIF profile "
-                                f"'{prof['name']}' — creating card anyway "
-                                f"(ONVIF SOAP confirmed credentials)")
-                details = await probe_stream_details(stream_url, "RTSP")
-                cid = f"{ip}_onvif_{prof['token']}"
+                    log.warning(f"  probe_rtsp returned False for '{prof['name']}' "
+                                f"— including anyway (ONVIF confirmed creds)")
+                det = await probe_stream_details(stream_url, "RTSP")
+                stream_candidates.append({
+                    "url": stream_url, "token": prof["token"],
+                    "name": prof["name"], **det,
+                })
+
+            # ── Silent DB probe: find additional streams not visible pre-login ─
+            db_entry = _match_stream_db(camera)
+            if db_entry:
+                existing = {c["url"] for c in stream_candidates}
+                db_streams = await _probe_db_streams(ip, port, enc_creds,
+                                                     db_entry, existing)
+                if db_streams:
+                    log.info(f"  DB probe found {len(db_streams)} extra stream(s)")
+                    for s in db_streams:
+                        stream_candidates.append({**s, "token": "db_probe",
+                                                  "name": "DB stream"})
+
+            if stream_candidates:
+                # ── Rank by resolution: highest first, lowest last ─────────────
+                def _res(c):
+                    return (c.get("stream_width") or 0) * (c.get("stream_height") or 0)
+                stream_candidates.sort(key=_res, reverse=True)
+                main_s = stream_candidates[0]
+                sub_s  = stream_candidates[-1] if len(stream_candidates) > 1 else None
+
+                log.info(f"  Main stream: {_strip_creds(main_s['url'])} "
+                         f"({main_s.get('stream_width')}x{main_s.get('stream_height')})")
+                if sub_s:
+                    log.info(f"  Sub stream:  {_strip_creds(sub_s['url'])} "
+                             f"({sub_s.get('stream_width')}x{sub_s.get('stream_height')})")
+
+                main_token = main_s.get("token", profiles[0]["token"])
+                cid = f"{ip}_onvif_{main_token}"
+                main_details = {k: v for k, v in main_s.items()
+                                if k not in ("url", "token", "name")}
+                # Suppress H.265+ badge if we have a working sub-stream fallback
+                hevc_warn = main_s.get("hevc_plus_warning", False)
+                if hevc_warn and sub_s:
+                    hevc_warn = False
                 CAMERAS[cid] = {
                     "id": cid, "ip": ip,
                     "hostname": camera.get("hostname", ip),
                     "port": port, "protocol": "RTSP", "onvif": True,
-                    "stream_url": stream_url,
+                    "stream_url":     main_s["url"],
+                    "sub_stream_url": sub_s["url"] if sub_s else None,
                     "requires_credentials": False, "credentials": enc_creds,
-                    "name": f"{camera.get('name', ip)} — {prof['name']}",
+                    "name": camera.get("name", ip),
                     "status": "ready", "display": "proxy", "user_saved": True,
                     "verdict": "camera", "verdict_reason": "ONVIF profile",
-                    **details,
+                    "hevc_plus_warning": hevc_warn,
+                    **main_details,
                 }
-                created.append(cid)
-            if created:
                 CAMERAS.pop(camera_id, None)
                 save_cameras()
-                # Register new ONVIF profile cards with go2rtc
-                for cid in created:
-                    cam = CAMERAS.get(cid)
-                    if cam:
-                        cam_url = build_authenticated_url(cam) or ""
-                        asyncio.create_task(
-                            go2rtc_add(cid, go2rtc_source(cam, cam_url)))
-                return web.json_response({"status": "ok", "channels": len(created)})
-            log.warning(f"  ONVIF: profiles found but no streams probed OK — falling back to direct RTSP")
+                cam = CAMERAS.get(cid)
+                if cam:
+                    cam_url = build_authenticated_url(cam) or ""
+                    asyncio.create_task(go2rtc_add(cid, go2rtc_source(cam, cam_url)))
+                return web.json_response({"status": "ok", "channels": 1})
+            log.warning(f"  ONVIF: profiles found but no streams resolved — falling back to direct RTSP")
         else:
             log.warning(f"  ONVIF: no profiles returned (auth failed or device unreachable)")
 
@@ -7144,8 +7476,29 @@ async def api_set_credentials(request):
         return web.json_response({"error": "Could not connect with those credentials."}, status=401)
 
     details = await probe_stream_details(url, proto)
-    camera.update(credentials=encrypt_creds(username, password),
-                  stream_url=url, requires_credentials=False,
+    enc_creds = encrypt_creds(username, password)
+
+    # ── Silent DB probe for additional streams on non-ONVIF cameras ──────────
+    sub_url = None
+    db_entry = _match_stream_db(camera)
+    if db_entry and proto in ("RTSP", "DVR"):
+        db_streams = await _probe_db_streams(ip, port, enc_creds,
+                                             db_entry, {url})
+        if db_streams:
+            # Rank with main stream, pick lowest-res as sub
+            all_s = [{"url": url, **details}] + db_streams
+            def _res2(c):
+                return (c.get("stream_width") or 0) * (c.get("stream_height") or 0)
+            all_s.sort(key=_res2, reverse=True)
+            url     = all_s[0]["url"]
+            details = {k: v for k, v in all_s[0].items() if k != "url"}
+            sub_url = all_s[-1]["url"] if len(all_s) > 1 else None
+            if sub_url:
+                log.info(f"  DB probe found sub stream: {_strip_creds(sub_url)}")
+
+    camera.update(credentials=enc_creds,
+                  stream_url=url, sub_stream_url=sub_url,
+                  requires_credentials=False,
                   status="ready", user_saved=True, **details)
     save_cameras()
     log.info(f"Credentials accepted for {camera_id}: {_strip_creds(url)}")
@@ -7404,6 +7757,7 @@ HTML = None   # built once on first request
 
 _JS = r"""
 const BASE = '___BASE___';
+const STORAGE_UNRESTRICTED = ___UNRESTRICTED___;
 const PROTO_ICONS = {RTSP:'📹',ONVIF:'🔭',MJPEG:'🖼️',HLS:'📡',RTMP:'📺',WebRTC:'🔗','WS-RTSP':'🔌',HTTP:'🌐',DVR:'💾'};
 const PROTO_CLR   = {
   RTSP:['1e3a5f','79b8ff'],ONVIF:['2d1e4a','c09eff'],MJPEG:['1e3a30','79ffcd'],
@@ -7575,13 +7929,8 @@ async function cancelScan() {
 
 /* ── Open HA addon log page ─────────────────────────────────────────────────── */
 function openHALog() {
-  // HA addon log URL: /hassio/addon/{slug}/logs
-  // Our slug is "camera_discovery" — derive the base HA URL from current location.
-  // When running under ingress, window.location is something like:
-  //   https://ha-host/api/hassio_ingress/TOKEN/
-  // The HA frontend root is the same host without the ingress path.
-  const haBase = window.location.origin;
-  window.open(haBase + '/hassio/addon/camera_discovery/logs', '_blank');
+  // Navigate the top-level HA window (not this ingress iframe) to the addon log page.
+  window.top.location.href = window.top.location.origin + '/config/app/local_camera_discovery/logs';
 }
 
 /* ── Camera page opener (Firefox addon or direct) ────────────────────────────── */
@@ -7680,17 +8029,14 @@ let _lastLogTime = 0;
 async function pollStatusDot() {
   try {
     const d   = await (await fetch(BASE + '/api/logs?since=' + _lastLogTime)).json();
-    const dot = document.getElementById('status-dot');
-    if (!dot) return;
+    const icon = document.getElementById('status-cam-icon');
+    if (!icon) return;
     if (d.status === 'error') {
-      dot.style.background = '#e53935';   // red — errors
-      dot.style.boxShadow  = '0 0 0 2px rgba(229,57,53,.35)';
+      icon.style.stroke = '#e53935';   // red — errors
     } else if (d.status === 'warning') {
-      dot.style.background = '#f9c700';   // yellow — warnings
-      dot.style.boxShadow  = '0 0 0 2px rgba(249,199,0,.35)';
+      icon.style.stroke = '#f9c700';   // yellow — warnings
     } else {
-      dot.style.background = '#43a047';   // green — all clear
-      dot.style.boxShadow  = '0 0 0 2px rgba(67,160,71,.25)';
+      icon.style.stroke = '#43a047';   // green — all clear
     }
     if (d.entries && d.entries.length) {
       _lastLogTime = d.entries[d.entries.length - 1].t;
@@ -7739,8 +8085,18 @@ function storNavForward() {
 }
 
 function storNavUp() {
-  if (_storCurrent === null) return;
-  _storNavTo(null);
+  if (_storCurrent === null) return;   // already at root (ceiling)
+  if (STORAGE_UNRESTRICTED) {
+    // In unrestricted mode _storCurrent is a full path string
+    const parts = _storCurrent.replace(/\/+$/, '').split('/');
+    parts.pop();
+    const parent = parts.join('/') || '/';
+    _storNavTo(parent === '/' ? null : parent);
+  } else {
+    // Scoped mode: two levels max (null = /media/anycam root, string = subfolder)
+    // Any subfolder is one level below root, so up always goes to root
+    _storNavTo(null);
+  }
 }
 
 /* Sort state */
@@ -7768,19 +8124,103 @@ function _updateNavButtons() {
   if (!back) return;
   back.disabled = _storHistIdx <= 0;
   up.disabled   = _storCurrent === null;
-  // Update breadcrumb: show folder name after root when inside a folder
   if (sep && folderEl) {
     if (_storCurrent === null) {
       sep.style.display    = 'none';
       folderEl.textContent = '';
     } else {
       sep.style.display    = 'inline';
-      folderEl.textContent = _storCurrent;
+      // In unrestricted mode show only the last path component
+      folderEl.textContent = STORAGE_UNRESTRICTED
+        ? (_storCurrent.replace(/\/+$/, '').split('/').filter(Boolean).pop() || '/')
+        : _storCurrent;
     }
   }
 }
 
-/* ── Storage render (replaces old renderStorage) ─────────────────────────── */
+/* ── Editable path bar ────────────────────────────────────────────────────── */
+function _pathBarEdit() {
+  const bc = document.getElementById('stor-breadcrumb');
+  if (!bc || bc.querySelector('#stor-path-input')) return;  // already editing
+  // Compute the current full display path
+  const root = STORAGE_UNRESTRICTED ? '/' : '/media/anycam';
+  let fullPath = root;
+  if (_storCurrent !== null) {
+    fullPath = STORAGE_UNRESTRICTED ? _storCurrent : (root + '/' + _storCurrent);
+  }
+  // Replace breadcrumb contents with an input
+  bc.innerHTML = '';
+  const inp = document.createElement('input');
+  inp.id = 'stor-path-input';
+  inp.value = fullPath;
+  inp.style.cssText = 'width:100%;border:none;outline:none;font-size:.82rem;color:#111;background:transparent;padding:0';
+  bc.appendChild(inp);
+  inp.focus();
+  // Place cursor at end
+  inp.setSelectionRange(inp.value.length, inp.value.length);
+
+  function _commit() {
+    const val = inp.value.trim().replace(/\/+$/, '') || '/';
+    _pathBarCommit(val);
+  }
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); _commit(); }
+    if (e.key === 'Escape') { _renderBreadcrumb(); }
+  });
+  inp.addEventListener('blur', _commit);
+}
+
+function _pathBarCommit(path) {
+  // Validate the path against known data
+  if (!_storageData) { _renderBreadcrumb(); return; }
+  const root = STORAGE_UNRESTRICTED ? '/' : '/media/anycam';
+  const rootNorm = root.replace(/\/+$/, '');
+  const pathNorm = path.replace(/\/+$/, '') || '/';
+
+  if (pathNorm === rootNorm || pathNorm === '/media/anycam' || pathNorm === '/') {
+    // Navigating to the root ceiling
+    _storNavTo(null);
+    return;
+  }
+
+  if (STORAGE_UNRESTRICTED) {
+    // Accept any path string in unrestricted mode — server will validate
+    _storNavTo(pathNorm);
+    return;
+  }
+
+  // Scoped mode: path must be /media/anycam or /media/anycam/<folder>
+  if (!pathNorm.startsWith(rootNorm + '/')) {
+    alert('Folder not found: ' + path + '\n\nBrowser is scoped to ' + root);
+    _renderBreadcrumb();
+    return;
+  }
+  const sub = pathNorm.slice(rootNorm.length + 1);
+  const folders = (_storageData.folders || []).map(f => f.folder || f.name);
+  if (!folders.includes(sub)) {
+    alert('Folder not found: ' + path);
+    _renderBreadcrumb();
+    return;
+  }
+  _storNavTo(sub);
+}
+
+function _renderBreadcrumb() {
+  const bc = document.getElementById('stor-breadcrumb');
+  if (!bc) return;
+  const rootLabel = STORAGE_UNRESTRICTED ? '/' : '/media/anycam';
+  bc.innerHTML =
+    '<span id="stor-path-root" onclick="_storNavTo(null)"'
+    + ' style="cursor:pointer;padding:2px 6px;border-radius:3px;color:#0066cc"'
+    + ' title="' + rootLabel + '">' + rootLabel + '</span>'
+    + '<span id="stor-path-sep" style="display:none;color:#888;padding:0 2px">&rsaquo;</span>'
+    + '<span id="stor-path-folder" style="font-weight:600;color:#111;padding:2px 4px"></span>';
+  // Re-apply click-to-edit on the whole bar
+  bc.onclick = e => { if (!e.target.closest('#stor-path-root')) _pathBarEdit(); };
+  _updateNavButtons();
+}
+
+
 function renderStorage(d) {
   const disk = d.disk || {};
   const pct  = disk.pct_used || 0;
@@ -7792,6 +8232,7 @@ function renderStorage(d) {
     fill.style.background = pct > 90 ? 'var(--red)' : pct > 70 ? 'var(--orange)' : 'var(--primary)';
   }
   _storHistory = [null]; _storHistIdx = 0; _storCurrent = null;
+  _renderBreadcrumb();
   _renderStorageView();
 }
 
@@ -7810,6 +8251,8 @@ function _sortRows(rows) {
 }
 
 function _renderStorageView() {
+  // Refresh breadcrumb text (don't interrupt if user is actively editing)
+  if (!document.getElementById('stor-path-input')) _renderBreadcrumb();
   _updateNavButtons();
   const list = document.getElementById('storage-list');
   if (!list || !_storageData) return;
@@ -8324,9 +8767,9 @@ function cardHTML(cam) {
     + ' title="Permanently hide — not a camera">🚫 Not a Camera</button>';
   const upgradeBdg = cam.upgrade_missing
     ? '<span class="badge" style="background:#3a2a10;color:var(--orange)">⚠ Not found after upgrade</span>' : '';
-  const hevcPlusBdg = cam.hevc_plus_warning
+  const hevcPlusBdg = cam.hevc_plus_warning && !cam.has_sub_stream
     ? '<span class="badge" style="background:#3a1a1a;color:#ff7070" title="Camera streams H.265+ (Hikvision proprietary). Fix: camera web UI → Video → Encoding → change H.265+ to H.265">⚠ H.265+</span>'
-    : cam.hevc_plus_fallback_active
+    : cam.hevc_plus_fallback_active || (cam.hevc_plus_warning && cam.has_sub_stream)
     ? '<span class="badge" style="background:#1a3a1a;color:#6fcf97" title="H.265+ detected — switched to compatible sub-stream automatically">✓ H.265+ fallback</span>'
     : '';
 
@@ -8760,6 +9203,8 @@ function esc(s) {
 
 def build_html() -> str:
     js_code = _JS.replace('___BASE___', INGRESS_PATH)
+    js_code = js_code.replace('___UNRESTRICTED___',
+                               'true' if CFG_UNRESTRICTED_BROWSER else 'false')
     # CSS uses {{ }} for literal braces in Python f-string
     css = f"""\
 *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
@@ -8928,7 +9373,9 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 #stor-nav-bar button{{background:none;border:1px solid transparent;color:#333;border-radius:3px;width:28px;height:24px;cursor:pointer;font-size:.85rem;line-height:1;transition:background .1s;flex-shrink:0}}
 #stor-nav-bar button:disabled{{opacity:.35;cursor:default}}
 #stor-nav-bar button:not(:disabled):hover{{background:#e0e0e0;border-color:#c0c0c0}}
-#stor-breadcrumb{{flex:1;background:#fff;border:1px solid #c0c0c0;border-radius:2px;padding:3px 8px;font-size:.82rem;color:#111;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:4px;display:flex;align-items:center;gap:0}}
+#stor-breadcrumb{{flex:1;background:#fff;border:1px solid #c0c0c0;border-radius:2px;padding:3px 8px;font-size:.82rem;color:#111;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:4px;display:flex;align-items:center;gap:0;cursor:text}}
+#stor-breadcrumb:hover{{border-color:#888}}
+#stor-path-input{{width:100%;border:none;outline:none;font-size:.82rem;color:#111;background:transparent;padding:0}}
 #stor-path-root{{color:#0066cc;cursor:pointer;border-radius:2px;padding:1px 3px}}
 #stor-path-root:hover{{background:#e8f0fe}}
 #stor-path-folder{{color:#111;font-weight:600}}
@@ -8999,17 +9446,15 @@ header h1{{cursor:pointer}}
 
 <header>
   <h1 onclick="switchView('cameras')" title="Home" style="cursor:pointer">
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <svg id="status-cam-icon" width="27" height="27" viewBox="0 0 24 24"
+         fill="none" stroke="#43a047" stroke-width="2"
+         style="cursor:pointer;flex-shrink:0;vertical-align:middle"
+         title="System Stability — click to view logs"
+         onclick="openHALog();event.stopPropagation()">
       <path d="M15 10l4.553-2.069A1 1 0 0121 8.87v6.26a1 1 0 01-1.447.9L15 14"/>
       <rect x="1" y="7" width="14" height="10" rx="2" ry="2"/>
     </svg>
-    AnyCam
-    <span id="status-dot" title="System Stability"
-          onclick="openHALog();event.stopPropagation()"
-          style="width:9px;height:9px;border-radius:50%;background:#43a047;
-                 display:inline-block;cursor:pointer;margin-left:6px;
-                 vertical-align:middle;flex-shrink:0;
-                 box-shadow:0 0 0 2px rgba(67,160,71,.25)"></span>
+    <span style="margin-left:10px">AnyCam &mdash; Home</span>
   </h1>
   <span id="cam-count" style="color:var(--text-dim);font-size:.78rem"></span>
   <label class="sweep-toggle" title="Scan ports 0-10000 on live hosts that don't respond to camera ports">
@@ -9178,8 +9623,8 @@ header h1{{cursor:pointer}}
     <div id="stor-nav-bar">
       <button id="stor-back-btn" onclick="storNavBack()" title="Back" disabled>&#x2190;</button>
       <button id="stor-up-btn"   onclick="storNavUp()"   title="Up"   disabled>&#x2191;</button>
-      <div id="stor-breadcrumb">
-        <span id="stor-path-root" onclick="_storNavTo(null)"
+      <div id="stor-breadcrumb" onclick="if(!event.target.closest('#stor-path-root'))_pathBarEdit()">
+        <span id="stor-path-root" onclick="_storNavTo(null);event.stopPropagation()"
               style="cursor:pointer;padding:2px 6px;border-radius:3px;color:#0066cc"
               title="/media/anycam">/media/anycam</span>
         <span id="stor-path-sep" style="display:none;color:#888;padding:0 2px">&rsaquo;</span>

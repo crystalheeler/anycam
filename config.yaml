@@ -1,6 +1,6 @@
 name: "AnyCam"
 description: "Scans the local network for IP cameras (RTSP, ONVIF, MJPEG, HLS, RTMP, WebRTC, WS-RTSP) and displays live feeds in a card grid."
-version: "1.7.6"
+version: "1.7.8"
 slug: "camera_discovery"
 init: false
 host_network: true
@@ -18,6 +18,7 @@ options:
   motion_sensitivity: 15
   motion_cooldown_secs: 10
   motion_clip_padding_secs: 3
+  unrestricted_storage_browser: false
 
 schema:
   low_fps_mode: bool
@@ -29,6 +30,7 @@ schema:
   motion_sensitivity: "int(1,100)"
   motion_cooldown_secs: "int(1,300)"
   motion_clip_padding_secs: "int(0,30)"
+  unrestricted_storage_browser: bool
 
 map:
   - type: media
