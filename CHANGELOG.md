@@ -1,3 +1,18 @@
+## 1.8.1
+
+### Adaptive FPS — step-up removed
+- **Step-down only**: adaptive fps controller now strictly steps down when a tier is unstable and locks there for the session — step-up logic removed entirely
+- Once a stable fps tier is found, the controller stays there permanently until the user closes and re-opens enhanced view
+
+## 1.8.0
+
+### Adaptive FPS for enhanced/focus view
+- **Adaptive fps controller**: focus/native_res mode now uses a self-tuning fps ladder `[uncapped, 10, 8, 5, 4, 3, 2]` to find the highest stable fps the hardware can sustain at full resolution
+- **Step-down on instability**: if ffmpeg exits in under 8 seconds with fewer than 15 frames, the controller steps down one tier (slower fps) and relaunches — repeats until stable
+- **Step-up on stability**: if a run lasts 45+ seconds, the controller steps up one tier (faster fps) to try recovering quality — drops back immediately if that tier is also unstable
+- **Per-camera memory**: each camera remembers its best stable fps tier across focus sessions within the same addon run, so it converges faster on re-entry
+- **Run_start reset on focus exit**: adaptive state cleans up cleanly when leaving focus view; tier is preserved but timing resets for next session
+
 ## 1.7.9
 
 ### Enhanced view improvements

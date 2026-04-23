@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.7.9"  # must match config.yaml
+CURRENT_VERSION = "1.8.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -6515,6 +6515,15 @@ async def _try_hevc_plus_fallback(camera_id: str, camera: dict,
     return None
 
 
+# ── Adaptive fps state for focus/native_res mode ───────────────────────────────
+# Persists across focus sessions so the camera remembers its best stable fps.
+# Tiers ordered fastest→slowest. None = no fps limit (full native rate).
+_ADAPTIVE_TIERS:        list = [None, 10, 8, 5, 4, 3, 2]
+_ADAPTIVE_UNSTABLE_S:   float = 8.0    # run shorter than this with few frames = unstable
+_ADAPTIVE_UNSTABLE_FR:  int   = 15     # fewer frames than this also = unstable
+_FOCUS_ADAPTIVE:        dict  = {}     # camera_id → {tier, run_start}
+
+
 async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = False) -> None:
     """
     Background task: keeps ffmpeg running for one camera, continuously
@@ -6565,10 +6574,17 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         hw_label    = f"hw:{hw_dec}" if hw_dec else "sw"
 
         if native_res:
-            # Focus mode: run at camera's native resolution and fps
-            native_vf = f"format=yuvj420p"
-            vf_used   = native_vf
-            fps_label = f"native ({stream_fps or '?'}fps, {stream_w or '?'}px)"
+            # Focus mode: use adaptive tier fps to keep the stream stable.
+            # _FOCUS_ADAPTIVE[camera_id] tracks which fps tier is currently stable.
+            ada      = _FOCUS_ADAPTIVE.setdefault(camera_id, {"tier": 0, "run_start": None})
+            tier_fps = _ADAPTIVE_TIERS[ada["tier"]]
+            if tier_fps is None:
+                vf_used   = "format=yuvj420p"
+                fps_label = f"adaptive:uncapped ({stream_w or '?'}px)"
+            else:
+                vf_used   = f"fps={tier_fps},format=yuvj420p"
+                fps_label = f"adaptive:{tier_fps}fps ({stream_w or '?'}px)"
+            ada["run_start"] = time.monotonic()
         elif CFG_LOW_FPS and is_hevc:
             # Low-fps mode for HEVC — 2fps output (decode cost unchanged,
             # encode/pipe cost drastically reduced)
@@ -6771,6 +6787,30 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
             state["restart_count"] += 1
 
+            # ── Adaptive fps for focus/native_res mode ────────────────────────
+            # Adjust the fps tier based on how the last run went:
+            #   Unstable (short run, few frames) → step down to slower fps tier
+            #   Stable → stay at current tier (no step-up)
+            if native_res:
+                ada      = _FOCUS_ADAPTIVE.setdefault(camera_id, {"tier": 0, "run_start": None})
+                run_start = ada.get("run_start") or time.monotonic()
+                run_dur  = time.monotonic() - run_start
+                if run_dur < _ADAPTIVE_UNSTABLE_S and frames < _ADAPTIVE_UNSTABLE_FR:
+                    # Run was too short — stream couldn't sustain this fps
+                    if ada["tier"] < len(_ADAPTIVE_TIERS) - 1:
+                        ada["tier"] += 1
+                        new_fps = _ADAPTIVE_TIERS[ada["tier"]]
+                        log.info(
+                            f"SNAP [{camera_id}]: adaptive focus — unstable "
+                            f"({frames}fr in {run_dur:.1f}s), stepping down to "
+                            f"{new_fps}fps"
+                        )
+                    else:
+                        log.warning(
+                            f"SNAP [{camera_id}]: adaptive focus — already at minimum "
+                            f"({_ADAPTIVE_TIERS[-1]}fps), stream still unstable"
+                        )
+
             # ── H.265+ fallback: probe alternate URLs on first restart after flag ──
             # _drain_stderr sets camera["hevc_plus_warning"] = True when it detects
             # the "Multi-layer HEVC coding is not implemented" ffmpeg error message.
@@ -6961,6 +7001,11 @@ async def handle_focus_clear(request: web.Request) -> web.Response:
                 task.cancel()
                 log.info(f"Focus: cancelled native-res snap_loop for {prev} — "
                          f"thumbnail polling will restart at normal quality")
+        # Reset run_start so the next focus session measures cleanly,
+        # but preserve the tier so it remembers the best stable fps.
+        ada = _FOCUS_ADAPTIVE.get(prev)
+        if ada:
+            ada["run_start"] = None
     return web.json_response({"status": "ok"})
 
 
