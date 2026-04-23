@@ -1,5 +1,60 @@
 # AnyCam — Changelog
 
+## 1.7.6
+- Critical fix: storage view was rendering the OLD card-based layout instead
+  of the Windows Explorer grid because two renderStorage() functions existed
+  in the JS — the second (old) definition overrode the first (new) one.
+  Old renderStorage removed; only the correct one calling _renderStorageView()
+  remains.
+- Critical fix: initSnaps() was defined twice; duplicate stub removed.
+- Storage folder rows: entire row is now single-clickable to navigate into
+  the folder (not just the name text); double-click on name still renames.
+  Row cursor set to pointer to signal clickability.
+- Storage file rows: single-click on filename now triggers a browser download
+  of the MP4/MKV clip directly; double-click on filename still opens rename
+  prompt. Download icon (⬇) in the actions column still works as before.
+- Storage path breadcrumb now correctly shows /media/anycam (blue, clickable
+  back to root) with › folder-name (bold) when inside a folder, and plain
+  /media/anycam at root. _updateNavButtons() drives the display correctly.
+- Forward button remains absent from nav bar (Windows Explorer style).
+
+## 1.7.5
+- Connect Camera page: Back button now matches all other pages — 'Back to
+  Cameras' with btn-ghost btn-sm class, positioned at the top of the view
+  before the form heading, identical to Port Scan and Storage pages
+- Storage file browser nav bar: removed Forward button (Windows Explorer
+  style only shows Back and Up); replaced path text box with a clickable
+  breadcrumb: /media/anycam (blue, clickable → root) › folder-name (bold)
+- Storage folder rows: type column now shows 'File folder' to match
+  Windows Explorer; folder icon sized consistently at 1rem
+
+## 1.7.4
+- H.265+ automatic fallback for Hikvision (and compatible) cameras:
+  When snap_loop detects the "Multi-layer HEVC coding is not implemented"
+  ffmpeg error (set as camera["hevc_plus_warning"] = True by _drain_stderr),
+  it now probes a prioritised list of alternate RTSP URLs on the FIRST
+  restart after the flag appears:
+    1. /Streaming/Channels/102 — Hikvision sub-stream (standard H.265,
+       lower resolution, almost always decodable by ffmpeg)
+    2. /Streaming/Channels/101?videoCodecType=H.264 — requests server-side
+       transcode to H.264 (firmware-dependent, works on many models)
+    3. /ISAPI/Streaming/channels/102 — ISAPI path sub-stream variant
+    4. /ISAPI/Streaming/channels/101?videoCodecType=H.264 — ISAPI transcode
+  Each candidate is probed with a raw RTSP OPTIONS socket call (4s timeout).
+  The first URL that returns RTSP/1.0 200 is adopted; snap_loop switches to
+  it, updates camera["stream_url"] in CAMERAS and saves to cameras.json,
+  clears hevc_plus_warning, and sets hevc_plus_fallback_active = True.
+  On subsequent addon restarts the camera loads from the fallback URL
+  directly — no further probing needed.
+  If no fallback URL responds, snap_loop continues with the original stream
+  and -err_detect ignore_err extending stream life as before.
+- Card badge updated: when hevc_plus_warning clears and fallback is active,
+  the red "⚠ H.265+" badge is replaced by a green "✓ H.265+ fallback" badge
+  confirming the automatic switch succeeded.
+- New function _try_hevc_plus_fallback(camera_id, camera, orig_url) encapsulates
+  all probe logic; easily extensible to other manufacturers using similar
+  proprietary SVC codec extensions.
+
 ## 1.7.3
 - Status dot moved inside <h1> tag, right after AnyCam text, so it appears
   immediately next to the logo as shown in screenshot (not as a separate

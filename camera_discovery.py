@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.7.3"  # must match config.yaml
+CURRENT_VERSION = "1.7.6"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -6197,6 +6197,104 @@ async def handle_stream_test(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def _try_hevc_plus_fallback(camera_id: str, camera: dict,
+                                    orig_url: str) -> str | None:
+    """
+    Called when a camera is flagged hevc_plus_warning (Hikvision H.265+).
+    Probes a prioritised list of alternative URLs that the camera likely
+    supports and returns the first one that responds to an RTSP OPTIONS.
+
+    Strategy (in order):
+      1. Sub-stream  /Streaming/Channels/102  — H.265 at lower res, almost
+         certainly standard HEVC that ffmpeg can decode fine.
+      2. Transcode   ?videoCodecType=H.264    — request server-side transcode
+         to H.264; firmware-dependent but works on many Hikvision models.
+      3. Sub-stream via ISAPI path            — alternate URL format.
+      4. /Streaming/Channels/101 (main, same URL, unchanged) — lets caller
+         know nothing better was found so it keeps trying the same stream
+         with -err_detect ignore_err as a last resort.
+
+    Returns the authenticated URL to use, or None to keep the original.
+    """
+    import socket as _socket
+
+    def _rtsp_options_ok(test_url: str, timeout: float = 4.0) -> bool:
+        """Send a bare RTSP OPTIONS and return True if we get RTSP/1.0 200."""
+        try:
+            from urllib.parse import urlparse as _up
+            p      = _up(test_url)
+            host   = p.hostname or ""
+            port   = p.port or 554
+            path   = p.path or "/"
+            # Build a credentials-stripped URL for the OPTIONS request
+            bare   = f"rtsp://{host}:{port}{path}"
+            sock   = _socket.create_connection((host, port), timeout=timeout)
+            sock.settimeout(timeout)
+            req    = (f"OPTIONS {bare} RTSP/1.0\r\n"
+                      f"CSeq: 1\r\n"
+                      f"User-Agent: AnyCam/1.0\r\n\r\n")
+            sock.sendall(req.encode())
+            resp   = sock.recv(512).decode("utf-8", errors="replace")
+            sock.close()
+            return resp.startswith("RTSP/1.0 200")
+        except Exception:
+            return False
+
+    # Extract base IP:port from the original URL (strip credentials + path)
+    try:
+        from urllib.parse import urlparse as _up
+        p    = _up(orig_url)
+        host = p.hostname or ""
+        port = p.port or 554
+        # Reconstruct cred prefix for authenticated probes
+        creds      = camera.get("credentials")
+        cred_pfx   = ""
+        if creds:
+            try:
+                from urllib.parse import quote as _q
+                u, pw = decrypt_creds(creds)
+                _SAFE = "!$&'()*+,;=~-._"
+                cred_pfx = f"{_q(u,safe=_SAFE)}:{_q(pw,safe=_SAFE)}@"
+            except Exception:
+                pass
+        base = f"rtsp://{cred_pfx}{host}:{port}"
+    except Exception as ex:
+        log.warning(f"SNAP [{camera_id}]: H.265+ fallback — URL parse failed: {ex}")
+        return None
+
+    candidates = [
+        # 1. Sub-stream — same path family, lower channel ID → standard H.265
+        (f"{base}/Streaming/Channels/102",
+         "Hikvision sub-stream (/102) — standard H.265"),
+
+        # 2. Server-side H.264 transcode request
+        (f"{base}/Streaming/Channels/101?videoCodecType=H.264",
+         "Hikvision main stream with H.264 transcode request"),
+
+        # 3. ISAPI sub-stream path
+        (f"{base}/ISAPI/Streaming/channels/102",
+         "ISAPI sub-stream (/102) — standard H.265"),
+
+        # 4. ISAPI main with transcode
+        (f"{base}/ISAPI/Streaming/channels/101?videoCodecType=H.264",
+         "ISAPI main stream with H.264 transcode request"),
+    ]
+
+    loop = asyncio.get_event_loop()
+    for url_candidate, label in candidates:
+        log.info(f"SNAP [{camera_id}]: H.265+ fallback probing → {_strip_creds(url_candidate)}")
+        ok = await loop.run_in_executor(None, _rtsp_options_ok, url_candidate)
+        if ok:
+            log.info(f"SNAP [{camera_id}]: H.265+ fallback accepted: {label}")
+            return url_candidate
+        else:
+            log.info(f"SNAP [{camera_id}]: H.265+ fallback no response: {label}")
+
+    log.warning(f"SNAP [{camera_id}]: H.265+ — no fallback URL responded; "
+                f"continuing with original stream + error resilience")
+    return None
+
+
 async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = False) -> None:
     """
     Background task: keeps ffmpeg running for one camera, continuously
@@ -6444,6 +6542,29 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 return
 
             state["restart_count"] += 1
+
+            # ── H.265+ fallback: probe alternate URLs on first restart after flag ──
+            # _drain_stderr sets camera["hevc_plus_warning"] = True when it detects
+            # the "Multi-layer HEVC coding is not implemented" ffmpeg error message.
+            # On the FIRST restart after that flag appears, probe sub-stream and
+            # H.264-transcode URLs; if one responds, switch to it permanently.
+            cam_dict = CAMERAS.get(camera_id, camera)
+            if cam_dict.get("hevc_plus_warning") and state["restart_count"] == 1:
+                log.info(f"SNAP [{camera_id}]: H.265+ detected — probing fallback URLs")
+                fallback_url = await _try_hevc_plus_fallback(camera_id, cam_dict, url)
+                if fallback_url and fallback_url != url:
+                    log.info(f"SNAP [{camera_id}]: switching to fallback URL "
+                             f"→ {_strip_creds(fallback_url)}")
+                    # Patch the url variable for all subsequent loop iterations
+                    url = fallback_url
+                    # Also update the stored stream_url so it persists across restarts
+                    cam_dict["stream_url"] = _strip_creds(fallback_url)
+                    CAMERAS[camera_id] = cam_dict
+                    save_cameras()
+                    # Clear the warning now that we have a working alternative
+                    cam_dict["hevc_plus_warning"] = False
+                    cam_dict["hevc_plus_fallback_active"] = True
+
             log.info(f"SNAP [{camera_id}]: restarting in 2s "
                      f"(#{state['restart_count']})")
             await asyncio.sleep(2)
@@ -7640,19 +7761,21 @@ function storSort(key) {
 }
 
 function _updateNavButtons() {
-  const back = document.getElementById('stor-back-btn');
-  const fwd  = document.getElementById('stor-forward-btn');
-  const up   = document.getElementById('stor-up-btn');
-  const path = document.getElementById('stor-path-display');
+  const back    = document.getElementById('stor-back-btn');
+  const up      = document.getElementById('stor-up-btn');
+  const sep     = document.getElementById('stor-path-sep');
+  const folderEl= document.getElementById('stor-path-folder');
   if (!back) return;
   back.disabled = _storHistIdx <= 0;
-  fwd.disabled  = _storHistIdx >= _storHistory.length - 1;
   up.disabled   = _storCurrent === null;
-  if (path) {
+  // Update breadcrumb: show folder name after root when inside a folder
+  if (sep && folderEl) {
     if (_storCurrent === null) {
-      path.textContent = '/media/anycam';
+      sep.style.display    = 'none';
+      folderEl.textContent = '';
     } else {
-      path.textContent = '/media/anycam/' + _storCurrent;
+      sep.style.display    = 'inline';
+      folderEl.textContent = _storCurrent;
     }
   }
 }
@@ -7708,16 +7831,27 @@ function _renderStorageView() {
     _sortRows(rows).forEach(f => {
       const row = document.createElement('div');
       row.className = 'stor-row stor-row-folder';
-      row.innerHTML = '<div class="stor-row-name"><span>📁</span>'
+      row.innerHTML = '<div class="stor-row-name">'
+        + '<span style="font-size:1rem;flex-shrink:0;margin-right:4px">📁</span>'
         + '<span class="stor-row-name-text editable">' + esc(f.name) + '</span></div>'
         + '<div class="stor-row-date"></div>'
-        + '<div class="stor-row-type">Folder</div>'
+        + '<div class="stor-row-type">File folder</div>'
         + '<div class="stor-row-size"></div>'
         + '<div class="stor-row-acts"><span style="font-size:.72rem;color:#888">'
         + f.count + ' clip' + (f.count !== 1 ? 's' : '') + '</span></div>';
-      const nameEl = row.querySelector('.stor-row-name-text');
-      nameEl.addEventListener('click',   () => _storNavTo(f.name));
-      nameEl.addEventListener('dblclick',() => storRenameFolder(f.name));
+      // Single-click anywhere on row → navigate into folder
+      // Double-click on name → rename
+      let _folderClickTimer = null;
+      row.addEventListener('click', e => {
+        if (e.detail === 2) return;   // let dblclick handle it
+        clearTimeout(_folderClickTimer);
+        _folderClickTimer = setTimeout(() => _storNavTo(f.name), 200);
+      });
+      row.querySelector('.stor-row-name-text').addEventListener('dblclick', e => {
+        clearTimeout(_folderClickTimer);
+        storRenameFolder(f.name);
+      });
+      row.style.cursor = 'pointer';
       row.addEventListener('dragover', e => e.preventDefault());
       row.addEventListener('drop',     e => storDrop(e, f.name));
       folderFrag.appendChild(row);
@@ -7754,7 +7888,24 @@ function _renderStorageView() {
         + encodeURIComponent(path) + '" download title="Download" style="font-size:.9rem;text-decoration:none">⬇</a>'
         + '&nbsp;<span class="stor-del" title="Delete" style="cursor:pointer;font-size:.9rem;color:#c00">🗑</span>'
         + '</div>';
-      row.querySelector('.stor-row-name-text').addEventListener('dblclick', () => storRenameFile(path, f.name));
+      // Single-click on name → download; double-click → rename
+      const fileNameEl = row.querySelector('.stor-row-name-text');
+      let _fileClickTimer = null;
+      fileNameEl.addEventListener('click', e => {
+        if (e.detail === 2) return;
+        clearTimeout(_fileClickTimer);
+        _fileClickTimer = setTimeout(() => {
+          const a = document.createElement('a');
+          a.href = BASE + '/api/storage/download?path=' + encodeURIComponent(path);
+          a.download = f.name;
+          a.click();
+        }, 200);
+      });
+      fileNameEl.addEventListener('dblclick', e => {
+        clearTimeout(_fileClickTimer);
+        storRenameFile(path, f.name);
+      });
+      fileNameEl.style.cursor = 'pointer';
       row.querySelector('.stor-del').addEventListener('click', () => storDeleteFile(path));
       row.addEventListener('dragstart', e => storDragStart(e, path, _storCurrent));
       fileFrag.appendChild(row);
@@ -7764,12 +7915,6 @@ function _renderStorageView() {
   }
 }
 
-/* Called after renderGrid() to start polling for all visible snap cameras */
-function initSnaps() {
-  document.querySelectorAll('[data-snap]').forEach(img => {
-    startSnap(img.dataset.snap);
-  });
-}
 /* Called after renderGrid() to start polling for all visible snap cameras */
 function initSnaps() {
   document.querySelectorAll('[data-snap]').forEach(img => {
@@ -7911,47 +8056,7 @@ async function loadStorage() {
   }
 }
 
-function renderStorage(d) {
-  const disk  = d.disk || {};
-  const pct   = disk.pct_used || 0;
-  const label = document.getElementById('disk-label');
-  const fill  = document.getElementById('disk-bar-fill');
-  label.textContent = 'Storage: ' + pct + '% used — '
-    + (disk.free_gb || 0) + ' GB free of ' + (disk.total_gb || 0) + ' GB';
-  fill.style.width = Math.min(pct, 100) + '%';
-  fill.style.background = pct > 90 ? 'var(--red)' : pct > 70 ? 'var(--orange)' : 'var(--primary)';
 
-  const list = document.getElementById('storage-list');
-  if (!d.folders || !d.folders.length) {
-    list.innerHTML = '<p style="color:var(--text-dim);padding:24px">No recordings yet. Enable motion detection on a camera to start recording.</p>';
-    return;
-  }
-
-  list.innerHTML = d.folders.map(folder => `
-    <div class="stor-folder" id="sf-${esc(folder.folder)}"
-         ondragover="e=>e.preventDefault()"
-         ondrop="storDrop(event, '${esc(folder.folder)}')">
-      <div class="stor-folder-hdr">
-        <span class="stor-folder-name" title="Click to rename"
-              ondblclick="storRenameFolder('${esc(folder.folder)}')">${esc(folder.folder)}</span>
-        <span class="stor-folder-meta">${folder.count} clip${folder.count !== 1 ? 's' : ''} · ${folder.size_mb} MB</span>
-      </div>
-      <div class="stor-files">
-        ${folder.files.length ? folder.files.map(f => `
-          <div class="stor-file" draggable="true"
-               ondragstart="storDragStart(event,'${esc(folder.folder + '/' + f.name)}','${esc(folder.folder)}')">
-            <span class="stor-file-icon">🎬</span>
-            <span class="stor-file-name" title="Double-click to rename"
-                  ondblclick="storRenameFile('${esc(folder.folder + '/' + f.name)}', '${esc(f.name)}')">${esc(f.name)}</span>
-            <span class="stor-file-size">${f.size_mb} MB</span>
-            <span class="stor-file-date">${new Date(f.mtime * 1000).toLocaleString()}</span>
-            <a class="btn btn-ghost btn-xs" href="${BASE}/api/storage/download?path=${encodeURIComponent(folder.folder + '/' + f.name)}" download>&#x2B07;</a>
-            <button class="btn btn-danger btn-xs" onclick="storDeleteFile('${esc(folder.folder + '/' + f.name)}')">&#x1F5D1;</button>
-          </div>`).join('')
-        : '<span class="stor-empty">No recordings</span>'}
-      </div>
-    </div>`).join('');
-}
 
 function storDragStart(e, path, folder) {
   _dragSrc = {path, folder};
@@ -8221,6 +8326,8 @@ function cardHTML(cam) {
     ? '<span class="badge" style="background:#3a2a10;color:var(--orange)">⚠ Not found after upgrade</span>' : '';
   const hevcPlusBdg = cam.hevc_plus_warning
     ? '<span class="badge" style="background:#3a1a1a;color:#ff7070" title="Camera streams H.265+ (Hikvision proprietary). Fix: camera web UI → Video → Encoding → change H.265+ to H.265">⚠ H.265+</span>'
+    : cam.hevc_plus_fallback_active
+    ? '<span class="badge" style="background:#1a3a1a;color:#6fcf97" title="H.265+ detected — switched to compatible sub-stream automatically">✓ H.265+ fallback</span>'
     : '';
 
   return '<div class="feed-wrap">' + feedHTML(cam) + '</div>'
@@ -8818,10 +8925,13 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 /* ── Explorer pane (white box with nav inside) ── */
 #stor-explorer{{background:#fff;border:1px solid #d0d0d0;border-radius:4px;overflow:hidden;color:#000}}
 #stor-nav-bar{{display:flex;align-items:center;gap:4px;padding:6px 8px;background:#f3f3f3;border-bottom:1px solid #d0d0d0}}
-#stor-nav-bar button{{background:none;border:1px solid transparent;color:#333;border-radius:3px;width:28px;height:24px;cursor:pointer;font-size:.85rem;line-height:1;transition:background .1s}}
+#stor-nav-bar button{{background:none;border:1px solid transparent;color:#333;border-radius:3px;width:28px;height:24px;cursor:pointer;font-size:.85rem;line-height:1;transition:background .1s;flex-shrink:0}}
 #stor-nav-bar button:disabled{{opacity:.35;cursor:default}}
 #stor-nav-bar button:not(:disabled):hover{{background:#e0e0e0;border-color:#c0c0c0}}
-#stor-path-display{{flex:1;background:#fff;border:1px solid #c0c0c0;border-radius:2px;padding:2px 8px;font-size:.82rem;color:#111;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:4px}}
+#stor-breadcrumb{{flex:1;background:#fff;border:1px solid #c0c0c0;border-radius:2px;padding:3px 8px;font-size:.82rem;color:#111;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:4px;display:flex;align-items:center;gap:0}}
+#stor-path-root{{color:#0066cc;cursor:pointer;border-radius:2px;padding:1px 3px}}
+#stor-path-root:hover{{background:#e8f0fe}}
+#stor-path-folder{{color:#111;font-weight:600}}
 /* ── Column headers ── */
 #stor-col-headers{{display:grid;grid-template-columns:1fr 180px 130px 90px 80px;gap:0;padding:5px 8px;background:#f3f3f3;border-bottom:1px solid #d0d0d0;font-size:.78rem;font-weight:600;color:#333}}
 #stor-col-headers span{{cursor:pointer;user-select:none;padding:2px 4px;border-radius:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
@@ -8978,6 +9088,9 @@ header h1{{cursor:pointer}}
 </div>
 
 <div class="view" id="add-view">
+  <div style="margin-bottom:14px">
+    <button class="btn btn-ghost btn-sm" onclick="switchView('cameras')">&#x2190; Back to Cameras</button>
+  </div>
   <h2>Connect Known Camera</h2>
   <div class="fgrid">
     <div class="field full"><label>CAMERA NAME</label><input type="text" id="add-name" placeholder="e.g. Front Door"/></div>
@@ -9003,7 +9116,6 @@ header h1{{cursor:pointer}}
   <div id="add-error"></div>
   <div style="display:flex;gap:10px;margin-top:12px">
     <button class="btn btn-primary" id="add-btn2" onclick="submitAddCamera()">Connect</button>
-    <button class="btn btn-ghost" onclick="switchView('cameras')">&#x2190; Back</button>
   </div>
 </div>
 
@@ -9064,10 +9176,15 @@ header h1{{cursor:pointer}}
   <!-- Explorer pane: nav bar + column headers + file list all inside white box -->
   <div id="stor-explorer">
     <div id="stor-nav-bar">
-      <button id="stor-back-btn"    onclick="storNavBack()"    title="Back"    disabled>&#x2190;</button>
-      <button id="stor-forward-btn" onclick="storNavForward()" title="Forward" disabled>&#x25B6;</button>
-      <button id="stor-up-btn"      onclick="storNavUp()"      title="Up"      disabled>&#x2191;</button>
-      <div id="stor-path-display"></div>
+      <button id="stor-back-btn" onclick="storNavBack()" title="Back" disabled>&#x2190;</button>
+      <button id="stor-up-btn"   onclick="storNavUp()"   title="Up"   disabled>&#x2191;</button>
+      <div id="stor-breadcrumb">
+        <span id="stor-path-root" onclick="_storNavTo(null)"
+              style="cursor:pointer;padding:2px 6px;border-radius:3px;color:#0066cc"
+              title="/media/anycam">/media/anycam</span>
+        <span id="stor-path-sep" style="display:none;color:#888;padding:0 2px">&rsaquo;</span>
+        <span id="stor-path-folder" style="font-weight:600;color:#111;padding:2px 4px"></span>
+      </div>
     </div>
     <div id="stor-col-headers">
       <span class="stor-col-name"  onclick="storSort('name')"  id="sorth-name">Name &#x25B2;</span>
