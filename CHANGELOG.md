@@ -1,3 +1,13 @@
+## 1.7.9
+
+### Enhanced view improvements
+- **Live resolution display**: status bar now shows actual decoded pixel dimensions from each JPEG frame (loader.naturalWidth × naturalHeight) rather than stored metadata
+- **Live FPS display**: status bar counts real frame loads per second using a rolling 1-second window — updates every second with the true displayed frame rate
+- **Status bar placeholder**: shows "loading…" on open then switches to live measurements after the first second
+- **Fix: focus view was serving wrong stream**: handle_focus_set now always cancels the existing thumbnail snap_loop before starting a new native-res main-stream task — previously a running sub-stream task would block the high-quality task from starting
+- **Higher JPEG quality in focus mode**: q:v lowered from 5 to 2 for focus/native_res frames (sharper output, less compression grain at 4K)
+- **Config limits bypassed in focus mode**: Low FPS Mode and Limit Threads are now properly ignored when entering enhanced view; restored immediately on exit (snap_loop task cancelled on focus_clear)
+
 ## 1.7.8
 
 ### Bug fixes
