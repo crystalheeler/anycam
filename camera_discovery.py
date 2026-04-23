@@ -6580,6 +6580,10 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
         log.info(f"SNAP [{camera_id}]: ffmpeg starting "
                  f"(codec={stream_codec or '?'}, {hw_label}, {fps_label}, vf={vf_used})")
+        # JPEG quality: 1=best, 31=worst.
+        # Focus/native_res: q:v 2 for maximum sharpness at full resolution.
+        # Thumbnails: q:v 5 is a good balance of quality vs bandwidth.
+        jpeg_q = "2" if native_res else "5"
         return await asyncio.create_subprocess_exec(
             "ffmpeg", "-nostdin", "-loglevel", "warning",
             "-rtsp_transport", "tcp", "-timeout", "8000000",
@@ -6590,7 +6594,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             "-an", "-vf", vf_used,
             *thread_args,
             "-vcodec", "mjpeg", "-pix_fmt", "yuvj420p",
-            "-q:v", "5", "-f", "image2pipe", "pipe:1",
+            "-q:v", jpeg_q, "-f", "image2pipe", "pipe:1",
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -6924,14 +6928,20 @@ async def handle_focus_set(request: web.Request) -> web.Response:
         return web.json_response({"error": "Camera not found"}, status=404)
     _FOCUSED_CAMERA = camera_id
     log.info(f"Focus: entering enhanced view for {camera_id}")
-    # Focus always uses the main (highest-res) stream_url, not sub_stream_url
+    # Always cancel any existing task (likely a low-fps sub-stream thumbnail task)
+    # and start a fresh native_res=True task on the main high-res stream_url.
+    # Without this, a running thumbnail task would block the focus task from starting.
     camera = CAMERAS[camera_id]
     url    = build_authenticated_url(camera, url_key="stream_url")
     if url:
         state = _snap_state(camera_id)
-        if state.get("task") is None or state["task"].done():
-            state["task"] = asyncio.create_task(
-                snap_loop(camera_id, url, camera, native_res=True))
+        existing = state.get("task")
+        if existing and not existing.done():
+            existing.cancel()
+            log.info(f"Focus: cancelled existing snap_loop for {camera_id} "
+                     f"— starting native-res main-stream task")
+        state["task"] = asyncio.create_task(
+            snap_loop(camera_id, url, camera, native_res=True))
     return web.json_response({"status": "ok", "focused": camera_id})
 
 
@@ -8450,20 +8460,51 @@ async function _startFocusPoll(camId, cam) {
   // Tell server: enter focus mode (other cams throttle, this cam goes native res)
   await fetch(BASE + '/snap/focus/' + camId, {method: 'POST'}).catch(() => {});
 
-  const img     = document.getElementById('focus-img');
-  const infoEl  = document.getElementById('focus-info');
-  const fps     = cam.stream_fps    || '?';
-  const res     = (cam.stream_width || '?') + 'x' + (cam.stream_height || '?');
-  const codec   = (cam.stream_codec || '?').toUpperCase();
-  infoEl.textContent = (cam.name || cam.ip) + ' — ' + res + ' · ' + fps + ' fps · ' + codec;
+  const img    = document.getElementById('focus-img');
+  const infoEl = document.getElementById('focus-info');
+  const codec  = (cam.stream_codec || '?').toUpperCase();
+  const name   = cam.name || cam.ip;
+
+  // Show placeholder until first real measurements arrive
+  infoEl.textContent = name + ' — loading…';
+
+  // Live measurement state
+  let _frameCount   = 0;
+  let _fpsWindowStart = performance.now();
+  let _liveFps      = null;
+  let _liveRes      = null;
+
+  function _updateInfoBar() {
+    const res = _liveRes || ((cam.stream_width || '?') + 'x' + (cam.stream_height || '?'));
+    const fps = _liveFps !== null ? _liveFps + ' fps' : 'measuring…';
+    infoEl.textContent = name + ' — ' + res + ' · ' + fps + ' · ' + codec + ' · full quality';
+  }
 
   // Fast polling: 60ms intervals (~16fps attempt at native res)
   const poll = () => {
     if (_focusCamId !== camId) return;
     const loader  = new Image();
-    loader.onload = () => { img.src = loader.src; };
-    loader.src    = BASE + '/snapshot/' + camId + '?t=' + Date.now() + '&focus=1';
-    _focusTimer   = setTimeout(poll, 60);
+    loader.onload = () => {
+      img.src = loader.src;
+      _frameCount++;
+
+      // Capture actual resolution from the decoded JPEG on first frame and periodically
+      if (loader.naturalWidth && loader.naturalHeight) {
+        _liveRes = loader.naturalWidth + 'x' + loader.naturalHeight;
+      }
+
+      // Recalculate FPS once per second
+      const now     = performance.now();
+      const elapsed = (now - _fpsWindowStart) / 1000;
+      if (elapsed >= 1.0) {
+        _liveFps        = Math.round(_frameCount / elapsed);
+        _frameCount     = 0;
+        _fpsWindowStart = now;
+        _updateInfoBar();
+      }
+    };
+    loader.src  = BASE + '/snapshot/' + camId + '?t=' + Date.now() + '&focus=1';
+    _focusTimer = setTimeout(poll, 60);
   };
   poll();
 }
