@@ -1,3 +1,18 @@
+## 1.8.2
+
+### Focus view adaptive quality — complete rewrite
+
+**Bug fixes:**
+- **480p flickering eliminated**: handle_snapshot now returns the last buffered frame during focus mode instead of starting a competing 480p sub-stream task; the 2s restart gap no longer causes the quality controller to fight itself
+- **FPS going "up" was an illusion**: the JS was measuring frame delivery rate from whichever task happened to be running — when the 480p task kicked in it delivered frames fast, making it look like fps increased; this is now impossible since only one task runs
+
+**New adaptive quality ladder:**
+- Ladder is now (resolution × fps) pairs, exhausting all fps tiers at the highest resolution before dropping to sub-stream resolution
+- Tier order: main_stream @ [uncapped, 30, 20, 15, 10, 8, 5, 4, 3, 2, 1fps] → sub_stream @ [same fps sequence]
+- Step-down only: never steps back up once stable
+- Locks permanently when a stable tier is found; if a locked tier becomes unstable, unlocks and continues stepping down from there
+- Per-camera memory: tier_idx and locked state persist across focus sessions within the same addon run
+
 ## 1.8.1
 
 ### Adaptive FPS — step-up removed
