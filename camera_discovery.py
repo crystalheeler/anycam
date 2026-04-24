@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.8.2"  # must match config.yaml
+CURRENT_VERSION = "1.8.3"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -6589,6 +6589,12 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         skip_args   = [] if native_res else (["-skip_frame", "nonref"] if CFG_SKIP_NONREF else [])
         hw_label    = f"hw:{hw_dec}" if hw_dec else "sw"
 
+        # ffmpeg_url: which URL to actually pass to ffmpeg.
+        # For native_res/focus mode this may differ from the outer url variable.
+        # Using a separate name avoids Python treating 'url' as local-only and
+        # causing an UnboundLocalError in the non-native_res branches.
+        ffmpeg_url = url
+
         if native_res:
             # Focus mode: use adaptive ladder to find best stable (res, fps) combo.
             cam_now  = CAMERAS.get(camera_id, camera)
@@ -6608,9 +6614,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             if tier_url and tier_url != url:
                 log.info(f"SNAP [{camera_id}]: adaptive focus — switching to "
                          f"{url_key} for tier {tier_idx}")
-                # Update url in outer scope via nonlocal-equivalent: reassign for
-                # _launch_snap's usage only; outer snap_loop url updated at restart
-            effective_url = tier_url or url
+            ffmpeg_url = tier_url or url
             if tier_fps is None:
                 vf_used   = "format=yuvj420p"
                 fps_label = f"adaptive:uncapped {url_key} ({stream_w or '?'}px)"
@@ -6618,8 +6622,6 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 vf_used   = f"fps={tier_fps},format=yuvj420p"
                 fps_label = f"adaptive:{tier_fps}fps {url_key} ({stream_w or '?'}px)"
             ada["run_start"] = time.monotonic()
-            # Override the url passed to ffmpeg with the tier's url
-            url = effective_url
         elif CFG_LOW_FPS and is_hevc:
             # Low-fps mode for HEVC — 2fps output (decode cost unchanged,
             # encode/pipe cost drastically reduced)
@@ -6641,7 +6643,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             "-err_detect", "ignore_err",   # tolerate partial HEVC decode errors
             *skip_args,
             *hw_args,
-            "-i", url,
+            "-i", ffmpeg_url,
             "-an", "-vf", vf_used,
             *thread_args,
             "-vcodec", "mjpeg", "-pix_fmt", "yuvj420p",

@@ -1,3 +1,8 @@
+## 1.8.3
+
+### Bug fix
+- **Critical crash fix**: `UnboundLocalError: cannot access local variable 'url'` — when I added `url = effective_url` inside the `if native_res:` block of `_launch_snap`, Python treated `url` as a local variable for the entire function, making the outer closure variable inaccessible in the non-native_res branches. Fixed by using a separate `ffmpeg_url` variable instead of reassigning `url`.
+
 ## 1.8.2
 
 ### Focus view adaptive quality — complete rewrite
