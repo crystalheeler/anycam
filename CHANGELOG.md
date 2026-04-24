@@ -1,3 +1,10 @@
+## 1.8.4
+
+### Bug fixes
+- **Focus exit race — duplicate snap_loop tasks**: `task.cancel()` alone is unreliable when ffmpeg is streaming 4K data at high throughput — the event loop can't deliver `CancelledError` until a `read()` suspends, which may never happen while the pipe is full. Fixed by having `snap_loop` poll `_FOCUSED_CAMERA` itself: an explicit check at the top of the outer restart loop and after each frame parsed in the inner loop causes the native-res task to exit cleanly within one frame of focus being cleared. This eliminates the duplicate "idle 30s — stopping" entries and 4K frames arriving after focus exit seen in the log.
+- **Idle timeout during focus (freeze bug)**: `_snap_last_access[camera_id]` was updated *after* the focus guard early-return in `handle_snapshot`, so the native-res snap_loop's idle timer never got reset while in focus mode. Loop died after 30s → screen froze. Fixed by updating `_snap_last_access` before the early return.
+- **FPS display accuracy**: Focus status bar was measuring frame *delivery* rate (~16fps from 60ms polling) rather than actual frame *production* rate from ffmpeg. Switched focus poller from `Image()` to `fetch()` so the `X-Frame-Count` response header can be read; only increments the fps counter when the server-side frame count actually changes. Displayed fps now reflects true ffmpeg output rate (e.g. 3fps for 4K HEVC).
+
 ## 1.8.3
 
 ### Bug fix

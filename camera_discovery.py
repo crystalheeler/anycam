@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.8.3"  # must match config.yaml
+CURRENT_VERSION = "1.8.4"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -6655,6 +6655,14 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
     try:
         while True:   # outer restart loop
+            # Native-res focus task: exit if focus was cleared or switched.
+            # task.cancel() alone isn't reliable when ffmpeg is writing rapidly
+            # (CancelledError can't be delivered while reads complete immediately).
+            # This check makes focus exit deterministic.
+            if native_res and _FOCUSED_CAMERA != camera_id:
+                log.info(f"SNAP [{camera_id}]: focus cleared — exiting native-res task")
+                return
+
             # Idle check — stop if nobody has polled recently
             last   = _snap_last_access.get(camera_id, 0)
             idle_s = time.monotonic() - last
@@ -6770,6 +6778,13 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         state["frame"]       = frame
                         state["frame_time"]  = time.monotonic()
                         state["frame_count"] += 1
+
+                        # Native-res focus task: exit the inner loop the moment
+                        # focus is cleared so the task terminates quickly without
+                        # waiting for task.cancel() to be delivered.
+                        if native_res and _FOCUSED_CAMERA != camera_id:
+                            break
+
                         if frames == 1 or frames % 50 == 0:
                             poll_ago = time.monotonic() -                                        _snap_last_access.get(camera_id, time.monotonic())
                             log.info(f"SNAP [{camera_id}]: frame {frames} "
@@ -6941,12 +6956,17 @@ async def handle_snapshot(request: web.Request) -> web.Response:
     # poller gets something without triggering a 480p task that would stomp
     # all over the adaptive quality controller.
     if _FOCUSED_CAMERA == camera_id:
+        # Update last_access so snap_loop's idle timer doesn't fire during focus.
+        # Without this, the loop would die after 30s since the early return skips
+        # the normal _snap_last_access update below.
+        _snap_last_access[camera_id] = time.monotonic()
         state = _snap_state(camera_id)
         frame = state.get("frame")
         if frame:
             return web.Response(body=frame, content_type="image/jpeg",
                                 headers={"Cache-Control": "no-cache",
-                                         "X-Frame-Source": "focus"})
+                                         "X-Frame-Source": "focus",
+                                         "X-Frame-Count": str(state.get("frame_count", 0))})
         return web.Response(status=204)  # no frame yet — JS will retry
 
     # Thumbnail polling uses the sub-stream (lower res/bandwidth) when available;
@@ -8592,45 +8612,66 @@ async function _startFocusPoll(camId, cam) {
   const name   = cam.name || cam.ip;
 
   // Show placeholder until first real measurements arrive
-  infoEl.textContent = name + ' — loading…';
+  infoEl.textContent = name + ' — loading…';
 
-  // Live measurement state
-  let _frameCount   = 0;
+  // Live measurement state.
+  // fetch() is used instead of Image() so we can read X-Frame-Count response
+  // header and only count frames that are actually new from ffmpeg.
+  // Polling with Image() measures delivery rate (~16fps), not production rate.
+  let _lastFrameCount = -1;   // server frame_count from last response
+  let _newFrames      = 0;    // new frames seen in current 1-second window
   let _fpsWindowStart = performance.now();
-  let _liveFps      = null;
-  let _liveRes      = null;
+  let _liveFps        = null;
+  let _liveRes        = null;
+  let _prevBlobUrl    = null;
 
   function _updateInfoBar() {
     const res = _liveRes || ((cam.stream_width || '?') + 'x' + (cam.stream_height || '?'));
     const fps = _liveFps !== null ? _liveFps + ' fps' : 'measuring…';
-    infoEl.textContent = name + ' — ' + res + ' · ' + fps + ' · ' + codec + ' · full quality';
+    infoEl.textContent = name + ' — ' + res + ' · ' + fps + ' · ' + codec + ' · full quality';
   }
 
-  // Fast polling: 60ms intervals (~16fps attempt at native res)
+  // Fetch-based polling at 60ms. X-Frame-Count tells us when a new frame
+  // has actually been produced by ffmpeg vs the same buffered frame re-served.
   const poll = () => {
     if (_focusCamId !== camId) return;
-    const loader  = new Image();
-    loader.onload = () => {
-      img.src = loader.src;
-      _frameCount++;
-
-      // Capture actual resolution from the decoded JPEG on first frame and periodically
-      if (loader.naturalWidth && loader.naturalHeight) {
-        _liveRes = loader.naturalWidth + 'x' + loader.naturalHeight;
-      }
-
-      // Recalculate FPS once per second
-      const now     = performance.now();
-      const elapsed = (now - _fpsWindowStart) / 1000;
-      if (elapsed >= 1.0) {
-        _liveFps        = Math.round(_frameCount / elapsed);
-        _frameCount     = 0;
-        _fpsWindowStart = now;
-        _updateInfoBar();
-      }
-    };
-    loader.src  = BASE + '/snapshot/' + camId + '?t=' + Date.now() + '&focus=1';
-    _focusTimer = setTimeout(poll, 60);
+    fetch(BASE + '/snapshot/' + camId + '?t=' + Date.now() + '&focus=1')
+      .then(resp => {
+        if (!resp.ok) return null;
+        const serverCount = parseInt(resp.headers.get('X-Frame-Count') || '-1');
+        return resp.blob().then(blob => ({ blob, serverCount }));
+      })
+      .then(result => {
+        if (!result || _focusCamId !== camId) return;
+        const { blob, serverCount } = result;
+        const isNew = serverCount >= 0 && serverCount !== _lastFrameCount;
+        if (isNew) {
+          _lastFrameCount = serverCount;
+          _newFrames++;
+          const blobUrl = URL.createObjectURL(blob);
+          if (_prevBlobUrl) URL.revokeObjectURL(_prevBlobUrl);
+          _prevBlobUrl = blobUrl;
+          img.onload = () => {
+            if (img.naturalWidth && img.naturalHeight) {
+              _liveRes = img.naturalWidth + 'x' + img.naturalHeight;
+            }
+          };
+          img.src = blobUrl;
+        }
+        // Update FPS display once per second
+        const now     = performance.now();
+        const elapsed = (now - _fpsWindowStart) / 1000;
+        if (elapsed >= 1.0) {
+          _liveFps        = Math.round(_newFrames / elapsed);
+          _newFrames      = 0;
+          _fpsWindowStart = now;
+          _updateInfoBar();
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (_focusCamId === camId) _focusTimer = setTimeout(poll, 60);
+      });
   };
   poll();
 }
