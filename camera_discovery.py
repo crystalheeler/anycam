@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.9.0"  # must match config.yaml
+CURRENT_VERSION = "1.9.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -6640,9 +6640,10 @@ def _build_focus_ladder(camera: dict) -> list:
     if camera.get("sub_stream_url"):
         res_blocks.append(("sub_stream_url", None))
 
-    # For each resolution block: 30fps → 29fps → ... → 1fps
+    # For each resolution block: uncapped first, then 30fps → 29fps → ... → 1fps
     ladder = []
     for url_key, scale_w in res_blocks:
+        ladder.append((url_key, None, scale_w))          # uncapped — always first
         for fps in range(_ADAPTIVE_FPS_MAX, 0, -1):
             ladder.append((url_key, fps, scale_w))
 
@@ -6955,11 +6956,11 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
             # ── Adaptive fps for focus/native_res mode ────────────────────────
             # Step-down only: never step back up once stable.
-            # Two instability signals:
-            #   1. Fast death: run_dur < threshold AND frames < threshold
-            #   2. Repeated restarts: locked tier restarted >= _ADAPTIVE_RESTART_LIMIT
-            #      times, meaning the stream is unreliable even if each run is long.
-            if native_res:
+            # ── Adaptive fps/res controller for focus/native_res mode ─────────
+            # Only run when this camera still has focus — prevents post-exit
+            # step-downs from firing after focus was cleared while ffmpeg was
+            # still running.
+            if native_res and _FOCUSED_CAMERA == camera_id:
                 cam_now   = CAMERAS.get(camera_id, camera)
                 ada       = _FOCUS_ADAPTIVE.setdefault(camera_id, {
                     "tier_idx": 0, "locked": False,
@@ -7094,10 +7095,37 @@ async def handle_snapshot(request: web.Request) -> web.Response:
         state = _snap_state(camera_id)
         frame = state.get("frame")
         if frame:
+            # Build step-label headers so the JS info bar can show the current
+            # ladder tier ("Stepped Feed") separately from measured real FPS.
+            step_res = "?"
+            step_fps = "?"
+            ada = _FOCUS_ADAPTIVE.get(camera_id)
+            if ada and ada.get("ladder"):
+                ladder   = ada["ladder"]
+                tier_idx = min(ada.get("tier_idx", 0), len(ladder) - 1)
+                uk, t_fps, t_scale = ladder[tier_idx]
+                cam_now  = CAMERAS.get(camera_id, {})
+                if t_scale:
+                    # Scaled: compute proportional height
+                    sw = cam_now.get("stream_width") or 0
+                    sh = cam_now.get("stream_height") or 0
+                    sh_scaled = round(t_scale * sh / sw) if sw else 0
+                    step_res  = f"{t_scale}x{sh_scaled}" if sh_scaled else f"{t_scale}x?"
+                elif uk == "sub_stream_url":
+                    ssw = cam_now.get("sub_stream_width") or "?"
+                    ssh = cam_now.get("sub_stream_height") or "?"
+                    step_res = f"{ssw}x{ssh}"
+                else:
+                    sw = cam_now.get("stream_width") or "?"
+                    sh = cam_now.get("stream_height") or "?"
+                    step_res = f"{sw}x{sh}"
+                step_fps = "uncapped" if t_fps is None else str(t_fps)
             return web.Response(body=frame, content_type="image/jpeg",
                                 headers={"Cache-Control": "no-cache",
                                          "X-Frame-Source": "focus",
-                                         "X-Frame-Count": str(state.get("frame_count", 0))})
+                                         "X-Frame-Count": str(state.get("frame_count", 0)),
+                                         "X-Step-Res":    step_res,
+                                         "X-Step-FPS":    step_fps})
         return web.Response(status=204)  # no frame yet — JS will retry
 
     # Thumbnail polling uses the sub-stream (lower res/bandwidth) when available;
@@ -7200,6 +7228,12 @@ async def handle_focus_set(request: web.Request) -> web.Response:
         return web.json_response({"error": "Camera not found"}, status=404)
     _FOCUSED_CAMERA = camera_id
     log.info(f"Focus: entering enhanced view for {camera_id}")
+    # Reset restarts_since_lock so a stale count from the previous focus session
+    # doesn't immediately trigger a step-down on re-entry.
+    ada = _FOCUS_ADAPTIVE.get(camera_id)
+    if ada:
+        ada["restarts_since_lock"] = 0
+        ada["run_start"]           = None
     # Always cancel any existing task (likely a low-fps sub-stream thumbnail task)
     # and start a fresh native_res=True task on the main high-res stream_url.
     # Without this, a running thumbnail task would block the focus task from starting.
@@ -7669,21 +7703,47 @@ async def api_set_credentials(request):
                     log.warning(f"  probe_rtsp returned False for '{prof['name']}' "
                                 f"— including anyway (ONVIF confirmed creds)")
                 det = await probe_stream_details(stream_url, "RTSP")
-                # ONVIF's GetProfiles XML is the authoritative source for
-                # resolution, video codec, and audio codec — it's always present
-                # regardless of whether the stream can be probed.  probe_stream_details
-                # (go2rtc / ffprobe) is only needed for actual measured FPS, which
-                # ONVIF's FrameRateLimit ceiling doesn't accurately reflect.
-                if prof.get("onvif_width"):
-                    det["stream_width"]  = prof["onvif_width"]
-                    det["stream_height"] = prof["onvif_height"]
-                if prof.get("onvif_encoding"):
-                    det["stream_codec"] = prof["onvif_encoding"]
+
+                # ── Resolution: highest pixel area wins ───────────────────────
+                # Both probe and ONVIF can be wrong — buggy firmware tends to
+                # report *lower* or zero values, not inflated ones, so the source
+                # reporting the larger pixel area is almost certainly more correct.
+                probe_w  = det.get("stream_width")  or 0
+                probe_h  = det.get("stream_height") or 0
+                onvif_w  = prof.get("onvif_width")  or 0
+                onvif_h  = prof.get("onvif_height") or 0
+                if (onvif_w * onvif_h) >= (probe_w * probe_h) and onvif_w:
+                    det["stream_width"]  = onvif_w
+                    det["stream_height"] = onvif_h
+                    res_src = "onvif"
+                else:
+                    res_src = "probe" if probe_w else "none"
+
+                # ── Codec: highest capability wins ────────────────────────────
+                # Rank: hevc > h264 > mjpeg > mpeg4 > anything else.
+                # Again, wrong firmware tends to report a lesser codec (e.g.
+                # H264 for an HEVC stream), so the higher-ranked source wins.
+                _CODEC_RANK = {"hevc": 4, "h265": 4, "h264": 3,
+                               "mjpeg": 2, "jpeg": 2, "mpeg4": 1}
+                probe_codec = det.get("stream_codec") or ""
+                onvif_codec = prof.get("onvif_encoding") or ""
+                probe_rank  = _CODEC_RANK.get(probe_codec.lower(), 0)
+                onvif_rank  = _CODEC_RANK.get(onvif_codec.lower(), 0)
+                if onvif_rank > probe_rank and onvif_codec:
+                    det["stream_codec"] = onvif_codec
+                    codec_src = "onvif"
+                elif probe_codec:
+                    codec_src = "probe"
+                else:
+                    codec_src = "none"
+
+                # ── Audio: ONVIF wins (probe rarely detects audio correctly) ──
                 if prof.get("onvif_audio"):
                     det["stream_audio"] = prof["onvif_audio"]
+
                 log.info(f"  Profile '{prof['name']}': "
-                         f"{det.get('stream_width')}x{det.get('stream_height')} "
-                         f"{det.get('stream_codec','?')} "
+                         f"{det.get('stream_width')}x{det.get('stream_height')} [{res_src}] "
+                         f"{det.get('stream_codec','?')} [{codec_src}] "
                          f"{det.get('stream_fps','?')}fps "
                          f"audio={det.get('stream_audio','none')}")
                 stream_candidates.append({
@@ -8771,22 +8831,41 @@ async function _startFocusPoll(camId, cam) {
   let _fpsWindowStart = performance.now();
   let _liveFps        = null;
   let _liveRes        = null;
+  let _stepRes        = null;  // current ladder tier resolution from X-Step-Res header
+  let _stepFps        = null;  // current ladder tier fps from X-Step-FPS header
   let _prevBlobUrl    = null;
 
+  // Info bar format:
+  //   Name (IP) — Real Feed: WxH · X fps  Stepped Feed: WxH · fps
+  // "Real Feed" = measured from actual received JPEG dimensions + frame count.
+  // "Stepped Feed" = current adaptive ladder tier reported by server headers.
   function _updateInfoBar() {
-    const res = _liveRes || ((cam.stream_width || '?') + 'x' + (cam.stream_height || '?'));
-    const fps = _liveFps !== null ? _liveFps + ' fps' : 'measuring…';
-    infoEl.textContent = name + ' — ' + res + ' · ' + fps + ' · ' + codec + ' · full quality';
+    const realRes  = _liveRes  || '…';
+    const realFps  = _liveFps  !== null ? _liveFps + ' fps' : 'measuring…';
+    const stepRes  = _stepRes  || '…';
+    const stepFpsS = _stepFps  !== null
+      ? (_stepFps === 'uncapped' ? 'uncapped' : _stepFps + ' fps')
+      : '…';
+    infoEl.innerHTML =
+      name + ' — ' +
+      '<b>Real Feed:</b> '    + realRes + ' · ' + realFps +
+      ' ' +
+      '<b>Stepped Feed:</b> ' + stepRes + ' · ' + stepFpsS;
   }
 
   // Fetch-based polling at 60ms. X-Frame-Count tells us when a new frame
   // has actually been produced by ffmpeg vs the same buffered frame re-served.
+  // X-Step-Res / X-Step-FPS carry the current adaptive ladder tier.
   const poll = () => {
     if (_focusCamId !== camId) return;
     fetch(BASE + '/snapshot/' + camId + '?t=' + Date.now() + '&focus=1')
       .then(resp => {
         if (!resp.ok) return null;
         const serverCount = parseInt(resp.headers.get('X-Frame-Count') || '-1');
+        const stepRes     = resp.headers.get('X-Step-Res');
+        const stepFps     = resp.headers.get('X-Step-FPS');
+        if (stepRes) _stepRes = stepRes;
+        if (stepFps) _stepFps = stepFps;
         return resp.blob().then(blob => ({ blob, serverCount }));
       })
       .then(result => {
@@ -9715,7 +9794,7 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 #focus-close{{position:absolute;top:16px;right:20px;background:#222;border:1px solid #444;color:#fff;font-size:1.4rem;width:40px;height:40px;border-radius:50%;cursor:pointer;z-index:9001;line-height:1}}
 #focus-close:hover{{background:#444}}
 #focus-img{{width:100vw;height:calc(100vh - 50px);object-fit:contain;display:block}}
-#focus-info{{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);font-size:.8rem;color:#aaa;background:rgba(0,0,0,.6);padding:4px 12px;border-radius:20px;white-space:nowrap}}
+#focus-info{{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);font-size:.8rem;color:#aaa;background:rgba(0,0,0,.6);padding:4px 16px;border-radius:20px;white-space:nowrap;max-width:90%}}
 #focus-warning{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a1a;border:1px solid var(--orange);border-radius:10px;padding:24px;max-width:480px;text-align:center;z-index:9002;display:flex;flex-direction:column;gap:14px;align-items:center}}
 #focus-warn-text{{color:#f5b942;font-size:.9rem;line-height:1.5}}
 /* ── Toast ── */

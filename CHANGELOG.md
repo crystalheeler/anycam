@@ -1,3 +1,24 @@
+## 1.9.2
+
+### Improvement
+- **Resolution and codec detection: highest-wins arbitration** — when both probe (`probe_stream_details`) and ONVIF (`GetProfiles` XML) report values, whichever is "higher" is used. Buggy firmware tends to underreport (e.g. H264 for an HEVC stream, or 0x0 when probing fails), never overreport, so the higher value is almost always correct.
+  - Resolution: highest pixel area wins (probe_w×probe_h vs onvif_w×onvif_h).
+  - Codec: ranked by capability (hevc > h264 > mjpeg > mpeg4), higher rank wins.
+  - Audio: ONVIF wins unconditionally (probe rarely detects audio correctly).
+  - FPS: probe wins unconditionally (ONVIF's FrameRateLimit is a ceiling, not measured).
+  - Log now shows `[probe]` or `[onvif]` source tag for resolution and codec per profile.
+
+## 1.9.1
+
+### Bug fixes
+- **Post-exit step-down**: adaptive controller was firing after focus was already cleared (ffmpeg EOF fired after task.cancel() landed late). Guarded the entire step-down block with `_FOCUSED_CAMERA == camera_id` so it's a no-op once focus exits.
+- **Stale restart count on re-entry**: `restarts_since_lock` was preserved across focus sessions, causing a premature step-down immediately on re-entering focus. Reset to 0 (along with `run_start`) in `handle_focus_set`.
+- **Codec detection**: reverted codec to probe-first, ONVIF encoding as fallback only. ONVIF's `VideoEncoderConfiguration/Encoding` is unreliable on some Hikvision cameras (reports H264 for HEVC bitstreams). Probe reads the actual bitstream and is authoritative for codec.
+
+### Improvements
+- **Enhanced view info bar**: split into two sections — `Real Feed: WxH · fps` (measured from actual received frames) and `Stepped Feed: WxH · fps` (current adaptive ladder tier from server headers `X-Step-Res` / `X-Step-FPS`). Removed codec name and "full quality" text.
+- **Uncapped tier restored**: each resolution block in the adaptive ladder now starts with an uncapped fps tier before stepping down through 30→1fps.
+
 ## 1.9.0
 
 ### Improvement
