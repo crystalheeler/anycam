@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.8.5"  # must match config.yaml
+CURRENT_VERSION = "1.8.8"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2541,10 +2541,20 @@ def _onvif_soap(url: str, body: str,
 
 
 def onvif_get_profiles(onvif_url: str, username: str, password: str) -> list[dict]:
+    """
+    Parse ONVIF GetProfiles response.
+    Returns profile list with resolution, video codec, and audio codec taken
+    directly from VideoEncoderConfiguration / AudioEncoderConfiguration in the
+    XML.  These are always present regardless of stream codec, so they are
+    used as authoritative sources — probing is only needed for actual FPS
+    (which ONVIF's FrameRateLimit doesn't accurately reflect).
+    """
     xml = _onvif_soap(onvif_url, "<trt:GetProfiles/>", username, password)
     if not xml:
         return []
     profiles = []
+    enc_map  = {"H264": "h264", "H265": "hevc", "JPEG": "mjpeg",
+                "H264E": "h264", "MPEG4": "mpeg4"}
     try:
         root = ET.fromstring(xml)
         ns   = {"trt": "http://www.onvif.org/ver10/media/wsdl",
@@ -2553,8 +2563,41 @@ def onvif_get_profiles(onvif_url: str, username: str, password: str) -> list[dic
             token = p.get("token", "")
             name_el = p.find("tt:Name", ns)
             name = name_el.text if name_el is not None else token
-            if token:
-                profiles.append({"token": token, "name": name})
+            if not token:
+                continue
+
+            # ── Video resolution + codec ──────────────────────────────────────
+            onvif_w   = None
+            onvif_h   = None
+            onvif_enc = None
+            vec = p.find("tt:VideoEncoderConfiguration", ns)
+            if vec is not None:
+                res_el = vec.find("tt:Resolution", ns)
+                if res_el is not None:
+                    try:
+                        onvif_w = int(res_el.findtext("tt:Width",  namespaces=ns) or 0) or None
+                        onvif_h = int(res_el.findtext("tt:Height", namespaces=ns) or 0) or None
+                    except (ValueError, TypeError):
+                        pass
+                enc_el = vec.find("tt:Encoding", ns)
+                if enc_el is not None and enc_el.text:
+                    onvif_enc = enc_map.get(enc_el.text.upper(), enc_el.text.lower())
+
+            # ── Audio codec ───────────────────────────────────────────────────
+            onvif_audio = None
+            aec = p.find("tt:AudioEncoderConfiguration", ns)
+            if aec is not None:
+                aenc_el = aec.find("tt:Encoding", ns)
+                if aenc_el is not None and aenc_el.text:
+                    onvif_audio = aenc_el.text.lower()  # e.g. "g711", "aac", "g726"
+
+            profiles.append({
+                "token": token, "name": name,
+                "onvif_width":    onvif_w,
+                "onvif_height":   onvif_h,
+                "onvif_encoding": onvif_enc,
+                "onvif_audio":    onvif_audio,
+            })
     except Exception as e:
         log.debug(f"GetProfiles parse: {e}")
     return profiles
@@ -5120,10 +5163,20 @@ def _onvif_soap(url: str, body: str,
 
 
 def onvif_get_profiles(onvif_url: str, username: str, password: str) -> list[dict]:
+    """
+    Parse ONVIF GetProfiles response.
+    Returns profile list with resolution, video codec, and audio codec taken
+    directly from VideoEncoderConfiguration / AudioEncoderConfiguration in the
+    XML.  These are always present regardless of stream codec, so they are
+    used as authoritative sources — probing is only needed for actual FPS
+    (which ONVIF's FrameRateLimit doesn't accurately reflect).
+    """
     xml = _onvif_soap(onvif_url, "<trt:GetProfiles/>", username, password)
     if not xml:
         return []
     profiles = []
+    enc_map  = {"H264": "h264", "H265": "hevc", "JPEG": "mjpeg",
+                "H264E": "h264", "MPEG4": "mpeg4"}
     try:
         root = ET.fromstring(xml)
         ns   = {"trt": "http://www.onvif.org/ver10/media/wsdl",
@@ -5132,8 +5185,41 @@ def onvif_get_profiles(onvif_url: str, username: str, password: str) -> list[dic
             token = p.get("token", "")
             name_el = p.find("tt:Name", ns)
             name = name_el.text if name_el is not None else token
-            if token:
-                profiles.append({"token": token, "name": name})
+            if not token:
+                continue
+
+            # ── Video resolution + codec ──────────────────────────────────────
+            onvif_w   = None
+            onvif_h   = None
+            onvif_enc = None
+            vec = p.find("tt:VideoEncoderConfiguration", ns)
+            if vec is not None:
+                res_el = vec.find("tt:Resolution", ns)
+                if res_el is not None:
+                    try:
+                        onvif_w = int(res_el.findtext("tt:Width",  namespaces=ns) or 0) or None
+                        onvif_h = int(res_el.findtext("tt:Height", namespaces=ns) or 0) or None
+                    except (ValueError, TypeError):
+                        pass
+                enc_el = vec.find("tt:Encoding", ns)
+                if enc_el is not None and enc_el.text:
+                    onvif_enc = enc_map.get(enc_el.text.upper(), enc_el.text.lower())
+
+            # ── Audio codec ───────────────────────────────────────────────────
+            onvif_audio = None
+            aec = p.find("tt:AudioEncoderConfiguration", ns)
+            if aec is not None:
+                aenc_el = aec.find("tt:Encoding", ns)
+                if aenc_el is not None and aenc_el.text:
+                    onvif_audio = aenc_el.text.lower()  # e.g. "g711", "aac", "g726"
+
+            profiles.append({
+                "token": token, "name": name,
+                "onvif_width":    onvif_w,
+                "onvif_height":   onvif_h,
+                "onvif_encoding": onvif_enc,
+                "onvif_audio":    onvif_audio,
+            })
     except Exception as e:
         log.debug(f"GetProfiles parse: {e}")
     return profiles
@@ -7583,6 +7669,23 @@ async def api_set_credentials(request):
                     log.warning(f"  probe_rtsp returned False for '{prof['name']}' "
                                 f"— including anyway (ONVIF confirmed creds)")
                 det = await probe_stream_details(stream_url, "RTSP")
+                # ONVIF's GetProfiles XML is the authoritative source for
+                # resolution, video codec, and audio codec — it's always present
+                # regardless of whether the stream can be probed.  probe_stream_details
+                # (go2rtc / ffprobe) is only needed for actual measured FPS, which
+                # ONVIF's FrameRateLimit ceiling doesn't accurately reflect.
+                if prof.get("onvif_width"):
+                    det["stream_width"]  = prof["onvif_width"]
+                    det["stream_height"] = prof["onvif_height"]
+                if prof.get("onvif_encoding"):
+                    det["stream_codec"] = prof["onvif_encoding"]
+                if prof.get("onvif_audio"):
+                    det["stream_audio"] = prof["onvif_audio"]
+                log.info(f"  Profile '{prof['name']}': "
+                         f"{det.get('stream_width')}x{det.get('stream_height')} "
+                         f"{det.get('stream_codec','?')} "
+                         f"{det.get('stream_fps','?')}fps "
+                         f"audio={det.get('stream_audio','none')}")
                 stream_candidates.append({
                     "url": stream_url, "token": prof["token"],
                     "name": prof["name"], **det,

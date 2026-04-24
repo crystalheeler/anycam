@@ -1,3 +1,18 @@
+## 1.8.8
+
+### Improvement
+- **ONVIF as authoritative source for resolution, video codec, and audio codec**: `onvif_get_profiles` now also parses `AudioEncoderConfiguration/Encoding` from the GetProfiles XML. All three fields (resolution, video codec, audio codec) are now applied unconditionally from ONVIF data — probing via `probe_stream_details` (go2rtc/ffprobe) only contributes measured FPS, which ONVIF's `FrameRateLimit` ceiling doesn't accurately reflect. This removes the previous inconsistency where codec was "ONVIF if probe fails, else probe."
+
+## 1.8.7
+
+### Improvement
+- **ONVIF profile selection: authoritative resolution source** — `probe_stream_details` (go2rtc/ffprobe) was the sole source of truth for resolution+codec when building the stream candidate list, but it frequently fails for H.265 streams, returning 0×0 and causing those streams to sort below lower-res streams that probe successfully. ONVIF's `GetProfiles` response already contains `VideoEncoderConfiguration/Resolution` and `Encoding` — this data is always present and never fails. Changed strategy: ONVIF is now the authoritative source for resolution and codec; probing is still used for actual FPS (which ONVIF's `FrameRateLimit` doesn't accurately reflect) and audio codec. This ensures H.265 main streams sort correctly above MJPEG sub-streams regardless of probe success.
+
+## 1.8.6
+
+### Bug fix
+- **ONVIF profile resolution — wrong stream selected as main**: `probe_stream_details` often fails for H.265 streams (codec negotiation timeout), returning 0×0. When sorting ONVIF profiles by detected resolution, those streams sank to the bottom, causing a lower-resolution sub-stream that probed cleanly (e.g. MJPEG 704×480) to be selected as `stream_url`. Fix: `onvif_get_profiles` now also parses `VideoEncoderConfiguration/Resolution` and `Encoding` directly from the ONVIF XML — this data is always present and reliable. When `probe_stream_details` returns no resolution, the ONVIF-reported value is used instead, ensuring the sort is correct and the main high-res H.265 stream is properly selected as `stream_url`. Codec is also seeded from the ONVIF encoding field when probing fails.
+
 ## 1.8.5
 
 ### Improvements
