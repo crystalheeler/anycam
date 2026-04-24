@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.8.4"  # must match config.yaml
+CURRENT_VERSION = "1.8.5"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -6518,25 +6518,48 @@ async def _try_hevc_plus_fallback(camera_id: str, camera: dict,
 # ── Adaptive fps state for focus/native_res mode ───────────────────────────────
 # Persists across focus sessions so the camera remembers its best stable fps.
 # Tiers ordered fastest→slowest. None = no fps limit (full native rate).
-_ADAPTIVE_FPS_TIERS:    list  = [None, 30, 20, 15, 10, 8, 5, 4, 3, 2, 1]
-_ADAPTIVE_UNSTABLE_S:   float = 8.0   # run shorter than this with few frames = unstable
-_ADAPTIVE_UNSTABLE_FR:  int   = 15    # fewer frames than this = unstable
-_FOCUS_ADAPTIVE:        dict  = {}    # camera_id → {tier_idx, locked, run_start, ladder}
+_ADAPTIVE_FPS_TIERS:     list  = [None, 30, 20, 15, 10, 8, 5, 4, 3, 2, 1]
+_ADAPTIVE_UNSTABLE_S:    float = 8.0   # run shorter than this with few frames = unstable
+_ADAPTIVE_UNSTABLE_FR:   int   = 15    # fewer frames than this = unstable
+_ADAPTIVE_RESTART_LIMIT: int   = 3     # restarts at locked tier before stepping down
+_ADAPTIVE_SCALE_STEPS:   list  = [1920, 1280]  # intermediate width stops (px)
+_FOCUS_ADAPTIVE:         dict  = {}    # camera_id → {tier_idx, locked, run_start, ladder,
+                                       #               restarts_since_lock}
 
 
 def _build_focus_ladder(camera: dict) -> list:
     """
     Build the ordered adaptive quality ladder for focus mode.
-    Returns list of (url_key, fps) tuples, best quality first.
-    Exhausts all fps tiers at main stream resolution before
-    dropping to sub_stream, then exhausts fps tiers there too.
+    Returns list of (url_key, fps, scale_w) tuples, best quality first:
+      - url_key:  'stream_url' or 'sub_stream_url'
+      - fps:      None (uncapped) or int fps limit
+      - scale_w:  None (native resolution) or target pixel width for ffmpeg scale
+
+    Order:
+      1. Main stream at native resolution — all fps tiers
+      2. Main stream scaled to intermediate widths — all fps tiers each
+         (only added when native width is ≥1.5× the scale target, so we
+         never upscale and always get a meaningful reduction)
+      3. Sub-stream at native resolution — all fps tiers
     """
-    ladder = []
+    stream_w = camera.get("stream_width") or 0
+    ladder   = []
+
+    # ── 1. Main stream at native res ─────────────────────────────────────────
     for fps in _ADAPTIVE_FPS_TIERS:
-        ladder.append(("stream_url", fps))
+        ladder.append(("stream_url", fps, None))
+
+    # ── 2. Intermediate scaled tiers (only when camera is wide enough) ───────
+    for scale_w in _ADAPTIVE_SCALE_STEPS:
+        if stream_w >= int(scale_w * 1.5):   # e.g. 1920 step only if native ≥ 2880
+            for fps in _ADAPTIVE_FPS_TIERS:
+                ladder.append(("stream_url", fps, scale_w))
+
+    # ── 3. Sub-stream ────────────────────────────────────────────────────────
     if camera.get("sub_stream_url"):
         for fps in _ADAPTIVE_FPS_TIERS:
-            ladder.append(("sub_stream_url", fps))
+            ladder.append(("sub_stream_url", fps, None))
+
     return ladder
 
 
@@ -6602,25 +6625,30 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 "tier_idx": 0, "locked": False,
                 "run_start": None,
                 "ladder": _build_focus_ladder(cam_now),
+                "restarts_since_lock": 0,
             })
             # Rebuild ladder if camera gained a sub_stream_url since last focus
             if not ada["ladder"]:
                 ada["ladder"] = _build_focus_ladder(cam_now)
-            ladder    = ada["ladder"]
-            tier_idx  = min(ada["tier_idx"], len(ladder) - 1)
-            url_key, tier_fps = ladder[tier_idx]
+            ladder   = ada["ladder"]
+            tier_idx = min(ada["tier_idx"], len(ladder) - 1)
+            url_key, tier_fps, scale_w = ladder[tier_idx]
             # Switch URL if the tier requires a different stream (e.g. sub_stream)
             tier_url = build_authenticated_url(cam_now, url_key=url_key)
             if tier_url and tier_url != url:
                 log.info(f"SNAP [{camera_id}]: adaptive focus — switching to "
                          f"{url_key} for tier {tier_idx}")
             ffmpeg_url = tier_url or url
+
+            # Build vf filter: optional fps cap, optional scale, always format
+            scale_str = f"scale={scale_w}:-2," if scale_w else ""
+            res_label = f"{scale_w}px scaled" if scale_w else f"{stream_w or '?'}px native"
             if tier_fps is None:
-                vf_used   = "format=yuvj420p"
-                fps_label = f"adaptive:uncapped {url_key} ({stream_w or '?'}px)"
+                vf_used   = f"{scale_str}format=yuvj420p"
+                fps_label = f"adaptive:uncapped {url_key} ({res_label})"
             else:
-                vf_used   = f"fps={tier_fps},format=yuvj420p"
-                fps_label = f"adaptive:{tier_fps}fps {url_key} ({stream_w or '?'}px)"
+                vf_used   = f"fps={tier_fps},{scale_str}format=yuvj420p"
+                fps_label = f"adaptive:{tier_fps}fps {url_key} ({res_label})"
             ada["run_start"] = time.monotonic()
         elif CFG_LOW_FPS and is_hevc:
             # Low-fps mode for HEVC — 2fps output (decode cost unchanged,
@@ -6841,13 +6869,17 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
             # ── Adaptive fps for focus/native_res mode ────────────────────────
             # Step-down only: never step back up once stable.
-            # Exhausts all fps tiers at current resolution before dropping res.
+            # Two instability signals:
+            #   1. Fast death: run_dur < threshold AND frames < threshold
+            #   2. Repeated restarts: locked tier restarted >= _ADAPTIVE_RESTART_LIMIT
+            #      times, meaning the stream is unreliable even if each run is long.
             if native_res:
                 cam_now   = CAMERAS.get(camera_id, camera)
                 ada       = _FOCUS_ADAPTIVE.setdefault(camera_id, {
                     "tier_idx": 0, "locked": False,
                     "run_start": None,
                     "ladder": _build_focus_ladder(cam_now),
+                    "restarts_since_lock": 0,
                 })
                 ladder    = ada["ladder"]
                 tier_idx  = ada["tier_idx"]
@@ -6855,23 +6887,34 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 run_dur   = time.monotonic() - run_start
                 locked    = ada.get("locked", False)
 
-                if run_dur < _ADAPTIVE_UNSTABLE_S and frames < _ADAPTIVE_UNSTABLE_FR:
-                    # Unstable run — step down one tier
+                fast_death = (run_dur < _ADAPTIVE_UNSTABLE_S and
+                              frames  < _ADAPTIVE_UNSTABLE_FR)
+
+                # Count restarts at locked tier
+                if locked:
+                    ada["restarts_since_lock"] = ada.get("restarts_since_lock", 0) + 1
+                restart_overflow = (locked and
+                                    ada.get("restarts_since_lock", 0) >= _ADAPTIVE_RESTART_LIMIT)
+
+                if fast_death or restart_overflow:
+                    reason = (f"fast-death ({frames}fr in {run_dur:.1f}s)"
+                              if fast_death else
+                              f"repeated-restart ({ada['restarts_since_lock']}x at locked tier)")
                     if locked:
-                        # Was stable before; something changed — unlock and keep stepping
                         ada["locked"] = False
-                        log.info(f"SNAP [{camera_id}]: adaptive focus — previously "
-                                 f"stable tier became unstable, continuing step-down")
+                        ada["restarts_since_lock"] = 0
+                        log.info(f"SNAP [{camera_id}]: adaptive focus — "
+                                 f"locked tier unstable ({reason}), stepping down")
                     if tier_idx < len(ladder) - 1:
                         ada["tier_idx"] += 1
-                        new_url_key, new_fps = ladder[ada["tier_idx"]]
+                        new_url_key, new_fps, new_scale = ladder[ada["tier_idx"]]
+                        scale_desc = f" @{new_scale}px" if new_scale else ""
                         log.info(
-                            f"SNAP [{camera_id}]: adaptive focus — unstable "
-                            f"({frames}fr in {run_dur:.1f}s), stepping down to "
-                            f"{'uncapped' if new_fps is None else str(new_fps)+'fps'} "
-                            f"on {new_url_key}"
+                            f"SNAP [{camera_id}]: adaptive focus — {reason}, "
+                            f"stepping down to "
+                            f"{'uncapped' if new_fps is None else str(new_fps)+'fps'}"
+                            f" on {new_url_key}{scale_desc}"
                         )
-                        # Update url for next _launch_snap call
                         next_url = build_authenticated_url(cam_now, url_key=new_url_key)
                         if next_url:
                             url = next_url
@@ -6881,16 +6924,18 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                             f"quality ladder, staying at lowest tier"
                         )
                 else:
-                    # Run was stable — lock here
+                    # Run was stable — lock here, reset restart counter
                     if not locked:
-                        _, locked_fps = ladder[tier_idx]
-                        locked_url_key, _ = ladder[tier_idx]
+                        _, locked_fps, locked_scale = ladder[tier_idx]
+                        locked_url_key = ladder[tier_idx][0]
+                        scale_desc = f" @{locked_scale}px" if locked_scale else ""
                         log.info(
                             f"SNAP [{camera_id}]: adaptive focus — stable at "
-                            f"{'uncapped' if locked_fps is None else str(locked_fps)+'fps'} "
-                            f"on {locked_url_key} — locking"
+                            f"{'uncapped' if locked_fps is None else str(locked_fps)+'fps'}"
+                            f" on {locked_url_key}{scale_desc} — locking"
                         )
                         ada["locked"] = True
+                        ada["restarts_since_lock"] = 0
 
             # ── H.265+ fallback: probe alternate URLs on first restart after flag ──
             # _drain_stderr sets camera["hevc_plus_warning"] = True when it detects

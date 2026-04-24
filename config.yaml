@@ -1,6 +1,6 @@
 name: "AnyCam"
 description: "Scans the local network for IP cameras (RTSP, ONVIF, MJPEG, HLS, RTMP, WebRTC, WS-RTSP) and displays live feeds in a card grid."
-version: "1.8.4"
+version: "1.8.5"
 slug: "camera_discovery"
 init: false
 host_network: true

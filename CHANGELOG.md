@@ -1,3 +1,10 @@
+## 1.8.5
+
+### Improvements
+- **Adaptive controller: restart-count instability** — added second instability signal alongside the existing fast-death check. If a locked tier restarts ≥3 times (regardless of individual run duration/frame count), the tier is considered unreliable and the controller unlocks and steps down. This catches cameras that drop RTSP connections on a regular cycle (e.g. every 20s) — previously these would lock as "stable" immediately and stay there forever.
+- **Adaptive controller: intermediate resolution steps** — the quality ladder now includes scaled variants of the main stream (1920px-wide, 1280px-wide) inserted between the native-res fps tiers and the sub-stream. These are only added when the camera's native width is ≥1.5× the scale target (so never upscales). For a 4K camera this gives 4K→1920px→1280px→sub-stream instead of jumping straight from 4K to 480p.
+- **Focus status bar: no more "0 fps"** — the JS FPS window now distinguishes three states: `X fps` (frames flowing), `buffering…` (had frames before, currently reconnecting), `connecting…` (waiting for very first frame). Previously any 1-second window with no new frames would show "0 fps".
+
 ## 1.8.4
 
 ### Bug fixes
