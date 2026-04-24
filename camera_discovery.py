@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.8.8"  # must match config.yaml
+CURRENT_VERSION = "1.9.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -6604,10 +6604,10 @@ async def _try_hevc_plus_fallback(camera_id: str, camera: dict,
 # ── Adaptive fps state for focus/native_res mode ───────────────────────────────
 # Persists across focus sessions so the camera remembers its best stable fps.
 # Tiers ordered fastest→slowest. None = no fps limit (full native rate).
-_ADAPTIVE_FPS_TIERS:     list  = [None, 30, 20, 15, 10, 8, 5, 4, 3, 2, 1]
+_ADAPTIVE_FPS_MAX:       int   = 30    # start fps cap (steps down by 1 each restart)
 _ADAPTIVE_UNSTABLE_S:    float = 8.0   # run shorter than this with few frames = unstable
 _ADAPTIVE_UNSTABLE_FR:   int   = 15    # fewer frames than this = unstable
-_ADAPTIVE_RESTART_LIMIT: int   = 3     # restarts at locked tier before stepping down
+_ADAPTIVE_RESTART_LIMIT: int   = 1     # restarts at locked tier before stepping down
 _ADAPTIVE_SCALE_STEPS:   list  = [1920, 1280]  # intermediate width stops (px)
 _FOCUS_ADAPTIVE:         dict  = {}    # camera_id → {tier_idx, locked, run_start, ladder,
                                        #               restarts_since_lock}
@@ -6616,35 +6616,35 @@ _FOCUS_ADAPTIVE:         dict  = {}    # camera_id → {tier_idx, locked, run_st
 def _build_focus_ladder(camera: dict) -> list:
     """
     Build the ordered adaptive quality ladder for focus mode.
-    Returns list of (url_key, fps, scale_w) tuples, best quality first:
-      - url_key:  'stream_url' or 'sub_stream_url'
-      - fps:      None (uncapped) or int fps limit
-      - scale_w:  None (native resolution) or target pixel width for ffmpeg scale
+    Returns list of (url_key, fps, scale_w) tuples, best quality first.
 
-    Order:
-      1. Main stream at native resolution — all fps tiers
-      2. Main stream scaled to intermediate widths — all fps tiers each
-         (only added when native width is ≥1.5× the scale target, so we
-         never upscale and always get a meaningful reduction)
-      3. Sub-stream at native resolution — all fps tiers
+    Order is FPS-FIRST within each resolution block:
+
+      native @ 30fps → native @ 29fps → ... → native @ 1fps
+      1920px @ 30fps → 1920px @ 29fps → ... → 1920px @ 1fps
+      sub    @ 30fps → sub    @ 29fps → ... → sub    @ 1fps
+
+    This means one step-down reduces fps by 1 at the current resolution.
+    Only after exhausting all fps values (down to 1fps) does the resolution drop.
+
+    Intermediate scaled resolutions are only inserted when the native stream
+    width is ≥1.5× the scale target (never upscale, always a real reduction).
     """
     stream_w = camera.get("stream_width") or 0
-    ladder   = []
 
-    # ── 1. Main stream at native res ─────────────────────────────────────────
-    for fps in _ADAPTIVE_FPS_TIERS:
-        ladder.append(("stream_url", fps, None))
-
-    # ── 2. Intermediate scaled tiers (only when camera is wide enough) ───────
+    # Ordered resolution blocks: (url_key, scale_w)
+    res_blocks = [("stream_url", None)]
     for scale_w in _ADAPTIVE_SCALE_STEPS:
-        if stream_w >= int(scale_w * 1.5):   # e.g. 1920 step only if native ≥ 2880
-            for fps in _ADAPTIVE_FPS_TIERS:
-                ladder.append(("stream_url", fps, scale_w))
-
-    # ── 3. Sub-stream ────────────────────────────────────────────────────────
+        if stream_w >= int(scale_w * 1.5):
+            res_blocks.append(("stream_url", scale_w))
     if camera.get("sub_stream_url"):
-        for fps in _ADAPTIVE_FPS_TIERS:
-            ladder.append(("sub_stream_url", fps, None))
+        res_blocks.append(("sub_stream_url", None))
+
+    # For each resolution block: 30fps → 29fps → ... → 1fps
+    ladder = []
+    for url_key, scale_w in res_blocks:
+        for fps in range(_ADAPTIVE_FPS_MAX, 0, -1):
+            ladder.append((url_key, fps, scale_w))
 
     return ladder
 
@@ -7721,10 +7721,10 @@ async def api_set_credentials(request):
                 cid = f"{ip}_onvif_{main_token}"
                 main_details = {k: v for k, v in main_s.items()
                                 if k not in ("url", "token", "name")}
-                # Suppress H.265+ badge if we have a working sub-stream fallback
-                hevc_warn = main_s.get("hevc_plus_warning", False)
-                if hevc_warn and sub_s:
-                    hevc_warn = False
+                # Always reset hevc_plus_warning on (re-)discovery so stale flags
+                # from previous sessions or wrong stream URLs don't carry forward.
+                # _drain_stderr will re-set it at runtime if ffmpeg actually sees
+                # "Multi-layer HEVC coding is not implemented" on this stream.
                 CAMERAS[cid] = {
                     "id": cid, "ip": ip,
                     "hostname": camera.get("hostname", ip),
@@ -7735,7 +7735,7 @@ async def api_set_credentials(request):
                     "name": camera.get("name", ip),
                     "status": "ready", "display": "proxy", "user_saved": True,
                     "verdict": "camera", "verdict_reason": "ONVIF profile",
-                    "hevc_plus_warning": hevc_warn,
+                    "hevc_plus_warning": False,  # reset; _drain_stderr re-sets if needed
                     **main_details,
                 }
                 CAMERAS.pop(camera_id, None)

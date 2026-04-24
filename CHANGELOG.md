@@ -1,3 +1,20 @@
+## 1.9.0
+
+### Improvement
+- **Adaptive ladder: fps-first per resolution block, every integer 30→1**: Each resolution block descends by 1fps per restart (30fps → 29fps → ... → 1fps) before the resolution drops. For a 4K camera with intermediate scales and a sub-stream, the ladder is:
+  - 4K native: 30fps → 29fps → ... → 1fps  (30 tiers)
+  - 1920px scaled: 30fps → ... → 1fps       (30 tiers, if native ≥ 2880px)
+  - 1280px scaled: 30fps → ... → 1fps       (30 tiers, if native ≥ 1920px)
+  - sub-stream: 30fps → ... → 1fps          (30 tiers)
+  Each tier change requires exactly 1 restart at the current locked tier. Previous design had sparse fps steps and a resolution-first ordering that didn't match intended behavior.
+
+## 1.8.9
+
+### Bug fixes
+- **Adaptive ladder: resolution-first ordering** — the quality ladder was fps-first (all 11 fps tiers at native res, then all 11 at 1920px, etc.), so stepping down always reduced fps at the same resolution before ever trying a lower resolution. Getting from 4K native to 1920px scaled required stepping through 11 fps tiers × 3 restarts = 33 restarts. The ladder is now resolution-first: for each fps tier, all available resolutions are tried before moving to the next fps tier. A single step-down now moves to the next lower resolution at the same fps, matching the expected behavior.
+- **Adaptive restart limit reduced to 1** — with resolution-first ordering, a single restart at a locked tier is sufficient signal to try the next lower resolution. Limit of 3 was designed for fps-stepping (where you wanted confidence before giving up), not resolution-stepping (where each failure is immediate evidence the current quality doesn't work).
+- **H.265+ flag reset on re-discovery** — `hevc_plus_warning` is now always reset to False when a camera is re-discovered, so stale flags from previous sessions or from when the wrong stream URL was stored don't carry forward. The flag is still set at runtime by `_drain_stderr` if ffmpeg genuinely encounters a multi-layer HEVC bitstream. Note: some Hikvision firmware versions output multi-layer HEVC bitstream even when H.265+ is set to OFF in the camera UI — this is a firmware bug, not a detection bug.
+
 ## 1.8.8
 
 ### Improvement
