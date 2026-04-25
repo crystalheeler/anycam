@@ -1,3 +1,27 @@
+## 2.0.5
+- Fix: enhanced view adaptive ladder now correctly steps down when the stream
+  produces 0 frames regardless of run duration. Previously, when ffmpeg hit
+  its 30-second read timeout with zero frames decoded, run_dur ≈ 30s caused
+  fast_death = (30s < 8s AND 0 < 15) = False, locking the tier as "stable"
+  and displaying "0 fps" indefinitely. Now frames==0 is always treated as
+  unstable and forces a step-down regardless of how long ffmpeg ran.
+- Add: Resolution and FPS dropdowns in enhanced view bottom bar. The
+  Resolution dropdown is populated from the camera's discovered stream
+  profiles (e.g. "3840x2160 HEVC", "1280x720 H264"). The FPS dropdown
+  offers Uncapped / 30 / 20 / 15 / 10 / 5 / 2 / 1 fps. Selecting from
+  either locks the adaptive controller to that tier immediately (manual
+  override). The Auto button clears the override and resumes adaptive
+  stepping. A new server endpoint POST /snap/focus/tier accepts
+  {profile_idx, fps} and GET /snap/focus/profiles returns profile metadata
+  for the currently focused camera.
+- Style: X close button in enhanced view is now a red circle (border: 2.5px
+  solid #e03) positioned top-right at 10px/14px, styled to hover-fill red.
+  No longer overlaps the camera's built-in OSD timestamp.
+- Style: enhanced view info and controls moved to a fixed 52px bottom bar
+  (dark background, border-top) keeping them separate from the video feed.
+  Info text (camera name, real/stepped feed stats) on the left; dropdowns
+  and Auto button on the right.
+
 ## 2.0.4
 - Critical fix: ONVIF credential flow now works correctly for cameras that
   advertise multiple XAddrs in WS-Discovery (both IPv4 and IPv6 link-local).

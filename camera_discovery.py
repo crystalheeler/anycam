@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.0.4"  # must match config.yaml
+CURRENT_VERSION = "2.0.5"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -7145,8 +7145,20 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 run_dur   = time.monotonic() - run_start
                 locked    = ada.get("locked", False)
 
-                fast_death = (run_dur < _ADAPTIVE_UNSTABLE_S and
-                              frames  < _ADAPTIVE_UNSTABLE_FR)
+                # frames == 0 is always a failure regardless of run duration
+                # (e.g. 30-second ffmpeg read timeout with zero frames decoded).
+                # Previously this was counted as "stable" because run_dur >= 8s.
+                # Skip adaptive stepping entirely if the user manually pinned the tier
+                if ada.get("manual_override"):
+                    fast_death       = False
+                    restart_overflow = False
+                else:
+                    # frames == 0 is always a failure regardless of run duration
+                    # (e.g. 30-second ffmpeg read timeout with zero frames decoded).
+                    # Previously this was counted as "stable" because run_dur >= 8s.
+                    fast_death = (frames == 0 or
+                                  (run_dur < _ADAPTIVE_UNSTABLE_S and
+                                   frames  < _ADAPTIVE_UNSTABLE_FR))
 
                 # Count restarts at locked tier
                 if locked:
@@ -7458,6 +7470,100 @@ async def handle_focus_clear(request: web.Request) -> web.Response:
         if ada:
             ada["run_start"] = None
     return web.json_response({"status": "ok"})
+
+
+async def handle_focus_set_tier(request: web.Request) -> web.Response:
+    """POST /snap/focus/tier — manually pin the enhanced view to a specific
+    profile index and fps cap.  Adaptive stepping is paused while a manual
+    override is active.  Send profile_idx=null to resume auto mode."""
+    camera_id = _FOCUSED_CAMERA
+    if not camera_id:
+        return web.json_response({"error": "No camera in focus"}, status=400)
+    try:
+        data     = await request.json()
+        prof_idx = data.get("profile_idx")   # int or None = reset
+        fps_cap  = data.get("fps")            # int, None, or "uncapped"
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    camera = CAMERAS.get(camera_id)
+    if not camera:
+        return web.json_response({"error": "Camera not found"}, status=404)
+
+    ladder = _build_focus_ladder(camera)
+
+    if prof_idx is None:
+        # Reset to automatic
+        ada = _FOCUS_ADAPTIVE.get(camera_id, {})
+        ada.pop("manual_override", None)
+        ada["locked"]             = False
+        ada["restarts_since_lock"] = 0
+        ada["tier_idx"]           = 0
+        _FOCUS_ADAPTIVE[camera_id] = ada
+        log.info(f"Focus [{camera_id}]: manual override cleared")
+        return web.json_response({"status": "ok", "mode": "auto"})
+
+    fps_val = None if (fps_cap is None or fps_cap == "uncapped") else int(fps_cap)
+
+    # Find the best matching tier
+    best_idx = 0
+    for i, (p, f) in enumerate(ladder):
+        if p == prof_idx and f == fps_val:
+            best_idx = i
+            break
+        if p == prof_idx:   # right profile, any fps — keep as fallback
+            best_idx = i
+
+    ada = _FOCUS_ADAPTIVE.setdefault(camera_id, {
+        "tier_idx": 0, "locked": False,
+        "restarts_since_lock": 0, "run_start": None,
+        "ladder": ladder,
+    })
+    ada["tier_idx"]            = best_idx
+    ada["locked"]              = True
+    ada["restarts_since_lock"] = 0
+    ada["manual_override"]     = True
+    ada["ladder"]              = ladder
+    log.info(f"Focus [{camera_id}]: manual tier [{best_idx}] "
+             f"profile[{prof_idx}] fps={fps_val}")
+    return web.json_response({"status": "ok", "tier_idx": best_idx,
+                              "profile_idx": prof_idx, "fps": fps_val})
+
+
+async def handle_focus_profiles(request: web.Request) -> web.Response:
+    """GET /snap/focus/profiles — return the stream profiles for the focused
+    camera, so the JS can populate the resolution dropdown."""
+    camera_id = _FOCUSED_CAMERA
+    if not camera_id:
+        return web.json_response([])
+    camera = CAMERAS.get(camera_id)
+    if not camera:
+        return web.json_response([])
+    profiles = camera.get("stream_profiles") or []
+    if not profiles:
+        # Synthesise from legacy stream_url / sub_stream_url
+        profiles = [{
+            "_url_key": "stream_url",
+            "stream_width":  camera.get("stream_width"),
+            "stream_height": camera.get("stream_height"),
+            "stream_codec":  camera.get("stream_codec"),
+        }]
+        if camera.get("sub_stream_url"):
+            profiles.append({
+                "_url_key": "sub_stream_url",
+                "stream_width":  camera.get("sub_stream_width"),
+                "stream_height": camera.get("sub_stream_height"),
+                "stream_codec":  camera.get("sub_stream_codec"),
+            })
+    result = []
+    for i, p in enumerate(profiles):
+        w = p.get("stream_width")  or 0
+        h = p.get("stream_height") or 0
+        c = (p.get("stream_codec") or "?").upper()
+        label = f"{w}x{h} {c}" if (w and h) else f"Profile {i}"
+        result.append({"idx": i, "label": label, "width": w, "height": h,
+                       "codec": c})
+    return web.json_response(result)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -9028,9 +9134,12 @@ async function openFocus(camId) {
 }
 
 async function _startFocusPoll(camId, cam) {
-  _focusCamId = camId;
+  _focusCamId   = camId;
+  _focusCurProf = 0;
   // Tell server: enter focus mode (other cams throttle, this cam goes native res)
   await fetch(BASE + '/snap/focus/' + camId, {method: 'POST'}).catch(() => {});
+  // Load profile list for the resolution dropdown (async, non-blocking)
+  _loadFocusProfiles();
 
   const img    = document.getElementById('focus-img');
   const infoEl = document.getElementById('focus-info');
@@ -9128,12 +9237,80 @@ async function closeFocus() {
   document.getElementById('focus-overlay').style.display = 'none';
   document.getElementById('focus-img').src = '';
   document.getElementById('focus-warning').style.display = 'none';
+  // Reset dropdowns for next open
+  const rs = document.getElementById('focus-res-sel');
+  const fs = document.getElementById('focus-fps-sel');
+  if (rs) rs.value = '';
+  if (fs) fs.value = 'uncapped';
 }
 
 // Close focus on Escape key
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && _focusCamId) closeFocus();
 });
+
+/* ── Focus manual resolution/fps controls ─────────────────────────────── */
+// Populated when openFocus() runs
+let _focusProfiles = [];   // [{idx, label, width, height, codec}]
+let _focusCurProf  = 0;    // currently selected profile index
+
+async function _loadFocusProfiles() {
+  try {
+    const r = await fetch(BASE + '/snap/focus/profiles');
+    if (!r.ok) return;
+    _focusProfiles = await r.json();
+    const sel = document.getElementById('focus-res-sel');
+    if (!sel) return;
+    // Rebuild options
+    sel.innerHTML = '';
+    _focusProfiles.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = String(p.idx);
+      opt.textContent = p.label;
+      sel.appendChild(opt);
+    });
+    // Default to first (highest-res) profile
+    if (_focusProfiles.length > 0) {
+      sel.value = '0';
+      _focusCurProf = 0;
+    }
+  } catch(e) {}
+}
+
+async function focusPickRes(val) {
+  const profIdx = parseInt(val);
+  if (isNaN(profIdx)) return;
+  _focusCurProf = profIdx;
+  const fps = document.getElementById('focus-fps-sel')?.value || 'uncapped';
+  await _applyFocusTier(profIdx, fps === 'uncapped' ? null : parseInt(fps));
+}
+
+async function focusPickFps(val) {
+  const fps = val === 'uncapped' ? null : parseInt(val);
+  await _applyFocusTier(_focusCurProf, fps);
+}
+
+async function focusResetAuto() {
+  await fetch(BASE + '/snap/focus/tier', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({profile_idx: null})
+  }).catch(() => {});
+  // Reset dropdowns to first profile / uncapped
+  const rs = document.getElementById('focus-res-sel');
+  const fs = document.getElementById('focus-fps-sel');
+  if (rs && _focusProfiles.length > 0) rs.value = '0';
+  if (fs) fs.value = 'uncapped';
+  _focusCurProf = 0;
+}
+
+async function _applyFocusTier(profIdx, fps) {
+  await fetch(BASE + '/snap/focus/tier', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({profile_idx: profIdx, fps: fps})
+  }).catch(() => {});
+}
 
 /* ── Storage browser ─────────────────────────────────────────────────────── */
 let _storageData    = null;
@@ -10008,12 +10185,18 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .stor-files{{padding:8px}}
 .btn-xs{{padding:3px 8px;font-size:.72rem}}
 /* ── Focus overlay ── */
-#focus-overlay{{position:fixed;inset:0;background:#000;z-index:9000;display:flex;flex-direction:column;align-items:stretch;justify-content:center;padding:0}}
-#focus-close{{position:absolute;top:16px;right:20px;background:#222;border:1px solid #444;color:#fff;font-size:1.4rem;width:40px;height:40px;border-radius:50%;cursor:pointer;z-index:9001;line-height:1}}
-#focus-close:hover{{background:#444}}
-#focus-img{{width:100vw;height:calc(100vh - 50px);object-fit:contain;display:block}}
-#focus-info{{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);font-size:.8rem;color:#aaa;background:rgba(0,0,0,.6);padding:4px 16px;border-radius:20px;white-space:nowrap;max-width:90%}}
-#focus-warning{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a1a;border:1px solid var(--orange);border-radius:10px;padding:24px;max-width:480px;text-align:center;z-index:9002;display:flex;flex-direction:column;gap:14px;align-items:center}}
+#focus-overlay{{position:fixed;inset:0;background:#000;z-index:9000;display:flex;flex-direction:column;align-items:stretch;padding:0}}
+#focus-img{{width:100vw;height:calc(100vh - 52px);object-fit:contain;display:block;margin:0}}
+#focus-bar{{position:absolute;bottom:0;left:0;right:0;height:52px;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:space-between;padding:0 16px;gap:12px;z-index:9001;border-top:1px solid #333}}
+#focus-info{{font-size:.78rem;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}}
+#focus-controls{{display:flex;align-items:center;gap:8px;flex-shrink:0}}
+#focus-close{{position:absolute;top:10px;right:14px;background:transparent;border:2.5px solid #e03;color:#e03;font-size:1rem;font-weight:bold;width:34px;height:34px;border-radius:50%;cursor:pointer;z-index:9002;line-height:1;display:flex;align-items:center;justify-content:center}}
+#focus-close:hover{{background:#e03;color:#fff}}
+.focus-select{{background:#1e1e2e;border:1px solid #555;color:#e0e0e0;border-radius:6px;padding:4px 8px;font-size:.78rem;cursor:pointer;height:30px}}
+.focus-select:focus{{outline:none;border-color:#4a9eff}}
+.focus-auto-btn{{background:#1e1e2e;border:1px solid #555;color:#aaa;border-radius:6px;padding:4px 10px;font-size:.75rem;cursor:pointer;height:30px}}
+.focus-auto-btn:hover{{border-color:#4a9eff;color:#4a9eff}}
+#focus-warning{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a1a;border:1px solid var(--orange);border-radius:10px;padding:24px;max-width:480px;text-align:center;z-index:9003;display:flex;flex-direction:column;gap:14px;align-items:center}}
 #focus-warn-text{{color:#f5b942;font-size:.9rem;line-height:1.5}}
 /* ── Toast ── */
 #toast{{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);padding:10px 22px;border-radius:24px;color:#fff;font-size:.85rem;z-index:9100;pointer-events:none;transition:opacity .3s}}
@@ -10299,13 +10482,31 @@ header h1{{cursor:pointer}}
 
 <!-- ── Focus / full-screen enhanced view overlay ──────────────────────────── -->
 <div id="focus-overlay" style="display:none">
-  <button id="focus-close" onclick="closeFocus()" title="Exit enhanced view">&#x2715;</button>
+  <button id="focus-close" onclick="closeFocus()" title="Exit enhanced view (Esc)">&#x2715;</button>
   <div id="focus-warning" style="display:none">
     <span id="focus-warn-text"></span>
     <button onclick="document.getElementById('focus-warning').style.display='none'">OK</button>
   </div>
   <img id="focus-img" alt="Enhanced view">
-  <div id="focus-info"></div>
+  <div id="focus-bar">
+    <div id="focus-info">Loading…</div>
+    <div id="focus-controls">
+      <select id="focus-res-sel" class="focus-select" title="Resolution" onchange="focusPickRes(this.value)">
+        <option value="">Resolution…</option>
+      </select>
+      <select id="focus-fps-sel" class="focus-select" title="FPS cap" onchange="focusPickFps(this.value)">
+        <option value="uncapped">Uncapped</option>
+        <option value="30">30 fps</option>
+        <option value="20">20 fps</option>
+        <option value="15">15 fps</option>
+        <option value="10">10 fps</option>
+        <option value="5">5 fps</option>
+        <option value="2">2 fps</option>
+        <option value="1">1 fps</option>
+      </select>
+      <button class="focus-auto-btn" onclick="focusResetAuto()" title="Let the system adapt automatically">Auto</button>
+    </div>
+  </div>
 </div>
 
 <!-- ── Toast notification ─────────────────────────────────────────────────── -->
@@ -10347,6 +10548,8 @@ def make_app() -> web.Application:
     app.router.add_get(   "/api/logs",                            api_logs)
     app.router.add_post(  "/snap/focus/{camera_id}",              handle_focus_set)
     app.router.add_delete("/snap/focus",                          handle_focus_clear)
+    app.router.add_post(  "/snap/focus/tier",                     handle_focus_set_tier)
+    app.router.add_get(   "/snap/focus/profiles",                 handle_focus_profiles)
     app.router.add_post(  "/api/cameras/{camera_id}/motion",      api_motion_toggle)
     app.router.add_get(   "/api/cameras/{camera_id}/motion",      api_motion_status)
     app.router.add_get(   "/api/storage",                         api_storage_list)
