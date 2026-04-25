@@ -1,3 +1,34 @@
+## 2.1.0
+- Restored all core functions lost in the v2.0.6 duplicate-section removal:
+  build_authenticated_url, go2rtc_add, go2rtc_remove, go2rtc_source,
+  go2rtc_register_all, probe_stream_details, _drain_stderr,
+  _try_hevc_plus_fallback, run_scan, _probe_host_port, handle_stream,
+  handle_stream_test — the app could start but crashed on any scan,
+  credential entry, or stream operation without these
+- Reconstructed from session transcripts to match original implementations:
+  go2rtc_add uses correct PUT API (params=name, data=url body); go2rtc_source
+  is sync and builds ffmpeg:// wrapper URLs for HEVC cameras; run_scan uses
+  the real _probe_host_port helper for per-port probing; build_authenticated_url
+  uses the "credentials" field (not "creds") consistent with api_set_credentials
+- Added _go2rtc_streams tracking set and BLACKLIST global (loaded from disk)
+- probe_stream_details uses ffprobe only (simpler and more reliable than
+  going through go2rtc's stream API)
+- handle_stream: real MJPEG proxy via ffmpeg pipe with hw decode support,
+  proper _drain_stderr integration, and CRLF boundary headers
+- _probe_host_port: real per-port probing helper supporting RTSP, MJPEG,
+  HLS, RTMP, WebRTC, WS-RTSP with saved credential re-use
+- _try_hevc_plus_fallback: uses "credentials" field, tries sub_stream_url
+  then Hikvision path-convention sub-stream mapping
+- run_scan: real 4-stage implementation preserving user-saved cameras,
+  merging multicast-only ONVIF/SSDP results, and excluding BLACKLIST entries
+
+## 2.0.7
+- Fix: NameError crash on startup — _probe_hw_decoders() was only defined
+  in the duplicate code section that was removed in v2.0.6. The function
+  probes v4l2m2m and vaapi decoder availability at startup and populates
+  _HW_UNAVAILABLE so snap_loop skips unavailable decoders. Re-implemented
+  as a proper module-level async function before main().
+
 ## 2.0.6
 - Post-upgrade scan now re-runs the full ONVIF authentication flow for any
   saved ONVIF camera that has stored credentials. Previously the verification

@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.0.6"  # must match config.yaml
+CURRENT_VERSION = "2.1.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -341,6 +341,12 @@ _SNAP: dict = {}
 # Timestamp of most recent handle_snapshot call per camera.
 # snap_loop uses this to detect idle (>30s) and stop automatically.
 _snap_last_access: dict = {}
+
+# go2rtc registered stream IDs (for deduplication)
+_go2rtc_streams: set = set()
+
+# IPs/cam-ids the user has explicitly dismissed (loaded from disk)
+BLACKLIST: set = set()
 
 
 def _snap_state(camera_id: str) -> dict:
@@ -2325,11 +2331,6 @@ def probe_http_identity(ip: str, port: int, timeout: int = 5) -> dict:
                 return result  # found a match — stop
 
     return result
-
-
-def probe_http_for_camera(ip: str, port: int, timeout: int = 4) -> bool:
-    """Thin wrapper — returns True if probe_http_identity says is_camera."""
-    return probe_http_identity(ip, port, timeout).get("is_camera", False)
 
 
 def probe_http_for_camera(ip: str, port: int, timeout: int = 4) -> bool:
@@ -6308,6 +6309,671 @@ function esc(s) {
 """
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Core streaming / go2rtc / scan functions (restored for v2.1.0)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_authenticated_url(camera: dict, url_key: str = "stream_url") -> str | None:
+    """Return stream URL with credentials embedded, or None if no URL."""
+    url = camera.get(url_key) or camera.get("stream_url")
+    if not url:
+        return None
+    creds = camera.get("credentials")
+    if creds:
+        try:
+            u, p = decrypt_creds(creds)
+            proto, rest = url.split("://", 1)
+            rest = re.sub(r"^[^@]+@", "", rest)   # strip existing creds
+            url  = f"{proto}://{u}:{p}@{rest}"
+        except Exception as ex:
+            log.warning(f"build_authenticated_url decrypt: {ex}")
+    return url
+
+
+
+
+async def go2rtc_add(cid: str, url: str) -> bool:
+    """Register (or update) a stream source in go2rtc."""
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.put(
+                f"{GO2RTC_API}/api/streams",
+                params={"name": cid},
+                data=url,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as r:
+                ok = r.status < 300
+                if ok:
+                    _go2rtc_streams.add(cid)
+                    log.info(f"go2rtc: registered {cid}")
+                return ok
+    except Exception as ex:
+        log.debug(f"go2rtc_add {cid}: {ex}")
+        return False
+
+
+
+
+async def go2rtc_remove(cid: str) -> None:
+    """Remove a stream from go2rtc."""
+    _go2rtc_streams.discard(cid)
+    try:
+        async with aiohttp.ClientSession() as sess:
+            await sess.delete(
+                f"{GO2RTC_API}/api/streams",
+                params={"name": cid},
+                timeout=aiohttp.ClientTimeout(total=3),
+            )
+    except Exception:
+        pass
+
+
+
+
+def go2rtc_source(camera: dict, url: str) -> str:
+    """
+    Build the go2rtc source string for a camera.
+    HEVC cameras need an ffmpeg:// wrapper so go2rtc can transcode to H.264
+    before serving MJPEG (go2rtc can only MJPEG-encode H.264 natively).
+    """
+    codec = (camera.get("stream_codec") or "").lower()
+    w     = camera.get("stream_width") or 0
+    if codec in ("hevc", "h265"):
+        if w >= 3840:
+            params = "video=h264&width=480&height=270&fps=4"
+        else:
+            params = "video=h264&width=640&height=360&fps=8"
+        return f"ffmpeg:{url}#{params}"
+    return url
+
+
+
+
+async def go2rtc_register_all() -> None:
+    """Register all ready cameras with go2rtc on startup."""
+    count = 0
+    for cam in list(CAMERAS.values()):
+        if cam.get("status") == "ready":
+            url = build_authenticated_url(cam)
+            if url:
+                src = go2rtc_source(cam, url)
+                if await go2rtc_add(cam["id"], src):
+                    count += 1
+    if count:
+        log.info(f"go2rtc: registered {count} camera(s) on startup")
+
+
+
+
+async def probe_stream_details(url: str, proto: str) -> dict:
+    """
+    Run ffprobe on a confirmed stream URL to extract codec, resolution,
+    FPS, and audio info.  Called after credentials are accepted.
+    Returns a flat dict of stream_* fields, empty on failure.
+    """
+    extra = ["-rtsp_transport", "tcp"] if proto in ("RTSP", "DVR", "ONVIF") else []
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", *extra,
+            "-show_streams", "-print_format", "json", "-i", url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=12)
+        if proc.returncode != 0:
+            return {}
+        streams = json.loads(out.decode("utf-8", errors="replace")).get("streams", [])
+        video = next((s for s in streams if s.get("codec_type") == "video"), None)
+        audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        result: dict = {}
+        if video:
+            try:
+                n, d = video.get("avg_frame_rate", "0/1").split("/")
+                fps = round(int(n) / int(d), 1) if int(d) else 0
+            except Exception:
+                fps = 0
+            result.update({
+                "stream_codec":   video.get("codec_name", ""),
+                "stream_width":   video.get("width"),
+                "stream_height":  video.get("height"),
+                "stream_fps":     fps,
+                "stream_profile": video.get("profile", ""),
+            })
+        if audio:
+            result["stream_audio"] = audio.get("codec_name", "")
+        log.info(f"  probe_stream_details: {result}")
+        return result
+    except Exception as ex:
+        log.debug(f"probe_stream_details: {ex}")
+        return {}
+
+
+
+
+async def _drain_stderr(proc: object, label: str) -> None:
+    """
+    Drain ffmpeg stderr to prevent OS pipe buffer deadlock.
+    Logs collected lines on exit and auto-detects:
+      - v4l2m2m / vaapi hardware decoder unavailability
+      - Hikvision H.265+ (Multi-layer HEVC) incompatibility
+    """
+    lines: list[str] = []
+    try:
+        while True:
+            line = await proc.stderr.readline()
+            if not line:
+                break
+            decoded = line.decode("utf-8", errors="replace").rstrip()
+            if decoded and "deprecated pixel format" not in decoded:
+                lines.append(decoded)
+    except asyncio.CancelledError:
+        try:
+            remaining = await proc.stderr.read(8192)
+            for ln in remaining.decode("utf-8", errors="replace").splitlines():
+                if ln.strip() and "deprecated pixel format" not in ln:
+                    lines.append(ln.strip())
+        except Exception:
+            pass
+    except Exception:
+        pass
+    if not lines:
+        return
+    joined = " | ".join(lines)[:600]
+    log.warning(f"Stream {label} ffmpeg stderr: {joined}")
+    for hw in ("hevc_v4l2m2m", "h264_v4l2m2m", "hevc_vaapi", "h264_vaapi"):
+        if hw in joined and "Could not find a valid device" in joined:
+            _HW_UNAVAILABLE.add(hw)
+            log.info(f"Marked {hw} as unavailable on this system")
+    if "Multi-layer HEVC" in joined:
+        cam_id = label.replace("SNAP:", "").strip()
+        if cam_id in CAMERAS and not CAMERAS[cam_id].get("hevc_plus_warning"):
+            CAMERAS[cam_id]["hevc_plus_warning"] = True
+            log.warning(f"Camera {cam_id}: H.265+ (Hikvision proprietary) detected — "
+                        f"fix: camera UI → Video → Encoding → change H.265+ to H.265")
+
+
+
+
+async def _try_hevc_plus_fallback(camera_id: str, camera: dict,
+                                   url: str) -> str | None:
+    """
+    Hikvision H.265+ cameras use a proprietary multi-layer codec that standard
+    ffmpeg cannot decode. When detected, try a sub-stream fallback.
+    Returns a working alternate URL, or None.
+    """
+    log.info(f"snap_loop [{camera_id}]: attempting H.265+ fallback")
+    loop = asyncio.get_event_loop()
+
+    def _try_probe(test_url: str) -> bool:
+        u, p = "", ""
+        try:
+            creds = camera.get("credentials")
+            if creds:
+                u, p = decrypt_creds(creds)
+        except Exception:
+            pass
+        return probe_rtsp(test_url, u, p, timeout=6, label=f"{camera_id}/h265plus")
+
+    # 1. Explicit sub-stream URL stored on the camera dict
+    sub_url = camera.get("sub_stream_url")
+    if sub_url:
+        auth_sub = build_authenticated_url(camera, "sub_stream_url")
+        if auth_sub and await loop.run_in_executor(None, _try_probe, auth_sub):
+            log.info(f"snap_loop [{camera_id}]: H.265+ → sub_stream_url")
+            return auth_sub
+
+    # 2. Hikvision path-convention sub-stream mapping
+    from urllib.parse import urlparse as _up
+    parsed = _up(url)
+    sub_paths = {
+        "/Streaming/Channels/101":       "/Streaming/Channels/102",
+        "/Streaming/Channels/1":         "/Streaming/Channels/2",
+        "/ISAPI/Streaming/channels/101": "/ISAPI/Streaming/channels/102",
+        "/h264/ch1/main/av_stream":      "/h264/ch1/sub/av_stream",
+        "/h265/ch1/main/av_stream":      "/h265/ch1/sub/av_stream",
+    }
+    sub_path = sub_paths.get(parsed.path)
+    if sub_path:
+        auth_main = build_authenticated_url(camera) or url
+        alt_auth = auth_main.replace(parsed.path, sub_path, 1)
+        if await loop.run_in_executor(None, _try_probe, alt_auth):
+            log.info(f"snap_loop [{camera_id}]: H.265+ → path fallback {_strip_creds(alt_auth)}")
+            return alt_auth
+
+    log.warning(f"snap_loop [{camera_id}]: H.265+ fallback exhausted")
+    return None
+
+
+
+
+
+async def _probe_host_port(ip: str, port: int, hostname: str,
+                            initial_protocol: str, prev: dict,
+                            verdict: str, reason: str, loop) -> dict | None:
+    """
+    Probe a single host:port and return a camera dict if a stream is found,
+    or None if nothing reachable. Uses saved credentials from prev if available.
+    """
+    cid        = f"{ip}_{port}"
+    prev_creds = prev.get("credentials")
+    prev_name  = prev.get("name", hostname)
+    saved_u = saved_p = ""
+    if prev_creds:
+        try:
+            saved_u, saved_p = decrypt_creds(prev_creds)
+        except Exception:
+            pass
+
+    def base(proto: str, url: str, status: str, display: str = "proxy") -> dict:
+        return {
+            "id": cid, "ip": ip, "hostname": hostname, "port": port,
+            "protocol": proto, "stream_url": url,
+            "requires_credentials": False, "credentials": None,
+            "name": prev_name, "status": status,
+            "user_saved": bool(prev), "display": display,
+            "verdict": verdict, "verdict_reason": reason,
+        }
+
+    if initial_protocol in ("RTSP", "DVR"):
+        url = await loop.run_in_executor(None, find_rtsp_path, ip, port, "", "")
+        if url:
+            return base("RTSP", url, "ready")
+        if saved_u:
+            url = await loop.run_in_executor(None, find_rtsp_path, ip, port, saved_u, saved_p)
+            if url:
+                cam = base("RTSP", url, "ready")
+                cam["credentials"] = prev_creds
+                return cam
+        cam = base("RTSP", "", "needs_credentials")
+        cam["requires_credentials"] = True
+        return cam
+
+    if initial_protocol == "RTMP" or port in (1935, 1936):
+        ok = await loop.run_in_executor(None, probe_rtmp, ip, port)
+        if ok:
+            return base("RTMP", f"rtmp://{ip}:{port}/live/stream", "ready")
+
+    if initial_protocol in ("HTTP", "ONVIF", "UNKNOWN"):
+        url = await loop.run_in_executor(None, probe_mjpeg_http, ip, port, "", "")
+        if url:
+            return base("MJPEG", url, "ready", "mjpeg")
+        if saved_u:
+            url = await loop.run_in_executor(None, probe_mjpeg_http, ip, port, saved_u, saved_p)
+            if url:
+                cam = base("MJPEG", url, "ready", "mjpeg")
+                cam["credentials"] = prev_creds
+                return cam
+
+        url = await loop.run_in_executor(None, probe_hls, ip, port, "", "")
+        if url:
+            return base("HLS", url, "ready", "hls")
+        if saved_u:
+            url = await loop.run_in_executor(None, probe_hls, ip, port, saved_u, saved_p)
+            if url:
+                cam = base("HLS", url, "ready", "hls")
+                cam["credentials"] = prev_creds
+                return cam
+
+        url = await loop.run_in_executor(None, find_rtsp_path, ip, port, "", "")
+        if url:
+            return base("RTSP", url, "ready")
+
+        wrtc = await loop.run_in_executor(None, probe_webrtc, ip, port)
+        if wrtc:
+            cam = base("WebRTC", wrtc, "info", "webrtc")
+            cam["info"] = "WebRTC signaling detected. Direct browser negotiation required."
+            cam["signaling_url"] = wrtc
+            return cam
+
+        ws = await loop.run_in_executor(None, probe_ws_rtsp, ip, port)
+        if ws:
+            cam = base("WS-RTSP", ws, "info", "wsrtsp")
+            cam["info"] = "WS-RTSP endpoint detected."
+            cam["ws_url"] = ws
+            return cam
+
+        if verdict in ("camera", "uncertain"):
+            cam = base("HTTP", "", "needs_credentials")
+            cam["requires_credentials"] = True
+            return cam
+
+    return None
+
+
+
+async def run_scan() -> None:
+    """
+    4-stage network camera discovery:
+      Stage 1 — ARP + ONVIF/SSDP/mDNS multicast (parallel)
+      Stage 2 — Focused nmap port scan on live hosts
+      Stage 3 — Per-port stream probing
+      Stage 4 — Optional broader sweep on silent live hosts
+    """
+    global SCAN_CANCELLED
+    SCAN_CANCELLED = False
+
+    SCAN_STATE.update(running=True, progress=0, stage=1,
+                      stage_label="Stage 1/4 — Live host & multicast discovery",
+                      message="Stage 1/4 — ARP scan + ONVIF/SSDP/mDNS discovery…")
+    loop = asyncio.get_event_loop()
+
+    try:
+        subnet  = await loop.run_in_executor(None, get_local_subnet)
+        gateway = await loop.run_in_executor(None, get_default_gateway)
+        log.info(f"Subnet: {subnet}  Gateway: {gateway}")
+
+        arp_hosts, onvif_results, ssdp_results, mdns_results = await asyncio.gather(
+            loop.run_in_executor(None, discover_live_hosts, subnet),
+            loop.run_in_executor(None, onvif_discover, 5),
+            loop.run_in_executor(None, ssdp_discover, 5),
+            loop.run_in_executor(None, mdns_discover, 5),
+        )
+
+        multicast_ips = (
+            {r["ip"] for r in onvif_results} |
+            {r["ip"] for r in ssdp_results if r.get("is_camera")} |
+            {r["ip"] for r in mdns_results}
+        )
+        all_live = (arp_hosts | multicast_ips) - BLACKLIST
+        if gateway:
+            all_live.discard(gateway)
+        log.info(f"Live: {len(all_live)} host(s) ({len(arp_hosts)} ARP, {len(multicast_ips)} multicast)")
+
+        SCAN_STATE.update(progress=25, stage=2,
+                          stage_label="Stage 2/4 — Camera port scan",
+                          message=f"Stage 2/4 — Scanning camera ports on {len(all_live)} live host(s)…")
+
+        if SCAN_CANCELLED:
+            return
+
+        nmap_results  = await loop.run_in_executor(None, focused_nmap_scan, sorted(all_live))
+        responding_ips = {h["ip"] for h in nmap_results}
+
+        SCAN_STATE.update(progress=55, stage=3,
+                          stage_label="Stage 3/4 — Stream probing",
+                          message=f"Stage 3/4 — Probing {len(nmap_results)} responding host(s)…")
+
+        # Preserve cameras the user has already saved (creds, names, etc.)
+        saved = {cid: c for cid, c in CAMERAS.items() if c.get("user_saved")}
+        CAMERAS.clear()
+        CAMERAS.update(saved)
+
+        total = max(len(nmap_results), 1)
+        for idx, host in enumerate(nmap_results):
+            if SCAN_CANCELLED:
+                break
+            ip, hostname = host["ip"], host.get("hostname", host["ip"])
+            SCAN_STATE.update(
+                progress=55 + int(25 * idx / total),
+                message=f"Stage 3/4 — Probing {ip} ({idx+1}/{len(nmap_results)})…")
+
+            verdict, reason = classify_device(host)
+            for port_info in host.get("open_ports", []):
+                port = port_info["port"]
+                cid  = f"{ip}_{port}"
+                if cid in BLACKLIST:
+                    continue
+                initial = _initial_protocol(port, port_info.get("service", ""),
+                                             port_info.get("product", ""))
+                prev = saved.get(cid, {})
+                cam  = await _probe_host_port(ip, port, hostname, initial,
+                                              prev, verdict, reason, loop)
+                if cam:
+                    CAMERAS[cam["id"]] = cam
+
+        # Stage 4: optional broad sweep on silent live hosts
+        silent = sorted(all_live - responding_ips)
+        if SCAN_OPTIONS.get("broad_sweep") and silent and not SCAN_CANCELLED:
+            SCAN_STATE.update(progress=82, stage=4,
+                              stage_label="Stage 4/4 — Deeper Scan",
+                              message=f"Stage 4/4 — Deeper scan on {len(silent)} unresponsive host(s)…")
+            broad_results = await loop.run_in_executor(None, broad_nmap_scan, silent)
+            for host in broad_results:
+                if SCAN_CANCELLED:
+                    break
+                ip, hostname = host["ip"], host.get("hostname", host["ip"])
+                verdict, reason = classify_device(host)
+                for port_info in host.get("open_ports", []):
+                    port = port_info["port"]
+                    cid  = f"{ip}_{port}"
+                    if cid in BLACKLIST:
+                        continue
+                    initial = _initial_protocol(port, port_info.get("service", ""),
+                                                 port_info.get("product", ""))
+                    prev = saved.get(cid, {})
+                    cam  = await _probe_host_port(ip, port, hostname, initial,
+                                                  prev, verdict, reason, loop)
+                    if cam:
+                        CAMERAS[cam["id"]] = cam
+
+        # Merge multicast-only ONVIF cameras not found by nmap
+        for onvif in onvif_results:
+            ip = onvif["ip"]
+            if ip == gateway or ip in BLACKLIST:
+                continue
+            existing = [c for c in CAMERAS.values() if c["ip"] == ip]
+            if existing:
+                for cam in existing:
+                    cam["onvif"]  = True
+                    cam["xaddrs"] = onvif.get("xaddrs", cam.get("xaddrs", ""))
+            else:
+                cid  = f"{ip}_onvif"
+                prev = saved.get(cid, {})
+                CAMERAS[cid] = {
+                    "id": cid, "ip": ip, "hostname": onvif["name"],
+                    "port": 80, "protocol": "ONVIF",
+                    "stream_url": prev.get("stream_url", ""),
+                    "requires_credentials": True,
+                    "credentials": prev.get("credentials"),
+                    "name": prev.get("name", onvif["name"]),
+                    "xaddrs": onvif.get("xaddrs", ""),
+                    "status": "needs_credentials",
+                    "onvif": True, "user_saved": bool(prev), "display": "proxy",
+                    "verdict": "camera", "verdict_reason": "ONVIF discovered",
+                }
+
+        # Merge multicast-only SSDP cameras
+        for ssdp in ssdp_results:
+            if not ssdp.get("is_camera"):
+                continue
+            ip = ssdp["ip"]
+            if ip == gateway or ip in BLACKLIST:
+                continue
+            if not any(c["ip"] == ip for c in CAMERAS.values()):
+                cid  = f"{ip}_ssdp"
+                prev = saved.get(cid, {})
+                CAMERAS[cid] = {
+                    "id": cid, "ip": ip, "hostname": ssdp.get("name", ip),
+                    "port": 80, "protocol": "HTTP",
+                    "stream_url": "", "requires_credentials": True,
+                    "credentials": prev.get("credentials"),
+                    "name": prev.get("name", ssdp.get("name", ip)),
+                    "status": "needs_credentials",
+                    "user_saved": bool(prev), "display": "proxy",
+                    "verdict": "camera", "verdict_reason": "SSDP/UPnP discovered",
+                }
+
+        save_cameras()
+        ready = sum(1 for c in CAMERAS.values() if c.get("status") == "ready")
+        SCAN_STATE.update(
+            running=False, progress=100, stage=0, stage_label="",
+            message=f"Scan complete — {len(CAMERAS)} device(s), {ready} streaming.",
+        )
+        log.info(SCAN_STATE["message"])
+
+    except asyncio.CancelledError:
+        SCAN_STATE.update(running=False, message="Scan cancelled")
+    except Exception as ex:
+        log.error(f"run_scan error: {ex}", exc_info=True)
+        SCAN_STATE.update(running=False, message=f"Scan error: {ex}")
+    finally:
+        SCAN_CANCELLED = False
+        SCAN_STATE["running"] = False
+
+
+
+
+
+async def handle_stream(request: web.Request) -> web.StreamResponse:
+    """
+    GET /stream/{camera_id} — live MJPEG stream via ffmpeg pipe.
+    Frames are extracted from the camera's RTSP/MJPEG/HLS source and
+    served as multipart/x-mixed-replace. The snap_loop (used for card
+    thumbnails) is separate; this endpoint is for the focus/full view.
+    """
+    camera_id = request.match_info["camera_id"]
+    camera    = CAMERAS.get(camera_id)
+    if not camera:
+        return web.Response(status=404)
+    if camera.get("display") in ("webrtc", "wsrtsp", "info"):
+        return web.Response(status=400, text="Not proxy-streamable")
+
+    url = build_authenticated_url(camera)
+    if not url:
+        return web.Response(status=503, text="No stream URL")
+
+    proto = camera.get("protocol", "RTSP")
+    flags = (["-rtsp_transport", "tcp"] if proto in ("RTSP", "DVR", "ONVIF")
+             else ["-re"] if proto == "HLS" else [])
+
+    stream_codec = (camera.get("stream_codec") or "").lower()
+    stream_w     = camera.get("stream_width") or 0
+    is_hevc      = stream_codec in ("hevc", "h265")
+
+    wanted_hw = ("hevc_v4l2m2m" if is_hevc
+                 else "h264_v4l2m2m" if stream_codec == "h264" else "")
+    hw_dec    = wanted_hw if (CFG_HW_DECODE and wanted_hw
+                               and wanted_hw not in _HW_UNAVAILABLE) else ""
+    hw_args     = ["-c:v", hw_dec] if hw_dec else []
+    thread_args = ["-threads", "2"] if CFG_LIMIT_THREADS else []
+
+    if is_hevc and stream_w >= 3840:
+        vf = "fps=4,scale=640:-2,format=yuvj420p"
+    elif is_hevc:
+        vf = "fps=8,scale=640:-2,format=yuvj420p"
+    else:
+        vf = "fps=10,scale=640:-2,format=yuvj420p"
+
+    response = web.StreamResponse(headers={
+        "Content-Type":      "multipart/x-mixed-replace; boundary=frame",
+        "Cache-Control":     "no-cache",
+        "Pragma":            "no-cache",
+        "Connection":        "keep-alive",
+        "X-Accel-Buffering": "no",
+    })
+    await response.prepare(request)
+
+    proc = drain_t = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-nostdin", "-loglevel", "warning",
+            *flags, *hw_args,
+            "-i", url,
+            "-an", "-vf", vf, *thread_args,
+            "-vcodec", "mjpeg", "-pix_fmt", "yuvj420p",
+            "-q:v", "5", "-f", "mpjpeg", "-boundary_tag", "frame",
+            "pipe:1",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        drain_t = asyncio.create_task(_drain_stderr(proc, camera_id))
+        log.info(f"handle_stream [{camera_id}]: ffmpeg started")
+
+        buf = b""
+        SOI, EOI = bytes([0xFF, 0xD8]), bytes([0xFF, 0xD9])
+        while True:
+            chunk = await asyncio.wait_for(proc.stdout.read(65536), timeout=20)
+            if not chunk:
+                break
+            buf += chunk
+            if len(buf) > 4_000_000:
+                buf = b""
+                continue
+            while True:
+                s = buf.find(SOI)
+                if s < 0:
+                    buf = b""
+                    break
+                e = buf.find(EOI, s + 2)
+                if e < 0:
+                    if s > 0:
+                        buf = buf[s:]
+                    break
+                frame = buf[s:e + 2]
+                buf   = buf[e + 2:]
+                await response.write(
+                    b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                    + str(len(frame)).encode()
+                    + b"\r\n\r\n" + frame + b"\r\n"
+                )
+
+    except (asyncio.TimeoutError, ConnectionResetError, asyncio.CancelledError):
+        pass
+    except Exception as ex:
+        log.debug(f"handle_stream [{camera_id}]: {ex}")
+    finally:
+        if drain_t:
+            drain_t.cancel()
+        if proc and proc.returncode is None:
+            try:
+                proc.kill()
+                await asyncio.wait_for(proc.wait(), timeout=3)
+            except Exception:
+                pass
+        if drain_t:
+            try:
+                await asyncio.wait_for(drain_t, timeout=2)
+            except Exception:
+                pass
+
+    return response
+
+
+
+
+async def handle_stream_test(request: web.Request) -> web.Response:
+    """
+    GET /stream/{camera_id}/test — quick stream reachability check via ffprobe.
+    Returns JSON with codec info or an error.
+    """
+    camera_id = request.match_info["camera_id"]
+    camera    = CAMERAS.get(camera_id)
+    if not camera:
+        return web.json_response({"ok": False, "error": "Not found"}, status=404)
+
+    url = build_authenticated_url(camera)
+    if not url:
+        return web.json_response({"ok": False, "error": "No stream URL"})
+
+    proto = camera.get("protocol", "RTSP")
+    extra = ["-rtsp_transport", "tcp"] if proto in ("RTSP", "DVR", "ONVIF") else []
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", *extra,
+            "-show_entries", "stream=codec_type,codec_name,width,height",
+            "-print_format", "json", "-i", url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
+        if proc.returncode == 0:
+            streams = json.loads(out.decode("utf-8", errors="replace")).get("streams", [])
+            video   = next((s for s in streams if s.get("codec_type") == "video"), None)
+            return web.json_response({
+                "ok":      bool(video),
+                "streams": len(streams),
+                "codec":   video.get("codec_name", "") if video else "",
+                "width":   video.get("width") if video else None,
+                "height":  video.get("height") if video else None,
+            })
+    except Exception as ex:
+        log.debug(f"handle_stream_test {camera_id}: {ex}")
+
+    return web.json_response({"ok": False, "error": "Probe failed"})
+
+
+
 def build_html() -> str:
     js_code = _JS.replace('___BASE___', INGRESS_PATH)
     js_code = js_code.replace('___UNRESTRICTED___',
@@ -6852,6 +7518,85 @@ class _DockerIPFilter(logging.Filter):
         return not (msg.startswith("172.") or
                     msg.startswith('"172.') or
                     " 172." in msg[:20])
+
+
+async def _probe_hw_decoders() -> None:
+    """
+    Probe hardware decoder availability once at startup.
+
+    Tries to decode a 1-frame black H.264/HEVC stream with each v4l2m2m decoder.
+    If ffmpeg exits with error (device not found, not compiled in, etc.), the
+    decoder name is added to _HW_UNAVAILABLE so snap_loop never wastes 3 seconds
+    trying it.
+
+    Logs:
+      HW decoders available: hevc_v4l2m2m, h264_v4l2m2m
+      <decoder>: unavailable (<reason>)
+    """
+    log.info("Probing hardware decoder availability...")
+    decoders = [
+        ("hevc_v4l2m2m", "hevc"),
+        ("h264_v4l2m2m", "h264"),
+        ("hevc_vaapi",   "hevc"),
+        ("h264_vaapi",   "h264"),
+    ]
+    available = []
+    for dec, codec in decoders:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "nullsrc=s=16x16:d=0.1",
+                "-c:v", ("libx264" if codec == "h264" else "libx265"),
+                "-f", "rawvideo", "-",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            # Encode a tiny test clip, then try to decode it with the hw decoder
+            enc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=black:s=16x16:d=0.1",
+                "-c:v", ("libx264" if codec == "h264" else "libx265"),
+                "-f", "matroska", "pipe:1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            encoded, _ = await asyncio.wait_for(enc.communicate(), timeout=10)
+            if not encoded:
+                _HW_UNAVAILABLE.add(dec)
+                log.info(f"  {dec}: unavailable (encode failed)")
+                continue
+
+            dec_proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-c:v", dec,
+                "-i", "pipe:0",
+                "-f", "null", "-",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(
+                dec_proc.communicate(input=encoded), timeout=10)
+            stderr_s = stderr.decode("utf-8", errors="replace")
+
+            if dec_proc.returncode == 0 and "not compiled" not in stderr_s and                "Could not find" not in stderr_s and "Invalid" not in stderr_s:
+                available.append(dec)
+            else:
+                _HW_UNAVAILABLE.add(dec)
+                reason = "not compiled into ffmpeg" if "not compiled" in stderr_s                     else ("device not found" if "Could not find" in stderr_s
+                          else f"rc={dec_proc.returncode}")
+                log.info(f"  {dec}: unavailable ({reason})")
+        except asyncio.TimeoutError:
+            _HW_UNAVAILABLE.add(dec)
+            log.info(f"  {dec}: unavailable (probe timed out)")
+        except Exception as e:
+            _HW_UNAVAILABLE.add(dec)
+            log.info(f"  {dec}: unavailable ({e})")
+
+    if available:
+        log.info(f"HW decoders available: {', '.join(available)}")
+    else:
+        log.info("No hardware decoders available — using software decode")
 
 
 async def main():
