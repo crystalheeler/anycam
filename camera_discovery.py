@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.0.0"  # must match config.yaml
+CURRENT_VERSION = "2.0.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -6869,15 +6869,25 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
             # Select decoder
             # Respect CFG_HW_DECODE toggle: if disabled, skip hw entirely.
-            wanted_hw = ("hevc_v4l2m2m" if is_hevc else
-                         ("h264_v4l2m2m" if stream_codec == "h264" else ""))
-            if not CFG_HW_DECODE:
-                hw_dec = ""
-            elif wanted_hw in _HW_UNAVAILABLE:
-                hw_dec = ""
-                log.info(f"SNAP [{camera_id}]: skipping {wanted_hw} (known unavailable)")
-            else:
-                hw_dec = wanted_hw
+            # Otherwise pick the best available decoder for this codec from
+            # the candidates probed at startup — prefers v4l2m2m (Pi) then
+            # vaapi (Intel/AMD), skipping anything in _HW_UNAVAILABLE.
+            hw_dec = ""
+            if CFG_HW_DECODE:
+                codec_lower = (stream_codec or "").lower()
+                for decoder, _ in _HW_DECODER_CANDIDATES:
+                    if decoder in _HW_UNAVAILABLE:
+                        continue
+                    # Match decoder to stream codec
+                    if codec_lower in ("hevc", "h265") and "hevc" in decoder:
+                        hw_dec = decoder
+                        break
+                    if codec_lower == "h264" and "h264" in decoder:
+                        hw_dec = decoder
+                        break
+                if not hw_dec:
+                    log.debug(f"SNAP [{camera_id}]: no hw decoder available "
+                              f"for codec={stream_codec}, using software")
 
             proc     = await _launch_snap(hw_dec, native_res=native_res)
             state["proc"] = proc

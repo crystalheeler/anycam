@@ -1,3 +1,8 @@
+## 2.0.1
+
+### Bug fix
+- **Hardware decode: use best available decoder for codec, not hardcoded Pi names** — `snap_loop` was hardcoding `hevc_v4l2m2m` / `h264_v4l2m2m` as the only hw decoder candidates. On Intel/AMD hardware, `hevc_vaapi` / `h264_vaapi` would be detected as available by `_probe_hw_decoders()` but never actually used. Now selects the best available decoder from `_HW_DECODER_CANDIDATES` (v4l2m2m preferred over vaapi) based on stream codec and probe results.
+
 ## 2.0.0
 
 ### Improvements
