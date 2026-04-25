@@ -1,3 +1,22 @@
+## 2.1.2
+- Fix: snap_loop now detects persistent sub-stream failures. After 5 consecutive
+  0-frame restarts while polling the sub_stream_url, it permanently falls back
+  to stream_url (main stream) and clears sub_stream_url from the camera record.
+  This resolves the Microseven camera hammering /12 indefinitely when that stream
+  rejects connections with "Invalid data found when processing input".
+- Fix: load_cameras() startup migration now clears sub_stream_url entries that
+  are identical to stream_url (degenerate duplicate saved by old code).
+- Fix: _loadFocusProfiles() no longer clears the Resolution select's placeholder
+  option when the server returns an empty profiles list — the "Resolution…"
+  placeholder is preserved until real profile data is loaded.
+- Fix: handle_focus_profiles produces meaningful dropdown labels even for cameras
+  without full stream metadata (codec, resolution). Falls back to "Stream N"
+  labeling instead of "Profile N".
+- Fix: focus-select dropdowns now use a custom SVG down-arrow instead of the
+  browser native dropdown indicator, which renders as ▲ in HA's ingress webview
+  instead of the expected ▼. Selects now have appearance:none and explicit
+  padding-right to accommodate the inline SVG arrow.
+
 ## 2.1.1
 - Fix: AnyCam no longer creates a camera card for the HA Supervisor's Docker
   bridge IP (172.30.32.1) which mDNS was incorrectly discovering as a camera.

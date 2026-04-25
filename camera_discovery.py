@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.1.1"  # must match config.yaml
+CURRENT_VERSION = "2.1.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1386,7 +1386,11 @@ def load_cameras():
     if not CAMS_FILE.exists():
         return
     try:
-        for cam in json.loads(CAMS_FILE.read_text()):
+        loaded = json.loads(CAMS_FILE.read_text())
+        for cam in loaded:
+            # Migration: remove sub_stream_url == stream_url (pointless duplicate)
+            if cam.get("sub_stream_url") and cam.get("sub_stream_url") == cam.get("stream_url"):
+                cam["sub_stream_url"] = None
             CAMERAS[cam["id"]] = cam
         log.info(f"Loaded {len(CAMERAS)} camera(s)")
     except Exception as e:
@@ -3397,8 +3401,29 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # 0-frame failures: 2s, 4s, 8s, 16s, 32s (cap at 32s).
             # Normal failures (got some frames): always 2s.
             if frames == 0:
-                backoff = min(2 ** min(state.get("zero_frame_streak", 0), 4), 32)
-                state["zero_frame_streak"] = state.get("zero_frame_streak", 0) + 1
+                streak = state.get("zero_frame_streak", 0) + 1
+                state["zero_frame_streak"] = streak
+                backoff = min(2 ** min(streak - 1, 4), 32)
+
+                # After 5 consecutive 0-frame failures, check if we're using
+                # the sub-stream URL. If so, fall back permanently to the main
+                # stream_url — the sub-stream is broken (wrong codec, rejected).
+                if streak >= 5 and not native_res:
+                    cam_now   = CAMERAS.get(camera_id, {})
+                    main_url  = cam_now.get("stream_url", "")
+                    sub_url_s = cam_now.get("sub_stream_url", "")
+                    if sub_url_s and main_url and url != build_authenticated_url(cam_now):
+                        # We are on the sub-stream — fall back to main
+                        main_auth = build_authenticated_url(cam_now)
+                        if main_auth and main_auth != url:
+                            log.warning(f"SNAP [{camera_id}]: sub-stream failed "
+                                        f"{streak}x with 0 frames — falling back "
+                                        f"to main stream {_strip_creds(main_auth)}")
+                            url = main_auth
+                            cam_now["sub_stream_url"] = None
+                            CAMERAS[camera_id] = cam_now
+                            save_cameras()
+                            state["zero_frame_streak"] = 0
             else:
                 backoff = 2
                 state["zero_frame_streak"] = 0
@@ -3837,10 +3862,17 @@ async def handle_focus_profiles(request: web.Request) -> web.Response:
     for i, p in enumerate(profiles):
         w = p.get("stream_width")  or 0
         h = p.get("stream_height") or 0
-        c = (p.get("stream_codec") or "?").upper()
-        label = f"{w}x{h} {c}" if (w and h) else f"Profile {i}"
+        c = (p.get("stream_codec") or "").upper()
+        if w and h and c:
+            label = f"{w}x{h} {c}"
+        elif w and h:
+            label = f"{w}x{h}"
+        elif c:
+            label = f"Stream {i+1} ({c})"
+        else:
+            label = f"Stream {i+1}"
         result.append({"idx": i, "label": label, "width": w, "height": h,
-                       "codec": c})
+                       "codec": c or "?"})
     return web.json_response(result)
 
 
@@ -5540,10 +5572,12 @@ async function _loadFocusProfiles() {
   try {
     const r = await fetch(BASE + '/snap/focus/profiles');
     if (!r.ok) return;
-    _focusProfiles = await r.json();
+    const profiles = await r.json();
+    if (!profiles || profiles.length === 0) return;  // keep placeholder if empty
+    _focusProfiles = profiles;
     const sel = document.getElementById('focus-res-sel');
     if (!sel) return;
-    // Rebuild options
+    // Rebuild options from real profile data
     sel.innerHTML = '';
     _focusProfiles.forEach(p => {
       const opt = document.createElement('option');
@@ -5552,10 +5586,8 @@ async function _loadFocusProfiles() {
       sel.appendChild(opt);
     });
     // Default to first (highest-res) profile
-    if (_focusProfiles.length > 0) {
-      sel.value = '0';
-      _focusCurProf = 0;
-    }
+    sel.value = '0';
+    _focusCurProf = 0;
   } catch(e) {}
 }
 
@@ -7161,7 +7193,7 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 #focus-controls{{display:flex;align-items:center;gap:8px;flex-shrink:0}}
 #focus-close{{position:absolute;top:10px;right:14px;background:transparent;border:2.5px solid #e03;color:#e03;font-size:1rem;font-weight:bold;width:34px;height:34px;border-radius:50%;cursor:pointer;z-index:9002;line-height:1;display:flex;align-items:center;justify-content:center}}
 #focus-close:hover{{background:#e03;color:#fff}}
-.focus-select{{background:#1e1e2e;border:1px solid #555;color:#e0e0e0;border-radius:6px;padding:4px 8px;font-size:.78rem;cursor:pointer;height:30px}}
+.focus-select{{appearance:none;-webkit-appearance:none;background:#1e1e2e url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23aaa'/%3E%3C/svg%3E") no-repeat right 8px center;background-size:10px 6px;border:1px solid #555;color:#e0e0e0;border-radius:6px;padding:4px 28px 4px 8px;font-size:.78rem;cursor:pointer;height:30px;min-width:80px}}
 .focus-select:focus{{outline:none;border-color:#4a9eff}}
 .focus-auto-btn{{background:#1e1e2e;border:1px solid #555;color:#aaa;border-radius:6px;padding:4px 10px;font-size:.75rem;cursor:pointer;height:30px}}
 .focus-auto-btn:hover{{border-color:#4a9eff;color:#4a9eff}}
