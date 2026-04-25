@@ -1,3 +1,15 @@
+## 2.0.6
+- Post-upgrade scan now re-runs the full ONVIF authentication flow for any
+  saved ONVIF camera that has stored credentials. Previously the verification
+  scan only re-probed stream reachability; credential-dependent fixes (such
+  as the v2.0.4 XAddrs dual-URL fix for the Hikvision PTZ) only took effect
+  if the user manually re-entered credentials via Connect Camera. Now on
+  every version update, ONVIF cameras with stored credentials are silently
+  re-authenticated, stream profiles are refreshed, and stream_url /
+  sub_stream_url / stream_profiles are all updated in-place. If re-auth
+  fails (e.g. camera unreachable), the camera falls back to the existing
+  basic RTSP probe and is marked unverified_after_upgrade as before.
+
 ## 2.0.5
 - Fix: enhanced view adaptive ladder now correctly steps down when the stream
   produces 0 frames regardless of run duration. Previously, when ffmpeg hit
