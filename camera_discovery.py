@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.0.1"  # must match config.yaml
+CURRENT_VERSION = "2.0.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -75,6 +75,7 @@ CFG_SKIP_NONREF          = os.environ.get("SKIP_NONREF",    "false").lower() == 
 CFG_LIMIT_THREADS        = os.environ.get("LIMIT_THREADS",  "true").lower()  == "true"
 CFG_STAGGER_POLL         = os.environ.get("STAGGER_POLLING","false").lower() == "true"
 CFG_HW_DECODE            = os.environ.get("HW_DECODE",      "false").lower() == "true"
+CFG_ADAPTIVE_QUALITY     = os.environ.get("ADAPTIVE_QUALITY", "true").lower()  == "true"
 CFG_RECORDINGS           = os.environ.get("RECORDINGS_PATH", "/media/anycam")
 CFG_MOTION_SENS          = int(os.environ.get("MOTION_SENSITIVITY",       "15"))
 CFG_MOTION_COOL          = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
@@ -2917,6 +2918,7 @@ CFG_SKIP_NONREF    = os.environ.get("SKIP_NONREF",    "false").lower() == "true"
 CFG_LIMIT_THREADS  = os.environ.get("LIMIT_THREADS",  "true").lower()  == "true"
 CFG_STAGGER_POLL   = os.environ.get("STAGGER_POLLING","false").lower() == "true"
 CFG_HW_DECODE      = os.environ.get("HW_DECODE",      "false").lower() == "true"
+CFG_ADAPTIVE_QUALITY = os.environ.get("ADAPTIVE_QUALITY", "true").lower()  == "true"
 CFG_RECORDINGS     = os.environ.get("RECORDINGS_PATH", "/media/anycam")
 CFG_MOTION_SENS    = int(os.environ.get("MOTION_SENSITIVITY",       "15"))
 CFG_MOTION_COOL    = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
@@ -6706,6 +6708,11 @@ def _build_focus_ladder(camera: dict) -> list:
                               "stream_width":  camera.get("sub_stream_width"),
                               "stream_height": camera.get("sub_stream_height"),
                               "stream_codec":  camera.get("sub_stream_codec")})
+
+    # When Adaptive Quality is disabled: single tier — top profile, uncapped.
+    # The user gets maximum quality with no stepping at all.
+    if not CFG_ADAPTIVE_QUALITY:
+        return [(0, None)]
 
     ladder = []
     for idx in range(len(profiles)):

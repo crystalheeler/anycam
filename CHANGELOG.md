@@ -1,3 +1,8 @@
+## 2.0.2
+
+### Improvement
+- **Adaptive Quality toggle**: new config option (default ON) controls the adaptive profile/fps ladder in enhanced view. When OFF, enhanced view always uses the highest quality camera profile at uncapped fps with no stepping. When ON (default), the ladder steps through real camera profiles and fps tiers to find a stable setting.
+
 ## 2.0.1
 
 ### Bug fix

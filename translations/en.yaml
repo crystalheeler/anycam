@@ -25,9 +25,19 @@ configuration:
   hw_decode:
     name: Hardware Decode
     description: >-
-      Default OFF. Enables hevc_v4l2m2m / h264_v4l2m2m hardware decoders.
-      Works on native Pi installs with V4L2 device access. Not available in
-      HA Docker containers. Decoder failures are not permanently cached.
+      Default OFF. Enables hardware-accelerated video decoding. At startup
+      AnyCam probes for available decoders (hevc_v4l2m2m / h264_v4l2m2m on
+      Pi 4/5, hevc_vaapi / h264_vaapi on Intel/AMD) and uses the best one
+      available for each stream's codec. Pi 4/5 hardware HEVC requires
+      dtoverlay=rpivid-v4l2 in /boot/firmware/config.txt and a reboot.
+  adaptive_quality:
+    name: Adaptive Quality (Enhanced View)
+    description: >-
+      Default ON. In enhanced view, automatically steps down through available
+      camera stream profiles and fps tiers when the stream is unstable.
+      Switching to a lower camera profile reduces both network bandwidth and
+      CPU decode cost. When OFF, enhanced view always uses the highest quality
+      profile at uncapped fps with no adaptation.
   recordings_path:
     name: Recordings Path
     description: >-
