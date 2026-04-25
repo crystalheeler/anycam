@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "1.9.2"  # must match config.yaml
+CURRENT_VERSION = "2.0.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2932,6 +2932,65 @@ _FOCUSED_CAMERA: str | None = None
 # When v4l2m2m reports "Could not find a valid device", the decoder name
 # is added here so future stream requests skip hw decode immediately.
 _HW_UNAVAILABLE: set = set()
+
+# Ordered list of hw decoders to try, best first.
+# hevc_v4l2m2m — Pi 4/5 hardware HEVC (requires dtoverlay=rpivid-v4l2 in /boot/firmware/config.txt)
+# h264_v4l2m2m — Pi 4 hardware H.264
+# hevc_vaapi   — Intel/AMD GPU VAAPI HEVC
+# h264_vaapi   — Intel/AMD GPU VAAPI H.264
+_HW_DECODER_CANDIDATES: list = [
+    ("hevc_v4l2m2m", ["/dev/video19"]),
+    ("h264_v4l2m2m", ["/dev/video10", "/dev/video11"]),
+    ("hevc_vaapi",   ["/dev/dri/renderD128", "/dev/dri/renderD129"]),
+    ("h264_vaapi",   ["/dev/dri/renderD128", "/dev/dri/renderD129"]),
+]
+
+
+async def _probe_hw_decoders() -> None:
+    """
+    Probe hardware decoder availability once at startup.
+    Marks unavailable decoders in _HW_UNAVAILABLE so snap_loop never
+    attempts them, avoiding per-stream trial-and-error fallback for
+    decoders that will never work on this host.
+
+    Two checks per decoder:
+      1. Device file exists and is accessible (full_access: true in config.yaml
+         makes all host devices visible inside the container; on non-Pi hardware
+         /dev/video19 simply won't exist — skipped cleanly).
+      2. ffmpeg was compiled with the decoder (ffmpeg -decoders output).
+    """
+    import os
+    log.info("Probing hardware decoder availability...")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-decoders",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        compiled_decoders = stdout.decode(errors="replace")
+    except Exception as e:
+        log.warning(f"HW probe: could not run ffmpeg -decoders: {e}")
+        compiled_decoders = ""
+
+    for decoder, device_paths in _HW_DECODER_CANDIDATES:
+        device_ok   = any(os.path.exists(p) for p in device_paths)
+        compiled_ok = decoder in compiled_decoders
+        if not device_ok:
+            _HW_UNAVAILABLE.add(decoder)
+            log.info(f"  {decoder}: unavailable (no device at {device_paths})")
+        elif not compiled_ok:
+            _HW_UNAVAILABLE.add(decoder)
+            log.info(f"  {decoder}: unavailable (not compiled into ffmpeg)")
+        else:
+            log.info(f"  {decoder}: available")
+
+    available = [d for d, _ in _HW_DECODER_CANDIDATES if d not in _HW_UNAVAILABLE]
+    if available:
+        log.info(f"HW decoders available: {', '.join(available)}")
+    else:
+        log.info("HW decoders: none available — using software decode")
+
 
 # Circular log buffer — last 200 WARNING/ERROR entries for the status dot.
 # Structure: [{"level": "warning"|"error", "msg": str, "t": float}, ...]
@@ -6608,7 +6667,6 @@ _ADAPTIVE_FPS_MAX:       int   = 30    # start fps cap (steps down by 1 each res
 _ADAPTIVE_UNSTABLE_S:    float = 8.0   # run shorter than this with few frames = unstable
 _ADAPTIVE_UNSTABLE_FR:   int   = 15    # fewer frames than this = unstable
 _ADAPTIVE_RESTART_LIMIT: int   = 1     # restarts at locked tier before stepping down
-_ADAPTIVE_SCALE_STEPS:   list  = [1920, 1280]  # intermediate width stops (px)
 _FOCUS_ADAPTIVE:         dict  = {}    # camera_id → {tier_idx, locked, run_start, ladder,
                                        #               restarts_since_lock}
 
@@ -6616,36 +6674,44 @@ _FOCUS_ADAPTIVE:         dict  = {}    # camera_id → {tier_idx, locked, run_st
 def _build_focus_ladder(camera: dict) -> list:
     """
     Build the ordered adaptive quality ladder for focus mode.
-    Returns list of (url_key, fps, scale_w) tuples, best quality first.
+    Returns list of (profile_idx, fps) tuples, best quality first.
 
-    Order is FPS-FIRST within each resolution block:
+      profile_idx: index into camera["stream_profiles"] (0 = highest res)
+      fps:         None (uncapped) or int fps cap
 
-      native @ 30fps → native @ 29fps → ... → native @ 1fps
-      1920px @ 30fps → 1920px @ 29fps → ... → 1920px @ 1fps
-      sub    @ 30fps → sub    @ 29fps → ... → sub    @ 1fps
+    Order is FPS-FIRST within each profile block:
 
-    This means one step-down reduces fps by 1 at the current resolution.
-    Only after exhausting all fps values (down to 1fps) does the resolution drop.
+      profile[0] @ uncapped → profile[0] @ 30fps → ... → profile[0] @ 1fps
+      profile[1] @ uncapped → profile[1] @ 30fps → ... → profile[1] @ 1fps
+      ...
 
-    Intermediate scaled resolutions are only inserted when the native stream
-    width is ≥1.5× the scale target (never upscale, always a real reduction).
+    Each step-down reduces fps by 1 at the current profile. Only after
+    exhausting all fps values (down to 1fps) does the camera profile drop.
+    Switching to a lower-index profile genuinely reduces decode CPU because
+    the camera sends fewer pixels over the network.
+
+    Fake ffmpeg post-decode scaling (scale=WxH) is intentionally NOT used
+    because it does NOT reduce CPU decode pressure.
     """
-    stream_w = camera.get("stream_width") or 0
+    profiles = camera.get("stream_profiles") or []
+    if not profiles:
+        # Fallback for cameras discovered before stream_profiles was added:
+        # synthesise entries from stored stream_url / sub_stream_url.
+        profiles = [{"url": camera.get("stream_url", ""),
+                     "stream_width":  camera.get("stream_width"),
+                     "stream_height": camera.get("stream_height"),
+                     "stream_codec":  camera.get("stream_codec")}]
+        if camera.get("sub_stream_url"):
+            profiles.append({"url": camera.get("sub_stream_url", ""),
+                              "stream_width":  camera.get("sub_stream_width"),
+                              "stream_height": camera.get("sub_stream_height"),
+                              "stream_codec":  camera.get("sub_stream_codec")})
 
-    # Ordered resolution blocks: (url_key, scale_w)
-    res_blocks = [("stream_url", None)]
-    for scale_w in _ADAPTIVE_SCALE_STEPS:
-        if stream_w >= int(scale_w * 1.5):
-            res_blocks.append(("stream_url", scale_w))
-    if camera.get("sub_stream_url"):
-        res_blocks.append(("sub_stream_url", None))
-
-    # For each resolution block: uncapped first, then 30fps → 29fps → ... → 1fps
     ladder = []
-    for url_key, scale_w in res_blocks:
-        ladder.append((url_key, None, scale_w))          # uncapped — always first
+    for idx in range(len(profiles)):
+        ladder.append((idx, None))                   # uncapped — always first
         for fps in range(_ADAPTIVE_FPS_MAX, 0, -1):
-            ladder.append((url_key, fps, scale_w))
+            ladder.append((idx, fps))
 
     return ladder
 
@@ -6706,7 +6772,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         ffmpeg_url = url
 
         if native_res:
-            # Focus mode: use adaptive ladder to find best stable (res, fps) combo.
+            # Focus mode: use adaptive ladder to step through camera profiles + fps.
             cam_now  = CAMERAS.get(camera_id, camera)
             ada      = _FOCUS_ADAPTIVE.setdefault(camera_id, {
                 "tier_idx": 0, "locked": False,
@@ -6714,28 +6780,33 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 "ladder": _build_focus_ladder(cam_now),
                 "restarts_since_lock": 0,
             })
-            # Rebuild ladder if camera gained a sub_stream_url since last focus
             if not ada["ladder"]:
                 ada["ladder"] = _build_focus_ladder(cam_now)
-            ladder   = ada["ladder"]
-            tier_idx = min(ada["tier_idx"], len(ladder) - 1)
-            url_key, tier_fps, scale_w = ladder[tier_idx]
-            # Switch URL if the tier requires a different stream (e.g. sub_stream)
-            tier_url = build_authenticated_url(cam_now, url_key=url_key)
+            ladder    = ada["ladder"]
+            tier_idx  = min(ada["tier_idx"], len(ladder) - 1)
+            prof_idx, tier_fps = ladder[tier_idx]
+            profiles  = cam_now.get("stream_profiles") or []
+            prof      = profiles[prof_idx] if prof_idx < len(profiles) else {}
+            # Use the profile's URL directly (already has credentials stripped;
+            # build_authenticated_url re-adds them from camera["credentials"]).
+            prof_url_key = prof.get("_url_key", "stream_url")
+            tier_url     = build_authenticated_url(cam_now, url_key=prof_url_key)
             if tier_url and tier_url != url:
                 log.info(f"SNAP [{camera_id}]: adaptive focus — switching to "
-                         f"{url_key} for tier {tier_idx}")
+                         f"profile[{prof_idx}] for tier {tier_idx}")
             ffmpeg_url = tier_url or url
 
-            # Build vf filter: optional fps cap, optional scale, always format
-            scale_str = f"scale={scale_w}:-2," if scale_w else ""
-            res_label = f"{scale_w}px scaled" if scale_w else f"{stream_w or '?'}px native"
+            # vf filter: fps cap only — NO scale filter (post-decode scaling
+            # doesn't reduce CPU; only using a lower camera profile does).
+            prof_w    = prof.get("stream_width")  or stream_w or "?"
+            prof_h    = prof.get("stream_height") or "?"
+            res_label = f"{prof_w}x{prof_h}"
             if tier_fps is None:
-                vf_used   = f"{scale_str}format=yuvj420p"
-                fps_label = f"adaptive:uncapped {url_key} ({res_label})"
+                vf_used   = "format=yuvj420p"
+                fps_label = f"adaptive:uncapped profile[{prof_idx}] ({res_label})"
             else:
-                vf_used   = f"fps={tier_fps},{scale_str}format=yuvj420p"
-                fps_label = f"adaptive:{tier_fps}fps {url_key} ({res_label})"
+                vf_used   = f"fps={tier_fps},format=yuvj420p"
+                fps_label = f"adaptive:{tier_fps}fps profile[{prof_idx}] ({res_label})"
             ada["run_start"] = time.monotonic()
         elif CFG_LOW_FPS and is_hevc:
             # Low-fps mode for HEVC — 2fps output (decode cost unchanged,
@@ -6994,15 +7065,19 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                                  f"locked tier unstable ({reason}), stepping down")
                     if tier_idx < len(ladder) - 1:
                         ada["tier_idx"] += 1
-                        new_url_key, new_fps, new_scale = ladder[ada["tier_idx"]]
-                        scale_desc = f" @{new_scale}px" if new_scale else ""
+                        new_prof_idx, new_fps = ladder[ada["tier_idx"]]
+                        profiles   = cam_now.get("stream_profiles") or []
+                        new_prof   = profiles[new_prof_idx] if new_prof_idx < len(profiles) else {}
+                        new_res    = (f"{new_prof.get('stream_width')}x"
+                                      f"{new_prof.get('stream_height')}")
                         log.info(
                             f"SNAP [{camera_id}]: adaptive focus — {reason}, "
                             f"stepping down to "
                             f"{'uncapped' if new_fps is None else str(new_fps)+'fps'}"
-                            f" on {new_url_key}{scale_desc}"
+                            f" profile[{new_prof_idx}] ({new_res})"
                         )
-                        next_url = build_authenticated_url(cam_now, url_key=new_url_key)
+                        new_url_key = new_prof.get("_url_key", "stream_url")
+                        next_url    = build_authenticated_url(cam_now, url_key=new_url_key)
                         if next_url:
                             url = next_url
                     else:
@@ -7013,13 +7088,15 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 else:
                     # Run was stable — lock here, reset restart counter
                     if not locked:
-                        _, locked_fps, locked_scale = ladder[tier_idx]
-                        locked_url_key = ladder[tier_idx][0]
-                        scale_desc = f" @{locked_scale}px" if locked_scale else ""
+                        locked_prof_idx, locked_fps = ladder[tier_idx]
+                        profiles    = cam_now.get("stream_profiles") or []
+                        locked_prof = profiles[locked_prof_idx] if locked_prof_idx < len(profiles) else {}
+                        locked_res  = (f"{locked_prof.get('stream_width')}x"
+                                       f"{locked_prof.get('stream_height')}")
                         log.info(
                             f"SNAP [{camera_id}]: adaptive focus — stable at "
                             f"{'uncapped' if locked_fps is None else str(locked_fps)+'fps'}"
-                            f" on {locked_url_key}{scale_desc} — locking"
+                            f" profile[{locked_prof_idx}] ({locked_res}) — locking"
                         )
                         ada["locked"] = True
                         ada["restarts_since_lock"] = 0
@@ -7103,22 +7180,13 @@ async def handle_snapshot(request: web.Request) -> web.Response:
             if ada and ada.get("ladder"):
                 ladder   = ada["ladder"]
                 tier_idx = min(ada.get("tier_idx", 0), len(ladder) - 1)
-                uk, t_fps, t_scale = ladder[tier_idx]
+                prof_idx, t_fps = ladder[tier_idx]
                 cam_now  = CAMERAS.get(camera_id, {})
-                if t_scale:
-                    # Scaled: compute proportional height
-                    sw = cam_now.get("stream_width") or 0
-                    sh = cam_now.get("stream_height") or 0
-                    sh_scaled = round(t_scale * sh / sw) if sw else 0
-                    step_res  = f"{t_scale}x{sh_scaled}" if sh_scaled else f"{t_scale}x?"
-                elif uk == "sub_stream_url":
-                    ssw = cam_now.get("sub_stream_width") or "?"
-                    ssh = cam_now.get("sub_stream_height") or "?"
-                    step_res = f"{ssw}x{ssh}"
-                else:
-                    sw = cam_now.get("stream_width") or "?"
-                    sh = cam_now.get("stream_height") or "?"
-                    step_res = f"{sw}x{sh}"
+                profiles = cam_now.get("stream_profiles") or []
+                prof     = profiles[prof_idx] if prof_idx < len(profiles) else {}
+                pw       = prof.get("stream_width")  or cam_now.get("stream_width")  or "?"
+                ph       = prof.get("stream_height") or cam_now.get("stream_height") or "?"
+                step_res = f"{pw}x{ph}"
                 step_fps = "uncapped" if t_fps is None else str(t_fps)
             return web.Response(body=frame, content_type="image/jpeg",
                                 headers={"Cache-Control": "no-cache",
@@ -7771,16 +7839,47 @@ async def api_set_credentials(request):
                 main_s = stream_candidates[0]
                 sub_s  = stream_candidates[-1] if len(stream_candidates) > 1 else None
 
-                log.info(f"  Main stream: {_strip_creds(main_s['url'])} "
-                         f"({main_s.get('stream_width')}x{main_s.get('stream_height')})")
-                if sub_s:
-                    log.info(f"  Sub stream:  {_strip_creds(sub_s['url'])} "
-                             f"({sub_s.get('stream_width')}x{sub_s.get('stream_height')})")
+                # Build stream_profiles: all candidates in resolution order,
+                # each tagged with a _url_key so the adaptive ladder can look up
+                # the right URL via build_authenticated_url().
+                # profile[0] = highest res (main), profile[-1] = lowest res (sub).
+                stream_profiles = []
+                for i, cand in enumerate(stream_candidates):
+                    url_key = ("stream_url" if i == 0
+                               else ("sub_stream_url" if i == len(stream_candidates) - 1
+                                     else f"stream_profile_{i}_url"))
+                    stream_profiles.append({
+                        "url":          cand["url"],
+                        "_url_key":     url_key,
+                        "stream_width":  cand.get("stream_width"),
+                        "stream_height": cand.get("stream_height"),
+                        "stream_codec":  cand.get("stream_codec"),
+                        "stream_fps":    cand.get("stream_fps"),
+                        "stream_audio":  cand.get("stream_audio"),
+                    })
+
+                log.info(f"  Profiles ranked by resolution:")
+                for i, p in enumerate(stream_profiles):
+                    log.info(f"    [{i}] {_strip_creds(p['url'])} "
+                             f"({p.get('stream_width')}x{p.get('stream_height')}) "
+                             f"{p.get('stream_codec','?')}")
 
                 main_token = main_s.get("token", profiles[0]["token"])
                 cid = f"{ip}_onvif_{main_token}"
                 main_details = {k: v for k, v in main_s.items()
                                 if k not in ("url", "token", "name")}
+
+                # Build extra-profile URL keys for the CAMERAS dict so
+                # build_authenticated_url can look them up by key.
+                extra_urls = {}
+                for i, cand in enumerate(stream_candidates):
+                    if i == 0:
+                        pass   # main → stream_url (added below via main_s["url"])
+                    elif i == len(stream_candidates) - 1:
+                        pass   # last → sub_stream_url (added below)
+                    else:
+                        extra_urls[f"stream_profile_{i}_url"] = cand["url"]
+
                 # Always reset hevc_plus_warning on (re-)discovery so stale flags
                 # from previous sessions or wrong stream URLs don't carry forward.
                 # _drain_stderr will re-set it at runtime if ffmpeg actually sees
@@ -7791,11 +7890,13 @@ async def api_set_credentials(request):
                     "port": port, "protocol": "RTSP", "onvif": True,
                     "stream_url":     main_s["url"],
                     "sub_stream_url": sub_s["url"] if sub_s else None,
+                    "stream_profiles": stream_profiles,
                     "requires_credentials": False, "credentials": enc_creds,
                     "name": camera.get("name", ip),
                     "status": "ready", "display": "proxy", "user_saved": True,
                     "verdict": "camera", "verdict_reason": "ONVIF profile",
                     "hevc_plus_warning": False,  # reset; _drain_stderr re-sets if needed
+                    **extra_urls,
                     **main_details,
                 }
                 CAMERAS.pop(camera_id, None)
@@ -10165,6 +10266,13 @@ async def main():
     # Suppress Docker bridge IP entries from the aiohttp access log
     _access_log = logging.getLogger("aiohttp.access")
     _access_log.addFilter(_DockerIPFilter())
+
+    # ── Hardware decoder availability probe ───────────────────────────────────
+    # Run once at startup. Checks which hw decoders ffmpeg was compiled with
+    # AND which devices are actually accessible (full_access: true exposes all
+    # host devices; on non-Pi hardware the v4l2m2m devices simply won't exist).
+    # Populates _HW_UNAVAILABLE so snap_loop never tries an unavailable decoder.
+    await _probe_hw_decoders()
 
     app = make_app()
     runner = web.AppRunner(app)

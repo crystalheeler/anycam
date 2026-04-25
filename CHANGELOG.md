@@ -1,3 +1,13 @@
+## 2.0.0
+
+### Improvements
+- **Multi-profile stream ladder**: ONVIF discovery now stores all discovered profiles as `stream_profiles` (sorted highest→lowest resolution). The adaptive focus ladder steps through real camera profiles instead of fake ffmpeg post-decode scaling. Switching to a lower profile genuinely reduces CPU decode pressure because the camera transmits fewer pixels over the network. All `scale=WxH` ffmpeg filter steps removed.
+- **Hardware decode**: added `full_access: true` to config.yaml so the container can access all host hardware devices. At startup, `_probe_hw_decoders()` checks each candidate decoder (hevc_v4l2m2m, h264_v4l2m2m, hevc_vaapi, h264_vaapi) against both device file existence and ffmpeg compiled support, pre-populating `_HW_UNAVAILABLE` so snap_loop never attempts unavailable decoders. On non-Pi hardware, Pi-specific devices simply won't exist and are silently skipped.
+
+### Notes
+- Pi 4/5 hardware HEVC decode requires `dtoverlay=rpivid-v4l2` in `/boot/firmware/config.txt` and a reboot. Once set, the add-on will detect and use `hevc_v4l2m2m` automatically.
+- Cameras discovered before v1.9.3 will not have `stream_profiles` stored — the ladder falls back to `stream_url`/`sub_stream_url` for those until re-discovered.
+
 ## 1.9.2
 
 ### Improvement
