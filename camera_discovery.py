@@ -59,13 +59,11 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.1.5"  # must match config.yaml
+CURRENT_VERSION = "2.1.6"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
-GO2RTC_PORT      = 1984
-GO2RTC_RTSP_PORT = 8554
-GO2RTC_API       = f"http://127.0.0.1:{GO2RTC_PORT}"
+# go2rtc removed — snap_loop connects directly to cameras
 
 # ── HA add-on configuration options (set in the HA UI Config tab) ─────────────
 # Read from env vars set by the HA supervisor from config.yaml options.
@@ -342,8 +340,7 @@ _SNAP: dict = {}
 # snap_loop uses this to detect idle (>30s) and stop automatically.
 _snap_last_access: dict = {}
 
-# go2rtc registered stream IDs (for deduplication)
-_go2rtc_streams: set = set()
+
 
 # IPs/cam-ids the user has explicitly dismissed (loaded from disk)
 BLACKLIST: set = set()
@@ -2906,7 +2903,6 @@ async def _rerun_onvif_auth(camera_id: str, camera: dict,
     if new_cid != camera_id:
         CAMERAS.pop(camera_id, None)
     cam_url = build_authenticated_url(updated) or ""
-    asyncio.create_task(go2rtc_add(new_cid, go2rtc_source(updated, cam_url)))
     log.info(f"  [{camera_id}] ONVIF re-auth OK — {len(stream_profiles)} profile(s) "
              f"updated, new id={new_cid}")
     return True
@@ -4426,14 +4422,11 @@ async def api_set_credentials(request):
                 save_cameras()
                 cam = CAMERAS.get(cid)
                 if cam:
-                    cam_url = build_authenticated_url(cam) or ""
-                    asyncio.create_task(go2rtc_add(cid, go2rtc_source(cam, cam_url)))
-
                     # Run ffprobe to detect the real codec — ONVIF often reports
-                    # "h264" when the camera actually streams HEVC. Snap_loop
-                    # needs the correct codec to build the right ffmpeg pipeline.
+                    # "h264" when the camera actually streams HEVC.
+                    cam_url = build_authenticated_url(cam) or ""
                     async def _fix_codec(cam_id=cid, auth_url=cam_url):
-                        await asyncio.sleep(2.0)   # let go2rtc connect first
+                        await asyncio.sleep(1.0)
                         det = await probe_stream_details(auth_url, "RTSP")
                         real_codec = (det.get("stream_codec") or "").lower()
                         stored = (CAMERAS.get(cam_id, {}).get("stream_codec") or "").lower()
@@ -4510,9 +4503,6 @@ async def api_set_credentials(request):
                   status="ready", user_saved=True, **details)
     save_cameras()
     log.info(f"Credentials accepted for {camera_id}: {_strip_creds(url)}")
-    # Register with go2rtc (best-effort, don't block the response)
-    _cam_url = build_authenticated_url(camera) or url
-    asyncio.create_task(go2rtc_add(camera_id, go2rtc_source(camera, _cam_url)))
     return web.json_response({"status": "ok", "stream_url": _strip_creds(url), **details})
 
 
@@ -4543,7 +4533,6 @@ async def api_delete_camera(request):
     cid = request.match_info["camera_id"]
     CAMERAS.pop(cid, None)
     save_cameras()
-    asyncio.create_task(go2rtc_remove(cid))
     return web.json_response({"status": "ok"})
 
 async def api_confirm_camera(request):
@@ -6357,7 +6346,7 @@ function esc(s) {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core streaming / go2rtc / scan functions (restored for v2.1.0)
+# Core streaming / scan functions
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_authenticated_url(camera: dict, url_key: str = "stream_url") -> str | None:
@@ -6390,75 +6379,6 @@ def build_authenticated_url(camera: dict, url_key: str = "stream_url") -> str | 
 
 
 
-async def go2rtc_add(cid: str, url: str) -> bool:
-    """Register (or update) a stream source in go2rtc."""
-    try:
-        async with aiohttp.ClientSession() as sess:
-            async with sess.put(
-                f"{GO2RTC_API}/api/streams",
-                params={"name": cid},
-                data=url,
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as r:
-                ok = r.status < 300
-                if ok:
-                    _go2rtc_streams.add(cid)
-                    log.info(f"go2rtc: registered {cid}")
-                return ok
-    except Exception as ex:
-        log.debug(f"go2rtc_add {cid}: {ex}")
-        return False
-
-
-
-
-async def go2rtc_remove(cid: str) -> None:
-    """Remove a stream from go2rtc."""
-    _go2rtc_streams.discard(cid)
-    try:
-        async with aiohttp.ClientSession() as sess:
-            await sess.delete(
-                f"{GO2RTC_API}/api/streams",
-                params={"name": cid},
-                timeout=aiohttp.ClientTimeout(total=3),
-            )
-    except Exception:
-        pass
-
-
-
-
-def go2rtc_source(camera: dict, url: str) -> str:
-    """
-    Build the go2rtc source string for a camera.
-    HEVC cameras need an ffmpeg:// wrapper so go2rtc can transcode to H.264
-    before serving MJPEG (go2rtc can only MJPEG-encode H.264 natively).
-    """
-    codec = (camera.get("stream_codec") or "").lower()
-    w     = camera.get("stream_width") or 0
-    if codec in ("hevc", "h265"):
-        if w >= 3840:
-            params = "video=h264&width=480&height=270&fps=4"
-        else:
-            params = "video=h264&width=640&height=360&fps=8"
-        return f"ffmpeg:{url}#{params}"
-    return url
-
-
-
-
-async def go2rtc_register_all() -> None:
-    """Register all ready cameras with go2rtc on startup."""
-    count = 0
-    for cam in list(CAMERAS.values()):
-        if cam.get("status") == "ready":
-            url = build_authenticated_url(cam)
-            if url:
-                src = go2rtc_source(cam, url)
-                if await go2rtc_add(cam["id"], src):
-                    count += 1
-    if count:
-        log.info(f"go2rtc: registered {count} camera(s) on startup")
 
 
 
@@ -7701,9 +7621,7 @@ async def main():
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
     log.info(f"AnyCam on :{PORT}  ingress='{INGRESS_PATH}'")
-    # Register all saved cameras with go2rtc on startup
-    asyncio.get_event_loop().create_task(go2rtc_register_all())
-
+    # Register all saved cameras on startup
     startup_mode = get_startup_mode()
     log.info(f"Startup mode: {startup_mode}")
 

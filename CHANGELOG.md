@@ -1,3 +1,21 @@
+## 2.1.6
+- Removed go2rtc entirely. go2rtc was introduced in v1.4.1 as a streaming
+  backbone but was never wired to serve frames — snap_loop and handle_stream
+  already use ffmpeg directly. go2rtc was running as a sidecar process that
+  held the camera's single RTSP connection indefinitely, preventing snap_loop's
+  ffmpeg from connecting and producing "Invalid data found when processing
+  input" on cameras with a one-session limit (confirmed: 10.1.1the Microseven).
+  The camera was working in v1.8.0–v1.8.3 precisely because go2rtc was
+  absent in that session — snap_loop was the only RTSP client.
+- Removed from Dockerfile: go2rtc binary download, BUILD_ARCH arg, wget
+- Removed from run.sh: go2rtc config write, background start, readiness poll
+- Removed from Python: go2rtc_add, go2rtc_remove, go2rtc_source,
+  go2rtc_register_all functions; GO2RTC_PORT/RTSP_PORT/API constants;
+  _go2rtc_streams global; all call sites at credential entry, camera
+  deletion, ONVIF re-auth, and startup
+- Retained: _fix_codec background task (runs ffprobe after ONVIF credential
+  entry to detect real codec when ONVIF misreports it, e.g. "h264" vs hevc)
+
 ## 2.1.5
 - Fix (definitive): Card view thumbnail polling now always uses stream_url
   (the main RTSP stream), never sub_stream_url. This is the root cause of the
