@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.1.0"  # must match config.yaml
+CURRENT_VERSION = "2.1.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -4317,7 +4317,7 @@ async def api_set_credentials(request):
                          f"audio={det.get('stream_audio','none')}")
                 stream_candidates.append({
                     "url": stream_url, "token": prof["token"],
-                    "name": prof["name"], **det,
+                    "name": prof["name"], "probe_ok": ok, **det,
                 })
 
             # ── Silent DB probe: find additional streams not visible pre-login ─
@@ -4338,7 +4338,11 @@ async def api_set_credentials(request):
                     return (c.get("stream_width") or 0) * (c.get("stream_height") or 0)
                 stream_candidates.sort(key=_res, reverse=True)
                 main_s = stream_candidates[0]
-                sub_s  = stream_candidates[-1] if len(stream_candidates) > 1 else None
+                # Only use a sub-stream that actually passed probe_rtsp.
+                # If the second profile failed probe (e.g. "Connection reset"),
+                # thumbnail polling would hammer a broken URL indefinitely.
+                ok_subs = [c for c in stream_candidates[1:] if c.get("probe_ok")]
+                sub_s   = ok_subs[-1] if ok_subs else None
 
                 # Build stream_profiles: all candidates in resolution order,
                 # each tagged with a _url_key so the adaptive ladder can look up
@@ -6554,6 +6558,11 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
     Probe a single host:port and return a camera dict if a stream is found,
     or None if nothing reachable. Uses saved credentials from prev if available.
     """
+    # Never treat our own ingress port as a camera — it's AnyCam's own web UI
+    local_ip = get_local_ip()
+    if local_ip and ip == local_ip and port == PORT:
+        return None
+
     cid        = f"{ip}_{port}"
     prev_creds = prev.get("credentials")
     prev_name  = prev.get("name", hostname)
@@ -6677,6 +6686,13 @@ async def run_scan() -> None:
         all_live = (arp_hosts | multicast_ips) - BLACKLIST
         if gateway:
             all_live.discard(gateway)
+
+        # Remove Docker/HA-internal bridge IPs and APIPA — never real camera targets.
+        # 172.x.x.x = HA Supervisor Docker bridge (e.g. 172.30.32.1) found by mDNS.
+        # 169.254.x.x = link-local/APIPA addresses.
+        all_live = {ip for ip in all_live
+                    if not ip.startswith("172.")
+                    and not ip.startswith("169.254.")}
         log.info(f"Live: {len(all_live)} host(s) ({len(arp_hosts)} ARP, {len(multicast_ips)} multicast)")
 
         SCAN_STATE.update(progress=25, stage=2,
@@ -6692,6 +6708,16 @@ async def run_scan() -> None:
         SCAN_STATE.update(progress=55, stage=3,
                           stage_label="Stage 3/4 — Stream probing",
                           message=f"Stage 3/4 — Probing {len(nmap_results)} responding host(s)…")
+
+        # Populate ARP_HOSTS for Port Scan tab (all live hosts, not just camera ones)
+        global ARP_HOSTS
+        ARP_HOSTS = [{"ip": h["ip"], "hostname": h.get("hostname", h["ip"]),
+                      "mac": h.get("mac", ""), "vendor": h.get("vendor", "")}
+                     for h in nmap_results]
+        nmap_ips = {h["ip"] for h in nmap_results}
+        for silent_ip in sorted(all_live - nmap_ips):
+            ARP_HOSTS.append({"ip": silent_ip, "hostname": silent_ip,
+                               "mac": "", "vendor": ""})
 
         # Preserve cameras the user has already saved (creds, names, etc.)
         saved = {cid: c for cid, c in CAMERAS.items() if c.get("user_saved")}

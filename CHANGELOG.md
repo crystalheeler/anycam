@@ -1,3 +1,21 @@
+## 2.1.1
+- Fix: AnyCam no longer creates a camera card for the HA Supervisor's Docker
+  bridge IP (172.30.32.1) which mDNS was incorrectly discovering as a camera.
+  All 172.x.x.x and 169.254.x.x addresses are now filtered out of the live
+  host list before port scanning begins.
+- Fix: AnyCam no longer probes its own ingress port (8099) on the Pi's local
+  IP as a potential camera. _probe_host_port now skips port==PORT on local IP.
+- Fix: Port Scan tab now shows all discovered live hosts after a network scan.
+  ARP_HOSTS was defined but never populated — run_scan now fills it from nmap
+  results plus any silent live hosts immediately after the focused port scan.
+- Fix: sub_stream_url is now only stored when probe_rtsp actually succeeded
+  for that ONVIF profile. Previously, a profile that returned "Connection reset
+  by peer" was still saved as sub_stream_url, causing handle_snapshot to hammer
+  a broken URL indefinitely (seen on 10.0.0.22 SecondStreamProfile /12).
+- Fix: enhanced view bottom bar, Resolution/FPS dropdowns, red X close button,
+  Auto button, and focus controls JS (focusPickRes, focusPickFps, focusResetAuto,
+  _loadFocusProfiles) all confirmed at v2.0.5 state from session transcript v10.
+
 ## 2.1.0
 - Restored all core functions lost in the v2.0.6 duplicate-section removal:
   build_authenticated_url, go2rtc_add, go2rtc_remove, go2rtc_source,
