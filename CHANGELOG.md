@@ -1,3 +1,10 @@
+## 2.0.3
+
+### Bug fixes
+- **Duplicate snap_loop after focus exit (root cause fix)**: `snap_loop`'s `finally` block was unconditionally setting `state["task"] = None` when any loop exited. When the lingering focus task finally wound down after being cancelled, it would overwrite the new card-view loop that `handle_snapshot` had already started — causing `handle_snapshot` to start yet another loop. Fixed by only clearing `state["task"]` when it still points to the current task, leaving any newer loop untouched.
+- **Sub-stream codec mismatch**: when `handle_snapshot` starts a snap_loop against the sub-stream URL, it now passes a `snap_camera` dict with the sub-stream's codec/resolution instead of the main stream's. Without this, `snap_loop` would configure ffmpeg for e.g. H.264 while decoding an MJPEG sub-stream, causing "Invalid data found" errors.
+- **Exponential backoff on 0-frame failures**: when ffmpeg repeatedly dies with 0 frames decoded (bad URL, wrong codec, camera rejecting connection), the restart delay now backs off exponentially: 2s → 4s → 8s → 16s → 32s (capped). Normal failures that produced at least one frame still restart at 2s. This prevents continuous hammering of a broken sub-stream URL.
+
 ## 2.0.2
 
 ### Improvement

@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.0.2"  # must match config.yaml
+CURRENT_VERSION = "2.0.3"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -347,12 +347,13 @@ def _snap_state(camera_id: str) -> dict:
     """Return (and lazily create) the snapshot state dict for a camera."""
     if camera_id not in _SNAP:
         _SNAP[camera_id] = {
-            "frame":         None,
-            "frame_time":    0.0,
-            "frame_count":   0,
-            "proc":          None,
-            "task":          None,
-            "restart_count": 0,
+            "frame":             None,
+            "frame_time":        0.0,
+            "frame_count":       0,
+            "proc":              None,
+            "task":              None,
+            "restart_count":     0,
+            "zero_frame_streak": 0,
         }
     return _SNAP[camera_id]
 
@@ -3029,12 +3030,13 @@ def _snap_state(camera_id: str) -> dict:
     """Return (and lazily create) the snapshot state dict for a camera."""
     if camera_id not in _SNAP:
         _SNAP[camera_id] = {
-            "frame":         None,
-            "frame_time":    0.0,
-            "frame_count":   0,
-            "proc":          None,
-            "task":          None,
-            "restart_count": 0,
+            "frame":             None,
+            "frame_time":        0.0,
+            "frame_count":       0,
+            "proc":              None,
+            "task":              None,
+            "restart_count":     0,
+            "zero_frame_streak": 0,
         }
     return _SNAP[camera_id]
 
@@ -7042,6 +7044,17 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
             state["restart_count"] += 1
 
+            # Exponential backoff when ffmpeg keeps dying with 0 frames
+            # (e.g. wrong codec, bad URL, camera rejecting connection).
+            # 0-frame failures: 2s, 4s, 8s, 16s, 32s (cap at 32s).
+            # Normal failures (got some frames): always 2s.
+            if frames == 0:
+                backoff = min(2 ** min(state.get("zero_frame_streak", 0), 4), 32)
+                state["zero_frame_streak"] = state.get("zero_frame_streak", 0) + 1
+            else:
+                backoff = 2
+                state["zero_frame_streak"] = 0
+
             # ── Adaptive fps for focus/native_res mode ────────────────────────
             # Step-down only: never step back up once stable.
             # ── Adaptive fps/res controller for focus/native_res mode ─────────
@@ -7140,13 +7153,19 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                     cam_dict["hevc_plus_warning"] = False
                     cam_dict["hevc_plus_fallback_active"] = True
 
-            log.info(f"SNAP [{camera_id}]: restarting in 2s "
+            log.info(f"SNAP [{camera_id}]: restarting in {backoff}s "
                      f"(#{state['restart_count']})")
-            await asyncio.sleep(2)
+            await asyncio.sleep(backoff)
 
     finally:
         state["proc"] = None
-        state["task"] = None
+        # Only clear state["task"] if it still points to this task.
+        # If handle_snapshot already started a new card-view loop while this
+        # focus task was winding down, state["task"] now points to that newer
+        # loop — clearing it unconditionally would cause handle_snapshot to
+        # start yet another loop (the root cause of the duplicate-loop bug).
+        if state.get("task") is asyncio.current_task():
+            state["task"] = None
         log.info(f"SNAP [{camera_id}]: loop done")
 
 
@@ -7218,8 +7237,19 @@ async def handle_snapshot(request: web.Request) -> web.Response:
     sub_url = camera.get("sub_stream_url")
     if sub_url:
         url = build_authenticated_url(camera, url_key="sub_stream_url")
+        # Build a camera-like dict with sub-stream details so snap_loop
+        # uses the correct codec/resolution for ffmpeg filter sizing.
+        # Without this, snap_loop uses main stream codec (e.g. h264 for a 4K
+        # stream) but tries to decode the sub-stream (e.g. MJPEG) — mismatch
+        # causes "Invalid data found" errors.
+        snap_camera = dict(camera)
+        snap_camera["stream_codec"]  = camera.get("sub_stream_codec")  or camera.get("stream_codec")
+        snap_camera["stream_width"]  = camera.get("sub_stream_width")  or camera.get("stream_width")
+        snap_camera["stream_height"] = camera.get("sub_stream_height") or camera.get("stream_height")
+        snap_camera["stream_fps"]    = camera.get("sub_stream_fps")    or camera.get("stream_fps")
     else:
         url = build_authenticated_url(camera)
+        snap_camera = camera
     if not url:
         return web.Response(status=503, text="No stream URL")
 
@@ -7231,9 +7261,9 @@ async def handle_snapshot(request: web.Request) -> web.Response:
     # Start background snap process if not already running
     if state.get("task") is None or state["task"].done():
         log.info(f"SNAP [{camera_id}]: starting background process "
-                 f"(codec={camera.get('stream_codec') or '?'}, "
-                 f"res={camera.get('stream_width') or '?'}px)")
-        state["task"] = asyncio.create_task(snap_loop(camera_id, url, camera))
+                 f"(codec={snap_camera.get('stream_codec') or '?'}, "
+                 f"res={snap_camera.get('stream_width') or '?'}px)")
+        state["task"] = asyncio.create_task(snap_loop(camera_id, url, snap_camera))
 
     # Wait up to 5s for the very first frame (subsequent calls return instantly)
     if state["frame"] is None:
