@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.1.2"  # must match config.yaml
+CURRENT_VERSION = "2.1.3"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -5530,7 +5530,12 @@ async function _startFocusPoll(camId, cam) {
         const now     = performance.now();
         const elapsed = (now - _fpsWindowStart) / 1000;
         if (elapsed >= 1.0) {
-          _liveFps        = Math.round(_newFrames / elapsed);
+          const measuredFps = Math.round(_newFrames / elapsed);
+          // Grace period: only zero out fps if no frames for >4 seconds.
+          // During a 2s restart gap the fps would otherwise flash to 0.
+          if (measuredFps > 0 || elapsed >= 4.0) {
+            _liveFps = measuredFps > 0 ? measuredFps : null;  // null = show "…"
+          }
           _newFrames      = 0;
           _fpsWindowStart = now;
           _updateInfoBar();

@@ -1,3 +1,11 @@
+## 2.1.3
+- Fix: fps display in enhanced view no longer flashes to 0 during the 2-second
+  restart gap when H.265+ or other streams crash and restart. A 4-second grace
+  period now holds the last known fps; after 4s with no new frames it shows
+  measuring... instead of 0 fps.
+- Includes all fixes from 2.1.2 (sub-stream fallback, Resolution/FPS dropdown
+  appearance, _loadFocusProfiles empty-guard, startup migration).
+
 ## 2.1.2
 - Fix: snap_loop now detects persistent sub-stream failures. After 5 consecutive
   0-frame restarts while polling the sub_stream_url, it permanently falls back
