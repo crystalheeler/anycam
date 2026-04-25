@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.1.3"  # must match config.yaml
+CURRENT_VERSION = "2.1.5"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3405,25 +3405,20 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 state["zero_frame_streak"] = streak
                 backoff = min(2 ** min(streak - 1, 4), 32)
 
-                # After 5 consecutive 0-frame failures, check if we're using
-                # the sub-stream URL. If so, fall back permanently to the main
-                # stream_url — the sub-stream is broken (wrong codec, rejected).
-                if streak >= 5 and not native_res:
-                    cam_now   = CAMERAS.get(camera_id, {})
-                    main_url  = cam_now.get("stream_url", "")
-                    sub_url_s = cam_now.get("sub_stream_url", "")
-                    if sub_url_s and main_url and url != build_authenticated_url(cam_now):
-                        # We are on the sub-stream — fall back to main
-                        main_auth = build_authenticated_url(cam_now)
-                        if main_auth and main_auth != url:
-                            log.warning(f"SNAP [{camera_id}]: sub-stream failed "
-                                        f"{streak}x with 0 frames — falling back "
-                                        f"to main stream {_strip_creds(main_auth)}")
-                            url = main_auth
-                            cam_now["sub_stream_url"] = None
-                            CAMERAS[camera_id] = cam_now
-                            save_cameras()
-                            state["zero_frame_streak"] = 0
+                # After 5 consecutive 0-frame failures on the main stream,
+                # it may be a codec mismatch (e.g. ONVIF says h264, camera sends hevc).
+                # Clear the stored codec so snap_loop lets ffmpeg auto-detect next restart.
+                if streak == 5 and not native_res:
+                    cam_now = CAMERAS.get(camera_id, {})
+                    if cam_now.get("stream_codec"):
+                        log.warning(f"SNAP [{camera_id}]: 5 consecutive 0-frame failures — "
+                                    f"clearing stored codec {cam_now['stream_codec']!r} "
+                                    f"so ffmpeg can auto-detect on next attempt")
+                        CAMERAS[camera_id]["stream_codec"] = None
+                        profs = CAMERAS[camera_id].get("stream_profiles") or []
+                        if profs:
+                            profs[0]["stream_codec"] = None
+                        # Don't save_cameras here — this is a runtime override only
             else:
                 backoff = 2
                 state["zero_frame_streak"] = 0
@@ -3617,24 +3612,15 @@ async def handle_snapshot(request: web.Request) -> web.Response:
                                          "X-Step-FPS":    step_fps})
         return web.Response(status=204)  # no frame yet — JS will retry
 
-    # Thumbnail polling uses the sub-stream (lower res/bandwidth) when available;
-    # focus view (handle_focus_set) always uses the main stream_url.
-    sub_url = camera.get("sub_stream_url")
-    if sub_url:
-        url = build_authenticated_url(camera, url_key="sub_stream_url")
-        # Build a camera-like dict with sub-stream details so snap_loop
-        # uses the correct codec/resolution for ffmpeg filter sizing.
-        # Without this, snap_loop uses main stream codec (e.g. h264 for a 4K
-        # stream) but tries to decode the sub-stream (e.g. MJPEG) — mismatch
-        # causes "Invalid data found" errors.
-        snap_camera = dict(camera)
-        snap_camera["stream_codec"]  = camera.get("sub_stream_codec")  or camera.get("stream_codec")
-        snap_camera["stream_width"]  = camera.get("sub_stream_width")  or camera.get("stream_width")
-        snap_camera["stream_height"] = camera.get("sub_stream_height") or camera.get("stream_height")
-        snap_camera["stream_fps"]    = camera.get("sub_stream_fps")    or camera.get("stream_fps")
-    else:
-        url = build_authenticated_url(camera)
-        snap_camera = camera
+    # Card view always uses the main stream_url for thumbnail polling.
+    # sub_stream_url is reserved for the adaptive focus ladder (enhanced view).
+    # Using sub_stream_url for thumbnails was causing "Invalid data found" errors
+    # on cameras where the sub-stream has different codec/transport requirements
+    # than the main stream (e.g. the Microseven: main=HEVC/RTSP, sub=MJPEG/HTTP).
+    # The thumbnail loop already runs at fps=10,scale=640:-2 so CPU/bandwidth
+    # is low regardless of which stream is used.
+    url = build_authenticated_url(camera)
+    snap_camera = camera
     if not url:
         return web.Response(status=503, text="No stream URL")
 
@@ -4442,6 +4428,26 @@ async def api_set_credentials(request):
                 if cam:
                     cam_url = build_authenticated_url(cam) or ""
                     asyncio.create_task(go2rtc_add(cid, go2rtc_source(cam, cam_url)))
+
+                    # Run ffprobe to detect the real codec — ONVIF often reports
+                    # "h264" when the camera actually streams HEVC. Snap_loop
+                    # needs the correct codec to build the right ffmpeg pipeline.
+                    async def _fix_codec(cam_id=cid, auth_url=cam_url):
+                        await asyncio.sleep(2.0)   # let go2rtc connect first
+                        det = await probe_stream_details(auth_url, "RTSP")
+                        real_codec = (det.get("stream_codec") or "").lower()
+                        stored = (CAMERAS.get(cam_id, {}).get("stream_codec") or "").lower()
+                        if real_codec and real_codec != stored:
+                            log.info(f"  Codec correction: ONVIF reported {stored!r} "
+                                     f"but ffprobe detected {real_codec!r}")
+                            if cam_id in CAMERAS:
+                                CAMERAS[cam_id]["stream_codec"] = real_codec
+                                profs = CAMERAS[cam_id].get("stream_profiles") or []
+                                if profs:
+                                    profs[0]["stream_codec"] = real_codec
+                                save_cameras()
+                    asyncio.create_task(_fix_codec())
+
                 return web.json_response({"status": "ok", "channels": 1})
             log.warning(f"  ONVIF: profiles found but no streams resolved — falling back to direct RTSP")
         else:
@@ -6355,17 +6361,28 @@ function esc(s) {
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_authenticated_url(camera: dict, url_key: str = "stream_url") -> str | None:
-    """Return stream URL with credentials embedded, or None if no URL."""
+    """Return stream URL with credentials embedded, or None if no URL.
+
+    Credentials are percent-encoded per RFC 3986 §3.2.1 so that special
+    characters in passwords (e.g. '!' '?' '@' '#' '%') don't corrupt the URL.
+    The safe set matches characters that RTSP/HTTP stacks accept raw in the
+    userinfo component without confusion.
+    """
     url = camera.get(url_key) or camera.get("stream_url")
     if not url:
         return None
     creds = camera.get("credentials")
     if creds:
         try:
+            from urllib.parse import quote as _q
             u, p = decrypt_creds(creds)
+            # RFC 3986 userinfo safe chars (never need encoding in user:pass)
+            _SAFE = "!$&'()*+,;=-._~"
+            u_enc = _q(u, safe=_SAFE)
+            p_enc = _q(p, safe=_SAFE)
             proto, rest = url.split("://", 1)
-            rest = re.sub(r"^[^@]+@", "", rest)   # strip existing creds
-            url  = f"{proto}://{u}:{p}@{rest}"
+            rest = re.sub(r"^[^@]+@", "", rest)   # strip any existing creds
+            url  = f"{proto}://{u_enc}:{p_enc}@{rest}"
         except Exception as ex:
             log.warning(f"build_authenticated_url decrypt: {ex}")
     return url

@@ -1,3 +1,40 @@
+## 2.1.5
+- Fix (definitive): Card view thumbnail polling now always uses stream_url
+  (the main RTSP stream), never sub_stream_url. This is the root cause of the
+  persistent the Microseven camera "Stream Unavailable" issue. History:
+    - v1.7.7 introduced sub_stream_url usage for card thumbnails (CPU saving)
+    - v1.8.7 implemented proper ONVIF multi-profile discovery, which for the
+      first time populated sub_stream_url on the Microseven camera with the MJPEG
+      sub-stream at /12
+    - handle_snapshot then tried to use /12 for thumbnails — this failed because
+      the sub-stream uses different codec/transport than the main stream
+    - The camera had been working in card view before v1.8.7 because it was
+      discovered via the db_probe path which never set sub_stream_url, so
+      handle_snapshot fell through to stream_url (/11)
+  sub_stream_url is now exclusively for the enhanced view adaptive focus ladder.
+  The thumbnail loop already runs at fps=10,scale=640:-2, so the main stream
+  is perfectly fine for card view on any hardware.
+
+## 2.1.4
+- Fix: ONVIF sub_stream_url is now always saved from the lowest-resolution ONVIF
+  profile regardless of whether probe_rtsp succeeded. ONVIF authentication already
+  confirms the URL and credentials are valid — "Connection reset by peer" from
+  probe_rtsp just means the camera was busy during probing, not that the URL is
+  broken. The v2.1.1 probe_ok filter was too aggressive and left cameras like
+  10.0.0.22 with no sub_stream_url, forcing snap_loop to hammer an inaccessible
+  4K main stream instead of using the manageable 1280x720 sub-stream.
+- Fix: After accepting ONVIF credentials, AnyCam now runs ffprobe on the real
+  stream 2 seconds later to detect the actual codec. ONVIF often reports "h264"
+  when the camera is actually streaming HEVC. If ffprobe disagrees with ONVIF,
+  the stored stream_codec is corrected so snap_loop builds the right ffmpeg
+  pipeline. This runs as a background task so it does not block the response.
+- Fix: After 5 consecutive 0-frame failures in snap_loop, the stored stream_codec
+  is cleared at runtime so ffmpeg can auto-detect the codec on the next attempt.
+  This catches cases where the codec correction task hasn't run yet or failed.
+- Fix: build_authenticated_url now properly percent-encodes credentials per
+  RFC 3986 §3.2.1 so special characters in passwords don't corrupt the URL.
+  Uses urllib.parse.quote with the standard userinfo safe character set.
+
 ## 2.1.3
 - Fix: fps display in enhanced view no longer flashes to 0 during the 2-second
   restart gap when H.265+ or other streams crash and restart. A 4-second grace
