@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.0.3"  # must match config.yaml
+CURRENT_VERSION = "2.0.4"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2626,8 +2626,43 @@ def onvif_get_stream_uri(onvif_url: str, token: str,
 
 
 def _onvif_media_url(ip: str, port: int, xaddrs: str) -> str:
+    """
+    Build the ONVIF media service URL from the XAddrs field.
+
+    XAddrs can contain multiple space-separated URLs (e.g. one IPv4 and one
+    IPv6 link-local address).  We pick the best single URL:
+      1. Prefer plain http:// URLs with IPv4 addresses (no IPv6 link-local)
+      2. Avoid IPv6 link-local addresses (fe80::...)
+      3. Fall back to whatever is first if nothing else qualifies
+
+    Without this, cameras advertising both IPv4 and IPv6 addrs produce a
+    malformed URL like:
+      http://10.0.0.33/onvif/media http://[fe80::...]/onvif/media
+    which causes SOAP requests to fail with 0 profiles returned.
+    """
     if xaddrs:
-        return xaddrs.rstrip("/").replace("device_service", "media").replace("Device", "Media")
+        # Split on whitespace — camera may advertise multiple addrs in one element
+        candidates = xaddrs.split()
+        chosen = None
+        for c in candidates:
+            c = c.strip()
+            if not c.startswith("http"):
+                continue
+            # Skip IPv6 link-local (fe80::) — unreliable from HA container
+            if "fe80" in c.lower() or "[" in c:
+                continue
+            chosen = c
+            break
+        if chosen is None:
+            # Fallback: take first http:// URL regardless of address type
+            for c in candidates:
+                c = c.strip()
+                if c.startswith("http"):
+                    chosen = c
+                    break
+        if chosen is None:
+            chosen = candidates[0].strip() if candidates else xaddrs
+        return chosen.rstrip("/").replace("device_service", "media").replace("Device", "Media")
     scheme = "https" if port in (443, 8443) else "http"
     return f"{scheme}://{ip}:{port}/onvif/media"
 
@@ -5309,8 +5344,43 @@ def onvif_get_stream_uri(onvif_url: str, token: str,
 
 
 def _onvif_media_url(ip: str, port: int, xaddrs: str) -> str:
+    """
+    Build the ONVIF media service URL from the XAddrs field.
+
+    XAddrs can contain multiple space-separated URLs (e.g. one IPv4 and one
+    IPv6 link-local address).  We pick the best single URL:
+      1. Prefer plain http:// URLs with IPv4 addresses (no IPv6 link-local)
+      2. Avoid IPv6 link-local addresses (fe80::...)
+      3. Fall back to whatever is first if nothing else qualifies
+
+    Without this, cameras advertising both IPv4 and IPv6 addrs produce a
+    malformed URL like:
+      http://10.0.0.33/onvif/media http://[fe80::...]/onvif/media
+    which causes SOAP requests to fail with 0 profiles returned.
+    """
     if xaddrs:
-        return xaddrs.rstrip("/").replace("device_service", "media").replace("Device", "Media")
+        # Split on whitespace — camera may advertise multiple addrs in one element
+        candidates = xaddrs.split()
+        chosen = None
+        for c in candidates:
+            c = c.strip()
+            if not c.startswith("http"):
+                continue
+            # Skip IPv6 link-local (fe80::) — unreliable from HA container
+            if "fe80" in c.lower() or "[" in c:
+                continue
+            chosen = c
+            break
+        if chosen is None:
+            # Fallback: take first http:// URL regardless of address type
+            for c in candidates:
+                c = c.strip()
+                if c.startswith("http"):
+                    chosen = c
+                    break
+        if chosen is None:
+            chosen = candidates[0].strip() if candidates else xaddrs
+        return chosen.rstrip("/").replace("device_service", "media").replace("Device", "Media")
     scheme = "https" if port in (443, 8443) else "http"
     return f"{scheme}://{ip}:{port}/onvif/media"
 

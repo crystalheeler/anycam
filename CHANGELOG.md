@@ -1,3 +1,13 @@
+## 2.0.4
+- Critical fix: ONVIF credential flow now works correctly for cameras that
+  advertise multiple XAddrs in WS-Discovery (both IPv4 and IPv6 link-local).
+  Previously, _onvif_media_url() joined all addresses into one space-separated
+  string and passed the entire garbage value to the SOAP request, causing
+  onvif_get_profiles() to return 0 profiles even with correct credentials.
+  Now the function splits XAddrs on whitespace, skips IPv6 link-local (fe80::)
+  addresses, and picks the first valid IPv4 http:// address. This fixes the
+  Hikvision DS-2DE4A425IW-DE (10.0.0.33) which advertises both addresses.
+
 ## 2.0.3
 
 ### Bug fixes
