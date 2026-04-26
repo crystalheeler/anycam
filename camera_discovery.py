@@ -33,10 +33,17 @@ from cryptography.fernet import Fernet
 
 log = logging.getLogger("anycam")
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
+# Show full DEBUG detail from our own logger; keep library loggers quiet
+# so aiohttp request noise and asyncio internals don't drown out camera events.
+log.setLevel(logging.DEBUG)
+logging.getLogger("aiohttp").setLevel(logging.WARNING)
+logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
+logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Paths & runtime config
@@ -59,7 +66,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.1.7"  # must match config.yaml
+CURRENT_VERSION = "2.1.8"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -94,6 +101,7 @@ MEDIA_DIR = Path(CFG_RECORDINGS)
 #   snap   — HTTP JPEG snapshot path (None if not available)
 #   port   — default RTSP port (554 unless the brand uses something else)
 STREAM_DB: dict = {
+    # ── Professional / Enterprise ──────────────────────────────────────────────
     "hikvision": {
         "match": ["hikvision", "hikv", "ds-2", "ds-7", "ds-6", "isapi"],
         "rtsp":  ["/Streaming/Channels/101", "/Streaming/Channels/102",
@@ -140,7 +148,7 @@ STREAM_DB: dict = {
     "axis": {
         "match": ["axis"],
         "rtsp":  ["/axis-media/media.amp", "/axis-media/media.amp?videocodec=h264",
-                  "/axis-media/media.amp?videocodec=h265"],
+                  "/axis-media/media.amp?videocodec=h265", "/mpeg4/media.amp"],
         "mjpeg": "/axis-cgi/mjpg/video.cgi",
         "snap":  "/axis-cgi/jpg/image.cgi",
         "port":  554,
@@ -149,25 +157,10 @@ STREAM_DB: dict = {
         "match": ["hanwha", "wisenet", "samsung", "snv-", "xnv-", "qnv-", "pnv-",
                   "qnd-", "xnd-", "pnd-"],
         "rtsp":  ["/profile1/media.smp", "/profile2/media.smp",
-                  "/profile10/media.smp"],
+                  "/profile10/media.smp", "/0/profile2/media.smp"],
         "mjpeg": "/stw-cgi/video.cgi?msubmenu=stream&action=view&Profile=1&CodecType=MJPEG&Resolution=800x450&FrameRate=15&CompressionLevel=10",
         "snap":  "/stw-cgi/image.cgi?msubmenu=snapshot&action=view",
         "port":  554,
-    },
-    "reolink": {
-        "match": ["reolink", "rlc-", "rlk-", "rlp-", "rln-"],
-        "rtsp":  ["/h264Preview_01_main", "/h264Preview_01_sub",
-                  "/Preview_01_main", "/Preview_01_sub"],
-        "mjpeg": None,
-        "snap":  None,
-        "port":  554,
-    },
-    "foscam": {
-        "match": ["foscam", "fi8", "fi9", "r2", "r4"],
-        "rtsp":  ["/videoMain", "/videoSub"],
-        "mjpeg": "/videostream.cgi",
-        "snap":  "/cgi-bin/CGIProxy.fcgi?cmd=snapPicture2",
-        "port":  88,
     },
     "uniview": {
         "match": ["uniview", "unv", "ipc3", "ipc6", "ipc8"],
@@ -199,9 +192,10 @@ STREAM_DB: dict = {
     },
     "avigilon": {
         "match": ["avigilon"],
-        "rtsp":  ["/defaultPrimary?streamType=u", "/defaultSecondary?streamType=u"],
+        "rtsp":  ["/defaultPrimary?streamType=u", "/defaultSecondary?streamType=u",
+                  "/defaultPrimary-0?streamType=u", "/defaultPrimary-1?streamType=u"],
         "mjpeg": None,
-        "snap":  None,
+        "snap":  None,   # generated in camera web UI per-stream
         "port":  554,
     },
     "mobotix": {
@@ -220,17 +214,19 @@ STREAM_DB: dict = {
         "port":  8554,
     },
     "panasonic": {
-        "match": ["panasonic", "wv-s", "wv-x", "wv-v", "wv-u", "wv-sc", "bl-c"],
-        "rtsp":  ["/MediaInput/h264/stream_1/ch_1", "/MediaInput/h264/stream_2/ch_1"],
-        "mjpeg": None,
-        "snap":  None,
+        "match": ["panasonic", "wv-s", "wv-x", "wv-v", "wv-u", "wv-sc", "bl-c",
+                  "i-pro"],
+        "rtsp":  ["/MediaInput/h264", "/MediaInput/h264/stream_1/ch_1",
+                  "/MediaInput/h264/stream_2/ch_1"],
+        "mjpeg": "/nphMotionJpeg?Resolution=640x480&Quality=Standard",
+        "snap":  "/SnapShotJPEG?Resolution=640x480&Quality=Clarity",
         "port":  554,
     },
     "acti": {
         "match": ["acti", "tcm-", "kce-", "e21", "e22", "e23", "e24", "e31"],
         "rtsp":  ["/track1", "/track2"],
         "mjpeg": None,
-        "snap":  None,
+        "snap":  "/snapshot.jpg",
         "port":  554,
     },
     "tiandy": {
@@ -240,11 +236,81 @@ STREAM_DB: dict = {
         "snap":  None,
         "port":  554,
     },
-    "tplink": {
-        "match": ["tapo", "tp-link", "tplink", "c100", "c200", "c300", "c310", "c320"],
-        "rtsp":  ["/stream1", "/stream2"],
+    "honeywell": {
+        "match": ["honeywell", "equip-", "hc3", "hp4", "hd4", "hb4"],
+        "rtsp":  ["/Streaming/Channels/101", "/Streaming/Channels/102",
+                  "/cam/realmonitor?channel=1&subtype=0"],
+        "mjpeg": None,
+        "snap":  "/ISAPI/Streaming/channels/101/picture",
+        "port":  554,
+    },
+    "arecont": {
+        "match": ["arecont", "av2", "av5", "av10", "av20"],
+        "rtsp":  ["/h264.sdp", "/h264.sdp?res=full", "/h264.sdp1", "/h264.sdp2"],
+        "mjpeg": "/mjpeg.cgi",
+        "snap":  "/image.jpg",
+        "port":  554,
+    },
+    "digital_watchdog": {
+        "match": ["digital watchdog", "dw-", "dwc-"],
+        "rtsp":  ["/1/stream1", "/1/stream2"],
         "mjpeg": None,
         "snap":  None,
+        "port":  554,
+    },
+    "sony": {
+        "match": ["sony", "snc-", "srg-", "srd-"],
+        "rtsp":  ["/media/video1", "/media/video2"],
+        "mjpeg": "/image?speed=1&size=3",
+        "snap":  "/oneshotimage.jpg",
+        "port":  554,
+    },
+    "iqinvision": {
+        "match": ["iqinvision", "iqm", "iqe"],
+        "rtsp":  ["/rtsp/now.mp4"],
+        "mjpeg": None,
+        "snap":  None,
+        "port":  554,
+    },
+    "verint": {
+        "match": ["verint"],
+        "rtsp":  ["/live.sdp", "/live2.sdp", "/live3.sdp", "/live4.sdp"],
+        "mjpeg": None,
+        "snap":  None,
+        "port":  554,
+    },
+    "ubiquiti": {
+        "match": ["ubiquiti", "unifi", "uvc-"],
+        "rtsp":  ["/{camera_id}"],   # served via UniFi Protect NVR
+        "mjpeg": None,
+        "snap":  None,
+        "port":  7447,
+    },
+    # ── Consumer / Prosumer ────────────────────────────────────────────────────
+    "reolink": {
+        "match": ["reolink", "rlc-", "rlk-", "rlp-", "rln-"],
+        "rtsp":  ["/h264Preview_01_main", "/h264Preview_01_sub",
+                  "/Preview_01_main", "/Preview_01_sub",
+                  "/h265Preview_01_main"],
+        "mjpeg": None,
+        # Snap requires credentials as URL params: &user={user}&password={pass}
+        # http_snap_loop handles this via reolink_snap_auth flag
+        "snap":  "/cgi-bin/api.cgi?cmd=Snap&channel=0&rs=AnyCam",
+        "port":  554,
+    },
+    "foscam": {
+        "match": ["foscam", "fi8", "fi9", "r2", "r4"],
+        "rtsp":  ["/videoMain", "/videoSub"],
+        "mjpeg": "/videostream.cgi",
+        "snap":  "/cgi-bin/CGIProxy.fcgi?cmd=snapPicture2",
+        "port":  88,
+    },
+    "tplink": {
+        "match": ["tapo", "tp-link", "tplink", "c100", "c200", "c300", "c310",
+                  "c320", "vigi"],
+        "rtsp":  ["/stream1", "/stream2"],
+        "mjpeg": None,
+        "snap":  None,   # no HTTP snapshot endpoint — RTSP only
         "port":  554,
     },
     "annke": {
@@ -259,14 +325,14 @@ STREAM_DB: dict = {
         "match": ["trendnet", "tv-ip"],
         "rtsp":  ["/channel1", "/channel2"],
         "mjpeg": "/cgi/mjpg/mjpeg.cgi",
-        "snap":  None,
+        "snap":  "/cgi-bin/video.jpg",
         "port":  554,
     },
     "dlink": {
         "match": ["d-link", "dlink", "dcs-"],
         "rtsp":  ["/play1.sdp", "/play2.sdp"],
         "mjpeg": "/video.cgi",
-        "snap":  None,
+        "snap":  "/image.jpg",
         "port":  554,
     },
     "lorex": {
@@ -275,28 +341,74 @@ STREAM_DB: dict = {
                   "/cam/realmonitor?channel=1&subtype=1",
                   "/ch01/0"],
         "mjpeg": None,
-        "snap":  None,
+        "snap":  "/cgi-bin/snapshot.cgi",
         "port":  554,
     },
     "grandstream": {
         "match": ["grandstream", "gxv3"],
         "rtsp":  ["/0", "/1"],
         "mjpeg": None,
+        "snap":  "/snapshot/view0.jpg",
+        "port":  554,
+    },
+    "wansview": {
+        "match": ["wansview", "ncm-", "ncb-", "w2", "w3", "w4", "w5", "w6",
+                  "q5", "k1", "k2"],
+        "rtsp":  ["/live/ch0", "/live/ch1", "/live/mpeg4"],
+        "mjpeg": "/videostream.cgi",
+        "snap":  "/mjpeg/snap.cgi?chn=0",
+        "port":  554,
+    },
+    "eufy": {
+        "match": ["eufy", "eufycam"],
+        "rtsp":  ["/live0"],
+        "mjpeg": None,
+        "snap":  None,   # no HTTP snapshot — RTSP only (must enable in app)
+        "port":  554,
+    },
+    "vstarcam": {
+        "match": ["vstarcam", "c7", "c8", "c9"],
+        "rtsp":  ["/udp/av0_0", "/udp/av0_1", "/tcp/av0_0", "/udp/av0_2"],
+        "mjpeg": "/videostream.cgi",
+        "snap":  None,
+        "port":  554,
+    },
+    "swann": {
+        "match": ["swann"],
+        "rtsp":  ["/ch01/0", "/ch01/1",
+                  "/Streaming/Channels/101",
+                  "/cam/realmonitor?channel=1&subtype=0"],
+        "mjpeg": None,
+        "snap":  "/ISAPI/Streaming/channels/101/picture",
+        "port":  554,
+    },
+    "hiseeu": {
+        "match": ["hiseeu"],
+        "rtsp":  ["/Streaming/Channels/101", "/Streaming/Channels/102",
+                  "/cam/realmonitor?channel=1&subtype=0"],
+        "mjpeg": None,
+        "snap":  "/ISAPI/Streaming/channels/101/picture",
+        "port":  554,
+    },
+    "flir": {
+        "match": ["flir"],
+        "rtsp":  ["/avc", "/avc/ch1"],
+        "mjpeg": None,
         "snap":  None,
         "port":  554,
     },
     "sricam": {
         "match": ["sricam", "ipcam", "generic"],
-        "rtsp":  ["/11", "/12", "/1", "/2"],
-        "mjpeg": None,
-        "snap":  None,
+        "rtsp":  ["/11", "/12", "/1", "/2", "/onvif1"],
+        "mjpeg": "/videostream.cgi",
+        "snap":  "/tmpfs/snap.jpg",
         "port":  554,
     },
     "microseven": {
         "match": ["microseven", "m7d", "m7b", "m7t"],
-        "rtsp":  ["/11", "/12", "/13"],
-        "mjpeg": None,
-        "snap":  None,
+        "rtsp":  ["/11", "/12", "/13", "/h264major", "/h264minor"],
+        "mjpeg": "/auto.jpg",
+        "snap":  "/tmpfs/snap.jpg",
         "port":  554,
     },
 }
@@ -2627,6 +2739,33 @@ def onvif_get_stream_uri(onvif_url: str, token: str,
         return None
 
 
+def onvif_get_snapshot_uri(onvif_url: str, token: str,
+                            username: str, password: str) -> str | None:
+    """
+    Call ONVIF GetSnapshotUri for the given profile token.
+    Returns the snapshot HTTP URL, or None if the camera does not support it.
+    Used as a secondary source when STREAM_DB has no snap entry.
+    """
+    body = (
+        f"<trt:GetSnapshotUri>"
+        f"<trt:ProfileToken>{token}</trt:ProfileToken>"
+        f"</trt:GetSnapshotUri>"
+    )
+    xml = _onvif_soap(onvif_url, body, username, password)
+    if not xml:
+        return None
+    try:
+        root   = ET.fromstring(xml)
+        uri_el = root.find(".//{http://www.onvif.org/ver10/schema}Uri")
+        uri    = uri_el.text.strip() if uri_el is not None else None
+        if uri and uri.startswith("http"):
+            return uri
+        return None
+    except Exception as exc:
+        log.debug(f"onvif_get_snapshot_uri parse error: {exc}")
+        return None
+
+
 def _onvif_media_url(ip: str, port: int, xaddrs: str) -> str:
     """
     Build the ONVIF media service URL from the XAddrs field.
@@ -3090,6 +3229,14 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
       SNAP [id]: restarting in 2s (#N)                   [before each restart]
       SNAP [id]: loop done                               [final exit]
     """
+    # ── Route to HTTP snapshot polling if a direct snap URL was stored ────────
+    # http_snap_loop polls the camera's HTTP JPEG endpoint at ~1 fps, which is
+    # far cheaper than running ffmpeg for cameras where RTSP is unreliable or
+    # the snap URL is confirmed (Microseven, generic ONVIF/hi3516, Wansview…).
+    if camera.get("http_snap_url"):
+        await http_snap_loop(camera_id, camera)
+        return
+
     state        = _snap_state(camera_id)
     stream_codec = camera.get("stream_codec", "").lower()
     stream_w     = camera.get("stream_width")  or 0
@@ -3576,6 +3723,100 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         if state.get("task") is asyncio.current_task():
             state["task"] = None
         log.info(f"SNAP [{camera_id}]: loop done")
+
+
+async def http_snap_loop(camera_id: str, camera: dict) -> None:
+    """
+    Background task: polls an HTTP snapshot URL at ~1 fps and stores the JPEG
+    bytes in _SNAP[camera_id]['frame'] — the same buffer that handle_snapshot
+    reads, so the card-view machinery is completely untouched.
+
+    Stops after 30 s of idle (no handle_snapshot calls while a frame exists).
+
+    Debug logging:
+      SNAP [id]: http starting → <url>
+      SNAP [id]: http frame N — X bytes               [every 50 frames]
+      SNAP [id]: http status N                        [non-200 response]
+      SNAP [id]: http error: <exc>                    [request failure]
+      SNAP [id]: idle Ns — stopping                   [idle shutdown]
+      SNAP [id]: http loop done                       [final exit]
+
+    Auth modes (stored in camera['http_snap_auth_mode']):
+      'basic'        — HTTP Basic/Digest auth (default for all cameras)
+      'query_params' — credentials appended as &user=…&password=… in the URL
+                       (Reolink CGI API requires this)
+    """
+    state     = _snap_state(camera_id)
+    snap_url  = camera["http_snap_url"]
+    creds     = camera.get("credentials")
+    auth_mode = camera.get("http_snap_auth_mode", "basic")
+
+    auth = None
+    u = p = ""
+    if creds:
+        try:
+            u, p = decrypt_creds(creds)
+            if auth_mode == "basic":
+                auth = aiohttp.BasicAuth(u, p)
+        except Exception as exc:
+            log.debug(f"SNAP [{camera_id}]: http_snap_loop: decrypt_creds failed: {exc}")
+
+    log.info(f"SNAP [{camera_id}]: http starting → {snap_url}")
+
+    timeout = aiohttp.ClientTimeout(total=5)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        while True:
+            # ── Idle check: stop if nothing has polled us in 30 s ─────────────
+            last   = _snap_last_access.get(camera_id, 0)
+            idle_s = time.monotonic() - last
+            if idle_s > 30 and state["frame"] is not None:
+                log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s — stopping")
+                break
+
+            # ── Build request URL (Reolink needs creds in query params) ────────
+            request_url = snap_url
+            if auth_mode == "query_params" and u:
+                request_url = f"{snap_url}&user={u}&password={p}"
+
+            try:
+                async with session.get(
+                    request_url, auth=auth, allow_redirects=True
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        # Sanity check: a real JPEG is at least a few hundred bytes
+                        if data and len(data) > 200:
+                            state["frame"]       = data
+                            state["frame_time"]  = time.monotonic()
+                            state["frame_count"] = (state.get("frame_count") or 0) + 1
+                            fc = state["frame_count"]
+                            if fc % 50 == 0:
+                                log.debug(
+                                    f"SNAP [{camera_id}]: http frame {fc} "
+                                    f"— {len(data)} bytes"
+                                )
+                        else:
+                            log.debug(
+                                f"SNAP [{camera_id}]: http got {len(data) if data else 0} "
+                                f"bytes (too small, discarding)"
+                            )
+                    else:
+                        log.warning(
+                            f"SNAP [{camera_id}]: http status {resp.status}"
+                        )
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning(f"SNAP [{camera_id}]: http error: {exc}")
+
+            try:
+                await asyncio.sleep(1.0)   # ~1 fps
+            except asyncio.CancelledError:
+                break
+
+    if state.get("task") is asyncio.current_task():
+        state["task"] = None
+    log.info(f"SNAP [{camera_id}]: http loop done")
 
 
 async def handle_snapshot(request: web.Request) -> web.Response:
@@ -4235,6 +4476,23 @@ def _match_stream_db(camera: dict) -> dict | None:
     return STREAM_DB[best_slug] if best_slug else None
 
 
+def _match_stream_db_slug(camera: dict) -> str | None:
+    """Return the STREAM_DB slug that matched, or None."""
+    haystack = " ".join([
+        camera.get("name", ""),
+        camera.get("vendor", ""),
+        camera.get("model", ""),
+        camera.get("verdict_reason", ""),
+        camera.get("hostname", ""),
+    ]).lower()
+    best_slug, best_len = None, 0
+    for slug, entry in STREAM_DB.items():
+        for kw in entry["match"]:
+            if kw in haystack and len(kw) > best_len:
+                best_slug, best_len = slug, len(kw)
+    return best_slug
+
+
 async def _probe_db_streams(ip: str, port: int, creds: str | None,
                              db_entry: dict,
                              existing_urls: set[str]) -> list[dict]:
@@ -4368,7 +4626,30 @@ async def api_set_credentials(request):
                 })
 
             # ── Silent DB probe: find additional streams not visible pre-login ─
-            db_entry = _match_stream_db(camera)
+            db_entry  = _match_stream_db(camera)
+            db_slug   = _match_stream_db_slug(camera)
+
+            # ── HTTP snapshot URL: DB first, ONVIF GetSnapshotUri as fallback ─
+            http_snap_url       = None
+            http_snap_auth_mode = "basic"
+            if db_entry and db_entry.get("snap"):
+                http_snap_url = f"http://{ip}{db_entry['snap']}"
+                if db_slug == "reolink":
+                    http_snap_auth_mode = "query_params"
+                log.info(f"  HTTP snap URL (DB): {http_snap_url}")
+            else:
+                # Secondary: try ONVIF GetSnapshotUri on the first profile token
+                if profiles:
+                    _first_token = profiles[0]["token"]
+                    _snap_uri = await loop.run_in_executor(
+                        None, onvif_get_snapshot_uri,
+                        media_url, _first_token, username, password)
+                    if _snap_uri:
+                        http_snap_url = _snap_uri
+                        log.info(f"  HTTP snap URL (ONVIF GetSnapshotUri): {http_snap_url}")
+                    else:
+                        log.debug(f"  HTTP snap URL: not available (DB=None, ONVIF=None)")
+
             if db_entry:
                 existing = {c["url"] for c in stream_candidates}
                 db_streams = await _probe_db_streams(ip, port, enc_creds,
@@ -4448,6 +4729,8 @@ async def api_set_credentials(request):
                     "status": "ready", "display": "proxy", "user_saved": True,
                     "verdict": "camera", "verdict_reason": "ONVIF profile",
                     "hevc_plus_warning": False,  # reset; _drain_stderr re-sets if needed
+                    "http_snap_url":       http_snap_url,
+                    "http_snap_auth_mode": http_snap_auth_mode,
                     **extra_urls,
                     **main_details,
                 }
@@ -4514,7 +4797,20 @@ async def api_set_credentials(request):
 
     # ── Silent DB probe for additional streams on non-ONVIF cameras ──────────
     sub_url = None
-    db_entry = _match_stream_db(camera)
+    db_entry  = _match_stream_db(camera)
+    db_slug   = _match_stream_db_slug(camera)
+
+    # ── HTTP snapshot URL: DB first, no ONVIF fallback on non-ONVIF path ──────
+    http_snap_url       = None
+    http_snap_auth_mode = "basic"
+    if db_entry and db_entry.get("snap"):
+        http_snap_url = f"http://{ip}{db_entry['snap']}"
+        if db_slug == "reolink":
+            http_snap_auth_mode = "query_params"
+        log.info(f"  HTTP snap URL (DB): {http_snap_url}")
+    else:
+        log.debug(f"  HTTP snap URL: not available (no DB snap entry for this camera)")
+
     if db_entry and proto in ("RTSP", "DVR"):
         db_streams = await _probe_db_streams(ip, port, enc_creds,
                                              db_entry, {url})
@@ -4533,7 +4829,10 @@ async def api_set_credentials(request):
     camera.update(credentials=enc_creds,
                   stream_url=url, sub_stream_url=sub_url,
                   requires_credentials=False,
-                  status="ready", user_saved=True, **details)
+                  status="ready", user_saved=True,
+                  http_snap_url=http_snap_url,
+                  http_snap_auth_mode=http_snap_auth_mode,
+                  **details)
     save_cameras()
     log.info(f"Credentials accepted for {camera_id}: {_strip_creds(url)}")
     return web.json_response({"status": "ok", "stream_url": _strip_creds(url), **details})

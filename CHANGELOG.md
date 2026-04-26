@@ -1,3 +1,30 @@
+## 2.1.8
+- STREAM_DB: populated snap URLs for microseven (/tmpfs/snap.jpg, confirmed
+  from official ha.ivanfm.com source) and sricam/ipcam/generic (/tmpfs/snap.jpg,
+  same hi3510/hi3516 chipset); Reolink snap set to CGI endpoint with URL-param
+  auth; 13 new manufacturers added (Wansview, Eufy, Vstarcam, Honeywell,
+  Arecont, Swann, FLIR, Digital Watchdog, Ubiquiti UniFi, Hiseeu, Sony,
+  IQinVision, Verint); 200+ sources researched
+- api_set_credentials: reads snap from STREAM_DB immediately after
+  _match_stream_db() — no network call, pure dict lookup — and stores it as
+  http_snap_url in the camera dict; also stores http_snap_auth_mode (basic or
+  query_params for Reolink) and runs ONVIF GetSnapshotUri as secondary source
+  when DB has no snap entry
+- onvif_get_snapshot_uri(): new helper calling ONVIF GetSnapshotUri SOAP
+  action; used only as fallback when db_entry is None or snap is None
+- http_snap_loop(): new async function replacing the ffmpeg snap loop for
+  cameras with a confirmed HTTP snapshot URL; polls at ~1 fps via aiohttp,
+  writes JPEG bytes to _SNAP[camera_id]["frame"] — exactly the same buffer
+  that handle_snapshot reads, so card view machinery is untouched; idle timeout
+  30 s; supports both HTTP Basic auth (default) and URL-param auth (Reolink)
+- snap_loop: routes to http_snap_loop when camera["http_snap_url"] is set,
+  otherwise runs existing ffmpeg loop unchanged
+- Logging: changed root logger level to DEBUG so all log.debug() calls are
+  now visible (ONVIF parse errors, probe detail, SSDP/mDNS failures, snap
+  frame counts, etc.); aiohttp, aiohttp.access, aiohttp.server, and asyncio
+  library loggers suppressed to WARNING to avoid library noise drowning out
+  camera events
+
 ## 2.1.7
 - Fix A: RTSP transport auto-detection for non-compliant cameras. Many cheap/
   generic ONVIF cameras (Microseven, Sricam, etc.) accept the TCP RTSP SETUP
