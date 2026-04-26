@@ -37,11 +37,30 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-# Log level is set from the HA Config tab (LOG_LEVEL option).
-# Default is INFO. Set to DEBUG in HA Config to see all probe/snap detail.
-# Library loggers stay at WARNING regardless of the chosen level.
-_cfg_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
-log.setLevel(_cfg_level)
+# Log level is set from the HA Config tab via four boolean toggles:
+# LOG_DEBUG, LOG_INFO, LOG_WARNING, LOG_ERROR.
+# A custom filter passes only the levels that are enabled.
+# Library loggers stay at WARNING regardless.
+class _LevelFilter(logging.Filter):
+    def __init__(self) -> None:
+        super().__init__()
+        self._allowed: set[int] = set()
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._allowed = set()
+        if os.environ.get("LOG_DEBUG",   "false").lower() == "true": self._allowed.add(logging.DEBUG)
+        if os.environ.get("LOG_INFO",    "true").lower()  == "true": self._allowed.add(logging.INFO)
+        if os.environ.get("LOG_WARNING", "true").lower()  == "true": self._allowed.add(logging.WARNING)
+        if os.environ.get("LOG_ERROR",   "true").lower()  == "true": self._allowed.add(logging.ERROR)
+        self._allowed.add(logging.CRITICAL)  # always pass CRITICAL
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno in self._allowed
+
+_level_filter = _LevelFilter()
+log.addFilter(_level_filter)
+log.setLevel(logging.DEBUG)   # pass all to the filter; filter decides what shows
 logging.getLogger("aiohttp").setLevel(logging.WARNING)
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
@@ -77,18 +96,21 @@ PORT         = int(os.environ.get("INGRESS_PORT", 8099))
 # ── HA add-on configuration options (set in the HA UI Config tab) ─────────────
 # Read from env vars set by the HA supervisor from config.yaml options.
 # Defaults mirror the config.yaml defaults so the server works without HA too.
-CFG_LOW_FPS              = os.environ.get("LOW_FPS_MODE",   "true").lower()  == "true"
+CFG_LOW_FPS              = os.environ.get("LOW_FPS_MODE",   "false").lower() == "true"
 CFG_SKIP_NONREF          = os.environ.get("SKIP_NONREF",    "false").lower() == "true"
-CFG_LIMIT_THREADS        = os.environ.get("LIMIT_THREADS",  "true").lower()  == "true"
+CFG_LIMIT_THREADS        = os.environ.get("LIMIT_THREADS",  "false").lower() == "true"
 CFG_STAGGER_POLL         = os.environ.get("STAGGER_POLLING","false").lower() == "true"
 CFG_HW_DECODE            = os.environ.get("HW_DECODE",      "false").lower() == "true"
-CFG_ADAPTIVE_QUALITY     = os.environ.get("ADAPTIVE_QUALITY", "true").lower()  == "true"
+CFG_ADAPTIVE_QUALITY     = os.environ.get("ADAPTIVE_QUALITY","false").lower() == "true"
 CFG_RECORDINGS           = os.environ.get("RECORDINGS_PATH", "/media/anycam")
 CFG_MOTION_SENS          = int(os.environ.get("MOTION_SENSITIVITY",       "15"))
 CFG_MOTION_COOL          = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
 CFG_MOTION_PAD           = int(os.environ.get("MOTION_CLIP_PADDING_SECS", "3"))
 CFG_UNRESTRICTED_BROWSER = os.environ.get("UNRESTRICTED_STORAGE_BROWSER", "false").lower() == "true"
-CFG_LOG_LEVEL            = os.environ.get("LOG_LEVEL", "INFO").upper()
+CFG_LOG_DEBUG            = os.environ.get("LOG_DEBUG",   "false").lower() == "true"
+CFG_LOG_INFO             = os.environ.get("LOG_INFO",    "true").lower()  == "true"
+CFG_LOG_WARNING          = os.environ.get("LOG_WARNING", "true").lower()  == "true"
+CFG_LOG_ERROR            = os.environ.get("LOG_ERROR",   "true").lower()  == "true"
 
 MEDIA_DIR = Path(CFG_RECORDINGS)
 
@@ -2629,17 +2651,30 @@ def _onvif_soap(url: str, body: str,
         nonce_raw = os.urandom(16)
         nonce_b64 = base64.b64encode(nonce_raw).decode()
         created   = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-        digest    = base64.b64encode(
-            hashlib.sha1(nonce_raw + created.encode() + password.encode()).digest()
+        # RFC 2617 WS-Security PasswordDigest: SHA1(nonce_raw || created_utf8 || password_utf8)
+        digest = base64.b64encode(
+            hashlib.sha1(
+                nonce_raw + created.encode("utf-8") + password.encode("utf-8")
+            ).digest()
         ).decode()
+        _wsse = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+        _wssu = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
         security = (
-            '<s:Header><Security xmlns="http://docs.oasis-open.org/wss/2004/01/'
-            'oasis-200401-wss-wssecurity-secext-1.0.xsd"><UsernameToken>'
+            f'<s:Header>'
+            f'<Security xmlns="{_wsse}" '
+            f'xmlns:wsu="{_wssu}" '
+            f's:mustUnderstand="1">'
+            f'<wsu:Timestamp wsu:Id="TS-1">'
+            f'<wsu:Created>{created}</wsu:Created>'
+            f'</wsu:Timestamp>'
+            f'<UsernameToken wsu:Id="UT-1">'
             f'<Username>{username}</Username>'
-            f'<Password Type="...#PasswordDigest">{digest}</Password>'
-            f'<Nonce EncodingType="...#Base64Binary">{nonce_b64}</Nonce>'
-            f'<Created xmlns="...wssecurity-utility-1.0.xsd">{created}</Created>'
-            '</UsernameToken></Security></s:Header>'
+            f'<Password Type="{_wsse}#PasswordDigest">{digest}</Password>'
+            f'<Nonce EncodingType="{_wsse}#Base64Binary">{nonce_b64}</Nonce>'
+            f'<wsu:Created>{created}</wsu:Created>'
+            f'</UsernameToken>'
+            f'</Security>'
+            f'</s:Header>'
         )
     envelope = (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -2648,15 +2683,25 @@ def _onvif_soap(url: str, body: str,
         ' xmlns:tt="http://www.onvif.org/ver10/schema">'
         f"{security}<s:Body>{body}</s:Body></s:Envelope>"
     )
-    try:
-        req = urllib.request.Request(url, envelope.encode(), method="POST")
-        req.add_header("Content-Type", "application/soap+xml; charset=utf-8")
-        req.add_header("SOAPAction", "")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        log.debug(f"ONVIF SOAP ({url}): {e}")
-        return None
+    # Try SOAP 1.2 first (application/soap+xml), then fall back to SOAP 1.1
+    # (text/xml) for cameras like Hikvision that return HTTP 400 on SOAP 1.2.
+    for content_type in ("application/soap+xml; charset=utf-8",
+                         "text/xml; charset=utf-8"):
+        try:
+            req = urllib.request.Request(url, envelope.encode("utf-8"), method="POST")
+            req.add_header("Content-Type", content_type)
+            req.add_header("SOAPAction", '""')
+            req.add_header("User-Agent", f"AnyCam/{CURRENT_VERSION}")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except Exception as e:
+            err_str = str(e)
+            if "400" in err_str and content_type.startswith("application/soap"):
+                log.debug(f"ONVIF SOAP ({url}): SOAP 1.2 → 400, retrying with SOAP 1.1")
+                continue   # retry with text/xml
+            log.debug(f"ONVIF SOAP ({url}): {e}")
+            return None
+    return None
 
 
 def onvif_get_profiles(onvif_url: str, username: str, password: str) -> list[dict]:
@@ -3819,6 +3864,31 @@ async def http_snap_loop(camera_id: str, camera: dict) -> None:
     _err_logged_at = 0  # frame count when we last logged an error
 
     async with aiohttp.ClientSession(timeout=timeout, connector=_connector) as session:
+
+        # ── Options 1+2: One-time redirect probe ──────────────────────────────
+        # aiohttp strips the Authorization header when following http→https
+        # redirects (different scheme), so Digest auth never reaches the camera.
+        # Fix: probe with allow_redirects=False, detect the redirect ourselves,
+        # follow it manually so the auth header survives to the final URL.
+        # If the final URL is https://, upgrade snap_url permanently so every
+        # subsequent request goes straight to https:// — no further redirects.
+        if snap_url.startswith("http://") and auth and auth_mode == "basic":
+            try:
+                async with session.get(
+                    snap_url, auth=auth, allow_redirects=False
+                ) as _probe:
+                    if _probe.status in (301, 302, 303, 307, 308):
+                        _loc = _probe.headers.get("Location", "")
+                        if _loc.startswith("https://") or _loc.startswith("http://"):
+                            snap_url = _loc
+                            camera["http_snap_url"] = snap_url
+                            log.info(
+                                f"SNAP [{camera_id}]: redirect detected → "
+                                f"upgrading snap URL to {snap_url}"
+                            )
+            except Exception as _exc:
+                log.debug(f"SNAP [{camera_id}]: redirect probe error: {_exc}")
+
         while True:
             # ── Idle check: stop if nothing has polled us in 30 s ────────────
             last   = _snap_last_access.get(camera_id, 0)
@@ -3910,6 +3980,18 @@ async def http_snap_loop(camera_id: str, camera: dict) -> None:
                 if _err_count == 1 or (_err_count % 30 == 0):
                     log.warning(f"SNAP [{camera_id}]: http error: {exc} "
                                 f"(consecutive failures: {_err_count})")
+
+            # ── Option 4: ffmpeg fallback after 60 consecutive failures ────────
+            # If HTTP snap has never produced a frame and has failed 60 times
+            # (≈60 s), clear http_snap_url so snap_loop falls through to the
+            # ffmpeg path on the next restart, using the confirmed RTSP URL.
+            if _err_count >= 60 and state["frame"] is None:
+                log.warning(
+                    f"SNAP [{camera_id}]: {_err_count} consecutive HTTP snap "
+                    f"failures with no frame — falling back to ffmpeg snap loop"
+                )
+                camera["http_snap_url"] = None
+                break
 
             try:
                 await asyncio.sleep(1.0)   # ~1 fps
@@ -7659,7 +7741,7 @@ header h1{{cursor:pointer}}
 <body>
 
 <header>
-  <h1 onclick="switchView('cameras')" title="Home" style="cursor:pointer">
+  <h1 onclick="switchView('cameras')" title="System Stability — See Logs" style="cursor:pointer">
     <svg id="status-cam-icon" width="27" height="27" viewBox="0 0 24 24"
          fill="none" stroke="#43a047" stroke-width="2"
          style="cursor:pointer;flex-shrink:0;vertical-align:middle"
@@ -7910,24 +7992,21 @@ async def api_set_log_level(request: web.Request) -> web.Response:
     """
     POST /api/log_level   body: {"level": "DEBUG"|"INFO"|"WARNING"|"ERROR"}
     Adjusts the anycam logger level at runtime without restart.
-    Library loggers (aiohttp, asyncio) are kept at WARNING regardless.
+    Updates the environment variable and refreshes the _LevelFilter.
     """
     try:
-        body  = await request.json()
+        body      = await request.json()
         level_str = str(body.get("level", "")).upper()
-        level_map = {
-            "DEBUG":   logging.DEBUG,
-            "INFO":    logging.INFO,
-            "WARNING": logging.WARNING,
-            "ERROR":   logging.ERROR,
-        }
-        if level_str not in level_map:
+        if level_str not in ("DEBUG", "INFO", "WARNING", "ERROR"):
             return web.json_response(
                 {"error": f"Unknown level '{level_str}'. Use DEBUG/INFO/WARNING/ERROR."},
                 status=400
             )
-        log.setLevel(level_map[level_str])
-        log.info(f"Log level changed to {level_str}")
+        # Toggle the single named level on; leave others as configured by HA
+        env_key = f"LOG_{level_str}"
+        os.environ[env_key] = "true"
+        _level_filter._refresh()
+        log.info(f"Log level {level_str} enabled at runtime")
         return web.json_response({"status": "ok", "level": level_str})
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=400)

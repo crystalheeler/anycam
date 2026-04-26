@@ -1,4 +1,29 @@
 ## 2.1.9
+- ONVIF SOAP WS-Security: expanded all abbreviated namespace URIs (were using
+  '...' placeholders causing malformed XML); added wsu:Timestamp block; added
+  SOAP 1.1 fallback (text/xml) after SOAP 1.2 returns HTTP 400 — fixes
+  Hikvision GetProfiles returning 400 Bad Request
+- http_snap_loop: added one-time redirect probe (Options 1+2) — sends initial
+  request with allow_redirects=False, detects http→https redirect, follows
+  manually so Authorization header survives to final URL; upgrades stored
+  snap_url to https:// permanently for the loop lifetime
+- http_snap_loop: ffmpeg fallback (Option 4) — after 60 consecutive failures
+  with no frame ever received, clears http_snap_url and exits; next
+  handle_snapshot call will restart snap_loop on the ffmpeg path using the
+  confirmed working RTSP URL
+- Log level: replaced single LOG_LEVEL dropdown with four independent boolean
+  toggles (Log Debug, Log Info, Log Warning, Log Error) in HA Config tab;
+  uses _LevelFilter class to pass only enabled levels; all four read from
+  environment at startup; LOG_DEBUG default off, LOG_INFO/WARNING/ERROR on
+- config.yaml: all boolean options now default to false (low_fps_mode,
+  limit_threads, adaptive_quality changed from true); added boot: auto so
+  Start on Boot defaults enabled; log_level dropdown replaced by four booleans
+- translations/en.yaml: added entries for log_debug/log_info/log_warning/
+  log_error with descriptive text (Most detailed / Standard / Somewhat
+  detailed / Least detailed); removed log_level entry
+- System status icon tooltip: changed from "Home" to "System Stability — See Logs"
+
+## 2.1.9
 - Log level now configured in the HA add-on Configuration tab (log_level option:
   DEBUG / INFO / WARNING / ERROR, default INFO); takes effect on next add-on
   restart; reads LOG_LEVEL env var alongside all other CFG_ options at startup

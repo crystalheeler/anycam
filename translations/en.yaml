@@ -59,3 +59,27 @@ configuration:
     description: >-
       Extra seconds recorded after the cooldown ends, to capture the
       tail of a motion event. Default 3.
+  log_debug:
+    name: Log Debug
+    description: >-
+      Most detailed. Shows all probe attempts, ONVIF parse errors, RTSP
+      OPTIONS detail, snap frame counts, redirect detection, and every
+      low-level decision AnyCam makes. Use when actively diagnosing a
+      problem. Produces high log volume — turn off when not needed.
+  log_info:
+    name: Log Info
+    description: >-
+      Standard detail (recommended on). Shows camera discovery results,
+      credential attempts, stream URLs found, snap loop start/stop, and
+      all major state changes. Good balance of visibility and volume.
+  log_warning:
+    name: Log Warning
+    description: >-
+      Somewhat detailed. Shows recoverable issues — auth failures, snap
+      loop errors, probe timeouts, ffmpeg restarts, and anything AnyCam
+      is working around automatically. Recommended on at all times.
+  log_error:
+    name: Log Error
+    description: >-
+      Least detailed. Shows only fatal or unrecoverable errors that
+      require attention. Always leave this on.
