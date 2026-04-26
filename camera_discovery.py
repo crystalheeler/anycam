@@ -37,9 +37,11 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-# Show full DEBUG detail from our own logger; keep library loggers quiet
-# so aiohttp request noise and asyncio internals don't drown out camera events.
-log.setLevel(logging.DEBUG)
+# Log level is set from the HA Config tab (LOG_LEVEL option).
+# Default is INFO. Set to DEBUG in HA Config to see all probe/snap detail.
+# Library loggers stay at WARNING regardless of the chosen level.
+_cfg_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+log.setLevel(_cfg_level)
 logging.getLogger("aiohttp").setLevel(logging.WARNING)
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
@@ -66,7 +68,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.1.8"  # must match config.yaml
+CURRENT_VERSION = "2.1.9"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -86,6 +88,7 @@ CFG_MOTION_SENS          = int(os.environ.get("MOTION_SENSITIVITY",       "15"))
 CFG_MOTION_COOL          = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
 CFG_MOTION_PAD           = int(os.environ.get("MOTION_CLIP_PADDING_SECS", "3"))
 CFG_UNRESTRICTED_BROWSER = os.environ.get("UNRESTRICTED_STORAGE_BROWSER", "false").lower() == "true"
+CFG_LOG_LEVEL            = os.environ.get("LOG_LEVEL", "INFO").upper()
 
 MEDIA_DIR = Path(CFG_RECORDINGS)
 
@@ -3764,50 +3767,149 @@ async def http_snap_loop(camera_id: str, camera: dict) -> None:
     log.info(f"SNAP [{camera_id}]: http starting → {snap_url}")
 
     timeout = aiohttp.ClientTimeout(total=5)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    # ssl=False: LAN cameras often present self-signed certs (Hikvision redirects
+    # http→https with a self-signed cert).  The connection remains TLS-encrypted;
+    # we skip cert *verification* only, which is appropriate on a trusted LAN.
+    _connector = aiohttp.TCPConnector(ssl=False)
+
+    def _make_digest_auth(www_auth: str, method: str, uri: str) -> str:
+        """
+        Build an HTTP Digest Authorization header value.
+        Handles the qop=auth case (most cameras) and the simpler no-qop case.
+        """
+        # Parse WWW-Authenticate: Digest realm="...", nonce="...", ...
+        def _unquote(s: str) -> str:
+            return s.strip().strip('"')
+
+        params: dict[str, str] = {}
+        for part in re.split(r',\s*(?=[a-zA-Z])', www_auth.replace("Digest ", "", 1)):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                params[k.strip()] = _unquote(v)
+
+        realm  = params.get("realm", "")
+        nonce  = params.get("nonce", "")
+        qop    = params.get("qop", "")
+        opaque = params.get("opaque", "")
+        nc_hex = "00000001"
+        cnonce = hashlib.md5(os.urandom(8)).hexdigest()[:8]
+
+        ha1 = hashlib.md5(f"{u}:{realm}:{p}".encode()).hexdigest()
+        ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
+
+        if "auth" in qop:
+            resp_str = f"{ha1}:{nonce}:{nc_hex}:{cnonce}:auth:{ha2}"
+        else:
+            resp_str = f"{ha1}:{nonce}:{ha2}"
+
+        response = hashlib.md5(resp_str.encode()).hexdigest()
+
+        header = (
+            f'Digest username="{u}", realm="{realm}", '
+            f'nonce="{nonce}", uri="{uri}", response="{response}"'
+        )
+        if "auth" in qop:
+            header += f', qop=auth, nc={nc_hex}, cnonce="{cnonce}"'
+        if opaque:
+            header += f', opaque="{opaque}"'
+        return header
+
+    # Track consecutive error count to rate-limit log noise
+    _err_count     = 0
+    _err_logged_at = 0  # frame count when we last logged an error
+
+    async with aiohttp.ClientSession(timeout=timeout, connector=_connector) as session:
         while True:
-            # ── Idle check: stop if nothing has polled us in 30 s ─────────────
+            # ── Idle check: stop if nothing has polled us in 30 s ────────────
             last   = _snap_last_access.get(camera_id, 0)
             idle_s = time.monotonic() - last
             if idle_s > 30 and state["frame"] is not None:
                 log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s — stopping")
                 break
 
-            # ── Build request URL (Reolink needs creds in query params) ────────
+            # ── Build request URL (Reolink needs creds in query params) ───────
             request_url = snap_url
             if auth_mode == "query_params" and u:
                 request_url = f"{snap_url}&user={u}&password={p}"
 
+            # Parse path for Digest uri field
             try:
-                async with session.get(
-                    request_url, auth=auth, allow_redirects=True
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.read()
-                        # Sanity check: a real JPEG is at least a few hundred bytes
-                        if data and len(data) > 200:
-                            state["frame"]       = data
-                            state["frame_time"]  = time.monotonic()
-                            state["frame_count"] = (state.get("frame_count") or 0) + 1
-                            fc = state["frame_count"]
-                            if fc % 50 == 0:
-                                log.debug(
-                                    f"SNAP [{camera_id}]: http frame {fc} "
-                                    f"— {len(data)} bytes"
-                                )
-                        else:
+                _parsed_path = request_url.split("//", 1)[1].split("/", 1)[1]
+                _uri = "/" + _parsed_path
+            except (IndexError, ValueError):
+                _uri = "/"
+
+            try:
+                # ── Step 1: try with Basic auth (or no auth for query_params) ─
+                headers: dict[str, str] = {}
+                if auth and auth_mode == "basic":
+                    # Send Basic auth first — many cameras accept it
+                    async with session.get(
+                        request_url, auth=auth, allow_redirects=True
+                    ) as resp1:
+                        status1 = resp1.status
+                        www_auth = resp1.headers.get("WWW-Authenticate", "")
+
+                    if status1 == 401 and www_auth.startswith("Digest") and u:
+                        # ── Step 2: camera requires Digest auth — compute and retry
+                        dig_header = _make_digest_auth(www_auth, "GET", _uri)
+                        headers = {"Authorization": dig_header}
+                        async with session.get(
+                            request_url, headers=headers, allow_redirects=True
+                        ) as resp2:
+                            final_status = resp2.status
+                            data = await resp2.read() if final_status == 200 else b""
+                    elif status1 == 200:
+                        async with session.get(
+                            request_url, auth=auth, allow_redirects=True
+                        ) as resp_ok:
+                            final_status = resp_ok.status
+                            data = await resp_ok.read() if final_status == 200 else b""
+                    else:
+                        final_status = status1
+                        data = b""
+                else:
+                    # query_params or no credentials
+                    async with session.get(
+                        request_url, allow_redirects=True
+                    ) as resp:
+                        final_status = resp.status
+                        data = await resp.read() if final_status == 200 else b""
+
+                if final_status == 200:
+                    if data and len(data) > 200:
+                        state["frame"]       = data
+                        state["frame_time"]  = time.monotonic()
+                        state["frame_count"] = (state.get("frame_count") or 0) + 1
+                        fc = state["frame_count"]
+                        _err_count = 0
+                        if fc % 50 == 0:
                             log.debug(
-                                f"SNAP [{camera_id}]: http got {len(data) if data else 0} "
-                                f"bytes (too small, discarding)"
+                                f"SNAP [{camera_id}]: http frame {fc} "
+                                f"— {len(data)} bytes"
                             )
                     else:
-                        log.warning(
-                            f"SNAP [{camera_id}]: http status {resp.status}"
+                        log.debug(
+                            f"SNAP [{camera_id}]: http got {len(data) if data else 0} "
+                            f"bytes (too small, discarding)"
                         )
+                else:
+                    _err_count += 1
+                    fc = state.get("frame_count") or 0
+                    # Log first failure, then every 30th, to avoid log flood
+                    if _err_count == 1 or (_err_count % 30 == 0):
+                        log.warning(
+                            f"SNAP [{camera_id}]: http status {final_status} "
+                            f"(consecutive failures: {_err_count})"
+                        )
+
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                log.warning(f"SNAP [{camera_id}]: http error: {exc}")
+                _err_count += 1
+                if _err_count == 1 or (_err_count % 30 == 0):
+                    log.warning(f"SNAP [{camera_id}]: http error: {exc} "
+                                f"(consecutive failures: {_err_count})")
 
             try:
                 await asyncio.sleep(1.0)   # ~1 fps
@@ -5255,6 +5357,7 @@ function stopAllSnaps() {
 async function cancelScan() {
   await fetch(BASE + '/api/scan/cancel', {method: 'POST'}).catch(() => {});
 }
+
 
 /* ── Open HA addon log page ─────────────────────────────────────────────────── */
 function openHALog() {
@@ -7576,6 +7679,7 @@ header h1{{cursor:pointer}}
   <button class="btn btn-secondary" id="pscan-btn"    onclick="switchView('pscan')">&#x1F50E; Port Scan</button>
   <button class="btn btn-secondary" id="add-btn"      onclick="switchView('add')">&#x2795; Connect Camera</button>
   <button class="btn btn-secondary" id="storage-btn"  onclick="switchView('storage')">&#x1F4BE; Storage</button>
+
 </header>
 
 <div id="status-bar">
@@ -7802,6 +7906,33 @@ async def handle_index(request: web.Request) -> web.Response:
 # Routing
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def api_set_log_level(request: web.Request) -> web.Response:
+    """
+    POST /api/log_level   body: {"level": "DEBUG"|"INFO"|"WARNING"|"ERROR"}
+    Adjusts the anycam logger level at runtime without restart.
+    Library loggers (aiohttp, asyncio) are kept at WARNING regardless.
+    """
+    try:
+        body  = await request.json()
+        level_str = str(body.get("level", "")).upper()
+        level_map = {
+            "DEBUG":   logging.DEBUG,
+            "INFO":    logging.INFO,
+            "WARNING": logging.WARNING,
+            "ERROR":   logging.ERROR,
+        }
+        if level_str not in level_map:
+            return web.json_response(
+                {"error": f"Unknown level '{level_str}'. Use DEBUG/INFO/WARNING/ERROR."},
+                status=400
+            )
+        log.setLevel(level_map[level_str])
+        log.info(f"Log level changed to {level_str}")
+        return web.json_response({"status": "ok", "level": level_str})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+
 def make_app() -> web.Application:
     app = web.Application()
     app.router.add_get(   "/",                                    handle_index)
@@ -7820,6 +7951,7 @@ def make_app() -> web.Application:
     app.router.add_get(   "/stream/{camera_id}/test",             handle_stream_test)
     app.router.add_get(   "/snapshot/{camera_id}",                handle_snapshot)
     app.router.add_get(   "/snap/status",                         handle_snap_status)
+    app.router.add_post(  "/api/log_level",                        api_set_log_level)
     app.router.add_get(   "/api/logs",                            api_logs)
     app.router.add_post(  "/snap/focus/{camera_id}",              handle_focus_set)
     app.router.add_delete("/snap/focus",                          handle_focus_clear)

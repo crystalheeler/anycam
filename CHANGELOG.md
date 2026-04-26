@@ -1,4 +1,26 @@
+## 2.1.9
+- Log level now configured in the HA add-on Configuration tab (log_level option:
+  DEBUG / INFO / WARNING / ERROR, default INFO); takes effect on next add-on
+  restart; reads LOG_LEVEL env var alongside all other CFG_ options at startup
+- Removed the log level dropdown that was incorrectly placed in the AnyCam web
+  UI header; POST /api/log_level endpoint retained for internal use
+- config.yaml: added log_level option (default INFO) and schema entry
+  list(DEBUG|INFO|WARNING|ERROR)
+- Bumped version to 2.1.9 (was held at 2.1.8 in error across multiple releases)
+
 ## 2.1.8
+- http_snap_loop: add HTTP Digest auth support — two-step flow: sends Basic auth
+  first, detects WWW-Authenticate: Digest response, computes RFC 2617 MD5 Digest
+  response and retries; fixes Hikvision ISAPI snapshot endpoint which rejects
+  Basic auth (consistent with RTSP Digest challenge already seen in probing)
+- http_snap_loop: reduce log flood — consecutive 401/error warnings now logged
+  on the 1st failure and every 30th thereafter instead of every second
+- UI: add Log Level dropdown to the header bar (DEBUG / INFO / WARNING / ERROR);
+  calls POST /api/log_level and takes effect immediately without restart; shows
+  toast confirmation on change
+- api_set_log_level: new handler for POST /api/log_level; adjusts anycam logger
+  level at runtime; library loggers (aiohttp, asyncio) remain at WARNING
+- http_snap_loop: use TCPConnector(ssl=False) so cameras that redirect HTTP→HTTPS with a self-signed certificate (e.g. Hikvision on newer firmware) are served correctly; previously every snap attempt failed with SSLCertVerificationError
 - STREAM_DB: populated snap URLs for microseven (/tmpfs/snap.jpg, confirmed
   from official ha.ivanfm.com source) and sricam/ipcam/generic (/tmpfs/snap.jpg,
   same hi3510/hi3516 chipset); Reolink snap set to CGI endpoint with URL-param
