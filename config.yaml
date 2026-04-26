@@ -9,18 +9,21 @@ arch:
   - amd64
 
 options:
-  low_fps_mode: true
+  low_fps_mode: false
   skip_nonref: false
-  limit_threads: true
+  limit_threads: false
   stagger_polling: false
   hw_decode: false
-  adaptive_quality: true
+  adaptive_quality: false
   recordings_path: "/media/anycam"
   motion_sensitivity: 15
   motion_cooldown_secs: 10
   motion_clip_padding_secs: 3
   unrestricted_storage_browser: false
-  log_level: "INFO"
+  log_debug: false
+  log_info: true
+  log_warning: true
+  log_error: true
 
 schema:
   low_fps_mode: bool
@@ -34,12 +37,16 @@ schema:
   motion_cooldown_secs: "int(1,300)"
   motion_clip_padding_secs: "int(0,30)"
   unrestricted_storage_browser: bool
-  log_level: "list(DEBUG|INFO|WARNING|ERROR)"
+  log_debug: bool
+  log_info: bool
+  log_warning: bool
+  log_error: bool
 
 map:
   - type: media
     read_only: false
 
+boot: auto
 ingress: true
 ingress_port: 8099
 ingress_stream: true
