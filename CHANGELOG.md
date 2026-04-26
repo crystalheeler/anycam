@@ -1,3 +1,16 @@
+## 2.1.7
+- Fix A: RTSP transport auto-detection for non-compliant cameras. Many cheap/
+  generic ONVIF cameras (Microseven, Sricam, etc.) accept the TCP RTSP SETUP
+  request but reply with UDP in the Transport header. ffmpeg logs this as
+  'Nonmatching transport in server reply' which surfaces as 'Invalid data found
+  when processing input' — the exact error seen on camera 10.0.0.22 since
+  version 2.1.0. After 3 consecutive 0-frame failures with TCP transport,
+  snap_loop now automatically switches to UDP and resets the streak counter.
+  If UDP also fails 3 times, it reverts to TCP. The preferred_transport is
+  stored in the camera dict at runtime (not persisted to cameras.json — it
+  rediscovers the right transport each addon start, which takes under a minute).
+- Audit due at 2.1.9 (every other release per project rules, issues 2-10).
+
 ## 2.1.6
 - Removed go2rtc entirely. go2rtc was introduced in v1.4.1 as a streaming
   backbone but was never wired to serve frames — snap_loop and handle_stream

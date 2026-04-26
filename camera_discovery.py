@@ -59,7 +59,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.1.6"  # must match config.yaml
+CURRENT_VERSION = "2.1.7"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3180,9 +3180,19 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         # Focus/native_res: q:v 2 for maximum sharpness at full resolution.
         # Thumbnails: q:v 5 is a good balance of quality vs bandwidth.
         jpeg_q = "2" if native_res else "5"
+        # Transport: default TCP for reliability, but some cameras (typically
+        # cheap/generic ONVIF devices) accept the TCP SETUP request but reply
+        # with UDP in the Transport header — ffmpeg raises "Nonmatching transport
+        # in server reply" which surfaces as "Invalid data found when processing
+        # input".  After repeated failures snap_loop marks the camera as needing
+        # UDP; we honour that here.
+        cam_for_transport = CAMERAS.get(camera_id, camera)
+        pref_transport    = cam_for_transport.get("preferred_transport", "tcp")
+        transport_args    = ["-rtsp_transport", pref_transport, "-timeout", "8000000"]
+
         return await asyncio.create_subprocess_exec(
             "ffmpeg", "-nostdin", "-loglevel", "warning",
-            "-rtsp_transport", "tcp", "-timeout", "8000000",
+            *transport_args,
             "-err_detect", "ignore_err",   # tolerate partial HEVC decode errors
             *skip_args,
             *hw_args,
@@ -3400,6 +3410,29 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 streak = state.get("zero_frame_streak", 0) + 1
                 state["zero_frame_streak"] = streak
                 backoff = min(2 ** min(streak - 1, 4), 32)
+
+                # After 3 consecutive 0-frame failures, try flipping the
+                # RTSP transport.  Many cheap/generic ONVIF cameras (Sricam,
+                # Microseven, etc.) accept the TCP SETUP but reply with UDP —
+                # ffmpeg calls this "Nonmatching transport in server reply"
+                # which surfaces as "Invalid data found when processing input".
+                # Flipping to UDP fixes this class of camera entirely.
+                # We try TCP→UDP first; if UDP also fails 3 more times we
+                # flip back to TCP (so the backoff loop still applies).
+                if streak == 3 and not native_res:
+                    cam_now = CAMERAS.get(camera_id, {})
+                    cur_transport = cam_now.get("preferred_transport", "tcp")
+                    if cur_transport == "tcp":
+                        log.warning(f"SNAP [{camera_id}]: 3 consecutive 0-frame failures "
+                                    f"with TCP — switching to UDP transport (camera may "
+                                    f"not support TCP RTSP)")
+                        CAMERAS[camera_id]["preferred_transport"] = "udp"
+                        state["zero_frame_streak"] = 0   # fresh count for UDP
+                    elif cur_transport == "udp":
+                        log.warning(f"SNAP [{camera_id}]: 3 consecutive 0-frame failures "
+                                    f"with UDP also — reverting to TCP")
+                        CAMERAS[camera_id]["preferred_transport"] = "tcp"
+                        state["zero_frame_streak"] = 0
 
                 # After 5 consecutive 0-frame failures on the main stream,
                 # it may be a codec mismatch (e.g. ONVIF says h264, camera sends hevc).
