@@ -57,8 +57,9 @@ CONTRACTS = {
     "http_snap_loop":        ["asyncio.sleep", "_snap_state", "TCPConnector"],
     "snap_loop":             ["_snap_state", "asyncio"],
     "build_html":            ["INGRESS_PATH"],
-    "make_app":              ["app.router", "web.Application"],
+    "make_app":              ["app.router", "web.Application", "on_shutdown"],
     "api_set_credentials":   ["save_cameras", "CAMERAS"],
+    "_on_shutdown":          ["SIGTERM", "save_cameras", "_THREAD_POOL"],
 }
 all_ok = True
 for node in ast.walk(tree):
