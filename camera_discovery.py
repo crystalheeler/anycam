@@ -10,15 +10,18 @@ AnyCam — Home Assistant Add-on  v1.1.4
 
 import asyncio
 import base64
+import concurrent.futures
 import datetime
 import hashlib
 import ipaddress
 import json
 import logging
 import os
+import random
 import re
 import signal
 import socket
+import ssl
 import struct
 import subprocess
 import time
@@ -87,7 +90,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.3"  # must match config.yaml
+CURRENT_VERSION = "2.2.4"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -447,12 +450,26 @@ _FOCUSED_CAMERA: str | None = None
 # is added here so future stream requests skip hw decode immediately.
 _HW_UNAVAILABLE: set = set()
 
+# ── Shared thread pool for all run_in_executor calls ─────────────────────────
+# Using a named, bounded pool instead of None (default) gives us:
+#   1. Explicit max_workers cap — prevents unbounded thread creation on scan
+#   2. Named threads for easier debugging (anycam-N in stack traces)
+#   3. Clean shutdown lifecycle via _THREAD_POOL.shutdown()
+# 12 workers: above the Pi 4 default (8) but appropriate for I/O-bound probes.
+_THREAD_POOL: concurrent.futures.ThreadPoolExecutor = (
+    concurrent.futures.ThreadPoolExecutor(
+        max_workers=12,
+        thread_name_prefix="anycam",
+    )
+)
+
 # Circular log buffer — last 200 WARNING/ERROR entries for the status dot.
 # Structure: [{"level": "warning"|"error", "msg": str, "t": float}, ...]
 _LOG_BUFFER: list = []
 
 class _BufHandler(logging.Handler):
-    def emit(self, record):
+    def emit(self, record) -> None:
+
         if record.levelno >= logging.WARNING:
             _LOG_BUFFER.append({
                 "level": "error" if record.levelno >= logging.ERROR else "warning",
@@ -1373,7 +1390,8 @@ def _oui_key(mac: str) -> str:
     return ":".join(parts[:3]) if len(parts) >= 3 else ""
 
 
-def load_oui_db():
+def load_oui_db() -> None:
+
     """
     Load the OUI database from /data/oui_cache.json into _OUI_DB.
     The cache is downloaded asynchronously by refresh_oui_db() on first run.
@@ -1390,7 +1408,8 @@ def load_oui_db():
     _OUI_DB_LOADED = True
 
 
-async def refresh_oui_db():
+async def refresh_oui_db() -> None:
+
     """
     Download the IEEE OUI CSV and cache it to /data/oui_cache.json.
     Runs once on startup if cache is missing or older than OUI_MAX_AGE_DAYS.
@@ -1412,13 +1431,14 @@ async def refresh_oui_db():
     try:
         loop = asyncio.get_event_loop()
 
-        def _download():
+        def _download() -> str:
+
             req = urllib.request.Request(OUI_CSV_URL)
             req.add_header("User-Agent", "AnyCam/1.0")
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return resp.read().decode("utf-8", errors="replace")
 
-        raw = await loop.run_in_executor(None, _download)
+        raw = await loop.run_in_executor(_THREAD_POOL, _download)
 
         # Parse CSV: Registry, Assignment (OUI hex), Organization Name, Address
         oui_map: dict[str, str] = {}
@@ -1516,7 +1536,8 @@ def decrypt_creds(token: str) -> tuple[str, str]:
 # Persistent stores
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_cameras():
+def load_cameras() -> None:
+
     if not CAMS_FILE.exists():
         return
     try:
@@ -1530,7 +1551,8 @@ def load_cameras():
     except Exception as e:
         log.warning(f"Load cameras: {e}")
 
-def save_cameras():
+def save_cameras() -> None:
+
     DATA_DIR.mkdir(exist_ok=True)
     safe = []
     for cam in CAMERAS.values():
@@ -1540,7 +1562,8 @@ def save_cameras():
         safe.append(s)
     CAMS_FILE.write_text(json.dumps(safe, indent=2))
 
-def load_blacklist():
+def load_blacklist() -> None:
+
     if not BLACKLIST_FILE.exists():
         return
     try:
@@ -1548,14 +1571,16 @@ def load_blacklist():
     except Exception:
         pass
 
-def save_blacklist():
+def save_blacklist() -> None:
+
     DATA_DIR.mkdir(exist_ok=True)
     BLACKLIST_FILE.write_text(json.dumps(list(BLACKLIST)))
 
 # In-memory feedback store: cid → rich fingerprint record
 FEEDBACK: dict = {}
 
-def load_feedback():
+def load_feedback() -> None:
+
     if not FEEDBACK_FILE.exists():
         return
     try:
@@ -1564,7 +1589,8 @@ def load_feedback():
     except Exception as e:
         log.warning(f"Feedback load: {e}")
 
-def save_feedback():
+def save_feedback() -> None:
+
     DATA_DIR.mkdir(exist_ok=True)
     FEEDBACK_FILE.write_text(json.dumps(FEEDBACK, indent=2))
 
@@ -1584,7 +1610,8 @@ def build_fingerprint(cam: dict) -> dict:
         "manufacturer": cam.get("manufacturer",""),
     }
 
-async def submit_to_community(record: dict):
+async def submit_to_community(record: dict) -> None:
+
     """
     Fire-and-forget submission to the community endpoint.
     Silently fails if the endpoint is unavailable or not configured.
@@ -1614,7 +1641,8 @@ def load_runtime() -> dict:
     except Exception:
         return {}
 
-def save_runtime(data: dict):
+def save_runtime(data: dict) -> None:
+
     DATA_DIR.mkdir(exist_ok=True)
     RUNTIME_FILE.write_text(json.dumps(data, indent=2))
 
@@ -2343,7 +2371,8 @@ _IDENTITY_PATHS = [
 ]
 
 
-def _make_ssl_ctx():
+def _make_ssl_ctx() -> ssl.SSLContext:
+
     """SSL context that ignores self-signed certificates (common on cameras/NVRs)."""
     import ssl
     ctx = ssl.create_default_context()
@@ -2860,7 +2889,8 @@ def _onvif_media_url(ip: str, port: int, xaddrs: str) -> str:
 # Full-range port scanner (user-initiated, separate from camera scan)
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def run_port_scan(ip: str):
+async def run_port_scan(ip: str) -> None:
+
     """
     Full 65535-port scan with live discovery feed.
 
@@ -2931,7 +2961,7 @@ async def run_port_scan(ip: str):
                 # the event loop — nmap XML can be several KB on busy subnets.
                 loop     = asyncio.get_event_loop()
                 xml_text = await loop.run_in_executor(
-                    None, lambda: open(xml_path).read()
+                    _THREAD_POOL, lambda: open(xml_path).read()
                 )
                 root = ET.fromstring(xml_text)
                 for host in root.findall("host"):
@@ -3003,7 +3033,7 @@ async def _rerun_onvif_auth(camera_id: str, camera: dict,
 
     log.info(f"  [{camera_id}] ONVIF re-auth: media_url={media_url}")
     profiles = await loop.run_in_executor(
-        None, onvif_get_profiles, media_url, username, password)
+        _THREAD_POOL, onvif_get_profiles, media_url, username, password)
     log.info(f"  [{camera_id}] ONVIF profiles found: {len(profiles)} "
              f"— {[p['name'] for p in profiles]}")
     if not profiles:
@@ -3014,7 +3044,7 @@ async def _rerun_onvif_auth(camera_id: str, camera: dict,
     stream_candidates = []
     for prof in profiles:
         stream_url = await loop.run_in_executor(
-            None, onvif_get_stream_uri, media_url, prof["token"], username, password)
+            _THREAD_POOL, onvif_get_stream_uri, media_url, prof["token"], username, password)
         if not stream_url:
             continue
         det = await probe_stream_details(stream_url, "RTSP")
@@ -3050,7 +3080,8 @@ async def _rerun_onvif_auth(camera_id: str, camera: dict,
         return False
 
     # Rank by resolution descending
-    def _res(c):
+    def _res(c) -> int:
+
         return (c.get("stream_width") or 0) * (c.get("stream_height") or 0)
     stream_candidates.sort(key=_res, reverse=True)
     main_s = stream_candidates[0]
@@ -3166,7 +3197,7 @@ async def run_verification_scan(prev_version: str = "unknown") -> None:
         if proto in ("RTSP", "DVR", "ONVIF"):
             url = cam.get("stream_url","")
             if url:
-                found = await loop.run_in_executor(None, probe_rtsp, url, u, p)
+                found = await loop.run_in_executor(_THREAD_POOL, probe_rtsp, url, u, p)
                 # Populate codec info using authenticated URL if not yet stored
                 if not cam.get("stream_codec"):
                     _auth_url = build_authenticated_url(cam) or url
@@ -3178,15 +3209,15 @@ async def run_verification_scan(prev_version: str = "unknown") -> None:
                                      f"{cam.get('stream_codec','?')} "
                                      f"{cam.get('stream_width','?')}x{cam.get('stream_height','?')}")
             if not found:
-                found = await loop.run_in_executor(None, probe_rtsp_options, ip, port)
+                found = await loop.run_in_executor(_THREAD_POOL, probe_rtsp_options, ip, port)
         elif proto == "MJPEG":
-            result = await loop.run_in_executor(None, probe_mjpeg_quick, ip, port)
+            result = await loop.run_in_executor(_THREAD_POOL, probe_mjpeg_quick, ip, port)
             found = bool(result)
         elif proto == "HLS":
-            result = await loop.run_in_executor(None, probe_hls_quick, ip, port)
+            result = await loop.run_in_executor(_THREAD_POOL, probe_hls_quick, ip, port)
             found = bool(result)
         elif proto == "RTMP":
-            found = await loop.run_in_executor(None, probe_rtmp, ip, port)
+            found = await loop.run_in_executor(_THREAD_POOL, probe_rtmp, ip, port)
         else:
             # WebRTC / WS-RTSP / HTTP — just check TCP reachability
             try:
@@ -3386,7 +3417,8 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     SOI = bytes([0xFF, 0xD8])
     EOI = bytes([0xFF, 0xD9])
 
-    async def _launch_snap(hw_dec: str = "", native_res: bool = False):
+    async def _launch_snap(hw_dec: str = "", native_res: bool = False) -> None:
+
         """Launch ffmpeg for snapshot polling.
         native_res=True: use camera's native resolution/fps (for focus view).
         Respects CFG_ options: thread limiting, skip_nonref, low_fps_mode.
@@ -3857,7 +3889,9 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
             log.info(f"SNAP [{camera_id}]: restarting in {backoff}s "
                      f"(#{state['restart_count']})")
-            await asyncio.sleep(backoff)
+            # ±10% jitter prevents multiple cameras from hammering resources
+            # in lockstep after a shared network event (e.g. a brief outage).
+            await asyncio.sleep(backoff * random.uniform(0.9, 1.1))
 
     finally:
         state["proc"] = None
@@ -4713,10 +4747,12 @@ def _safe_cam(cam: dict) -> dict:
     return s
 
 
-async def api_cameras(request):
+async def api_cameras(request) -> web.Response:
+
     return web.json_response([_safe_cam(c) for c in CAMERAS.values()])
 
-async def api_scan(request):
+async def api_scan(request) -> web.Response:
+
     if SCAN_STATE["running"]:
         return web.json_response({"error": "Scan already running"}, status=409)
     try:
@@ -4727,11 +4763,13 @@ async def api_scan(request):
     asyncio.create_task(run_scan())
     return web.json_response({"status": "started"})
 
-async def api_scan_status(request):
+async def api_scan_status(request) -> web.Response:
+
     return web.json_response(SCAN_STATE)
 
 
-async def api_scan_cancel(request):
+async def api_scan_cancel(request) -> web.Response:
+
     """POST /api/scan/cancel — request graceful abort of running scan."""
     global _SCAN_CANCELLED
     if not SCAN_STATE["running"]:
@@ -4805,7 +4843,7 @@ async def _probe_db_streams(ip: str, port: int, creds: str | None,
             continue
         try:
             ok = await loop.run_in_executor(
-                None, probe_rtsp, url, "", "", 4, f"db_probe:{ip}{path}")
+                _THREAD_POOL, probe_rtsp, url, "", "", 4, f"db_probe:{ip}{path}")
             if ok:
                 det = await probe_stream_details(url, "RTSP")
                 results.append({"url": url, **det})
@@ -4814,7 +4852,8 @@ async def _probe_db_streams(ip: str, port: int, creds: str | None,
     return results
 
 
-async def api_set_credentials(request):
+async def api_set_credentials(request) -> web.Response:
+
     try:
         data      = await request.json()
         camera_id = data.get("camera_id", "")
@@ -4840,7 +4879,7 @@ async def api_set_credentials(request):
         media_url = _onvif_media_url(ip, port, camera.get("xaddrs",""))
         log.info(f"  ONVIF media URL: {media_url}")
         profiles  = await loop.run_in_executor(
-            None, onvif_get_profiles, media_url, username, password)
+            _THREAD_POOL, onvif_get_profiles, media_url, username, password)
         log.info(f"  ONVIF profiles found: {len(profiles)} — {[p['name'] for p in profiles]}")
         if profiles:
             enc_creds = encrypt_creds(username, password)
@@ -4848,12 +4887,12 @@ async def api_set_credentials(request):
             stream_candidates = []   # list of {url, width, height, codec, token, name}
             for prof in profiles:
                 stream_url = await loop.run_in_executor(
-                    None, onvif_get_stream_uri, media_url, prof["token"], username, password)
+                    _THREAD_POOL, onvif_get_stream_uri, media_url, prof["token"], username, password)
                 log.info(f"  Profile '{prof['name']}' stream_url: {stream_url}")
                 if not stream_url:
                     continue
                 ok = await loop.run_in_executor(
-                    None, probe_rtsp, stream_url, username, password,
+                    _THREAD_POOL, probe_rtsp, stream_url, username, password,
                     6, f"{camera_id}/{prof['name']}")
                 log.info(f"  probe_rtsp OK: {ok}")
                 if not ok:
@@ -4925,7 +4964,7 @@ async def api_set_credentials(request):
                 if profiles:
                     _first_token = profiles[0]["token"]
                     _snap_uri = await loop.run_in_executor(
-                        None, onvif_get_snapshot_uri,
+                        _THREAD_POOL, onvif_get_snapshot_uri,
                         media_url, _first_token, username, password)
                     if _snap_uri:
                         http_snap_url = _snap_uri
@@ -4945,7 +4984,8 @@ async def api_set_credentials(request):
 
             if stream_candidates:
                 # ── Rank by resolution: highest first, lowest last ─────────────
-                def _res(c):
+                def _res(c) -> int:
+
                     return (c.get("stream_width") or 0) * (c.get("stream_height") or 0)
                 stream_candidates.sort(key=_res, reverse=True)
                 main_s = stream_candidates[0]
@@ -5024,7 +5064,8 @@ async def api_set_credentials(request):
                     # Run ffprobe to detect the real codec — ONVIF often reports
                     # "h264" when the camera actually streams HEVC.
                     cam_url = build_authenticated_url(cam) or ""
-                    async def _fix_codec(cam_id=cid, auth_url=cam_url):
+                    async def _fix_codec(cam_id=cid, auth_url=cam_url) -> None:
+
                         await asyncio.sleep(1.0)
                         det = await probe_stream_details(auth_url, "RTSP")
                         real_codec = (det.get("stream_codec") or "").lower()
@@ -5050,26 +5091,26 @@ async def api_set_credentials(request):
         # Try stored port first
         log.info(f"  Trying direct RTSP on {ip}:{port}")
         url = await loop.run_in_executor(
-            None, find_rtsp_path, ip, port, username, password)
+            _THREAD_POOL, find_rtsp_path, ip, port, username, password)
         # For ONVIF cards the stored port is often 80; always also try 554
         if not url and port != 554:
             log.info(f"  Trying direct RTSP on {ip}:554 (standard RTSP port)")
             url = await loop.run_in_executor(
-                None, find_rtsp_path, ip, 554, username, password)
+                _THREAD_POOL, find_rtsp_path, ip, 554, username, password)
         if not url and camera.get("xaddrs"):
             parsed = urlparse(camera["xaddrs"])
             rtsp_port = parsed.port or 554
             log.info(f"  Trying RTSP via xaddrs {ip}:{rtsp_port}")
             url = await loop.run_in_executor(
-                None, find_rtsp_path, parsed.hostname or ip,
+                _THREAD_POOL, find_rtsp_path, parsed.hostname or ip,
                 rtsp_port, username, password)
         log.info(f"  RTSP result: {_strip_creds(url) if url else 'None'}")
     elif proto == "MJPEG":
         url = await loop.run_in_executor(
-            None, probe_mjpeg_http, ip, port, username, password)
+            _THREAD_POOL, probe_mjpeg_http, ip, port, username, password)
     elif proto == "HLS":
         url = await loop.run_in_executor(
-            None, probe_hls, ip, port, username, password)
+            _THREAD_POOL, probe_hls, ip, port, username, password)
 
     if not url:
         log.warning(f"Credential attempt FAILED for {camera_id} — no working stream found")
@@ -5100,7 +5141,8 @@ async def api_set_credentials(request):
         if db_streams:
             # Rank with main stream, pick lowest-res as sub
             all_s = [{"url": url, **details}] + db_streams
-            def _res2(c):
+            def _res2(c) -> int:
+
                 return (c.get("stream_width") or 0) * (c.get("stream_height") or 0)
             all_s.sort(key=_res2, reverse=True)
             url     = all_s[0]["url"]
@@ -5121,7 +5163,8 @@ async def api_set_credentials(request):
     return web.json_response({"status": "ok", "stream_url": _strip_creds(url), **details})
 
 
-async def api_clear_credentials(request):
+async def api_clear_credentials(request) -> web.Response:
+
     cid    = request.match_info["camera_id"]
     camera = CAMERAS.get(cid)
     if not camera:
@@ -5132,7 +5175,8 @@ async def api_clear_credentials(request):
     save_cameras()
     return web.json_response({"status": "ok"})
 
-async def api_rename_camera(request):
+async def api_rename_camera(request) -> web.Response:
+
     cid = request.match_info["camera_id"]
     try:
         data = await request.json()
@@ -5144,13 +5188,15 @@ async def api_rename_camera(request):
         save_cameras()
     return web.json_response({"status": "ok"})
 
-async def api_delete_camera(request):
+async def api_delete_camera(request) -> web.Response:
+
     cid = request.match_info["camera_id"]
     CAMERAS.pop(cid, None)
     save_cameras()
     return web.json_response({"status": "ok"})
 
-async def api_confirm_camera(request):
+async def api_confirm_camera(request) -> web.Response:
+
     """User confirmed a post-upgrade missing camera — clear the flag."""
     cid    = request.match_info["camera_id"]
     camera = CAMERAS.get(cid)
@@ -5163,7 +5209,8 @@ async def api_confirm_camera(request):
     return web.json_response({"status": "ok"})
 
 
-async def api_not_camera(request):
+async def api_not_camera(request) -> web.Response:
+
     cid = request.match_info["camera_id"]
     cam = CAMERAS.get(cid)
     if not cam:
@@ -5209,7 +5256,8 @@ async def api_not_camera(request):
 
     return web.json_response({"status": "ok"})
 
-async def api_add_camera(request):
+async def api_add_camera(request) -> web.Response:
+
     try:
         data = await request.json()
     except Exception:
@@ -5233,16 +5281,16 @@ async def api_add_camera(request):
     if protocol in ("RTSP", "DVR", "ONVIF"):
         if rtsp_path:
             test_url = f"rtsp://{ip}:{port}{rtsp_path}"
-            if await loop.run_in_executor(None, probe_rtsp, test_url, username, password):
+            if await loop.run_in_executor(_THREAD_POOL, probe_rtsp, test_url, username, password):
                 url = test_url
         if not url:
-            url = await loop.run_in_executor(None, find_rtsp_path, ip, port, username, password)
+            url = await loop.run_in_executor(_THREAD_POOL, find_rtsp_path, ip, port, username, password)
     elif protocol == "MJPEG":
-        url = await loop.run_in_executor(None, probe_mjpeg_http, ip, port, username, password)
+        url = await loop.run_in_executor(_THREAD_POOL, probe_mjpeg_http, ip, port, username, password)
     elif protocol == "HLS":
-        url = await loop.run_in_executor(None, probe_hls, ip, port, username, password)
+        url = await loop.run_in_executor(_THREAD_POOL, probe_hls, ip, port, username, password)
     elif protocol == "RTMP":
-        if await loop.run_in_executor(None, probe_rtmp, ip, port):
+        if await loop.run_in_executor(_THREAD_POOL, probe_rtmp, ip, port):
             url = f"rtmp://{ip}:{port}/live/stream"
 
     if not url and protocol not in ("WebRTC", "WS-RTSP"):
@@ -5263,12 +5311,14 @@ async def api_add_camera(request):
     return web.json_response({"status": "ok", "camera_id": cid})
 
 
-async def api_arp_hosts(request):
+async def api_arp_hosts(request) -> web.Response:
+
     """Return the last ARP-discovered host list for the Port Scan UI."""
     return web.json_response(ARP_HOSTS)
 
 
-async def api_pscan_start(request):
+async def api_pscan_start(request) -> web.Response:
+
     try:
         data = await request.json()
         ip   = data.get("ip","").strip()
@@ -5294,7 +5344,8 @@ async def api_pscan_start(request):
     return web.json_response({"status": "started"})
 
 
-async def run_batch_port_scan():
+async def run_batch_port_scan() -> None:
+
     """Run port scans sequentially for all IPs in PSCAN_QUEUE."""
     total = len(PSCAN_QUEUE)
     all_results = []
@@ -5315,7 +5366,8 @@ async def run_batch_port_scan():
     )
     PSCAN_QUEUE.clear()
 
-async def api_pscan_status(request):
+async def api_pscan_status(request) -> web.Response:
+
     # Add current elapsed so JS can compute drift between polls
     resp = dict(PSCAN)
     if resp.get("scan_start") and resp.get("running"):
@@ -5324,7 +5376,8 @@ async def api_pscan_status(request):
     resp["live_ports"] = PSCAN.get("live_ports", [])
     return web.json_response(resp)
 
-async def api_pscan_cancel(request):
+async def api_pscan_cancel(request) -> web.Response:
+
     pid = PSCAN.get("proc_pid")
     if pid:
         try:
@@ -5334,7 +5387,8 @@ async def api_pscan_cancel(request):
     PSCAN.update(running=False, paused=False, message="Cancelled.", proc_pid=None)
     return web.json_response({"status": "ok"})
 
-async def api_pscan_pause(request):
+async def api_pscan_pause(request) -> web.Response:
+
     pid = PSCAN.get("proc_pid")
     if pid and PSCAN["running"] and not PSCAN["paused"]:
         try:
@@ -5345,7 +5399,8 @@ async def api_pscan_pause(request):
             return web.json_response({"error": str(e)}, status=500)
     return web.json_response({"status": "ok"})
 
-async def api_pscan_resume(request):
+async def api_pscan_resume(request) -> web.Response:
+
     pid = PSCAN.get("proc_pid")
     if pid and PSCAN["paused"]:
         try:
@@ -7135,7 +7190,7 @@ async def _try_hevc_plus_fallback(camera_id: str, camera: dict,
     sub_url = camera.get("sub_stream_url")
     if sub_url:
         auth_sub = build_authenticated_url(camera, "sub_stream_url")
-        if auth_sub and await loop.run_in_executor(None, _try_probe, auth_sub):
+        if auth_sub and await loop.run_in_executor(_THREAD_POOL, _try_probe, auth_sub):
             log.info(f"snap_loop [{camera_id}]: H.265+ → sub_stream_url")
             return auth_sub
 
@@ -7153,7 +7208,7 @@ async def _try_hevc_plus_fallback(camera_id: str, camera: dict,
     if sub_path:
         auth_main = build_authenticated_url(camera) or url
         alt_auth = auth_main.replace(parsed.path, sub_path, 1)
-        if await loop.run_in_executor(None, _try_probe, alt_auth):
+        if await loop.run_in_executor(_THREAD_POOL, _try_probe, alt_auth):
             log.info(f"snap_loop [{camera_id}]: H.265+ → path fallback {_strip_creds(alt_auth)}")
             return alt_auth
 
@@ -7197,11 +7252,11 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
         }
 
     if initial_protocol in ("RTSP", "DVR"):
-        url = await loop.run_in_executor(None, find_rtsp_path, ip, port, "", "")
+        url = await loop.run_in_executor(_THREAD_POOL, find_rtsp_path, ip, port, "", "")
         if url:
             return base("RTSP", url, "ready")
         if saved_u:
-            url = await loop.run_in_executor(None, find_rtsp_path, ip, port, saved_u, saved_p)
+            url = await loop.run_in_executor(_THREAD_POOL, find_rtsp_path, ip, port, saved_u, saved_p)
             if url:
                 cam = base("RTSP", url, "ready")
                 cam["credentials"] = prev_creds
@@ -7211,43 +7266,43 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
         return cam
 
     if initial_protocol == "RTMP" or port in (1935, 1936):
-        ok = await loop.run_in_executor(None, probe_rtmp, ip, port)
+        ok = await loop.run_in_executor(_THREAD_POOL, probe_rtmp, ip, port)
         if ok:
             return base("RTMP", f"rtmp://{ip}:{port}/live/stream", "ready")
 
     if initial_protocol in ("HTTP", "ONVIF", "UNKNOWN"):
-        url = await loop.run_in_executor(None, probe_mjpeg_http, ip, port, "", "")
+        url = await loop.run_in_executor(_THREAD_POOL, probe_mjpeg_http, ip, port, "", "")
         if url:
             return base("MJPEG", url, "ready", "mjpeg")
         if saved_u:
-            url = await loop.run_in_executor(None, probe_mjpeg_http, ip, port, saved_u, saved_p)
+            url = await loop.run_in_executor(_THREAD_POOL, probe_mjpeg_http, ip, port, saved_u, saved_p)
             if url:
                 cam = base("MJPEG", url, "ready", "mjpeg")
                 cam["credentials"] = prev_creds
                 return cam
 
-        url = await loop.run_in_executor(None, probe_hls, ip, port, "", "")
+        url = await loop.run_in_executor(_THREAD_POOL, probe_hls, ip, port, "", "")
         if url:
             return base("HLS", url, "ready", "hls")
         if saved_u:
-            url = await loop.run_in_executor(None, probe_hls, ip, port, saved_u, saved_p)
+            url = await loop.run_in_executor(_THREAD_POOL, probe_hls, ip, port, saved_u, saved_p)
             if url:
                 cam = base("HLS", url, "ready", "hls")
                 cam["credentials"] = prev_creds
                 return cam
 
-        url = await loop.run_in_executor(None, find_rtsp_path, ip, port, "", "")
+        url = await loop.run_in_executor(_THREAD_POOL, find_rtsp_path, ip, port, "", "")
         if url:
             return base("RTSP", url, "ready")
 
-        wrtc = await loop.run_in_executor(None, probe_webrtc, ip, port)
+        wrtc = await loop.run_in_executor(_THREAD_POOL, probe_webrtc, ip, port)
         if wrtc:
             cam = base("WebRTC", wrtc, "info", "webrtc")
             cam["info"] = "WebRTC signaling detected. Direct browser negotiation required."
             cam["signaling_url"] = wrtc
             return cam
 
-        ws = await loop.run_in_executor(None, probe_ws_rtsp, ip, port)
+        ws = await loop.run_in_executor(_THREAD_POOL, probe_ws_rtsp, ip, port)
         if ws:
             cam = base("WS-RTSP", ws, "info", "wsrtsp")
             cam["info"] = "WS-RTSP endpoint detected."
@@ -7280,15 +7335,15 @@ async def run_scan() -> None:
     loop = asyncio.get_event_loop()
 
     try:
-        subnet  = await loop.run_in_executor(None, get_local_subnet)
-        gateway = await loop.run_in_executor(None, get_default_gateway)
+        subnet  = await loop.run_in_executor(_THREAD_POOL, get_local_subnet)
+        gateway = await loop.run_in_executor(_THREAD_POOL, get_default_gateway)
         log.info(f"Subnet: {subnet}  Gateway: {gateway}")
 
         arp_hosts, onvif_results, ssdp_results, mdns_results = await asyncio.gather(
-            loop.run_in_executor(None, discover_live_hosts, subnet),
-            loop.run_in_executor(None, onvif_discover, 5),
-            loop.run_in_executor(None, ssdp_discover, 5),
-            loop.run_in_executor(None, mdns_discover, 5),
+            loop.run_in_executor(_THREAD_POOL, discover_live_hosts, subnet),
+            loop.run_in_executor(_THREAD_POOL, onvif_discover, 5),
+            loop.run_in_executor(_THREAD_POOL, ssdp_discover, 5),
+            loop.run_in_executor(_THREAD_POOL, mdns_discover, 5),
         )
 
         multicast_ips = (
@@ -7315,7 +7370,7 @@ async def run_scan() -> None:
         if SCAN_CANCELLED:
             return
 
-        nmap_results  = await loop.run_in_executor(None, focused_nmap_scan, sorted(all_live))
+        nmap_results  = await loop.run_in_executor(_THREAD_POOL, focused_nmap_scan, sorted(all_live))
         responding_ips = {h["ip"] for h in nmap_results}
 
         SCAN_STATE.update(progress=55, stage=3,
@@ -7366,7 +7421,7 @@ async def run_scan() -> None:
             SCAN_STATE.update(progress=82, stage=4,
                               stage_label="Stage 4/4 — Deeper Scan",
                               message=f"Stage 4/4 — Deeper scan on {len(silent)} unresponsive host(s)…")
-            broad_results = await loop.run_in_executor(None, broad_nmap_scan, silent)
+            broad_results = await loop.run_in_executor(_THREAD_POOL, broad_nmap_scan, silent)
             for host in broad_results:
                 if SCAN_CANCELLED:
                     break
@@ -7808,7 +7863,7 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 #stor-col-headers .stor-col-acts{{cursor:default}}
 #stor-col-headers .stor-col-acts:hover{{background:none}}
 /* ── File/folder rows ── */
-#storage-list{{max-height:calc(100vh - 260px);overflow-y:auto}}
+#storage-list{{max-height:calc(100vh - 260px);max-height:calc(100dvh - 260px);overflow-y:auto}}
 .stor-row{{display:grid;grid-template-columns:1fr 180px 130px 90px 80px;gap:0;padding:3px 8px;font-size:.82rem;color:#111;align-items:center;border-bottom:1px solid #f0f0f0;cursor:default}}
 .stor-row:hover{{background:#cce8ff}}
 .stor-row:last-child{{border-bottom:none}}
@@ -8274,7 +8329,8 @@ async def _probe_hw_decoders() -> None:
         log.info("No hardware decoders available — using software decode")
 
 
-async def main():
+async def main() -> None:
+
     load_cameras()
     load_blacklist()
     load_feedback()
@@ -8323,6 +8379,9 @@ async def main():
     asyncio.create_task(refresh_oui_db())
 
     await asyncio.Event().wait()
+
+    # Shut down the thread pool cleanly when the event loop exits
+    _THREAD_POOL.shutdown(wait=False)
 
 
 if __name__ == "__main__":

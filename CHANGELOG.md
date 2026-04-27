@@ -1,3 +1,35 @@
+## 2.2.4
+SigRev-1 bundle (Items 1, 2, 3 — Items 4 and 7 were completed in 2.2.2/2.2.3):
+
+- SigRev-1 Item 1 — Backoff jitter: the ffmpeg restart backoff sleep in snap_loop
+  now applies ±10% random jitter (random.uniform(0.9, 1.1)) so multiple cameras
+  that fail simultaneously don't all restart in lockstep and hammer the Pi together;
+  added import random to module imports
+
+- SigRev-1 Item 2 — Type hints: all 38 functions missing return annotations are now
+  annotated (-> None, -> web.Response, -> ssl.SSLContext, -> str, -> int, etc.);
+  added import ssl and import concurrent.futures to module imports for type accuracy
+
+- SigRev-1 Item 3 — Thread pool cap: replaced all 44 run_in_executor(None, ...) calls
+  with a named, bounded ThreadPoolExecutor(_THREAD_POOL, max_workers=12,
+  thread_name_prefix='anycam'); prevents unbounded thread creation during full scans;
+  12 workers chosen for I/O-bound network probing on a 4-core Pi; pool is shut down
+  cleanly via _THREAD_POOL.shutdown(wait=False) when main() exits
+
+Best-practice audit (required on this release):
+  ✓ P1 Semantic contracts (6 functions verified)
+  ✓ P2 No bare except clauses
+  ✓ P3 No time.sleep() in async
+  ✓ P4 No blocking open() in async
+  ✓ P5 All functions annotated (0 missing — new)
+  ✓ P6 No mutable default arguments
+  ✓ J1-J4 JS checks clean
+  ✓ H1-H2 HTML checks clean
+  ✓ C1-C2 CSS typo / !important clean
+  ✓ C3 Added dvh fallback to #storage-list max-height (body min-height
+       left as-is: min-height:100vh is not affected by address-bar jump)
+  ✓ PL1 No bare newlines in JS string literals (String.fromCharCode not needed)
+
 ## 2.2.3
 - Bug fix: H.265+ warning badge on Hikvision card was a stale flag from
   cameras.json persisting across upgrades; verification scan RTSP-probe-fallback
