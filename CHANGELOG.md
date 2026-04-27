@@ -1,3 +1,23 @@
+## 2.2.0
+- Enhanced view #1: video feed now has a 44px top margin so the X close button
+  sits above the video rather than overlapping it; bottom black bar unchanged
+- Enhanced view #2: Resolution and Frame Rate dropdowns are smaller and now
+  have their labels ("Resolution", "Frame Rate") displayed beneath them in
+  small text; FPS options renamed to include unit ("30 FPS", "15 FPS", etc.)
+- Enhanced view #3: "Real Feed" renamed to "Actual Feed"
+- Enhanced view #4: "Stepped Feed" renamed to "Adapted Quality"; only shown
+  when adaptive_quality config toggle is on OR when the user has manually
+  picked from the Resolution/Frame Rate dropdowns; _manualTierActive flag
+  cleared when Auto button is pressed; CFG_ADAPTIVE_QUALITY injected from
+  Python into JS at build time
+- Enhanced view #5+#6: snap_loop now uses the ffmpeg pipeline (not
+  http_snap_loop) when native_res=True (enhanced view) and the camera has
+  a working stream_url (RTSP); fixes Resolution/FPS controls having no
+  effect and fixes the 1fps ceiling — cameras with working RTSP now get real
+  video in enhanced view; cameras with only HTTP snap (e.g. the Microseven) still use
+  http_snap_loop in enhanced view as RTSP is not available on that camera
+- Bumped to 2.2.0 (first double-digit minor version)
+
 ## 2.1.9
 - ONVIF SOAP WS-Security: expanded all abbreviated namespace URIs (were using
   '...' placeholders causing malformed XML); added wsu:Timestamp block; added
