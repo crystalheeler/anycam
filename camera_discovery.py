@@ -90,7 +90,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.5"  # must match config.yaml
+CURRENT_VERSION = "2.2.4"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -8237,175 +8237,80 @@ def make_app() -> web.Application:
     app.router.add_post(  "/api/pscan/pause",                     api_pscan_pause)
     app.router.add_post(  "/api/pscan/resume",                    api_pscan_resume)
 
-    # ── Graceful shutdown handler (SigRev-2 Item 5) ───────────────────────────
-    # Registered with aiohttp's lifecycle so it fires on runner.cleanup().
-    # Order: cancel snap tasks → SIGTERM ffmpeg → 3s wait → SIGKILL → persist.
-    app.on_shutdown.append(_on_shutdown)
-
     return app
-
-
-async def _on_shutdown(app: web.Application) -> None:
-    """
-    Graceful shutdown: called by aiohttp runner on SIGTERM / runner.cleanup().
-
-    1. Cancel all active snap_loop asyncio tasks.
-    2. SIGTERM all live ffmpeg child processes; wait up to 3 s; SIGKILL stragglers.
-    3. Persist final frame timestamps to cameras.json (last-seen-time per cam).
-    4. Shutdown thread pool.
-    """
-    log.info("AnyCam shutting down — cleaning up…")
-
-    # ── 1. Cancel snap tasks ─────────────────────────────────────────────────
-    tasks_cancelled = 0
-    for cam_id, state in list(_SNAP.items()):
-        task = state.get("task")
-        if task and not task.done():
-            task.cancel()
-            tasks_cancelled += 1
-    if tasks_cancelled:
-        # Give cancelled tasks a moment to catch CancelledError
-        await asyncio.gather(*[
-            state["task"] for state in _SNAP.values()
-            if state.get("task") and not state["task"].done()
-        ], return_exceptions=True)
-        log.info(f"  Cancelled {tasks_cancelled} snap task(s)")
-
-    # ── 2. Terminate ffmpeg child processes ───────────────────────────────────
-    procs_to_kill: list[tuple[str, object]] = []
-    for cam_id, state in _SNAP.items():
-        proc = state.get("proc")
-        if proc is not None and proc.returncode is None:
-            procs_to_kill.append((cam_id, proc))
-
-    for cam_id, proc in procs_to_kill:
-        try:
-            proc.terminate()   # SIGTERM
-            log.debug(f"  SIGTERM → ffmpeg [{cam_id}]")
-        except Exception:
-            pass
-
-    if procs_to_kill:
-        # Wait up to 3 seconds for all processes to exit
-        deadline = asyncio.get_event_loop().time() + 3.0
-        for cam_id, proc in procs_to_kill:
-            remaining = max(0.0, deadline - asyncio.get_event_loop().time())
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=remaining)
-            except (asyncio.TimeoutError, Exception):
-                pass
-
-        # SIGKILL any that are still alive
-        killed = 0
-        for cam_id, proc in procs_to_kill:
-            if proc.returncode is None:
-                try:
-                    proc.kill()
-                    killed += 1
-                    log.debug(f"  SIGKILL → ffmpeg [{cam_id}] (did not exit in 3 s)")
-                except Exception:
-                    pass
-        log.info(
-            f"  Terminated {len(procs_to_kill)} ffmpeg process(es)"
-            + (f", force-killed {killed}" if killed else "")
-        )
-
-    # ── 3. Persist final frame timestamps ────────────────────────────────────
-    # Store last frame time (as Unix epoch) per camera so the UI can show
-    # when footage was last seen after a restart.
-    changed = False
-    for cam_id, state in _SNAP.items():
-        ft = state.get("frame_time", 0.0)
-        if ft and ft > 0:
-            cam = CAMERAS.get(cam_id)
-            if cam is not None:
-                # frame_time is monotonic; convert to wall clock
-                wall = time.time() - (asyncio.get_event_loop().time() - ft)
-                cam["last_frame_wall"] = round(wall, 1)
-                changed = True
-    if changed:
-        save_cameras()
-        log.info("  Persisted frame timestamps to cameras.json")
-
-    # ── 4. Shut down thread pool ──────────────────────────────────────────────
-    _THREAD_POOL.shutdown(wait=False)
-    log.info("AnyCam shutdown complete")
-
-
-class _DockerIPFilter(logging.Filter):
-    """Suppress aiohttp access log entries from Docker bridge IPs (172.x.x.x)."""
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        # Drop lines where the client IP starts with 172. (Docker/HA Supervisor)
-        # Format: "172.30.32.2 [date] "METHOD /path..." status size ..."
-        return not (msg.startswith("172.") or
-                    msg.startswith('"172.') or
-                    " 172." in msg[:20])
 
 
 async def _probe_hw_decoders() -> None:
     """
-    Probe hardware decoder availability once at startup (SigRev-2 Item 6).
+    Probe hardware decoder availability once at startup.
 
-    Strategy: device-file check + ffmpeg compiled-decoder list.
-    No encode/decode round-trip — total probe time <200ms vs ~10s previously.
-
-      v4l2m2m: check /dev/video* exists AND decoder appears in ffmpeg -decoders
-      vaapi:   check /dev/dri/renderD* exists AND decoder appears in ffmpeg -decoders
+    Tries to decode a 1-frame black H.264/HEVC stream with each v4l2m2m decoder.
+    If ffmpeg exits with error (device not found, not compiled in, etc.), the
+    decoder name is added to _HW_UNAVAILABLE so snap_loop never wastes 3 seconds
+    trying it.
 
     Logs:
       HW decoders available: hevc_v4l2m2m, h264_v4l2m2m
       <decoder>: unavailable (<reason>)
     """
-    import glob as _glob
-
     log.info("Probing hardware decoder availability...")
-
-    # Candidates: (decoder_name, device_glob, friendly_reason)
-    candidates = [
-        ("hevc_v4l2m2m", "/dev/video*",       "v4l2m2m device"),
-        ("h264_v4l2m2m", "/dev/video*",       "v4l2m2m device"),
-        ("hevc_vaapi",   "/dev/dri/renderD*", "VAAPI render device"),
-        ("h264_vaapi",   "/dev/dri/renderD*", "VAAPI render device"),
+    decoders = [
+        ("hevc_v4l2m2m", "hevc"),
+        ("h264_v4l2m2m", "h264"),
+        ("hevc_vaapi",   "hevc"),
+        ("h264_vaapi",   "h264"),
     ]
-
-    # Get ffmpeg compiled-decoder list once (fast, <100ms)
-    decoder_list = ""
-    try:
-        list_proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-hide_banner", "-decoders",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        list_out, _ = await asyncio.wait_for(list_proc.communicate(), timeout=5)
-        decoder_list = list_out.decode("utf-8", errors="replace")
-    except Exception as exc:
-        log.warning(f"Could not query ffmpeg decoder list: {exc} — assuming no HW decoders")
-        for dec, _, _ in candidates:
-            _HW_UNAVAILABLE.add(dec)
-        log.info("HW decoders available: none")
-        return
-
     available = []
-    for dec, dev_glob, dev_label in candidates:
-        # Check 1: compiled into ffmpeg?
-        if dec not in decoder_list:
-            _HW_UNAVAILABLE.add(dec)
-            log.info(f"  {dec}: unavailable (not compiled into ffmpeg)")
-            continue
+    for dec, codec in decoders:
+        try:
+            # Encode a tiny test clip, then try to decode it with the hw decoder
+            enc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=black:s=16x16:d=0.1",
+                "-c:v", ("libx264" if codec == "h264" else "libx265"),
+                "-f", "matroska", "pipe:1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            encoded, _ = await asyncio.wait_for(enc.communicate(), timeout=10)
+            if not encoded:
+                _HW_UNAVAILABLE.add(dec)
+                log.info(f"  {dec}: unavailable (encode failed)")
+                continue
 
-        # Check 2: required device file present?
-        if not _glob.glob(dev_glob):
-            _HW_UNAVAILABLE.add(dec)
-            log.info(f"  {dec}: unavailable ({dev_label} not found)")
-            continue
+            dec_proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-c:v", dec,
+                "-i", "pipe:0",
+                "-f", "null", "-",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(
+                dec_proc.communicate(input=encoded), timeout=10)
+            stderr_s = stderr.decode("utf-8", errors="replace")
 
-        available.append(dec)
+            if dec_proc.returncode == 0 and "not compiled" not in stderr_s and \
+                    "Could not find" not in stderr_s and "Invalid" not in stderr_s:
+                available.append(dec)
+            else:
+                _HW_UNAVAILABLE.add(dec)
+                reason = "not compiled into ffmpeg" if "not compiled" in stderr_s \
+                    else ("device not found" if "Could not find" in stderr_s
+                          else f"rc={dec_proc.returncode}")
+                log.info(f"  {dec}: unavailable ({reason})")
+        except asyncio.TimeoutError:
+            _HW_UNAVAILABLE.add(dec)
+            log.info(f"  {dec}: unavailable (probe timed out)")
+        except Exception as e:
+            _HW_UNAVAILABLE.add(dec)
+            log.info(f"  {dec}: unavailable ({e})")
 
     if available:
         log.info(f"HW decoders available: {', '.join(available)}")
     else:
-        log.info("HW decoders available: none (software decode will be used)")
+        log.info("No hardware decoders available — using software decode")
 
 
 async def main() -> None:
@@ -8457,25 +8362,9 @@ async def main() -> None:
     # Background: download/refresh IEEE OUI database (non-blocking)
     asyncio.create_task(refresh_oui_db())
 
-    # ── Signal handling: SIGTERM / SIGINT → graceful shutdown ─────────────────
-    # When HA stops the container it sends SIGTERM. We catch it, stop the
-    # event-loop sentinel, and let runner.cleanup() trigger _on_shutdown.
-    _stop_event = asyncio.Event()
+    await asyncio.Event().wait()
 
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            loop.add_signal_handler(sig, _stop_event.set)
-        except NotImplementedError:
-            pass   # Windows — signals not supported on all platforms
-
-    await _stop_event.wait()   # blocks until SIGTERM/SIGINT
-
-    log.info("Shutdown signal received — starting graceful shutdown")
-    await runner.cleanup()     # triggers app.on_shutdown → _on_shutdown
-
-    # Thread pool is shut down inside _on_shutdown, but guard against
-    # cases where the signal fires before runner is fully set up
+    # Shut down the thread pool cleanly when the event loop exits
     _THREAD_POOL.shutdown(wait=False)
 
 
