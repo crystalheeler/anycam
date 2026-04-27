@@ -87,7 +87,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.1.9"  # must match config.yaml
+CURRENT_VERSION = "2.2.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3281,7 +3281,11 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     # http_snap_loop polls the camera's HTTP JPEG endpoint at ~1 fps, which is
     # far cheaper than running ffmpeg for cameras where RTSP is unreliable or
     # the snap URL is confirmed (Microseven, generic ONVIF/hi3516, Wansview…).
-    if camera.get("http_snap_url"):
+    # EXCEPTION: when native_res=True (enhanced view) AND RTSP is available,
+    # bypass http_snap_loop so the ffmpeg pipeline runs — this makes the
+    # Resolution/FPS controls work and gives real video instead of 1fps polling.
+    _has_rtsp = bool(camera.get("stream_url"))
+    if camera.get("http_snap_url") and not (native_res and _has_rtsp):
         await http_snap_loop(camera_id, camera)
         return
 
@@ -4043,7 +4047,7 @@ async def handle_snapshot(request: web.Request) -> web.Response:
         frame = state.get("frame")
         if frame:
             # Build step-label headers so the JS info bar can show the current
-            # ladder tier ("Stepped Feed") separately from measured real FPS.
+            # ladder tier ("Adapted Quality") separately from measured real FPS.
             step_res = "?"
             step_fps = "?"
             ada = _FOCUS_ADAPTIVE.get(camera_id)
@@ -5270,6 +5274,8 @@ HTML = None   # built once on first request
 
 _JS = r"""
 const BASE = '___BASE___';
+const CFG_UNRESTRICTED_BROWSER = ___UNRESTRICTED___;
+const CFG_ADAPTIVE_QUALITY     = ___ADAPTIVE_QUALITY___;
 const STORAGE_UNRESTRICTED = ___UNRESTRICTED___;
 const PROTO_ICONS = {RTSP:'📹',ONVIF:'🔭',MJPEG:'🖼️',HLS:'📡',RTMP:'📺',WebRTC:'🔗','WS-RTSP':'🔌',HTTP:'🌐',DVR:'💾'};
 const PROTO_CLR   = {
@@ -5989,9 +5995,12 @@ async function _startFocusPoll(camId, cam) {
   let _prevBlobUrl    = null;
 
   // Info bar format:
-  //   Name (IP) — Real Feed: WxH · X fps  Stepped Feed: WxH · fps
-  // "Real Feed" = measured from actual received JPEG dimensions + frame count.
-  // "Stepped Feed" = current adaptive ladder tier reported by server headers.
+  //   Name — Actual Feed: WxH · X fps  [Adapted Quality: WxH · fps]
+  // "Actual Feed"     = measured from actual received JPEG + frame count.
+  // "Adapted Quality" = current adaptive ladder tier from server headers.
+  //                     Only shown when adaptive_quality config is on OR
+  //                     the user has manually picked a resolution/fps tier.
+  let _manualTierActive = false;
   function _updateInfoBar() {
     const realRes  = _liveRes  || '…';
     const realFps  = _liveFps  !== null ? _liveFps + ' fps' : 'measuring…';
@@ -5999,11 +6008,14 @@ async function _startFocusPoll(camId, cam) {
     const stepFpsS = _stepFps  !== null
       ? (_stepFps === 'uncapped' ? 'uncapped' : _stepFps + ' fps')
       : '…';
+    const showAdapted = _manualTierActive
+      || (typeof CFG_ADAPTIVE_QUALITY !== 'undefined' && CFG_ADAPTIVE_QUALITY);
     infoEl.innerHTML =
-      name + ' — ' +
-      '<b>Real Feed:</b> '    + realRes + ' · ' + realFps +
-      ' ' +
-      '<b>Stepped Feed:</b> ' + stepRes + ' · ' + stepFpsS;
+      name + ' — ' +
+      '<b>Actual Feed:</b> ' + realRes + ' · ' + realFps +
+      (showAdapted
+        ? ' &nbsp;<b>Adapted Quality:</b> ' + stepRes + ' · ' + stepFpsS
+        : '');
   }
 
   // Fetch-based polling at 60ms. X-Frame-Count tells us when a new frame
@@ -6112,12 +6124,14 @@ async function focusPickRes(val) {
   const profIdx = parseInt(val);
   if (isNaN(profIdx)) return;
   _focusCurProf = profIdx;
+  _manualTierActive = true;
   const fps = document.getElementById('focus-fps-sel')?.value || 'uncapped';
   await _applyFocusTier(profIdx, fps === 'uncapped' ? null : parseInt(fps));
 }
 
 async function focusPickFps(val) {
   const fps = val === 'uncapped' ? null : parseInt(val);
+  _manualTierActive = true;
   await _applyFocusTier(_focusCurProf, fps);
 }
 
@@ -6127,12 +6141,13 @@ async function focusResetAuto() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({profile_idx: null})
   }).catch(() => {});
-  // Reset dropdowns to first profile / uncapped
+  // Reset dropdowns and manual flag
   const rs = document.getElementById('focus-res-sel');
   const fs = document.getElementById('focus-fps-sel');
   if (rs && _focusProfiles.length > 0) rs.value = '0';
   if (fs) fs.value = 'uncapped';
   _focusCurProf = 0;
+  _manualTierActive = false;
 }
 
 async function _applyFocusTier(profIdx, fps) {
@@ -7495,6 +7510,8 @@ def build_html() -> str:
     js_code = _JS.replace('___BASE___', INGRESS_PATH)
     js_code = js_code.replace('___UNRESTRICTED___',
                                'true' if CFG_UNRESTRICTED_BROWSER else 'false')
+    js_code = js_code.replace('___ADAPTIVE_QUALITY___',
+                               'true' if CFG_ADAPTIVE_QUALITY else 'false')
     # CSS uses {{ }} for literal braces in Python f-string
     css = f"""\
 *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
@@ -7646,16 +7663,18 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .btn-xs{{padding:3px 8px;font-size:.72rem}}
 /* ── Focus overlay ── */
 #focus-overlay{{position:fixed;inset:0;background:#000;z-index:9000;display:flex;flex-direction:column;align-items:stretch;padding:0}}
-#focus-img{{width:100vw;height:calc(100vh - 52px);object-fit:contain;display:block;margin:0}}
+#focus-img{{width:100vw;height:calc(100vh - 52px - 44px);object-fit:contain;display:block;margin:44px 0 0 0}}
 #focus-bar{{position:absolute;bottom:0;left:0;right:0;height:52px;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:space-between;padding:0 16px;gap:12px;z-index:9001;border-top:1px solid #333}}
 #focus-info{{font-size:.78rem;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}}
-#focus-controls{{display:flex;align-items:center;gap:8px;flex-shrink:0}}
-#focus-close{{position:absolute;top:10px;right:14px;background:transparent;border:2.5px solid #e03;color:#e03;font-size:1rem;font-weight:bold;width:34px;height:34px;border-radius:50%;cursor:pointer;z-index:9002;line-height:1;display:flex;align-items:center;justify-content:center}}
+#focus-controls{{display:flex;align-items:flex-end;gap:12px;flex-shrink:0}}
+#focus-close{{position:absolute;top:6px;right:14px;background:transparent;border:2.5px solid #e03;color:#e03;font-size:1rem;font-weight:bold;width:32px;height:32px;border-radius:50%;cursor:pointer;z-index:9002;line-height:1;display:flex;align-items:center;justify-content:center}}
 #focus-close:hover{{background:#e03;color:#fff}}
-.focus-select{{appearance:none;-webkit-appearance:none;background:#1e1e2e url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23aaa'/%3E%3C/svg%3E") no-repeat right 8px center;background-size:10px 6px;border:1px solid #555;color:#e0e0e0;border-radius:6px;padding:4px 28px 4px 8px;font-size:.78rem;cursor:pointer;height:30px;min-width:80px}}
+.focus-select{{appearance:none;-webkit-appearance:none;background:#1e1e2e url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23aaa'/%3E%3C/svg%3E") no-repeat right 6px center;background-size:9px 5px;border:1px solid #555;color:#e0e0e0;border-radius:6px;padding:3px 22px 3px 6px;font-size:.72rem;cursor:pointer;height:26px;min-width:68px}}
 .focus-select:focus{{outline:none;border-color:#4a9eff}}
-.focus-auto-btn{{background:#1e1e2e;border:1px solid #555;color:#aaa;border-radius:6px;padding:4px 10px;font-size:.75rem;cursor:pointer;height:30px}}
+.focus-auto-btn{{background:#1e1e2e;border:1px solid #555;color:#aaa;border-radius:6px;padding:3px 8px;font-size:.72rem;cursor:pointer;height:26px}}
 .focus-auto-btn:hover{{border-color:#4a9eff;color:#4a9eff}}
+.focus-ctrl-group{{display:flex;flex-direction:column;align-items:center;gap:3px}}
+.focus-ctrl-label{{font-size:.62rem;color:#777;white-space:nowrap;text-align:center;letter-spacing:.02em}}
 #focus-warning{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a1a;border:1px solid var(--orange);border-radius:10px;padding:24px;max-width:480px;text-align:center;z-index:9003;display:flex;flex-direction:column;gap:14px;align-items:center}}
 #focus-warn-text{{color:#f5b942;font-size:.9rem;line-height:1.5}}
 /* ── Toast ── */
@@ -7952,19 +7971,25 @@ header h1{{cursor:pointer}}
   <div id="focus-bar">
     <div id="focus-info">Loading…</div>
     <div id="focus-controls">
-      <select id="focus-res-sel" class="focus-select" title="Resolution" onchange="focusPickRes(this.value)">
-        <option value="">Resolution…</option>
-      </select>
-      <select id="focus-fps-sel" class="focus-select" title="FPS cap" onchange="focusPickFps(this.value)">
-        <option value="uncapped">Uncapped</option>
-        <option value="30">30 fps</option>
-        <option value="20">20 fps</option>
-        <option value="15">15 fps</option>
-        <option value="10">10 fps</option>
-        <option value="5">5 fps</option>
-        <option value="2">2 fps</option>
-        <option value="1">1 fps</option>
-      </select>
+      <div class="focus-ctrl-group">
+        <select id="focus-res-sel" class="focus-select" title="Resolution" onchange="focusPickRes(this.value)">
+          <option value="">—</option>
+        </select>
+        <span class="focus-ctrl-label">Resolution</span>
+      </div>
+      <div class="focus-ctrl-group">
+        <select id="focus-fps-sel" class="focus-select" title="Frame rate cap" onchange="focusPickFps(this.value)">
+          <option value="uncapped">Uncapped</option>
+          <option value="30">30 FPS</option>
+          <option value="20">20 FPS</option>
+          <option value="15">15 FPS</option>
+          <option value="10">10 FPS</option>
+          <option value="5">5 FPS</option>
+          <option value="2">2 FPS</option>
+          <option value="1">1 FPS</option>
+        </select>
+        <span class="focus-ctrl-label">Frame Rate</span>
+      </div>
       <button class="focus-auto-btn" onclick="focusResetAuto()" title="Let the system adapt automatically">Auto</button>
     </div>
   </div>
