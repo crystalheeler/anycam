@@ -1,31 +1,3 @@
-## 2.2.5
-SigRev-2 bundle (Items 5 and 6):
-
-- SigRev-2 Item 5 — Graceful shutdown on_shutdown handler:
-  - Registered _on_shutdown() with app.on_shutdown in make_app() so aiohttp
-    fires it on runner.cleanup()
-  - SIGTERM and SIGINT signal handlers added to main() — replace the infinite
-    asyncio.Event().wait() with a _stop_event that signals trigger; when set,
-    runner.cleanup() is called which invokes _on_shutdown()
-  - _on_shutdown() sequence: (1) cancel all active snap_loop asyncio tasks;
-    (2) SIGTERM all live ffmpeg child processes, wait up to 3 s, then SIGKILL
-    any that haven't exited; (3) persist final frame_time values to cameras.json
-    as last_frame_wall (Unix epoch) so the UI can show when footage was last seen
-    after a restart; (4) shutdown _THREAD_POOL
-  - verify_release.py: _on_shutdown added to semantic contracts (7 total)
-
-- SigRev-2 Item 6 — HW decoder probe: faster device-check approach:
-  - Replaced complex encode→decode round-trip (~10s for 4 decoders) with:
-    (1) single ffmpeg -decoders call to get compiled-in decoder list (<100ms)
-    (2) glob check for device files (/dev/video* for v4l2m2m, /dev/dri/renderD*
-        for vaapi) — no file = decoder unusable regardless of compilation
-  - Total probe time: <200ms vs ~10s previously; startup visibly faster
-  - Removed lavfi dependency (libx265 not always compiled on Pi ffmpeg packages)
-  - Timeout reduced to 5s for the decoder-list query (was 10s per decoder × 4)
-
-Best-practice audit (required on this release — every other release):
-  All checks clean: P1-P7, J2-J4, H1-H2, C1-C3, PL1
-
 ## 2.2.4
 SigRev-1 bundle (Items 1, 2, 3 — Items 4 and 7 were completed in 2.2.2/2.2.3):
 
