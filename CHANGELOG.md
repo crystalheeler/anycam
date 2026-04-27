@@ -1,3 +1,23 @@
+## 2.2.3
+- Bug fix: H.265+ warning badge on Hikvision card was a stale flag from
+  cameras.json persisting across upgrades; verification scan RTSP-probe-fallback
+  path now clears hevc_plus_warning=False whenever a camera verifies OK (was only
+  cleared in the ONVIF re-auth path, which the Hikvision never reaches due to the SOAP 400)
+- Bug fix: 'Stream unavailable' on card after browser tab backgrounded for 30+s;
+  browser throttles/drops pending image requests while tab is hidden; those
+  failures were accumulating in _snapErrors before the server could respond;
+  added visibilitychange listener that resets all _snapErrors to 0 when the tab
+  becomes visible again
+- Bug fix: credentials exposed in logs — ffmpeg includes the full authenticated
+  RTSP URL in its error messages; _drain_stderr was logging raw stderr without
+  applying _strip_creds(); password now stripped before logging (SigRev-1 item 4)
+- Bug fix: enhanced view for Microseven (broken RTSP) was looping ffmpeg
+  crashes indefinitely instead of falling back to http_snap_loop; after 3
+  consecutive 0-frame failures in native_res (enhanced view) mode, if the camera
+  has an http_snap_url, snap_loop now falls back to http_snap_loop for the focus
+  session; restores 2.1.9 behavior for cameras with broken RTSP
+- All four fixes validated against best practices ruleset and semantic contracts
+
 ## 2.2.2
 - Best-practice audit (first full audit against AnyCam Coding Best Practices doc):
   - P4 fixed: blocking open() in async def run_port_scan() replaced with
