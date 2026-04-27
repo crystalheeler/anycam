@@ -1,3 +1,40 @@
+## 2.2.1
+- run_verification_scan: was truncated — missing save_cameras(), SCAN_STATE
+  cleanup, and the follow-up fresh network scan entirely; this caused the
+  UI to show "Re-authenticating ONVIF… estimated 0:00 remaining" forever
+  because SCAN_STATE["running"] was never set to False; fixed by adding
+  proper cleanup block with save_cameras(), status update, await run_scan(),
+  and a try/finally error fallback
+- run_verification_scan: add HTTP snap URL as a third verification path —
+  after RTSP probe fails, if camera has http_snap_url, does a quick GET;
+  a 200 or 401 response confirms the camera is reachable; fixes Microseven
+  the Microseven being incorrectly marked "Not found after upgrade"
+- run_verification_scan: fix "was" version logging cosmetic bug — was reading
+  load_runtime() after save_runtime() had already written the new version,
+  so it always showed "was: current → now: current"; fixed by passing
+  prev_version as a parameter from the call site
+- http_snap_loop: persist upgraded https:// snap URL to cameras.json when
+  redirect detected, so subsequent restarts use https:// directly without
+  needing the redirect probe on every startup
+- Note: not a 2.2.0 regression; truncation was pre-existing and not previously
+  triggered because all prior installs were fresh installs skipping verification
+
+## 2.2.1
+- run_verification_scan: add HTTP snap URL as a third verification path —
+  after RTSP probe fails, if camera has http_snap_url stored, does a quick
+  GET to that URL; a 200 or 401 response both confirm the camera is reachable
+  (401 = auth required = camera alive); fixes cameras like the Microseven
+  being incorrectly marked 'Not found after upgrade' when their RTSP is broken
+  but HTTP snap works fine
+- run_verification_scan: fix cosmetic 'was' version logging bug — the log line
+  was reading load_runtime() after save_runtime() had already written the new
+  version, so it always showed 'was: 2.2.x → now: 2.2.x'; now passes
+  prev_version as a parameter from the call site where it is read before
+  save_runtime() is called
+- Note: the 'Not found after upgrade' issue was pre-existing and not a 2.2.0
+  regression; it was never triggered because all previous installs were fresh
+  installs (which skip verification) rather than upgrades (Check for Updates)
+
 ## 2.2.0
 - Enhanced view #1: video feed now has a 44px top margin so the X close button
   sits above the video rather than overlapping it; bottom black bar unchanged

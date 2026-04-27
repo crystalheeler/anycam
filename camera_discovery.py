@@ -87,7 +87,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.0"  # must match config.yaml
+CURRENT_VERSION = "2.2.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3095,7 +3095,7 @@ async def _rerun_onvif_auth(camera_id: str, camera: dict,
     return True
 
 
-async def run_verification_scan():
+async def run_verification_scan(prev_version: str = "unknown") -> None:
     """
     Post-upgrade verification scan.
     Runs after saved cameras are loaded.
@@ -3104,6 +3104,8 @@ async def run_verification_scan():
       - If ONVIF with stored credentials: re-runs the full ONVIF auth flow so
         any fixes to profile parsing / XAddrs handling take effect immediately.
       - Probes reachability with the appropriate stream prober.
+      - If RTSP probe fails and camera has an http_snap_url: tries HTTP snap
+        URL (200 or 401 both confirm the camera is alive).
       - If unreachable → marks as "unverified_after_upgrade".
 
     After verifying saved cameras, runs a fresh full scan to discover
@@ -3115,7 +3117,7 @@ async def run_verification_scan():
         message="Post-upgrade: verifying previously saved cameras…"
     )
     loop = asyncio.get_event_loop()
-    log.info(f"Post-upgrade verification scan (was: {load_runtime().get('version','?')} → now: {CURRENT_VERSION})")
+    log.info(f"Post-upgrade verification scan ({prev_version} → {CURRENT_VERSION})")
 
     # ── Verify each saved camera ──────────────────────────────────────────
     still_present = []
@@ -3196,9 +3198,78 @@ async def run_verification_scan():
             cam.pop("upgrade_missing", None)
             log.info(f"  Verified OK: {cam.get('name', ip)}")
         else:
-            now_missing.append(cid)
-            cam["upgrade_missing"] = True
+            # ── HTTP snap URL fallback verification ───────────────────────────
+            # Cameras like the Microseven have broken RTSP but a working
+            # HTTP snapshot endpoint.  If the RTSP probe failed and the camera
+            # has a stored http_snap_url, do a quick connectivity check against
+            # it.  A 200 or 401 response both confirm the camera is reachable
+            # (401 just means we need to send auth — the camera is alive).
+            http_snap = cam.get("http_snap_url")
+            if http_snap and not found:
+                try:
+                    import urllib.request as _urlreq
+                    _req = _urlreq.Request(http_snap, method="GET")
+                    _req.add_header("User-Agent", f"AnyCam/{CURRENT_VERSION}")
+                    try:
+                        with _urlreq.urlopen(  # nosec — LAN only, ssl not relevant
+                            _req, timeout=5,
+                            context=__import__("ssl")._create_unverified_context()
+                        ) as _r:
+                            found = _r.status in (200, 401)
+                    except Exception as _he:
+                        # urllib raises HTTPError for 4xx — that still means alive
+                        _code = getattr(_he, "code", None)
+                        if _code in (401, 403):
+                            found = True
+                        else:
+                            found = False
+                    if found:
+                        log.info(f"  Verified OK via HTTP snap: {cam.get('name', ip)}")
+                    else:
+                        log.warning(f"  HTTP snap probe also failed: {cam.get('name', ip)}")
+                except Exception as _exc:
+                    log.debug(f"  HTTP snap verify error: {_exc}")
+
+            if found:
+                still_present.append(cid)
+                cam.pop("upgrade_missing", None)
+                log.info(f"  Verified OK: {cam.get('name', ip)}")
+            else:
+                now_missing.append(cid)
+                cam["upgrade_missing"] = True
             cam["upgrade_missing_version"] = CURRENT_VERSION
+
+    # ── Save updated camera states ────────────────────────────────────────────
+    save_cameras()
+    log.info(
+        f"Verification complete: {len(still_present)} present, "
+        f"{len(now_missing)} missing"
+    )
+    if now_missing:
+        for cid in now_missing:
+            cam = CAMERAS.get(cid, {})
+            log.warning(
+                f"  Not found after upgrade: {cam.get('name', cid)} "
+                f"({cam.get('ip','')})"
+            )
+
+    # ── Run a fresh network scan to pick up newly discoverable cameras ────────
+    # Do this after the per-camera verification so the UI shows the verification
+    # results before the full scan progress bar takes over.
+    SCAN_STATE.update(
+        running=True, progress=10, stage=2,
+        stage_label="Post-upgrade verification",
+        message="Verification done — running fresh network scan…"
+    )
+    try:
+        await run_scan()
+    except Exception as scan_exc:
+        log.warning(f"Post-upgrade follow-up scan error: {scan_exc}")
+        SCAN_STATE.update(
+            running=False, progress=100,
+            message=f"Verification complete ({len(still_present)} cameras OK"
+                    + (f", {len(now_missing)} missing" if now_missing else "") + ")"
+        )
 # ── Adaptive fps state for focus/native_res mode ───────────────────────────────
 # Persists across focus sessions so the camera remembers its best stable fps.
 # Tiers ordered fastest→slowest. None = no fps limit (full native rate).
@@ -3886,6 +3957,7 @@ async def http_snap_loop(camera_id: str, camera: dict) -> None:
                         if _loc.startswith("https://") or _loc.startswith("http://"):
                             snap_url = _loc
                             camera["http_snap_url"] = snap_url
+                            save_cameras()   # persist so next restart uses https:// directly
                             log.info(
                                 f"SNAP [{camera_id}]: redirect detected → "
                                 f"upgrading snap URL to {snap_url}"
@@ -8200,7 +8272,7 @@ async def main():
     elif startup_mode == "post_upgrade":
         prev = load_runtime().get("version", "unknown")
         log.info(f"Post-upgrade ({prev} → {CURRENT_VERSION}) — running verification scan")
-        asyncio.create_task(run_verification_scan())
+        asyncio.create_task(run_verification_scan(prev_version=prev))
 
     else:  # "routine"
         log.info(f"Routine restart (v{CURRENT_VERSION}) — loaded {len(CAMERAS)} saved camera(s)")
