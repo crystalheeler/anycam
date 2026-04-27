@@ -1,3 +1,23 @@
+## 2.2.2
+- Best-practice audit (first full audit against AnyCam Coding Best Practices doc):
+  - P4 fixed: blocking open() in async def run_port_scan() replaced with
+    loop.run_in_executor(None, lambda: open(xml_path).read()) so nmap XML
+    parsing no longer holds the event loop
+  - P6 fixed: mutable default dict {} in roundtrip() closure replaced with
+    None default and extra = extra or {} guard inside the function
+  - C3 fixed: #focus-img now has height:calc(100dvh - 52px - 44px) fallback
+    after 100vh so mobile browsers do not jump when address bar hides/shows
+- Added verify_release.py: standalone release verification script replacing the
+  ad-hoc inline checks; runs 5 stages: syntax, semantic contracts, best-practice
+  audit, version consistency, changelog; exits 1 on any failure
+  - Semantic contract checks: 6 critical functions verified to contain their
+    required identifiers (run_verification_scan, http_snap_loop, snap_loop,
+    build_html, make_app, api_set_credentials)
+  - Best-practice audit in script: mutable defaults, blocking open() in async,
+    CSS // comments, display:flexbox typo
+- Best practices ruleset (AnyCam_Coding_Best_Practices.md) established as
+  permanent audit standard for all future releases
+
 ## 2.2.1
 - run_verification_scan: was truncated — missing save_cameras(), SCAN_STATE
   cleanup, and the follow-up fresh network scan entirely; this caused the

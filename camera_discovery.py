@@ -87,7 +87,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.1"  # must match config.yaml
+CURRENT_VERSION = "2.2.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2087,7 +2087,8 @@ def probe_rtsp_socket(host: str, port: int, path: str,
         CRLF = chr(13) + chr(10)
         CRLFCRLF = (chr(13) + chr(10)) * 2
 
-        def roundtrip(method: str, cseq: int, extra: dict = {}) -> str:
+        def roundtrip(method: str, cseq: int, extra: dict | None = None) -> str:
+            extra = extra or {}  # safe: new dict each call, never mutates caller's default
             hdr = "".join(k + ": " + v + CRLF for k, v in extra.items())
             req = method + " " + rtsp_url + " RTSP/1.0" + CRLF
             req += "CSeq: " + str(cseq) + CRLF + hdr + CRLF
@@ -2926,8 +2927,12 @@ async def run_port_scan(ip: str):
         results = []
         if _os.path.exists(xml_path):
             try:
-                with open(xml_path) as f:
-                    xml_text = f.read()
+                # Use run_in_executor so this blocking file read doesn't hold
+                # the event loop — nmap XML can be several KB on busy subnets.
+                loop     = asyncio.get_event_loop()
+                xml_text = await loop.run_in_executor(
+                    None, lambda: open(xml_path).read()
+                )
                 root = ET.fromstring(xml_text)
                 for host in root.findall("host"):
                     for port_el in host.findall("ports/port"):
@@ -7735,7 +7740,7 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .btn-xs{{padding:3px 8px;font-size:.72rem}}
 /* ── Focus overlay ── */
 #focus-overlay{{position:fixed;inset:0;background:#000;z-index:9000;display:flex;flex-direction:column;align-items:stretch;padding:0}}
-#focus-img{{width:100vw;height:calc(100vh - 52px - 44px);object-fit:contain;display:block;margin:44px 0 0 0}}
+#focus-img{{width:100vw;height:calc(100vh - 52px - 44px);height:calc(100dvh - 52px - 44px);object-fit:contain;display:block;margin:44px 0 0 0}}
 #focus-bar{{position:absolute;bottom:0;left:0;right:0;height:52px;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:space-between;padding:0 16px;gap:12px;z-index:9001;border-top:1px solid #333}}
 #focus-info{{font-size:.78rem;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}}
 #focus-controls{{display:flex;align-items:flex-end;gap:12px;flex-shrink:0}}
