@@ -87,7 +87,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.2"  # must match config.yaml
+CURRENT_VERSION = "2.2.3"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3199,8 +3199,10 @@ async def run_verification_scan(prev_version: str = "unknown") -> None:
 
         if found:
             still_present.append(cid)
-            # Clear any stale unverified flag from a previous upgrade
             cam.pop("upgrade_missing", None)
+            # Clear stale hevc_plus_warning — if the stream probes OK the camera
+            # is not stuck on H.265+. _drain_stderr will re-set it if needed.
+            cam["hevc_plus_warning"] = False
             log.info(f"  Verified OK: {cam.get('name', ip)}")
         else:
             # ── HTTP snap URL fallback verification ───────────────────────────
@@ -3238,6 +3240,7 @@ async def run_verification_scan(prev_version: str = "unknown") -> None:
             if found:
                 still_present.append(cid)
                 cam.pop("upgrade_missing", None)
+                cam["hevc_plus_warning"] = False  # clear stale flag
                 log.info(f"  Verified OK: {cam.get('name', ip)}")
             else:
                 now_missing.append(cid)
@@ -3708,6 +3711,21 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                                     f"with UDP also — reverting to TCP")
                         CAMERAS[camera_id]["preferred_transport"] = "tcp"
                         state["zero_frame_streak"] = 0
+
+                # After 3 consecutive 0-frame failures in native_res (enhanced
+                # view) mode, fall back to http_snap_loop if the camera has one.
+                # This handles cameras like the Microseven whose RTSP is
+                # stored but non-functional — ffmpeg keeps crashing, wasting CPU.
+                if streak == 3 and native_res:
+                    cam_now = CAMERAS.get(camera_id, camera)
+                    if cam_now.get("http_snap_url"):
+                        log.warning(
+                            f"SNAP [{camera_id}]: 3 consecutive 0-frame failures in "
+                            f"enhanced view — RTSP non-functional, falling back to "
+                            f"HTTP snap loop for this focus session"
+                        )
+                        await http_snap_loop(camera_id, cam_now)
+                        return
 
                 # After 5 consecutive 0-frame failures on the main stream,
                 # it may be a codec mismatch (e.g. ONVIF says h264, camera sends hevc).
@@ -6169,6 +6187,15 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && _focusCamId) closeFocus();
 });
 
+// When the browser tab returns to focus after being backgrounded, the browser
+// may have throttled or dropped pending image requests — resetting _snapErrors
+// prevents those stale failures from triggering "Stream unavailable" on the card.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    Object.keys(_snapErrors).forEach(camId => { _snapErrors[camId] = 0; });
+  }
+});
+
 /* ── Focus manual resolution/fps controls ─────────────────────────────── */
 // Populated when openFocus() runs
 let _focusProfiles = [];   // [{idx, label, width, height, codec}]
@@ -7066,6 +7093,9 @@ async def _drain_stderr(proc: object, label: str) -> None:
     if not lines:
         return
     joined = " | ".join(lines)[:600]
+    # Strip credentials from RTSP URLs before logging — ffmpeg includes the
+    # full authenticated URL in its error messages (SigRev-1 item 4).
+    joined = _strip_creds(joined)
     log.warning(f"Stream {label} ffmpeg stderr: {joined}")
     for hw in ("hevc_v4l2m2m", "h264_v4l2m2m", "hevc_vaapi", "h264_vaapi"):
         if hw in joined and "Could not find a valid device" in joined:
