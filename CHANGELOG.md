@@ -1,3 +1,27 @@
+## 2.2.6
+- Enhanced view: fix Resolution and Frame Rate controls having no effect —
+  root cause was _build_focus_ladder() returning a single-rung ladder
+  [(0, None)] when CFG_ADAPTIVE_QUALITY was False (the default); every
+  manual dropdown selection searched a one-rung ladder and always mapped
+  back to tier 0 (uncapped); fixed by always building the full ladder —
+  CFG_ADAPTIVE_QUALITY now only controls whether the system AUTO-STEPS
+  down the ladder, not whether the ladder exists for manual use
+- Enhanced view: gate adaptive auto-stepping on CFG_ADAPTIVE_QUALITY —
+  previously the system would still step down tiers on stream instability
+  even when Adaptive Quality was disabled; now combined with manual_override
+  check so neither manual pins nor disabled-adaptive-quality allow stepping
+- Enhanced view: add X-Snap-Mode response header ('rtsp' or 'http') so JS
+  knows when the enhanced view has fallen back to http_snap_loop
+- Enhanced view: disable Resolution and Frame Rate controls (greyed out,
+  tooltip: 'Stream switching unavailable — RTSP not accessible on this
+  camera') when in http_snap fallback mode — avoids misleading users on
+  cameras like Microseven whose RTSP is non-functional; both profiles
+  still visible in the dropdown so users can see what streams exist
+- Enhanced view: hide Adapted Quality from info bar when in http mode —
+  ladder tier selection is meaningless when http_snap_loop is serving frames
+- http_snap_loop fallback: set/clear http_snap_active flag in snap state so
+  handle_snapshot can report the correct X-Snap-Mode header
+
 ## 2.2.5
 - Enhanced view: fix JS scope bug where _manualTierActive was declared inside
   the _startFocusPoll() closure but written by top-level focusPickRes() and

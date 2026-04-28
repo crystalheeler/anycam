@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.5"  # must match config.yaml
+CURRENT_VERSION = "2.2.6"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3374,11 +3374,11 @@ def _build_focus_ladder(camera: dict) -> list:
                               "stream_height": camera.get("sub_stream_height"),
                               "stream_codec":  camera.get("sub_stream_codec")})
 
-    # When Adaptive Quality is disabled: single tier — top profile, uncapped.
-    # The user gets maximum quality with no stepping at all.
-    if not CFG_ADAPTIVE_QUALITY:
-        return [(0, None)]
-
+    # Always build the full ladder so manual Resolution/FPS controls have rungs
+    # to snap to. CFG_ADAPTIVE_QUALITY only controls whether the system AUTO-STEPS
+    # down the ladder — not whether the ladder exists for manual use.
+    # (Previously, when CFG_ADAPTIVE_QUALITY was False, only [(0, None)] was
+    # returned, making every manual dropdown selection silently ignored.)
     ladder = []
     for idx in range(len(profiles)):
         ladder.append((idx, None))                   # uncapped — always first
@@ -3774,7 +3774,10 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                             f"enhanced view — RTSP non-functional, falling back to "
                             f"HTTP snap loop for this focus session"
                         )
+                        # Mark state so JS can disable resolution/fps controls
+                        _snap_state(camera_id)["http_snap_active"] = True
                         await http_snap_loop(camera_id, cam_now)
+                        _snap_state(camera_id)["http_snap_active"] = False
                         return
 
                 # After 5 consecutive 0-frame failures on the main stream,
@@ -3815,17 +3818,15 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 run_dur   = time.monotonic() - run_start
                 locked    = ada.get("locked", False)
 
-                # frames == 0 is always a failure regardless of run duration
-                # (e.g. 30-second ffmpeg read timeout with zero frames decoded).
-                # Previously this was counted as "stable" because run_dur >= 8s.
-                # Skip adaptive stepping entirely if the user manually pinned the tier
-                if ada.get("manual_override"):
+                # Skip adaptive stepping if:
+                # (a) user manually pinned the tier (manual_override), or
+                # (b) Adaptive Quality is disabled in config — in that case the
+                #     ladder exists for manual use only; the system never auto-steps.
+                if ada.get("manual_override") or not CFG_ADAPTIVE_QUALITY:
                     fast_death       = False
                     restart_overflow = False
                 else:
                     # frames == 0 is always a failure regardless of run duration
-                    # (e.g. 30-second ffmpeg read timeout with zero frames decoded).
-                    # Previously this was counted as "stable" because run_dur >= 8s.
                     fast_death = (frames == 0 or
                                   (run_dur < _ADAPTIVE_UNSTABLE_S and
                                    frames  < _ADAPTIVE_UNSTABLE_FR))
@@ -4202,8 +4203,12 @@ async def handle_snapshot(request: web.Request) -> web.Response:
         if frame:
             # Build step-label headers so the JS info bar can show the current
             # ladder tier ("Adapted Quality") separately from measured real FPS.
-            step_res = "?"
-            step_fps = "?"
+            step_res  = "?"
+            step_fps  = "?"
+            # X-Snap-Mode tells JS whether frame is from ffmpeg (rtsp) or
+            # http_snap_loop — controls are disabled in http mode since profile
+            # switching is impossible via HTTP snapshot endpoints.
+            snap_mode = "http" if state.get("http_snap_active") else "rtsp"
             ada = _FOCUS_ADAPTIVE.get(camera_id)
             if ada and ada.get("ladder"):
                 ladder   = ada["ladder"]
@@ -4219,6 +4224,7 @@ async def handle_snapshot(request: web.Request) -> web.Response:
             return web.Response(body=frame, content_type="image/jpeg",
                                 headers={"Cache-Control": "no-cache",
                                          "X-Frame-Source": "focus",
+                                         "X-Snap-Mode":   snap_mode,
                                          "X-Frame-Count": str(state.get("frame_count", 0)),
                                          "X-Step-Res":    step_res,
                                          "X-Step-FPS":    step_fps})
@@ -6182,8 +6188,11 @@ async function _startFocusPoll(camId, cam) {
     const stepFpsS = _stepFps  !== null
       ? (_stepFps === 'uncapped' ? 'uncapped' : _stepFps + ' fps')
       : '…';
-    const showAdapted = _manualTierActive
-      || (typeof CFG_ADAPTIVE_QUALITY !== 'undefined' && CFG_ADAPTIVE_QUALITY);
+    // Only show Adapted Quality when using ffmpeg (rtsp mode) — in http
+    // fallback mode the controls are disabled so Adapted Quality is irrelevant.
+    const httpMode    = document.querySelector('.focus-ctrl-group select')?.disabled || false;
+    const showAdapted = !httpMode && (_manualTierActive
+      || (typeof CFG_ADAPTIVE_QUALITY !== 'undefined' && CFG_ADAPTIVE_QUALITY));
     infoEl.innerHTML =
       name + ' — ' +
       '<b>Actual Feed:</b> ' + realRes + ' · ' + realFps +
@@ -6203,8 +6212,28 @@ async function _startFocusPoll(camId, cam) {
         const serverCount = parseInt(resp.headers.get('X-Frame-Count') || '-1');
         const stepRes     = resp.headers.get('X-Step-Res');
         const stepFps     = resp.headers.get('X-Step-FPS');
+        const snapMode    = resp.headers.get('X-Snap-Mode') || 'rtsp';
         if (stepRes) _stepRes = stepRes;
         if (stepFps) _stepFps = stepFps;
+        // Disable resolution/fps controls when in http_snap fallback —
+        // profile switching is impossible via HTTP snapshot endpoints.
+        const httpFallback = (snapMode === 'http');
+        const ctrlGroups = document.querySelectorAll('.focus-ctrl-group');
+        const autoBtn    = document.querySelector('.focus-auto-btn');
+        ctrlGroups.forEach(g => {
+          const sel = g.querySelector('select');
+          if (sel) {
+            sel.disabled = httpFallback;
+            sel.title    = httpFallback
+              ? 'Stream switching unavailable — RTSP not accessible on this camera'
+              : '';
+            g.style.opacity = httpFallback ? '0.4' : '1';
+          }
+        });
+        if (autoBtn) {
+          autoBtn.disabled = httpFallback;
+          autoBtn.style.opacity = httpFallback ? '0.4' : '1';
+        }
         return resp.blob().then(blob => ({ blob, serverCount }));
       })
       .then(result => {
