@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.7"  # must match config.yaml
+CURRENT_VERSION = "2.2.8"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -572,13 +572,15 @@ CAMERA_PORTS = [
 ]
 
 RTSP_PATHS = [
-    "/", "/stream", "/stream1", "/stream2", "/live", "/live/ch00_0",
+    "/stream", "/stream1", "/stream2", "/live", "/live/ch00_0",
     "/live/main", "/h264", "/h264/ch1/main/av_stream", "/video",
     "/video1", "/cam", "/cam/realmonitor?channel=1&subtype=0",
     "/Streaming/Channels/101", "/Streaming/Channels/1",
     "/av0_0", "/av0_1", "/11", "/12", "/MediaInput/h264",
     "/ch0_unicast.sdp", "/onvif1", "/profile1/media.smp",
     "/channel1", "/mpeg4/media.amp",
+    "/",   # bare root tried last — many cameras 200-OK DESCRIBE here
+           # but reject SETUP because no real track lives at root
 ]
 
 MJPEG_PATHS = [
@@ -2111,8 +2113,13 @@ def probe_rtsp_socket(host: str, port: int, path: str,
                       timeout: float = 6.0,
                       label: str = "") -> bool:
     """
-    Verify an RTSP stream is accessible.  Returns True if DESCRIBE
-    succeeds (with or without auth).  Never touches ffprobe.
+    Verify an RTSP stream is genuinely streamable.  Returns True only if
+    OPTIONS + DESCRIBE succeed AND a SETUP round-trip on the first
+    m=video track succeeds (TCP-interleaved first, UDP fallback).  This
+    catches the common false-positive case where a camera 200-OKs DESCRIBE
+    on a bare root path but rejects SETUP because no real track lives
+    there (Microseven and similar firmware).
+
     Pass label="" for silent (debug-only) logging, or a non-empty
     string (e.g. camera_id/profile) for verbose INFO-level logging
     of each RTSP round-trip — useful when diagnosing credential failures.
@@ -2126,86 +2133,217 @@ def probe_rtsp_socket(host: str, port: int, path: str,
         else:
             log.debug(pfx + " " + msg)
 
-    try:
-        sock = socket.create_connection((host, port), timeout=timeout)
-        sock.settimeout(timeout)
+    CRLF     = chr(13) + chr(10)
+    CRLFCRLF = CRLF + CRLF
 
-        CRLF = chr(13) + chr(10)
-        CRLFCRLF = (chr(13) + chr(10)) * 2
-
-        def roundtrip(method: str, cseq: int, extra: dict | None = None) -> str:
-            extra = extra or {}  # safe: new dict each call, never mutates caller's default
-            hdr = "".join(k + ": " + v + CRLF for k, v in extra.items())
-            req = method + " " + rtsp_url + " RTSP/1.0" + CRLF
-            req += "CSeq: " + str(cseq) + CRLF + hdr + CRLF
-            sock.sendall(req.encode())
-            buf = b""
-            while CRLFCRLF.encode() not in buf and len(buf) < 32768:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                buf += chunk
-            return buf.decode("utf-8", errors="replace")
-
-        resp = roundtrip("OPTIONS", 1)
-        status_line = resp.split(chr(13))[0].strip()
-        if "RTSP/1.0 2" not in resp:
-            _log(f"OPTIONS → {status_line!r} (not 2xx — giving up)")
-            return False
-        _log(f"OPTIONS → OK")
-
-        # DESCRIBE — may trigger 401
-        resp = roundtrip("DESCRIBE", 2, {"Accept": "application/sdp"})
-        status_line = resp.split(chr(13))[0].strip()
-        if "RTSP/1.0 200" in resp:
-            _log("DESCRIBE → 200 OK (no auth required)")
-            return True
-        if "401" not in resp or not username:
-            ok = "RTSP/1.0 2" in resp
-            _log(f"DESCRIBE → {status_line!r} (no 401; result={ok})")
-            return ok
-
-        # Parse WWW-Authenticate
-        auth_line = next(
-            (l for l in resp.splitlines() if l.lower().startswith("www-authenticate:")), "")
-        auth_val  = auth_line.split(":", 1)[-1].strip()
-
+    def _build_auth(auth_val: str, method: str, uri: str) -> str | None:
+        """Build an Authorization header value for the given method+uri,
+        given the WWW-Authenticate value from a prior 401 response.
+        Reuses the nonce — RFC 2617 allows nonce reuse for subsequent
+        requests in the same session, recomputing the response digest
+        with the new method+uri in HA2."""
         if auth_val.lower().startswith("digest"):
             realm_m = re.search(r'realm="([^"]*)"', auth_val)
             nonce_m = re.search(r'nonce="([^"]*)"', auth_val)
             if not (realm_m and nonce_m):
-                _log(f"DESCRIBE → 401 Digest but no realm/nonce in: {auth_val[:80]!r}")
-                return False
+                return None
             realm, nonce = realm_m.group(1), nonce_m.group(1)
-            _log(f"DESCRIBE → 401 Digest (realm={realm!r}, nonce={nonce[:8]!r}...)")
             ha1 = hashlib.md5(f"{username}:{realm}:{password}".encode()).hexdigest()
-            ha2 = hashlib.md5(f"DESCRIBE:{rtsp_url}".encode()).hexdigest()
+            ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
             rsp = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
-            auth = (f'Digest username="{username}", realm="{realm}", '
-                    f'nonce="{nonce}", uri="{rtsp_url}", response="{rsp}"')
+            return (f'Digest username="{username}", realm="{realm}", '
+                    f'nonce="{nonce}", uri="{uri}", response="{rsp}"')
         elif auth_val.lower().startswith("basic"):
             import base64 as _b64
-            _log("DESCRIBE → 401 Basic")
-            auth = "Basic " + _b64.b64encode(f"{username}:{password}".encode()).decode()
+            return "Basic " + _b64.b64encode(
+                f"{username}:{password}".encode()).decode()
+        return None
+
+    def _parse_track_url(sdp: str, base_url: str) -> str | None:
+        """Find first m=video block in the SDP, extract its a=control:
+        value, and resolve it against base_url. Returns None if no
+        m=video or no control attribute exists."""
+        in_video        = False
+        video_control   = None
+        session_control = None
+        for raw in sdp.split("\n"):
+            line = raw.rstrip("\r").strip()
+            if line.startswith("m="):
+                if in_video:
+                    break  # next media block — stop, video control is final
+                in_video = line.startswith("m=video")
+            elif line.startswith("a=control:"):
+                ctrl = line[len("a=control:"):].strip()
+                if in_video:
+                    video_control = ctrl
+                else:
+                    session_control = ctrl
+        ctrl = video_control or session_control
+        if not ctrl:
+            return None
+        if ctrl == "*":
+            return base_url
+        if ctrl.lower().startswith("rtsp://"):
+            return ctrl
+        # Relative — append to base, ensuring exactly one separator
+        return (base_url.rstrip("/") + "/" + ctrl)
+
+    sock      = None
+    next_cseq = 1
+    auth_val  = None   # WWW-Authenticate value if any 401 was returned
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.settimeout(timeout)
+
+        def roundtrip(method: str, cseq: int,
+                      extra: dict | None = None,
+                      uri: str | None = None) -> str:
+            """Send an RTSP request and read response (headers + body if
+            Content-Length present). uri overrides the default rtsp_url
+            (used for SETUP/TEARDOWN where the track URI differs)."""
+            extra  = extra or {}   # safe: new dict each call
+            target = uri or rtsp_url
+            hdr    = "".join(k + ": " + v + CRLF for k, v in extra.items())
+            req    = method + " " + target + " RTSP/1.0" + CRLF
+            req   += "CSeq: " + str(cseq) + CRLF + hdr + CRLF
+            sock.sendall(req.encode())
+            buf = b""
+            # Read until end-of-headers
+            while CRLFCRLF.encode() not in buf and len(buf) < 65536:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            text = buf.decode("utf-8", errors="replace")
+            # If a Content-Length was advertised, read the body too
+            cl = 0
+            for line in text.split(CRLF):
+                if line.lower().startswith("content-length:"):
+                    try:
+                        cl = int(line.split(":", 1)[1].strip())
+                    except (ValueError, IndexError):
+                        cl = 0
+                    break
+            if cl > 0:
+                sep_idx   = text.find(CRLFCRLF)
+                already   = (len(buf) - (sep_idx + 4)) if sep_idx >= 0 else 0
+                remaining = max(0, cl - already)
+                while remaining > 0:
+                    chunk = sock.recv(min(remaining, 4096))
+                    if not chunk:
+                        break
+                    buf       += chunk
+                    remaining -= len(chunk)
+            return buf.decode("utf-8", errors="replace")
+
+        # ── OPTIONS ──────────────────────────────────────────────────────
+        resp = roundtrip("OPTIONS", next_cseq); next_cseq += 1
+        status_line = resp.split(CRLF)[0].strip()
+        if "RTSP/1.0 2" not in resp:
+            _log(f"OPTIONS → {status_line!r} (not 2xx — giving up)")
+            return False
+        _log("OPTIONS → OK")
+
+        # ── DESCRIBE (with optional 401-retry) ───────────────────────────
+        resp = roundtrip("DESCRIBE", next_cseq, {"Accept": "application/sdp"})
+        next_cseq += 1
+        status_line = resp.split(CRLF)[0].strip()
+        if "RTSP/1.0 200" in resp:
+            _log("DESCRIBE → 200 OK (no auth required)")
+        elif "401" in resp:
+            if not username:
+                _log("DESCRIBE → 401 (no credentials provided — rejecting)")
+                return False
+            auth_line = next(
+                (l for l in resp.splitlines()
+                 if l.lower().startswith("www-authenticate:")), "")
+            auth_val = auth_line.split(":", 1)[-1].strip() if auth_line else ""
+            if not auth_val:
+                _log("DESCRIBE → 401 with no WWW-Authenticate header")
+                return False
+            scheme = auth_val.split()[0] if auth_val else "?"
+            _log(f"DESCRIBE → 401 ({scheme})")
+            auth_hdr = _build_auth(auth_val, "DESCRIBE", rtsp_url)
+            if not auth_hdr:
+                _log(f"DESCRIBE → 401 unparseable auth: {auth_val[:60]!r}")
+                return False
+            resp = roundtrip("DESCRIBE", next_cseq,
+                             {"Accept": "application/sdp",
+                              "Authorization": auth_hdr})
+            next_cseq += 1
+            if "RTSP/1.0 200" not in resp:
+                sl = resp.split(CRLF)[0].strip()
+                _log(f"DESCRIBE (authenticated) → {sl!r}")
+                return False
+            _log("DESCRIBE (authenticated) → 200 OK")
         else:
-            _log(f"DESCRIBE → 401 unknown auth method: {auth_val[:60]!r} — giving up")
+            _log(f"DESCRIBE → {status_line!r} (not 200 / not 401 — rejecting)")
             return False
 
-        resp = roundtrip("DESCRIBE", 3,
-                         {"Accept": "application/sdp", "Authorization": auth})
-        ok = "RTSP/1.0 200" in resp
-        status_line = resp.split(chr(13))[0].strip()
-        _log(f"DESCRIBE (authenticated) → {'200 OK' if ok else status_line!r}")
-        return ok
+        # ── Parse SDP for first m=video track URL ────────────────────────
+        body_idx  = resp.find(CRLFCRLF)
+        sdp_text  = resp[body_idx + 4:] if body_idx >= 0 else ""
+        track_url = _parse_track_url(sdp_text, rtsp_url)
+        if not track_url:
+            _log("DESCRIBE 200 but SDP has no m=video / a=control — rejecting")
+            return False
+        _log(f"SDP track URL: {track_url}")
+
+        # ── SETUP: TCP-interleaved first, UDP fallback ───────────────────
+        # Catches the false-positive case where DESCRIBE 200 OKs but the
+        # camera has no real track at this path (rejects SETUP with 4xx).
+        # We never bind UDP locally — server's 200 OK to SETUP is enough
+        # to verify the stream is genuinely streamable.
+        transports = [
+            ("RTP/AVP/TCP;unicast;interleaved=0-1",            "TCP-interleaved"),
+            ("RTP/AVP/UDP;unicast;client_port=50000-50001",    "UDP"),
+        ]
+        for transport_hdr, tlabel in transports:
+            extra = {"Transport": transport_hdr}
+            if auth_val:
+                ah = _build_auth(auth_val, "SETUP", track_url)
+                if ah:
+                    extra["Authorization"] = ah
+            resp = roundtrip("SETUP", next_cseq, extra, uri=track_url)
+            next_cseq += 1
+            sl = resp.split(CRLF)[0].strip()
+            if "RTSP/1.0 200" in resp:
+                # Extract Session header so TEARDOWN can release it
+                session = ""
+                for line in resp.split(CRLF):
+                    if line.lower().startswith("session:"):
+                        session = line.split(":", 1)[1].strip().split(";")[0].strip()
+                        break
+                _log(f"SETUP ({tlabel}) → 200 OK (session={session[:12]!r})")
+
+                # ── TEARDOWN — release session cleanly ────────────────────
+                td_extra: dict = {}
+                if session:
+                    td_extra["Session"] = session
+                if auth_val:
+                    ah = _build_auth(auth_val, "TEARDOWN", track_url)
+                    if ah:
+                        td_extra["Authorization"] = ah
+                try:
+                    roundtrip("TEARDOWN", next_cseq, td_extra, uri=track_url)
+                    next_cseq += 1
+                except Exception:
+                    pass   # TEARDOWN failure is non-fatal — socket close
+                           # also releases server-side state
+                return True
+            _log(f"SETUP ({tlabel}) → {sl!r}")
+
+        return False
 
     except Exception as e:
         _log(f"exception: {e}")
         return False
     finally:
-        try:
-            sock.close()
-        except Exception:
-            pass
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
 
 
 def probe_rtsp(url: str, username: str = "", password: str = "",
@@ -8352,6 +8490,9 @@ async def api_set_log_level(request: web.Request) -> web.Response:
 
 def make_app() -> web.Application:
     app = web.Application()
+    # Graceful shutdown — fired by runner.cleanup() in main() when SIGTERM
+    # or SIGINT sets _STOP_EVENT.
+    app.on_shutdown.append(_on_shutdown)
     app.router.add_get(   "/",                                    handle_index)
     app.router.add_get(   "/api/cameras",                         api_cameras)
     app.router.add_get(   "/api/scan/status",                     api_scan_status)
@@ -8464,7 +8605,128 @@ async def _probe_hw_decoders() -> None:
         log.info("No hardware decoders available — using software decode")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Graceful shutdown
+# ─────────────────────────────────────────────────────────────────────────────
+# Module-level Event so signal handlers (registered in main()) can flip it.
+# When set, main() falls through to runner.cleanup() which fires the
+# app.on_shutdown chain (registered in make_app()).
+_STOP_EVENT: asyncio.Event | None = None
+
+
+async def _on_shutdown(app: web.Application) -> None:
+    """Graceful shutdown handler — registered via app.on_shutdown.append().
+
+    Sequence:
+      1. Persist last_frame_wall to cameras.json so the UI can show
+         "last seen N minutes ago" after the next startup.
+      2. Cancel all running snap_loop asyncio tasks.
+      3. SIGTERM all live ffmpeg child processes (both snap_loop and
+         motion-recording), wait up to 3s, then SIGKILL stragglers.
+      4. Shut down _THREAD_POOL with cancel_futures=True so queued
+         nmap/probe_rtsp jobs don't block exit.
+
+    Errors in any single step are logged but do not stop the rest of
+    the sequence — best-effort cleanup is the priority.
+    """
+    log.info("Graceful shutdown initiated...")
+
+    # ── 1. Persist last_frame_wall ─────────────────────────────────────────
+    # frame_time is monotonic (resets every process start). Convert to
+    # wall-clock by computing how long ago the last frame arrived and
+    # subtracting that from time.time().
+    now_mono     = time.monotonic()
+    now_wall     = time.time()
+    saved_count  = 0
+    for cam_id, state in _SNAP.items():
+        ft = state.get("frame_time") or 0.0
+        if ft > 0 and cam_id in CAMERAS:
+            elapsed = now_mono - ft
+            if elapsed >= 0:
+                CAMERAS[cam_id]["last_frame_wall"] = now_wall - elapsed
+                saved_count += 1
+    if saved_count:
+        try:
+            save_cameras()
+            log.info(f"  Persisted last_frame_wall for {saved_count} camera(s)")
+        except Exception as ex:
+            log.warning(f"  Could not save last_frame_wall: {ex}")
+
+    # ── 2. Cancel snap_loop tasks ──────────────────────────────────────────
+    cancelled_tasks = 0
+    for state in _SNAP.values():
+        task = state.get("task")
+        if task and not task.done():
+            task.cancel()
+            cancelled_tasks += 1
+
+    # ── 3. SIGTERM ffmpeg children, wait 3s, SIGKILL survivors ─────────────
+    procs_to_kill = []
+    for state in _SNAP.values():
+        proc = state.get("proc")
+        if proc and proc.returncode is None:
+            procs_to_kill.append(proc)
+    for ms in _MOTION.values():
+        proc = ms.get("proc")
+        if proc and proc.returncode is None:
+            procs_to_kill.append(proc)
+
+    if procs_to_kill:
+        log.info(f"  SIGTERM-ing {len(procs_to_kill)} ffmpeg child(ren)...")
+        for proc in procs_to_kill:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        # Wait up to 3 s total — divide remaining budget across processes
+        deadline = time.monotonic() + 3.0
+        for proc in procs_to_kill:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=remaining)
+            except (asyncio.TimeoutError, Exception):
+                pass
+        # SIGKILL anything that didn't exit
+        survivors = [p for p in procs_to_kill if p.returncode is None]
+        if survivors:
+            log.warning(f"  SIGKILL-ing {len(survivors)} ffmpeg process(es) "
+                        f"that did not exit within 3s")
+            for proc in survivors:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            for proc in survivors:
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                except Exception:
+                    pass
+
+    # Brief settle time so cancelled tasks finish their CancelledError handlers
+    if cancelled_tasks:
+        try:
+            await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            pass
+
+    # ── 4. Shut down thread pool ───────────────────────────────────────────
+    # cancel_futures=True drops queued (not-yet-started) work so we don't
+    # block waiting for nmap/probe_rtsp jobs that are still in the queue.
+    try:
+        _THREAD_POOL.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        # Python <3.9 doesn't have cancel_futures kwarg
+        _THREAD_POOL.shutdown(wait=False)
+
+    log.info(f"Graceful shutdown complete "
+             f"(cancelled {cancelled_tasks} task(s), "
+             f"killed {len(procs_to_kill)} ffmpeg child(ren))")
+
+
 async def main() -> None:
+    global _STOP_EVENT
 
     load_cameras()
     load_blacklist()
@@ -8481,6 +8743,19 @@ async def main() -> None:
     # host devices; on non-Pi hardware the v4l2m2m devices simply won't exist).
     # Populates _HW_UNAVAILABLE so snap_loop never tries an unavailable decoder.
     await _probe_hw_decoders()
+
+    # ── Graceful shutdown plumbing ────────────────────────────────────────────
+    # _STOP_EVENT is set by SIGTERM/SIGINT handlers below. main() blocks on it,
+    # then runner.cleanup() fires the on_shutdown chain (incl. _on_shutdown).
+    _STOP_EVENT = asyncio.Event()
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _STOP_EVENT.set)
+        except (NotImplementedError, RuntimeError):
+            # Some platforms (Windows) don't support add_signal_handler.
+            # On those, the process will die without graceful cleanup.
+            pass
 
     app = make_app()
     runner = web.AppRunner(app)
@@ -8513,10 +8788,12 @@ async def main() -> None:
     # Background: download/refresh IEEE OUI database (non-blocking)
     asyncio.create_task(refresh_oui_db())
 
-    await asyncio.Event().wait()
-
-    # Shut down the thread pool cleanly when the event loop exits
-    _THREAD_POOL.shutdown(wait=False)
+    # Block until SIGTERM/SIGINT flips the stop event, then run cleanup.
+    # runner.cleanup() invokes app.on_shutdown handlers (incl. _on_shutdown)
+    # which kills ffmpeg children, persists last_frame_wall, etc.
+    await _STOP_EVENT.wait()
+    log.info("Shutdown signal received — running cleanup...")
+    await runner.cleanup()
 
 
 if __name__ == "__main__":

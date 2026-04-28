@@ -57,9 +57,15 @@ CONTRACTS = {
     "http_snap_loop":        ["asyncio.sleep", "_snap_state", "TCPConnector"],
     "snap_loop":             ["_snap_state", "asyncio"],
     "build_html":            ["INGRESS_PATH"],
-    "make_app":              ["app.router", "web.Application"],
+    "make_app":              ["app.router", "web.Application", "_on_shutdown"],
     "api_set_credentials":   ["save_cameras", "CAMERAS"],
-    "main":                  ["_DockerIPFilter", "_probe_hw_decoders", "get_startup_mode"],
+    "main":                  ["_DockerIPFilter", "_probe_hw_decoders",
+                              "get_startup_mode", "_STOP_EVENT",
+                              "runner.cleanup", "add_signal_handler"],
+    "_on_shutdown":          ["_SNAP", "last_frame_wall", "save_cameras",
+                              "_THREAD_POOL.shutdown", "terminate"],
+    "probe_rtsp_socket":     ["DESCRIBE", "SETUP", "TEARDOWN",
+                              "_parse_track_url", "m=video"],
 }
 all_ok = True
 for node in ast.walk(tree):
