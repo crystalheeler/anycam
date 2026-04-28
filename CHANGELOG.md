@@ -1,3 +1,40 @@
+## 2.2.7
+- Card view: prefer RTSP via ffmpeg when probe_rtsp confirmed the stream
+  works at credential-set time, instead of routing through http_snap_loop
+  (which polls at ~1 fps and feels stale). http_snap_loop is still the
+  fallback after 3 consecutive RTSP failures.
+- Enhanced view: manual Resolution/Frame Rate selections that cross a
+  profile or fps boundary now kill the running ffmpeg process so the outer
+  restart loop relaunches with the new URL/vf filter. Previously the
+  dropdown changed but the actual stream stayed the same.
+- Enhanced view: dynamic toast "4K too demanding for this hardware —
+  falling back to secondary stream" appears for 5 seconds when the adaptive
+  controller steps down from a 4K-class profile (≥3840 wide). Replaces the
+  upfront CPU-estimate pre-warning.
+- Enhanced view: removed the upfront CPU-estimate pre-warning that fired
+  when opening focus on a high-bitrate camera. The adaptive controller and
+  the new dynamic 4K-fallback toast already cover this case.
+- Profile dropdown: dedupe by (width, height, codec). Cameras like
+  Hikvision often expose 4 ONVIF profiles for 2 unique streams; the
+  dropdown now collapses these to one entry per unique combo.
+- Initial scan: try unauthenticated RTSP on port 554 for ONVIF-only
+  multicast-discovered cameras before defaulting to needs_credentials.
+  Cameras with "RTSP Authentication" disabled (e.g. Microseven) now come
+  up green/ready immediately, no credential prompt.
+- Lock badge: replaced the 🔐 emoji credential indicator with an SVG lock
+  icon. Yellow key on yellow lock for unauthenticated cameras, green key
+  on yellow lock when credentials are stored.
+- Header tooltips: "AnyCam — Home" text now reads "Click for Home"; the
+  camera-icon SVG retains "System Stability — See Logs" via a proper SVG
+  <title> child element (the previous title="" attribute was a latent bug
+  — title attributes don't work on SVG elements).
+- Card metadata row: removed duplicate purple "ONVIF" badge at the
+  far-right of the row (the protocol badge already shows it).
+- Card metadata row: red IP address now appears before green port number,
+  consistent across all card types (RTSP, ONVIF, HTTP, MJPEG, HLS).
+- Enhanced view: "Auto" button is now wrapped in a focus-ctrl-group so it
+  aligns vertically with the Resolution and Frame Rate dropdowns above
+  their labels.
 ## 2.2.6
 - Enhanced view: fix Resolution and Frame Rate controls having no effect —
   root cause was _build_focus_ladder() returning a single-rung ladder
