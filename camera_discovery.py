@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.6"  # must match config.yaml
+CURRENT_VERSION = "2.2.7"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3409,11 +3409,18 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     # http_snap_loop polls the camera's HTTP JPEG endpoint at ~1 fps, which is
     # far cheaper than running ffmpeg for cameras where RTSP is unreliable or
     # the snap URL is confirmed (Microseven, generic ONVIF/hi3516, Wansview…).
-    # EXCEPTION: when native_res=True (enhanced view) AND RTSP is available,
+    # EXCEPTION 1: when native_res=True (enhanced view) AND RTSP is available,
     # bypass http_snap_loop so the ffmpeg pipeline runs — this makes the
     # Resolution/FPS controls work and gives real video instead of 1fps polling.
-    _has_rtsp = bool(camera.get("stream_url"))
-    if camera.get("http_snap_url") and not (native_res and _has_rtsp):
+    # EXCEPTION 2 (card view): when probe_rtsp confirmed the RTSP stream works
+    # at credential-set time, prefer ffmpeg over http_snap_loop. http_snap_loop
+    # produces ~1 fps cached frames (stale-feeling); ffmpeg gives second-by-second
+    # live video. http_snap_loop remains the fallback if ffmpeg fails 3× in a row
+    # (handled lower in this function).
+    _has_rtsp        = bool(camera.get("stream_url"))
+    _rtsp_probe_ok   = bool(camera.get("rtsp_probe_ok"))
+    _prefer_ffmpeg   = (native_res and _has_rtsp) or (_has_rtsp and _rtsp_probe_ok)
+    if camera.get("http_snap_url") and not _prefer_ffmpeg:
         await http_snap_loop(camera_id, camera)
         return
 
@@ -4426,6 +4433,7 @@ async def handle_focus_set_tier(request: web.Request) -> web.Response:
         "restarts_since_lock": 0, "run_start": None,
         "ladder": ladder,
     })
+    prev_tier_idx = ada.get("tier_idx", 0)
     ada["tier_idx"]            = best_idx
     ada["locked"]              = True
     ada["restarts_since_lock"] = 0
@@ -4433,6 +4441,21 @@ async def handle_focus_set_tier(request: web.Request) -> web.Response:
     ada["ladder"]              = ladder
     log.info(f"Focus [{camera_id}]: manual tier [{best_idx}] "
              f"profile[{prof_idx}] fps={fps_val}")
+
+    # If the new tier crosses a profile or fps boundary, the running ffmpeg is
+    # decoding the OLD profile/fps — kill it so snap_loop's outer restart loop
+    # picks up the new ada state and relaunches with the new URL+vf filter.
+    # Without this, the dropdown changes but the actual stream stays the same.
+    if best_idx != prev_tier_idx:
+        state  = _snap_state(camera_id)
+        proc   = state.get("proc")
+        if proc is not None:
+            try:
+                proc.kill()
+                log.info(f"Focus [{camera_id}]: killed ffmpeg to apply manual tier change")
+            except Exception as ex:
+                log.debug(f"Focus [{camera_id}]: ffmpeg kill failed (probably already dead): {ex}")
+
     return web.json_response({"status": "ok", "tier_idx": best_idx,
                               "profile_idx": prof_idx, "fps": fps_val})
 
@@ -5019,6 +5042,28 @@ async def api_set_credentials(request) -> web.Response:
 
                     return (c.get("stream_width") or 0) * (c.get("stream_height") or 0)
                 stream_candidates.sort(key=_res, reverse=True)
+
+                # ── Dedupe by (width, height, codec) ───────────────────────────
+                # Many ONVIF cameras (Hikvision, Dahua) expose 4+ profiles where
+                # several are identical resolution/codec but differ only in name
+                # or token. Showing all of them in the focus-view Resolution
+                # dropdown is noise — keep only the first (highest-priority,
+                # already sort-ordered) URL for each unique combo.
+                seen   = set()
+                deduped = []
+                for c in stream_candidates:
+                    key = (c.get("stream_width"),
+                           c.get("stream_height"),
+                           (c.get("stream_codec") or "").lower())
+                    if key in seen:
+                        log.info(f"  Profile dedupe: dropping duplicate "
+                                 f"{key[0]}x{key[1]} {key[2] or '?'} "
+                                 f"({c.get('name', '?')}, {_strip_creds(c.get('url',''))})")
+                        continue
+                    seen.add(key)
+                    deduped.append(c)
+                stream_candidates = deduped
+
                 main_s = stream_candidates[0]
                 # Only use a sub-stream that actually passed probe_rtsp.
                 # If the second profile failed probe (e.g. "Connection reset"),
@@ -5043,6 +5088,7 @@ async def api_set_credentials(request) -> web.Response:
                         "stream_codec":  cand.get("stream_codec"),
                         "stream_fps":    cand.get("stream_fps"),
                         "stream_audio":  cand.get("stream_audio"),
+                        "rtsp_probe_ok": bool(cand.get("probe_ok")),
                     })
 
                 log.info(f"  Profiles ranked by resolution:")
@@ -5085,6 +5131,7 @@ async def api_set_credentials(request) -> web.Response:
                     "hevc_plus_warning": False,  # reset; _drain_stderr re-sets if needed
                     "http_snap_url":       http_snap_url,
                     "http_snap_auth_mode": http_snap_auth_mode,
+                    "rtsp_probe_ok":       bool(main_s.get("probe_ok")),
                     **extra_urls,
                     **main_details,
                 }
@@ -6102,6 +6149,7 @@ setInterval(pollMotion, 3000);
 let _focusCamId   = null;
 let _focusTimer   = null;
 let _focusWarnOK  = {};   // camId → bool (user acknowledged warning this session)
+let _focus4kWarnTimer = null;   // auto-dismiss timer for the 4K-fallback toast
 
 function _estimateCpuPct(cam) {
   // Rough heuristic: hevc cost based on pixels × fps relative to Pi 4 capacity
@@ -6119,28 +6167,6 @@ function _estimateCpuPct(cam) {
 async function openFocus(camId) {
   const cam = cameras.find(c => c.id === camId);
   if (!cam || cam.status !== 'ready') return;
-
-  // CPU warning if this stream will likely overload the Pi
-  const pct = _estimateCpuPct(cam);
-  if (pct > 80 && !_focusWarnOK[camId]) {
-    const fps = cam.stream_fps || '?';
-    const res = (cam.stream_width || '?') + 'x' + (cam.stream_height || '?');
-    const warnEl = document.getElementById('focus-warning');
-    document.getElementById('focus-warn-text').textContent =
-      'This view runs at maximum quality: ' + fps + ' fps @ ' + res
-      + '. Estimated CPU load: ~' + pct + '%. This may overload your system.';
-    // Show overlay first, then show warning
-    document.getElementById('focus-overlay').style.display = 'flex';
-    warnEl.style.display = 'flex';
-    // OK button handler
-    const okBtn = warnEl.querySelector('button');
-    okBtn.onclick = () => {
-      _focusWarnOK[camId] = true;
-      warnEl.style.display = 'none';
-      _startFocusPoll(camId, cam);
-    };
-    return;
-  }
 
   document.getElementById('focus-overlay').style.display = 'flex';
   _startFocusPoll(camId, cam);
@@ -6213,7 +6239,29 @@ async function _startFocusPoll(camId, cam) {
         const stepRes     = resp.headers.get('X-Step-Res');
         const stepFps     = resp.headers.get('X-Step-FPS');
         const snapMode    = resp.headers.get('X-Snap-Mode') || 'rtsp';
-        if (stepRes) _stepRes = stepRes;
+        if (stepRes) {
+          // Detect 4K → smaller fallback so we can surface a one-time message.
+          // _stepRes is the previously seen tier resolution; if it was 4K-class
+          // (≥3840 wide) and the new tier is smaller, the adaptive controller
+          // just stepped down due to fast-death (CPU couldn't keep up with 4K).
+          if (_stepRes && _stepRes !== stepRes) {
+            const oldW = parseInt((_stepRes.split('x')[0]) || '0');
+            const newW = parseInt((stepRes.split('x')[0])  || '0');
+            if (oldW >= 3840 && newW > 0 && newW < oldW) {
+              const warnEl = document.getElementById('focus-warning');
+              const txt    = document.getElementById('focus-warn-text');
+              if (warnEl && txt) {
+                txt.textContent = '4K too demanding for this hardware — falling back to secondary stream';
+                warnEl.style.display = 'flex';
+                clearTimeout(_focus4kWarnTimer);
+                _focus4kWarnTimer = setTimeout(() => {
+                  warnEl.style.display = 'none';
+                }, 5000);
+              }
+            }
+          }
+          _stepRes = stepRes;
+        }
         if (stepFps) _stepFps = stepFps;
         // Disable resolution/fps controls when in http_snap fallback —
         // profile switching is impossible via HTTP snapshot endpoints.
@@ -6279,6 +6327,7 @@ async function _startFocusPoll(camId, cam) {
 async function closeFocus() {
   _focusCamId = null;
   clearTimeout(_focusTimer);
+  clearTimeout(_focus4kWarnTimer);
   await fetch(BASE + '/snap/focus', {method: 'DELETE'}).catch(() => {});
   document.getElementById('focus-overlay').style.display = 'none';
   document.getElementById('focus-img').src = '';
@@ -6642,10 +6691,28 @@ async function testStream(ev, cid) {
 
 function cardHTML(cam) {
   const name     = esc(cam.name || cam.hostname || cam.ip);
-  const onvifBdg = cam.onvif
-    ? '<span class="badge" style="background:#2d1e4a;color:#c09eff">ONVIF</span>' : '';
-  const credBdg  = cam.has_credentials
-    ? '<span class="badge" style="background:#1e2d1e;color:#6fcf97">🔐</span>' : '';
+  // Lock badge: yellow key when creds not stored, green key when stored.
+  // Only shown for cameras that actually involve credentials — pure-public
+  // streams (e.g. open MJPEG with no auth) get no badge.
+  const _showLock = cam.has_credentials || cam.requires_credentials || cam.status === 'needs_credentials';
+  const _keyFill  = cam.has_credentials ? '#3B6D11' : '#F2BD2A';
+  const _keyStrk  = cam.has_credentials ? '#173404' : '#8B6F00';
+  const _lockTtl  = cam.has_credentials ? 'Credentials stored' : 'Credentials required';
+  const credBdg   = _showLock
+    ? '<span class="badge lock-badge" title="' + _lockTtl + '">'
+      + '<svg width="20" height="20" viewBox="0 0 24 24">'
+      +   '<path d="M5 9V6a3 3 0 0 1 6 0v3" fill="none" stroke="#8B6F00" stroke-width="2" stroke-linecap="round"/>'
+      +   '<rect x="2" y="9" width="12" height="10" rx="2" fill="#F2BD2A" stroke="#8B6F00" stroke-width="0.6"/>'
+      +   '<circle cx="8" cy="13" r="1.1" fill="#5C4400"/>'
+      +   '<rect x="7.4" y="13" width="1.2" height="3" fill="#5C4400"/>'
+      +   '<circle cx="14.5" cy="7" r="2.85" fill="' + _keyFill + '" stroke="' + _keyStrk + '" stroke-width="0.7"/>'
+      +   '<circle cx="14.5" cy="7" r="1.2" fill="#1a1a1a"/>'
+      +   '<rect x="13.75" y="9.85" width="1.5" height="6.3" fill="' + _keyFill + '" stroke="' + _keyStrk + '" stroke-width="0.5"/>'
+      +   '<rect x="15.25" y="13.5" width="2.5" height="1.05" fill="' + _keyFill + '" stroke="' + _keyStrk + '" stroke-width="0.3"/>'
+      +   '<rect x="15.25" y="15" width="1.8" height="0.75" fill="' + _keyFill + '" stroke="' + _keyStrk + '" stroke-width="0.3"/>'
+      + '</svg>'
+      + '</span>'
+    : '';
   const uncBdg   = (cam.verdict === 'uncertain' || cam.verdict === 'not_camera')
     ? '<span class="badge" style="background:#3a2e1e;color:#f5b942" title="'
       + esc(cam.verdict_reason || '') + '">⚠ Unverified</span>' : '';
@@ -6669,9 +6736,9 @@ function cardHTML(cam) {
     + ' onclick="openRename(\'' + cam.id + '\',\'' + name.replace(/'/g, "\\'") + '\')">'
     + name + '</span></div>'
     + '<div class="badges">' + protoBadge(cam.protocol)
-    + '<span class="badge" style="background:#1e2d1e;color:#6fcf97">:' + cam.port + '</span>'
     + '<span class="badge" style="background:#2d2020;color:#e88">' + cam.ip + '</span>'
-    + onvifBdg + credBdg + uncBdg + upgradeBdg + hevcPlusBdg + '</div>'
+    + '<span class="badge" style="background:#1e2d1e;color:#6fcf97">:' + cam.port + '</span>'
+    + credBdg + uncBdg + upgradeBdg + hevcPlusBdg + '</div>'
     + '</div>'
     + identityHTML(cam)
     + credFormHTML(cam)
@@ -7507,18 +7574,44 @@ async def run_scan() -> None:
             else:
                 cid  = f"{ip}_onvif"
                 prev = saved.get(cid, {})
-                CAMERAS[cid] = {
-                    "id": cid, "ip": ip, "hostname": onvif["name"],
-                    "port": 80, "protocol": "ONVIF",
-                    "stream_url": prev.get("stream_url", ""),
-                    "requires_credentials": True,
-                    "credentials": prev.get("credentials"),
-                    "name": prev.get("name", onvif["name"]),
-                    "xaddrs": onvif.get("xaddrs", ""),
-                    "status": "needs_credentials",
-                    "onvif": True, "user_saved": bool(prev), "display": "proxy",
-                    "verdict": "camera", "verdict_reason": "ONVIF discovered",
-                }
+                # Try unauthenticated RTSP first — some cameras (e.g. Microseven
+                # with "RTSP Authentication" disabled) serve streams openly even
+                # though their ONVIF/HTTP ports require auth. If unauth RTSP
+                # works AND the user hasn't already saved creds, skip the cred
+                # prompt entirely and create a ready card right away.
+                unauth_url = ""
+                if not prev.get("credentials"):
+                    unauth_url = await loop.run_in_executor(
+                        _THREAD_POOL, find_rtsp_path, ip, 554, "", "")
+                if unauth_url:
+                    log.info(f"  ONVIF {ip}: unauthenticated RTSP works "
+                             f"({_strip_creds(unauth_url)}) — skipping cred prompt")
+                    CAMERAS[cid] = {
+                        "id": cid, "ip": ip, "hostname": onvif["name"],
+                        "port": 554, "protocol": "RTSP",
+                        "stream_url": unauth_url,
+                        "requires_credentials": False,
+                        "credentials": None,
+                        "name": prev.get("name", onvif["name"]),
+                        "xaddrs": onvif.get("xaddrs", ""),
+                        "status": "ready",
+                        "rtsp_probe_ok": True,
+                        "onvif": True, "user_saved": bool(prev), "display": "proxy",
+                        "verdict": "camera", "verdict_reason": "ONVIF + unauth RTSP",
+                    }
+                else:
+                    CAMERAS[cid] = {
+                        "id": cid, "ip": ip, "hostname": onvif["name"],
+                        "port": 80, "protocol": "ONVIF",
+                        "stream_url": prev.get("stream_url", ""),
+                        "requires_credentials": True,
+                        "credentials": prev.get("credentials"),
+                        "name": prev.get("name", onvif["name"]),
+                        "xaddrs": onvif.get("xaddrs", ""),
+                        "status": "needs_credentials",
+                        "onvif": True, "user_saved": bool(prev), "display": "proxy",
+                        "verdict": "camera", "verdict_reason": "ONVIF discovered",
+                    }
 
         # Merge multicast-only SSDP cameras
         for ssdp in ssdp_results:
@@ -7790,6 +7883,7 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .card-name:hover{{color:var(--primary)}}
 .badges{{padding:0 12px 8px;display:flex;flex-wrap:wrap;gap:4px}}
 .badge{{font-size:.68rem;font-weight:600;padding:2px 6px;border-radius:20px}}
+.lock-badge{{background:transparent !important;padding:0 !important;display:inline-flex;align-items:center;line-height:1}}
 .status-dot{{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:5px}}
 .dot-ready{{background:var(--green);box-shadow:0 0 5px var(--green)}}
 .dot-warning{{background:var(--yellow);box-shadow:0 0 5px var(--yellow)}}
@@ -7976,12 +8070,12 @@ header h1{{cursor:pointer}}
 <body>
 
 <header>
-  <h1 onclick="switchView('cameras')" title="System Stability — See Logs" style="cursor:pointer">
+  <h1 onclick="switchView('cameras')" title="Click for Home" style="cursor:pointer">
     <svg id="status-cam-icon" width="27" height="27" viewBox="0 0 24 24"
          fill="none" stroke="#43a047" stroke-width="2"
          style="cursor:pointer;flex-shrink:0;vertical-align:middle"
-         title="System Stability — click to view logs"
          onclick="openHALog();event.stopPropagation()">
+      <title>System Stability &mdash; See Logs</title>
       <path d="M15 10l4.553-2.069A1 1 0 0121 8.87v6.26a1 1 0 01-1.447.9L15 14"/>
       <rect x="1" y="7" width="14" height="10" rx="2" ry="2"/>
     </svg>
@@ -8206,7 +8300,10 @@ header h1{{cursor:pointer}}
         </select>
         <span class="focus-ctrl-label">Frame Rate</span>
       </div>
-      <button class="focus-auto-btn" onclick="focusResetAuto()" title="Let the system adapt automatically">Auto</button>
+      <div class="focus-ctrl-group">
+        <button class="focus-auto-btn" onclick="focusResetAuto()" title="Let the system adapt automatically">Auto</button>
+        <span class="focus-ctrl-label" style="visibility:hidden">&middot;</span>
+      </div>
     </div>
   </div>
 </div>
