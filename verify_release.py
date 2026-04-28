@@ -59,6 +59,7 @@ CONTRACTS = {
     "build_html":            ["INGRESS_PATH"],
     "make_app":              ["app.router", "web.Application"],
     "api_set_credentials":   ["save_cameras", "CAMERAS"],
+    "main":                  ["_DockerIPFilter", "_probe_hw_decoders", "get_startup_mode"],
 }
 all_ok = True
 for node in ast.walk(tree):
