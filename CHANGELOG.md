@@ -1,3 +1,23 @@
+## 2.2.4-rc1
+Release candidate naming convention introduced: when reverting or re-releasing
+a version with fixes, -rc1, -rc2, etc. are appended to distinguish the release
+candidate from the original stable release.
+
+This release is a corrected re-release of 2.2.4. The original 2.2.4 (SigRev-1
+bundle) was followed by 2.2.5 (SigRev-2) which introduced two regressions:
+  - hevc_v4l2m2m false positive: new simplified HW probe used /dev/video* for
+    both h264 and hevc v4l2m2m decoders; on Pi 4 the h264 device exists but
+    the hevc device (rpivid) does not without dtoverlay — causing hevc_v4l2m2m
+    to be incorrectly listed as available, then ffmpeg to stall for 10-15s
+    trying to initialize a non-existent hardware decoder
+  - _HW_DECODER_CANDIDATES NameError: snap_loop referenced this as a global
+    but it was only a local inside _probe_hw_decoders()
+Reverted to 2.2.4 (SigRev-1) as base and re-packaged as 2.2.4-rc1 to
+distinguish from the original stable 2.2.4.
+
+Content is identical to the original 2.2.4 (SigRev-1 bundle). SigRev-2 will
+be re-implemented correctly in a future release after Decoding-Rev is resolved.
+
 ## 2.2.4
 SigRev-1 bundle (Items 1, 2, 3 — Items 4 and 7 were completed in 2.2.2/2.2.3):
 
