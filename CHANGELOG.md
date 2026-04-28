@@ -1,3 +1,20 @@
+## 2.2.5
+- Enhanced view: fix JS scope bug where _manualTierActive was declared inside
+  the _startFocusPoll() closure but written by top-level focusPickRes() and
+  focusPickFps() functions — those functions could not access the closure
+  variable, so _updateInfoBar() always read it as false and never showed
+  'Adapted Quality'; fixed by moving _manualTierActive to module scope
+  alongside _focusProfiles and _focusCurProf
+- Enhanced view: fix manual tier being overridden by adaptive restart logic —
+  when a camera stream crashes repeatedly (e.g. Hikvision HEVC firmware bug),
+  restarts_since_lock incremented past _ADAPTIVE_RESTART_LIMIT and triggered
+  a tier step-down even when the user had manually pinned a specific tier;
+  fixed by checking manual_override before computing restart_overflow, making
+  manual pins stable across any number of ffmpeg crashes
+- Confirmed via Chrome browser inspection: Resolution shows 'Stream 1' for
+  Hikvision because ONVIF GetProfiles returns 0 (firmware bug) so no
+  stream metadata is available; this is addressed in Decoding-Rev
+
 ## 2.2.4-rc2
 - Fix: _DockerIPFilter class was lost during the 2.2.5→2.2.4 revert, causing
   NameError crash at startup before any cameras loaded; restored class definition

@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.4-rc2"  # must match config.yaml
+CURRENT_VERSION = "2.2.5"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3833,8 +3833,15 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 # Count restarts at locked tier
                 if locked:
                     ada["restarts_since_lock"] = ada.get("restarts_since_lock", 0) + 1
-                restart_overflow = (locked and
-                                    ada.get("restarts_since_lock", 0) >= _ADAPTIVE_RESTART_LIMIT)
+                # Never step down if the user manually pinned the tier —
+                # the adaptive system must not override an explicit user choice
+                # (e.g. HEVC firmware bug causes repeated crashes but user wants
+                # this tier regardless).
+                if ada.get("manual_override"):
+                    restart_overflow = False
+                else:
+                    restart_overflow = (locked and
+                                        ada.get("restarts_since_lock", 0) >= _ADAPTIVE_RESTART_LIMIT)
 
                 if fast_death or restart_overflow:
                     reason = (f"fast-death ({frames}fr in {run_dur:.1f}s)"
@@ -6168,7 +6175,6 @@ async function _startFocusPoll(camId, cam) {
   // "Adapted Quality" = current adaptive ladder tier from server headers.
   //                     Only shown when adaptive_quality config is on OR
   //                     the user has manually picked a resolution/fps tier.
-  let _manualTierActive = false;
   function _updateInfoBar() {
     const realRes  = _liveRes  || '…';
     const realFps  = _liveFps  !== null ? _liveFps + ' fps' : 'measuring…';
@@ -6271,8 +6277,9 @@ document.addEventListener('visibilitychange', () => {
 
 /* ── Focus manual resolution/fps controls ─────────────────────────────── */
 // Populated when openFocus() runs
-let _focusProfiles = [];   // [{idx, label, width, height, codec}]
-let _focusCurProf  = 0;    // currently selected profile index
+let _focusProfiles    = [];     // [{idx, label, width, height, codec}]
+let _focusCurProf     = 0;     // currently selected profile index
+let _manualTierActive = false; // true when user has manually picked res/fps
 
 async function _loadFocusProfiles() {
   try {
