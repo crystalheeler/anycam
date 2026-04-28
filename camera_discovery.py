@@ -69,6 +69,24 @@ logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
+
+class _DockerIPFilter(logging.Filter):
+    """Suppress aiohttp access-log noise from Docker bridge and HA supervisor IPs.
+
+    The Docker bridge (172.x.x.x) and the HA ingress proxy (127.0.0.1) make
+    frequent internal requests that clutter the log with lines like:
+      'GET /snapshot/cam_id 200 ...'
+    We keep user-facing access log lines but drop the internal noise.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not (
+            msg.startswith("172.")
+            or msg.startswith('"172.')
+            or " 172." in msg[:20]
+        )
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Paths & runtime config
 # ─────────────────────────────────────────────────────────────────────────────
@@ -90,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.4-rc1"  # must match config.yaml
+CURRENT_VERSION = "2.2.4-rc2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))

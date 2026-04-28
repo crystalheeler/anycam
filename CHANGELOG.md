@@ -1,3 +1,11 @@
+## 2.2.4-rc2
+- Fix: _DockerIPFilter class was lost during the 2.2.5→2.2.4 revert, causing
+  NameError crash at startup before any cameras loaded; restored class definition
+  alongside _LevelFilter where it belongs
+- verify_release.py: added main() to semantic contracts, requiring _DockerIPFilter,
+  _probe_hw_decoders, and get_startup_mode to be present — prevents this class
+  of missing-definition crash from shipping again
+
 ## 2.2.4-rc1
 Release candidate naming convention introduced: when reverting or re-releasing
 a version with fixes, -rc1, -rc2, etc. are appended to distinguish the release
