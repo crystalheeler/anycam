@@ -1,3 +1,46 @@
+## 2.2.8
+- RTSP probe: strict SETUP validation. probe_rtsp_socket now does a full
+  OPTIONS → DESCRIBE → SDP-parse → SETUP → TEARDOWN sequence and only
+  returns True if SETUP succeeds. The previous DESCRIBE-only probe was
+  giving false positives on cameras that 200-OK DESCRIBE on a generic
+  path but reject SETUP because no real track lives there (Microseven
+  with RTSP authentication disabled was the discovery case — the camera
+  acknowledged DESCRIBE on / but ffmpeg's SETUP returned 400 Bad Request
+  causing infinite snap_loop restarts).
+  SETUP transport is tried in order: TCP-interleaved first (matches what
+  ffmpeg defaults to), UDP fallback for cameras that only accept UDP RTP.
+  Track URL is extracted from the first m=video block's a=control: line,
+  with support for absolute URLs, relative URLs, and "*" (which means
+  use the base RTSP URL).
+- RTSP path order: "/" moved from index 0 to the end of RTSP_PATHS so
+  specific stream paths (/stream, /h264, /11, /Streaming/Channels/101,
+  etc.) are tried before falling back to the bare root. Combined with
+  the strict probe, this catches a working specific path before wasting
+  a SETUP round-trip on the false-positive root.
+- SigRev-2 Item 5 — Graceful shutdown handler:
+  - _on_shutdown(app) registered via app.on_shutdown.append in make_app(),
+    invoked when runner.cleanup() runs.
+  - SIGTERM and SIGINT handlers in main() flip a module-level _STOP_EVENT.
+    main() blocks on the event instead of asyncio.Event().wait(), then
+    runs runner.cleanup() to fire the on_shutdown chain.
+  - _on_shutdown sequence:
+    1. Persist last_frame_wall (Unix epoch) to cameras.json so the UI
+       can show "last seen N minutes ago" after the next restart.
+       Computed by converting each camera's monotonic frame_time to
+       wall-clock at shutdown time.
+    2. Cancel all running snap_loop asyncio tasks.
+    3. SIGTERM all live ffmpeg child processes (snap_loop and motion
+       recording), wait up to 3 s, then SIGKILL any that haven't exited.
+    4. _THREAD_POOL.shutdown(wait=False, cancel_futures=True) so queued
+       nmap/probe_rtsp jobs don't block exit.
+  - On platforms without add_signal_handler support (Windows), shutdown
+    handler installation is skipped silently and the process behaves as
+    before this change.
+- verify_release.py: added _on_shutdown to semantic contracts (contracts
+  count: 7 → 8). main() and probe_rtsp_socket contracts extended to
+  pin the new graceful-shutdown plumbing and SETUP-validation behavior
+  respectively.
+
 ## 2.2.7
 - Card view: prefer RTSP via ffmpeg when probe_rtsp confirmed the stream
   works at credential-set time, instead of routing through http_snap_loop
