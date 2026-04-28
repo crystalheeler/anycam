@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.8"  # must match config.yaml
+CURRENT_VERSION = "2.2.9"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -572,15 +572,32 @@ CAMERA_PORTS = [
 ]
 
 RTSP_PATHS = [
-    "/stream", "/stream1", "/stream2", "/live", "/live/ch00_0",
-    "/live/main", "/h264", "/h264/ch1/main/av_stream", "/video",
-    "/video1", "/cam", "/cam/realmonitor?channel=1&subtype=0",
-    "/Streaming/Channels/101", "/Streaming/Channels/1",
-    "/av0_0", "/av0_1", "/11", "/12", "/MediaInput/h264",
+    # ── Brand-specific MAIN-stream paths (unambiguous, tried first) ────────
+    # These are documented main-stream URLs for major brands. Putting them
+    # first prevents a camera from landing on a generic-looking sub-stream
+    # path that happens to also work — e.g. Hikvision 4K cameras serve 4K
+    # at /Streaming/Channels/101 but also serve 720p at /stream, and we
+    # want main-stream by default.
+    "/Streaming/Channels/101",                  # Hikvision main (4K/8MP)
+    "/Streaming/Channels/1",                    # Hikvision main (alt)
+    "/cam/realmonitor?channel=1&subtype=0",     # Dahua main (subtype=0)
+    "/h264/ch1/main/av_stream",                 # ZKTeco / generic main
+    "/live/main",                               # Reolink-style main
+    "/11",                                      # Microseven / hi3516 main
+    # ── Brand-specific SUB-stream paths ────────────────────────────────────
+    "/12",                                      # Microseven / hi3516 sub
+    "/h264",
+    # ── Generic paths (no main/sub semantics — try after specific ones) ────
+    "/stream", "/stream1", "/stream2",
+    "/live", "/live/ch00_0",
+    "/video", "/video1", "/cam",
+    "/av0_0", "/av0_1",
+    "/MediaInput/h264",
     "/ch0_unicast.sdp", "/onvif1", "/profile1/media.smp",
     "/channel1", "/mpeg4/media.amp",
-    "/",   # bare root tried last — many cameras 200-OK DESCRIBE here
-           # but reject SETUP because no real track lives at root
+    # ── Bare root LAST — many cameras 200-OK DESCRIBE here but reject
+    #    SETUP because no real track lives at root.
+    "/",
 ]
 
 MJPEG_PATHS = [
@@ -7378,6 +7395,39 @@ async def probe_stream_details(url: str, proto: str) -> dict:
 
 
 
+async def _populate_unauth_details(camera_id: str, stream_url: str) -> None:
+    """Background task: run ffprobe on an unauthenticated RTSP stream and
+    populate stream_codec / stream_width / stream_height / stream_fps on
+    the camera dict. Called from run_scan() right after Fix 5 creates a
+    card via the unauth-RTSP path. Persists to disk via save_cameras()
+    so the populated fields survive restart.
+
+    Failure is silent (debug-only log) — the card still works, the focus
+    view just shows "?x?" until ffprobe eventually succeeds on a later
+    scan. We don't retry within the same task — keeping it bounded."""
+    try:
+        details = await probe_stream_details(stream_url, "RTSP")
+    except Exception as ex:
+        log.debug(f"  _populate_unauth_details({camera_id}): {ex}")
+        return
+    if not details:
+        log.debug(f"  _populate_unauth_details({camera_id}): no details returned")
+        return
+    cam = CAMERAS.get(camera_id)
+    if not cam:
+        # Card was deleted between scan and ffprobe completion — nothing to do
+        return
+    cam.update(details)
+    log.info(f"  Stream details for {camera_id}: "
+             f"{cam.get('stream_codec','?')} "
+             f"{cam.get('stream_width','?')}x{cam.get('stream_height','?')} "
+             f"@ {cam.get('stream_fps','?')}fps")
+    try:
+        save_cameras()
+    except Exception as ex:
+        log.debug(f"  _populate_unauth_details: save_cameras failed: {ex}")
+
+
 async def _drain_stderr(proc: object, label: str) -> None:
     """
     Drain ffmpeg stderr to prevent OS pipe buffer deadlock.
@@ -7737,6 +7787,12 @@ async def run_scan() -> None:
                         "onvif": True, "user_saved": bool(prev), "display": "proxy",
                         "verdict": "camera", "verdict_reason": "ONVIF + unauth RTSP",
                     }
+                    # Schedule background ffprobe so the card eventually gets
+                    # codec / resolution / fps populated. Without this the
+                    # adaptive-focus controller logs "(NonexNone)" and the
+                    # focus-view info bar shows "?x?". Don't block scan
+                    # completion on this — it can take 5-10s per camera.
+                    asyncio.create_task(_populate_unauth_details(cid, unauth_url))
                 else:
                     CAMERAS[cid] = {
                         "id": cid, "ip": ip, "hostname": onvif["name"],
