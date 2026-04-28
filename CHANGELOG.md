@@ -1,3 +1,23 @@
+## 2.2.9
+- RTSP path priority: reordered RTSP_PATHS to put brand-specific
+  main-stream paths first. /Streaming/Channels/101 (Hikvision main),
+  /Streaming/Channels/1, /cam/realmonitor?channel=1&subtype=0 (Dahua
+  main), /h264/ch1/main/av_stream, /live/main, and /11 (Microseven main)
+  now come before generic paths like /stream and /stream1. Generic paths
+  follow, with bare "/" still last. Fixes a regression introduced in
+  2.2.8 where Hikvision 4K cameras were landing on /stream (which is
+  Hikvision's 720p sub-stream) instead of /Streaming/Channels/101 (4K
+  main) because /stream came earlier in the list.
+- Unauth-RTSP cameras: schedule a background ffprobe right after card
+  creation in run_scan() to populate stream_codec, stream_width,
+  stream_height, and stream_fps. Without this the adaptive-focus logger
+  printed "(NonexNone)" for resolution and the enhanced-view info bar
+  showed "?x?" until the user manually entered credentials (which the
+  unauth-RTSP path is specifically designed to skip). Fires as a
+  fire-and-forget asyncio task — does not block scan completion. Result
+  is persisted via save_cameras() so the populated fields survive
+  restart.
+
 ## 2.2.8
 - RTSP probe: strict SETUP validation. probe_rtsp_socket now does a full
   OPTIONS → DESCRIBE → SDP-parse → SETUP → TEARDOWN sequence and only
