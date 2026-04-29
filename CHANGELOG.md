@@ -1,22 +1,33 @@
-## 2.2.9
-- RTSP path priority: reordered RTSP_PATHS to put brand-specific
-  main-stream paths first. /Streaming/Channels/101 (Hikvision main),
-  /Streaming/Channels/1, /cam/realmonitor?channel=1&subtype=0 (Dahua
-  main), /h264/ch1/main/av_stream, /live/main, and /11 (Microseven main)
-  now come before generic paths like /stream and /stream1. Generic paths
-  follow, with bare "/" still last. Fixes a regression introduced in
-  2.2.8 where Hikvision 4K cameras were landing on /stream (which is
-  Hikvision's 720p sub-stream) instead of /Streaming/Channels/101 (4K
-  main) because /stream came earlier in the list.
-- Unauth-RTSP cameras: schedule a background ffprobe right after card
-  creation in run_scan() to populate stream_codec, stream_width,
-  stream_height, and stream_fps. Without this the adaptive-focus logger
-  printed "(NonexNone)" for resolution and the enhanced-view info bar
-  showed "?x?" until the user manually entered credentials (which the
-  unauth-RTSP path is specifically designed to skip). Fires as a
-  fire-and-forget asyncio task — does not block scan completion. Result
-  is persisted via save_cameras() so the populated fields survive
-  restart.
+## 2.2.8-rc1
+This is a release candidate for testing the first half of Decoding-Rev (Item B1).
+Decoding-Rev is split into two RC drops; rc2 will follow with the Pi 4 hardware
+HEVC decode path (Item A) once rc1 is confirmed stable.
+
+NOTE: The 2.2.9 release was rolled back because the RTSP_PATHS reorder broke
+the unauth-RTSP shortcut on the Microseven and the Hikvision fallback
+flow. rc1 is built on the 2.2.8 baseline (path order unchanged from 2.2.8).
+
+- Item B1 — Persistent -fflags +discardcorrupt for H.265+ cameras.
+  When _drain_stderr detects "Multi-layer HEVC coding is not implemented"
+  in ffmpeg stderr (the Hikvision H.265+ proprietary-codec error), it now
+  sets needs_fflags_discardcorrupt=True on the camera dict and persists
+  this to cameras.json via save_cameras(). All future ffmpeg launches for
+  that camera (both snap_loop's thumbnail pipeline and handle_stream's
+  live MJPEG endpoint) prepend "-fflags +discardcorrupt" to the input
+  args, telling the demuxer to drop corrupt packets instead of failing
+  the whole pipeline. Most H.265+ streams remain partially decodable, so
+  this turns "ffmpeg dies after 0 frames" into "ffmpeg produces video
+  with occasional drops" — usable rather than broken.
+- Auto-clear: After 10 consecutive ffmpeg runs producing ≥50 frames each
+  (a "clean run"), the flag is removed and the next launch runs unflagged.
+  This handles the case where the camera firmware is upgraded mid-life
+  to fix the H.265+ bug — we don't keep the workaround forever once the
+  underlying problem is gone. Partial runs that died early don't count
+  as clean (those are exactly the runs the flag is supposed to be
+  helping), preventing premature flag-clears. If the H.265+ pattern
+  reappears on an unflagged run, _drain_stderr immediately re-sets the
+  flag.
+- The flag and clean-runs counter both persist across AnyCam restarts.
 
 ## 2.2.8
 - RTSP probe: strict SETUP validation. probe_rtsp_socket now does a full

@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.9"  # must match config.yaml
+CURRENT_VERSION = "2.2.8-rc1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -572,32 +572,15 @@ CAMERA_PORTS = [
 ]
 
 RTSP_PATHS = [
-    # ── Brand-specific MAIN-stream paths (unambiguous, tried first) ────────
-    # These are documented main-stream URLs for major brands. Putting them
-    # first prevents a camera from landing on a generic-looking sub-stream
-    # path that happens to also work — e.g. Hikvision 4K cameras serve 4K
-    # at /Streaming/Channels/101 but also serve 720p at /stream, and we
-    # want main-stream by default.
-    "/Streaming/Channels/101",                  # Hikvision main (4K/8MP)
-    "/Streaming/Channels/1",                    # Hikvision main (alt)
-    "/cam/realmonitor?channel=1&subtype=0",     # Dahua main (subtype=0)
-    "/h264/ch1/main/av_stream",                 # ZKTeco / generic main
-    "/live/main",                               # Reolink-style main
-    "/11",                                      # Microseven / hi3516 main
-    # ── Brand-specific SUB-stream paths ────────────────────────────────────
-    "/12",                                      # Microseven / hi3516 sub
-    "/h264",
-    # ── Generic paths (no main/sub semantics — try after specific ones) ────
-    "/stream", "/stream1", "/stream2",
-    "/live", "/live/ch00_0",
-    "/video", "/video1", "/cam",
-    "/av0_0", "/av0_1",
-    "/MediaInput/h264",
+    "/stream", "/stream1", "/stream2", "/live", "/live/ch00_0",
+    "/live/main", "/h264", "/h264/ch1/main/av_stream", "/video",
+    "/video1", "/cam", "/cam/realmonitor?channel=1&subtype=0",
+    "/Streaming/Channels/101", "/Streaming/Channels/1",
+    "/av0_0", "/av0_1", "/11", "/12", "/MediaInput/h264",
     "/ch0_unicast.sdp", "/onvif1", "/profile1/media.smp",
     "/channel1", "/mpeg4/media.amp",
-    # ── Bare root LAST — many cameras 200-OK DESCRIBE here but reject
-    #    SETUP because no real track lives at root.
-    "/",
+    "/",   # bare root tried last — many cameras 200-OK DESCRIBE here
+           # but reject SETUP because no real track lives at root
 ]
 
 MJPEG_PATHS = [
@@ -3680,9 +3663,20 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         pref_transport    = cam_for_transport.get("preferred_transport", "tcp")
         transport_args    = ["-rtsp_transport", pref_transport, "-timeout", "8000000"]
 
+        # rc1 (Item B1): -fflags +discardcorrupt on cameras with H.265+ history.
+        # Set by _drain_stderr when it sees "Multi-layer HEVC coding is not
+        # implemented" in ffmpeg stderr. Tells the demuxer to drop corrupt
+        # packets instead of failing the entire decode pipeline. Cleared
+        # automatically after 10 consecutive ≥50-frame runs (see below).
+        # MUST come before -i (it's an input option).
+        fflags_args = (["-fflags", "+discardcorrupt"]
+                       if cam_for_transport.get("needs_fflags_discardcorrupt")
+                       else [])
+
         return await asyncio.create_subprocess_exec(
             "ffmpeg", "-nostdin", "-loglevel", "warning",
             *transport_args,
+            *fflags_args,
             "-err_detect", "ignore_err",   # tolerate partial HEVC decode errors
             *skip_args,
             *hw_args,
@@ -3889,6 +3883,32 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             if frames > 0 and idle_s > 30:
                 log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s after exit — not restarting")
                 return
+
+            # rc1 (Item B1): track clean runs to eventually clear the
+            # -fflags +discardcorrupt flag. A "clean run" is one that produced
+            # at least 50 frames before exiting — partial runs that died early
+            # don't count (those are exactly the runs the flag is supposed to
+            # be helping). After 10 consecutive clean runs, clear the flag and
+            # let the next ffmpeg launch run unflagged. If the camera firmware
+            # was fixed (or the H.265+ pattern stops appearing), this lets us
+            # automatically drop the workaround. _drain_stderr will re-set the
+            # flag immediately if the pattern shows up again on the unflagged
+            # run.
+            cam_now = CAMERAS.get(camera_id)
+            if cam_now and cam_now.get("needs_fflags_discardcorrupt"):
+                if frames >= 50:
+                    cam_now["clean_runs_since_fflags"] = (
+                        cam_now.get("clean_runs_since_fflags", 0) + 1)
+                    if cam_now["clean_runs_since_fflags"] >= 10:
+                        cam_now.pop("needs_fflags_discardcorrupt", None)
+                        cam_now.pop("clean_runs_since_fflags", None)
+                        log.info(f"SNAP [{camera_id}]: 10 consecutive clean runs "
+                                 f"— clearing -fflags +discardcorrupt")
+                        try:
+                            save_cameras()
+                        except Exception as ex:
+                            log.debug(f"SNAP [{camera_id}]: save_cameras after "
+                                      f"fflags clear failed: {ex}")
 
             state["restart_count"] += 1
 
@@ -7395,39 +7415,6 @@ async def probe_stream_details(url: str, proto: str) -> dict:
 
 
 
-async def _populate_unauth_details(camera_id: str, stream_url: str) -> None:
-    """Background task: run ffprobe on an unauthenticated RTSP stream and
-    populate stream_codec / stream_width / stream_height / stream_fps on
-    the camera dict. Called from run_scan() right after Fix 5 creates a
-    card via the unauth-RTSP path. Persists to disk via save_cameras()
-    so the populated fields survive restart.
-
-    Failure is silent (debug-only log) — the card still works, the focus
-    view just shows "?x?" until ffprobe eventually succeeds on a later
-    scan. We don't retry within the same task — keeping it bounded."""
-    try:
-        details = await probe_stream_details(stream_url, "RTSP")
-    except Exception as ex:
-        log.debug(f"  _populate_unauth_details({camera_id}): {ex}")
-        return
-    if not details:
-        log.debug(f"  _populate_unauth_details({camera_id}): no details returned")
-        return
-    cam = CAMERAS.get(camera_id)
-    if not cam:
-        # Card was deleted between scan and ffprobe completion — nothing to do
-        return
-    cam.update(details)
-    log.info(f"  Stream details for {camera_id}: "
-             f"{cam.get('stream_codec','?')} "
-             f"{cam.get('stream_width','?')}x{cam.get('stream_height','?')} "
-             f"@ {cam.get('stream_fps','?')}fps")
-    try:
-        save_cameras()
-    except Exception as ex:
-        log.debug(f"  _populate_unauth_details: save_cameras failed: {ex}")
-
-
 async def _drain_stderr(proc: object, label: str) -> None:
     """
     Drain ffmpeg stderr to prevent OS pipe buffer deadlock.
@@ -7467,10 +7454,33 @@ async def _drain_stderr(proc: object, label: str) -> None:
             log.info(f"Marked {hw} as unavailable on this system")
     if "Multi-layer HEVC" in joined:
         cam_id = label.replace("SNAP:", "").strip()
-        if cam_id in CAMERAS and not CAMERAS[cam_id].get("hevc_plus_warning"):
-            CAMERAS[cam_id]["hevc_plus_warning"] = True
-            log.warning(f"Camera {cam_id}: H.265+ (Hikvision proprietary) detected — "
-                        f"fix: camera UI → Video → Encoding → change H.265+ to H.265")
+        if cam_id in CAMERAS:
+            cam = CAMERAS[cam_id]
+            first_time = not cam.get("hevc_plus_warning")
+            if first_time:
+                cam["hevc_plus_warning"] = True
+                log.warning(f"Camera {cam_id}: H.265+ (Hikvision proprietary) detected — "
+                            f"fix: camera UI → Video → Encoding → change H.265+ to H.265")
+            # rc1 (Item B1): enable -fflags +discardcorrupt for future ffmpeg
+            # launches on this camera. ffmpeg's discardcorrupt flag drops frames
+            # that fail decoding instead of bailing the entire process — most
+            # Hikvision H.265+ streams remain partially decodable, so we get
+            # video instead of nothing. Persists across restarts via
+            # save_cameras() until 10 consecutive clean (≥50 frame) runs clear
+            # the flag.
+            if not cam.get("needs_fflags_discardcorrupt"):
+                cam["needs_fflags_discardcorrupt"] = True
+                cam["clean_runs_since_fflags"]    = 0
+                log.info(f"Camera {cam_id}: H.265+ Multi-layer HEVC detected — "
+                         f"enabling -fflags +discardcorrupt for future ffmpeg launches")
+                try:
+                    save_cameras()
+                except Exception as ex:
+                    log.debug(f"Camera {cam_id}: save_cameras after fflags set failed: {ex}")
+            else:
+                # Flag was already on but we just saw another error — reset
+                # the clean-run counter so we don't prematurely clear the flag.
+                cam["clean_runs_since_fflags"] = 0
 
 
 
@@ -7787,12 +7797,6 @@ async def run_scan() -> None:
                         "onvif": True, "user_saved": bool(prev), "display": "proxy",
                         "verdict": "camera", "verdict_reason": "ONVIF + unauth RTSP",
                     }
-                    # Schedule background ffprobe so the card eventually gets
-                    # codec / resolution / fps populated. Without this the
-                    # adaptive-focus controller logs "(NonexNone)" and the
-                    # focus-view info bar shows "?x?". Don't block scan
-                    # completion on this — it can take 5-10s per camera.
-                    asyncio.create_task(_populate_unauth_details(cid, unauth_url))
                 else:
                     CAMERAS[cid] = {
                         "id": cid, "ip": ip, "hostname": onvif["name"],
@@ -7870,6 +7874,11 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     proto = camera.get("protocol", "RTSP")
     flags = (["-rtsp_transport", "tcp"] if proto in ("RTSP", "DVR", "ONVIF")
              else ["-re"] if proto == "HLS" else [])
+    # rc1 (Item B1): -fflags +discardcorrupt for H.265+ cameras (see snap_loop
+    # for full explanation). Same flag, same persistence, applied here too
+    # so the live MJPEG endpoint also benefits.
+    if camera.get("needs_fflags_discardcorrupt"):
+        flags = flags + ["-fflags", "+discardcorrupt"]
 
     stream_codec = (camera.get("stream_codec") or "").lower()
     stream_w     = camera.get("stream_width") or 0
