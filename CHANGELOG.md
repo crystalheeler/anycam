@@ -1,3 +1,136 @@
+## 2.2.8-rc2
+This release candidate adds a single-socket two-layer RTSP path-walking probe,
+brand-aware throttle short-circuits driven by the new CAMERA_DB throttle
+fields, and the long-standing OUI fix that wires mac_vendor into the
+brand-identification pipeline. Built on top of rc1 (the persistent
+-fflags +discardcorrupt change ships unchanged in rc2).
+
+NOTE: rc2 is the second half of Decoding-Rev. The Pi 4 hardware HEVC decode
+path (Item A) is deferred to rc3 — a UI flow needs CrystalHeeler's network access
+to /boot/config.txt before that can ship.
+
+### find_rtsp_path refactor — single-socket two-layer probe
+
+Previous behavior (rc1 and prior): for each path in RTSP_PATHS, open a fresh
+TCP socket, probe, close. ~24 sockets per camera. This breaks against the
+Microseven — Hipcam RealServer firmware enforces a per-IP TCP rate-limit
+(~5s cooldown) on RTSP port 554. Second connection from the same source IP
+inside the cooldown window is RST'd at the TCP layer before any RTSP message
+exchange. The first path's probe always succeeded; everything after failed
+silently with connection-refused. Multi-socket fallbacks compounded this by
+hammering the rate-limited port harder. RFC 2326 §9.1 explicitly permits
+multiple RTSP requests over a single persistent TCP connection (servers MUST
+queue and respond in order), so the universal-safe probe is a single socket.
+
+New behavior (rc2):
+
+- Layer 1: open ONE TCP socket to host:port. For each candidate path, send
+  OPTIONS → read full response → DESCRIBE → read full response (including
+  Content-Length-bounded SDP body) → parse SDP for first m=video track →
+  SETUP (TCP-interleaved first, UDP fallback) → on 200, send TEARDOWN. On
+  first successful SETUP, return the URL. Never pipelines (always reads each
+  response in full before sending the next request) so the probe is safe
+  against every documented camera firmware. Auth (Digest/Basic) is captured
+  from the first 401 and reused across paths on the same socket — RFC 2617
+  permits nonce reuse with per-method+uri response-digest recompute. CSeq
+  increments monotonically across paths on the same socket.
+
+- Layer 2: only invoked when Layer 1 finds nothing AND the brand does NOT
+  have throttle_type=rate_limit_per_ip_tcp. Original per-path-per-socket
+  behavior, but with `time.sleep(5)` between path attempts and bail-after-10
+  on consecutive socket failures. The 10-failure cap is multi-socket-only —
+  Layer 1's single-socket walker has its own short-circuits (bails on
+  socket-death; per-path 4xx/5xx skips to the next path).
+
+- Brand-aware short-circuits driven by CAMERA_DB throttle_type:
+  - `no_rtsp_support` (Eufy, Arlo, Ring, Nest, Verkada): probe returns
+    None immediately, no socket opened.
+  - `rate_limit_per_ip_tcp` (Hipcam family): Layer 1 only, Layer 2 entirely
+    skipped — multi-socket would be RST'd before completing.
+  - `session_time_cap` (Reolink battery-WiFi): socket timeout extended from
+    6s to 25s to accommodate camera wake-up window.
+  - `requires_query_param` (Axis Companion line): Layer 1 retried with
+    `?Axis-Orig-Sw=true` appended to all paths if first pass fails;
+    Layer 2 retries each path with the query param on top of the standard
+    URL form.
+
+### CAMERA_DB additions — 55th brand and 8 new optional throttle fields
+
+- New 55th brand entry: "Hipcam/Microseven" — covers Microseven, Sricam,
+  Vstarcam, Wansview-old (W2/W3), Tenvis, and many cheap Chinese baby
+  monitor / IPCAM rebrands that ship the Hipcam RealServer firmware family.
+  Detection patterns include server header `Hipcam RealServer/V1.0` and
+  `HiIpcam/V100R003 VodServer/1.0.0`, RTSP URL paths /11 /12, and digest
+  auth realm "Hipcam RealServer".
+
+- 8 new optional fields per CAMERA_DB entry: throttle_type,
+  throttle_type_confidence, throttle_amount, throttle_amount_confidence,
+  throttle_notes, throttle_notes_confidence, request_behaviors,
+  request_behaviors_confidence. Confidence values are HIGH / MED / LOW.
+  Fields are absent (not in the dict) for brands with no research findings
+  rather than placeholder "none" values, so a missing field always means
+  "unknown" rather than "confirmed-none".
+
+- Throttle fields populated on ~28 brands: Hikvision, Dahua, Lorex, Reolink,
+  Axis, Hanwha, Amcrest, Vivotek, Foscam, Annke, Swann, TP-Link Tapo,
+  Night Owl, Nest, Ring, Wyze, Eufy, Arlo, Verkada, Q-See, LaView, Zosi,
+  Sricam, Vstarcam, Wansview, Tenvis, Uniview, plus the new
+  Hipcam/Microseven entry. Existing notes / default_ports updated where
+  research surfaced corrections (Foscam port 88 added; TP-Link Tapo
+  ONVIF port 2020 added; Reolink URL pattern documented; Hanwha multi-
+  sensor URL pattern documented; Axis session timeout documented; Vivotek
+  10-user limit documented; Wansview cloud-only firmware documented; etc.)
+
+### OUI bug fix — mac_vendor wired into brand identification
+
+For every camera identified before rc2, mac_vendor was captured from nmap
+ARP scan results and stored in cam["mac_vendor"], displayed in the UI
+tooltip, and... never used as a brand-detection signal. Brand-identification
+relied entirely on HTTP page titles, ONVIF scopes, and nmap product banners.
+For Microseven cameras (where ONVIF returns no profiles and HTTP probes
+require auth) this meant brand was never identified — the camera fell
+through to "Generic IP Camera" with no throttle metadata.
+
+rc2 fix:
+
+- New helper `_identify_camera_brand(cam, force=False)` runs identification
+  against ALL available signals (mac_vendor + manufacturer + page_title +
+  server_header + nmap_product + hostname + verdict_reason + onvif vendor)
+  and writes the result to cam["manufacturer"] in place. Skips overwrite if
+  manufacturer already set unless force=True.
+
+- Existing `_match_stream_db` and `_match_stream_db_slug` haystacks
+  extended with mac_vendor + manufacturer + page_title + server_header +
+  nmap_product so STREAM_DB recipes match even when ONVIF/HTTP yield
+  nothing (Microseven case).
+
+- `_probe_host_port` now accepts an optional `host_meta` dict and runs
+  brand identification BEFORE any RTSP probe begins. Focused-scan and
+  broad-scan call sites assemble host_meta from the nmap host dict
+  (mac_vendor, hostname, nmap_product) and pass it through. Manual-add
+  flows default to host_meta=None — the probe still works, just without
+  brand-aware short-circuits.
+
+### STREAM_DB tweak
+
+- `microseven` entry's `match` list extended to include `hipcam`,
+  `hiipcam`, `hipcam realserver`, `hiipcam/v100r003` so OUI vendors that
+  resolve to "Hipcam Industries" (some Microseven OUIs register under this
+  name) match the same recipe.
+
+### Code paths that don't change
+
+- probe_rtsp_socket (the strict per-path probe) — UNTOUCHED. Layer 2 still
+  uses it as-is. Layer 1 has its own walker that mirrors its strict-mode
+  logic but on a persistent socket.
+- All download / OUI-cache / nmap scan logic — UNTOUCHED.
+- HTTP MJPEG / HLS / WebRTC / WS-RTSP probes — UNTOUCHED.
+- ONVIF discovery — UNTOUCHED. Adds host_meta passthrough on the unauth-
+  RTSP shortcut path so Microseven-via-ONVIF benefits from brand short-
+  circuits there too.
+
+---
+
 ## 2.2.8-rc1
 This is a release candidate for testing the first half of Decoding-Rev (Item B1).
 Decoding-Rev is split into two RC drops; rc2 will follow with the Pi 4 hardware

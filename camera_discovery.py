@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.8-rc1"  # must match config.yaml
+CURRENT_VERSION = "2.2.8-rc2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -451,7 +451,8 @@ STREAM_DB: dict = {
         "port":  554,
     },
     "microseven": {
-        "match": ["microseven", "m7d", "m7b", "m7t"],
+        "match": ["microseven", "m7d", "m7b", "m7t", "hipcam", "hiipcam",
+                  "hipcam realserver", "hiipcam/v100r003"],
         "rtsp":  ["/11", "/12", "/13", "/h264major", "/h264minor"],
         "mjpeg": "/auto.jpg",
         "snap":  "/tmpfs/snap.jpg",
@@ -650,7 +651,25 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["hikvision", "hikvision ip camera"],
         "onvif_scopes": ["hikvision"],
         "default_ports": [554, 8000, 80],
-        "notes": "Hikvision IP camera or NVR/DVR",
+        "notes": ("Hikvision IP camera or NVR/DVR. URL pattern "
+                  "/Streaming/Channels/N0X (101=ch1 main, 102=ch1 sub). "
+                  "Multi-layer HEVC (H.265+) requires "
+                  "`-fflags +discardcorrupt` to decode reliably. "
+                  "Camera-level: no documented throttle. NVR-level: 128 "
+                  "concurrent users (configurable, 0=unlimited)."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "128 (NVR-level, configurable, 0=unlim)",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("Server-wide cap on NVR products. webSDK browser "
+                           "plugin has separate 5-stream cap. Camera-level "
+                           "products have no documented connection cap and "
+                           "tolerate rapid sequential probes (verified on "
+                           "DS-2DE4A425IW)."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": ("Standard RFC 2326. Digest auth "
+                              "(realm typically \"IP Camera(<chipset>)\")."),
+        "request_behaviors_confidence":"HIGH",
     },
     {
         "name": "Dahua",
@@ -661,7 +680,20 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["dahua"],
         "onvif_scopes": ["dahua"],
         "default_ports": [37777, 80, 554],
-        "notes": "Dahua Technology IP camera, NVR/DVR or IMOU device",
+        "notes": ("Dahua Technology IP camera, NVR/DVR or IMOU device. URL "
+                  "pattern /cam/realmonitor?channel=N&subtype=M. Native DVR "
+                  "protocol on port 37777. Camera-level: no documented "
+                  "throttle. NVR-level: 128 concurrent users "
+                  "(configurable, 0=unlimited)."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "128 (NVR-level, configurable, 0=unlim)",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("Server-wide cap on NVR products. Camera-level "
+                           "products have no documented connection cap."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": "Standard RFC 2326. Digest auth.",
+        "request_behaviors_confidence":"MED",
     },
     {
         "name": "Lorex",
@@ -673,7 +705,17 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["lorex"],
         "onvif_scopes": ["lorex"],
         "default_ports": [80, 443, 8080, 8888, 554, 34567],
-        "notes": "Lorex (FLIR) NVR/DVR or IP camera",
+        "notes": ("Lorex (FLIR-acquired, Dahua-OEM hardware) NVR/DVR or IP "
+                  "camera. Inherits Dahua URL patterns and behavior. "
+                  "FLIR→Dahua acquisition 2018."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "MED",
+        "throttle_amount":          "128 (NVR-level, inherits Dahua)",
+        "throttle_amount_confidence":"MED",
+        "throttle_notes": "Inherits Dahua throttle behavior (Dahua-OEM hardware).",
+        "throttle_notes_confidence":"MED",
+        "request_behaviors": "Standard RFC 2326. Inherits Dahua RTSP/HTTP behavior.",
+        "request_behaviors_confidence":"MED",
     },
     {
         "name": "Reolink",
@@ -684,7 +726,32 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["reolink"],
         "onvif_scopes": ["reolink"],
         "default_ports": [554, 80, 8080, 9000],
-        "notes": "Reolink IP camera or NVR",
+        "notes": ("Reolink IP camera or NVR. URL pattern "
+                  "/h264Preview_<ch>_<main|sub> (older) or "
+                  "/Preview_<ch>_<main|sub> (newer). Some models require "
+                  "beta firmware to expose RTSP/ONVIF. Battery-WiFi models "
+                  "have 5-min preview cap then sleep+disconnect — needs "
+                  "≥20s RTSP timeout. Bad cseq errors after fast restart "
+                  "need 5+s pause; some models (C2/RLC-410/420) "
+                  "auto-recover after ~30s, others (older RLC-423) require "
+                  "camera reboot."),
+        "throttle_type":            "restart_cooldown",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "5+s pause between fast restarts (or 30s self-clean / camera reboot)",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("Stop/restart RTSP within ~1-2s causes RTP-Cseq "
+                           "stream corruption that persists endlessly until "
+                           "the cooldown elapses. Battery-WiFi models also "
+                           "have a session_time_cap of 5 min preview before "
+                           "sleep. 8MP+ models (TrackMix etc.) are reported "
+                           "as unstable on RTSP — Neolink workaround often "
+                           "required."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": ("Standard RFC 2326. Battery models need "
+                              "extended socket timeout (≥20s) for wake-up. "
+                              "Stop processes via stdin 'q' rather than "
+                              "SIGKILL to allow clean TEARDOWN."),
+        "request_behaviors_confidence":"HIGH",
     },
     {
         "name": "Axis",
@@ -695,7 +762,31 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["axis network camera", "axis"],
         "onvif_scopes": ["axis"],
         "default_ports": [554, 80, 443],
-        "notes": "Axis Communications IP camera or encoder",
+        "notes": ("Axis Communications IP camera or encoder. URL "
+                  "/axis-media/media.amp. GStreamer-based RTSP server. "
+                  "Session timeout=60s default; OPTIONS keepalive every "
+                  "30s recommended. Multi-session-on-one-TCP supported. "
+                  "Companion line requires `Axis-Orig-Sw=true` query "
+                  "param appended to RTSP URL — without it, returns 403. "
+                  "Firmware 6.50+ returns 454 Session Not Found on session "
+                  "timeout. ONVIF Profile S/G/T."),
+        "throttle_type":            "unique_profile_cap",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "\"Too many viewers\" based on unique encoded profiles",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("Cap is per UNIQUE stream profile, not per "
+                           "client. If all clients request identical "
+                           "settings, camera encodes once and serves all. "
+                           "Companion variant returns 403 without "
+                           "`Axis-Orig-Sw=true` query param — retry-on-403 "
+                           "with that param appended works. Standards-strict "
+                           "RFC 2326 implementation."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": ("RFC 2326 strict. Digest auth. Some models "
+                              "(Companion) require `?Axis-Orig-Sw=true` "
+                              "query param. SRTP/SRTCP supported on newer "
+                              "firmware. RTSPS on rtsps:// URL."),
+        "request_behaviors_confidence":"HIGH",
     },
     {
         "name": "Hanwha / Samsung Techwin",
@@ -706,7 +797,30 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["hanwha", "wisenet", "samsung techwin"],
         "onvif_scopes": ["hanwha", "samsung"],
         "default_ports": [554, 80, 8080],
-        "notes": "Hanwha Vision (formerly Samsung Techwin) — Wisenet series",
+        "notes": ("Hanwha Vision (formerly Samsung Techwin) — Wisenet "
+                  "series. URL /profile<N>/media.smp; multi-sensor models "
+                  "use /<sensor#>/profile<N>/media.smp (e.g. "
+                  "/0/profile2/media.smp). Ports 3702 and 49152 are "
+                  "RESERVED (ONVIF discovery + RTP) — DO NOT use as "
+                  "RTSP. Requires shared Session ID across all requests "
+                  "from one client; mismatched IDs counted as separate "
+                  "users."),
+        "throttle_type":            "shared_session_id_required",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "All requests from one client must share Session ID",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("If a client opens multiple RTSP requests with "
+                           "different Session IDs, the camera counts each "
+                           "as a separate viewer (consuming concurrent-user "
+                           "quota). Probe behavior is unaffected — our "
+                           "probe never reuses Session IDs across paths "
+                           "(each probe is independent). Documented for "
+                           "future warning to users with NVR setups."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": ("Standard RFC 2326 with strict Session ID "
+                              "tracking. Digest auth. Profile-G recording "
+                              "and Profile-T analytics support."),
+        "request_behaviors_confidence":"HIGH",
     },
     {
         "name": "Amcrest",
@@ -717,7 +831,16 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["amcrest"],
         "onvif_scopes": ["amcrest"],
         "default_ports": [37777, 80, 554],
-        "notes": "Amcrest IP camera or NVR (Dahua-based OEM)",
+        "notes": ("Amcrest IP camera or NVR (Dahua-OEM hardware). "
+                  "Inherits Dahua URL patterns and throttle behavior."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "MED",
+        "throttle_amount":          "128 (NVR-level, inherits Dahua)",
+        "throttle_amount_confidence":"MED",
+        "throttle_notes": "Inherits Dahua throttle behavior (Dahua-OEM hardware).",
+        "throttle_notes_confidence":"MED",
+        "request_behaviors": "Standard RFC 2326. Inherits Dahua RTSP/HTTP behavior.",
+        "request_behaviors_confidence":"MED",
     },
     {
         "name": "Uniview (UNV)",
@@ -728,7 +851,14 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["uniview", "unv"],
         "onvif_scopes": ["uniview"],
         "default_ports": [554, 80],
-        "notes": "Uniview (UNV) IP camera or NVR",
+        "notes": ("Uniview (UNV) IP camera or NVR. URL pattern "
+                  "/media/video<N>. H.265 buggy on many models — Camect "
+                  "documentation explicitly recommends H.264 over H.265 "
+                  "on UNV cameras. No documented connection-rate "
+                  "throttle."),
+        "request_behaviors": ("Standard RFC 2326. Recommend H.264 "
+                              "transport over H.265 for stream stability."),
+        "request_behaviors_confidence":"MED",
     },
     {
         "name": "Vivotek",
@@ -739,7 +869,22 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["vivotek"],
         "onvif_scopes": ["vivotek"],
         "default_ports": [554, 80, 8080],
-        "notes": "Vivotek IP camera or NVR",
+        "notes": ("Vivotek IP camera or NVR. URL /live<N>s<M> or "
+                  "/live.sdp. Documented 10-user concurrent limit (browser "
+                  "+ VMS + NVR ALL count toward this). Server header: "
+                  "\"Vivotek RtspServer\"."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "10 concurrent users (browser+VMS+NVR all count)",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("Camera-level cap. Documented in Vivotek "
+                           "support article. Does not affect rapid "
+                           "sequential probes (we close socket between "
+                           "paths, which releases the slot)."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": ("Standard RFC 2326. Server header "
+                              "\"Vivotek RtspServer\" is identifying."),
+        "request_behaviors_confidence":"HIGH",
     },
     {
         "name": "Bosch",
@@ -849,7 +994,25 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["foscam"],
         "onvif_scopes": ["foscam"],
         "default_ports": [554, 88, 80, 443],
-        "notes": "Foscam IP camera",
+        "notes": ("Foscam IP camera. URL paths /videoMain (high-res) and "
+                  "/videoSub (low-res); audio at /audio. Some firmware "
+                  "variants (FI9821P V3, FI98xx V3 series) use port 88 "
+                  "for BOTH HTTP and RTSP, not the standard 554. Digest "
+                  "auth required. ~4 concurrent connection cap reported "
+                  "across community."),
+        "throttle_type":            "concurrent_stream_cap",
+        "throttle_type_confidence": "MED",
+        "throttle_amount":          "~4 concurrent connections (community-reported)",
+        "throttle_amount_confidence":"MED",
+        "throttle_notes": ("Community-reported pattern across multiple "
+                           "users. Does not affect rapid sequential "
+                           "probes (we close socket between paths). "
+                           "Some V3 firmware uses port 88 for both HTTP "
+                           "and RTSP — try 88 if 554 connect fails."),
+        "throttle_notes_confidence":"MED",
+        "request_behaviors": ("Digest auth required. Some firmware "
+                              "variants run RTSP on port 88 not 554."),
+        "request_behaviors_confidence":"HIGH",
     },
     {
         "name": "Annke",
@@ -860,7 +1023,18 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["annke"],
         "onvif_scopes": ["annke"],
         "default_ports": [554, 80, 8000],
-        "notes": "Annke IP camera or NVR/DVR (Hikvision-based OEM)",
+        "notes": ("Annke IP camera or NVR/DVR (Hikvision OEM hardware "
+                  "for IP line; Dahua-OEM for some DVR products). "
+                  "Inherits upstream throttle behavior."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "MED",
+        "throttle_amount":          "Inherits upstream (Hikvision/Dahua)",
+        "throttle_amount_confidence":"MED",
+        "throttle_notes": ("OEM rebrand — behavior inherits from upstream "
+                           "manufacturer (Hikvision IP, Dahua DVR)."),
+        "throttle_notes_confidence":"MED",
+        "request_behaviors": "Inherits Hikvision/Dahua RTSP/HTTP behavior.",
+        "request_behaviors_confidence":"MED",
     },
     {
         "name": "Swann",
@@ -871,7 +1045,19 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["swann"],
         "onvif_scopes": ["swann"],
         "default_ports": [554, 80, 34567],
-        "notes": "Swann security camera or NVR/DVR",
+        "notes": ("Swann security camera or NVR/DVR. OEM rebrand — uses "
+                  "Hikvision, Dahua, or Wansview hardware depending on "
+                  "model. Behavior inherits from upstream manufacturer."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "LOW",
+        "throttle_amount":          "Inherits upstream (Hikvision/Dahua/Wansview)",
+        "throttle_amount_confidence":"LOW",
+        "throttle_notes": ("OEM rebrand — varies by model. Some Swann "
+                           "products are Wansview-OEM (Hipcam family) "
+                           "and inherit that rate-limit behavior."),
+        "throttle_notes_confidence":"MED",
+        "request_behaviors": "Varies by hardware (Hikvision/Dahua/Wansview OEM).",
+        "request_behaviors_confidence":"LOW",
     },
     {
         "name": "TP-Link Tapo / Kasa",
@@ -881,9 +1067,31 @@ CAMERA_DB: list[dict] = [
         "http_headers":["tp-link", "tapo"],
         "nmap_products":["tp-link", "tapo"],
         "onvif_scopes": ["tapo", "tp-link"],
-        "default_ports": [554, 80, 2020],
-        "notes": "TP-Link Tapo / Kasa smart camera",
-    },    {
+        "default_ports": [554, 2020, 80],
+        "notes": ("TP-Link Tapo / Kasa smart camera. URLs /stream1 "
+                  "(main) and /stream2 (sub). ONVIF service runs on "
+                  "port 2020 (NOT 80 or 8080). Battery-powered models "
+                  "(C410, C420, C425, D230) do NOT support RTSP — "
+                  "cloud-only by design. Tapo Care subscription occupies "
+                  "1 main stream slot. Camera-account credentials are "
+                  "separate from Tapo cloud login."),
+        "throttle_type":            "concurrent_stream_cap",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "2 main + 2 sub streams max (4 total)",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("Each RTSP/ONVIF connection occupies one "
+                           "stream slot. Tapo Care subscription (cloud "
+                           "recording) consumes 1 main slot. Battery "
+                           "models (C410/C420/C425/D230) have no RTSP "
+                           "at all. Reboot the camera to disconnect all "
+                           "stream slots when stuck."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": ("ONVIF on port 2020 (NOT 80). Standard "
+                              "RTSP on 554. Battery models — no RTSP "
+                              "support."),
+        "request_behaviors_confidence":"HIGH",
+    },
+    {
         "name": "Night Owl",
         "aliases": ["night owl", "nightowl"],
         "http_titles": ["night owl"],
@@ -892,7 +1100,17 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["night owl"],
         "onvif_scopes": ["nightowl"],
         "default_ports": [554, 80, 34567],
-        "notes": "Night Owl security camera or NVR/DVR",
+        "notes": ("Night Owl security camera or NVR/DVR. OEM rebrand — "
+                  "uses Hikvision or Dahua hardware. Native DVR protocol "
+                  "on port 34567 (Hisilicon-based)."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "LOW",
+        "throttle_amount":          "Inherits upstream (Hikvision/Dahua)",
+        "throttle_amount_confidence":"LOW",
+        "throttle_notes": "OEM rebrand — behavior inherits from upstream manufacturer.",
+        "throttle_notes_confidence":"LOW",
+        "request_behaviors": "Inherits Hikvision/Dahua RTSP/HTTP behavior.",
+        "request_behaviors_confidence":"LOW",
     },
     {
         "name": "iENSO",
@@ -936,7 +1154,19 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["nest", "dropcam"],
         "onvif_scopes": ["nest"],
         "default_ports": [554, 443, 80],
-        "notes": "Google Nest / Dropcam IP camera",
+        "notes": ("Google Nest / Dropcam IP camera. CLOUD-ONLY by "
+                  "design — no RTSP, ONVIF, or local stream API. Local "
+                  "access requires reverse-engineered workarounds "
+                  "(unsupported)."),
+        "throttle_type":            "no_rtsp_support",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "n/a",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("No RTSP server present on device. Cloud-only "
+                           "by manufacturer policy."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": "No local stream protocols supported.",
+        "request_behaviors_confidence":"HIGH",
     },
     {
         "name": "Ring",
@@ -947,7 +1177,16 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["ring"],
         "onvif_scopes": ["ring"],
         "default_ports": [554, 443, 80],
-        "notes": "Ring doorbell or security camera (Amazon)",
+        "notes": ("Ring doorbell or security camera (Amazon). CLOUD-ONLY "
+                  "by design — no RTSP or ONVIF support."),
+        "throttle_type":            "no_rtsp_support",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "n/a",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": "No RTSP server present on device. Cloud-only by Amazon design.",
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": "No local stream protocols supported.",
+        "request_behaviors_confidence":"HIGH",
     },
     {
         "name": "Wyze",
@@ -958,7 +1197,24 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["wyze"],
         "onvif_scopes": ["wyze"],
         "default_ports": [554, 80],
-        "notes": "Wyze IP camera",
+        "notes": ("Wyze IP camera. RTSP NOT enabled by default — "
+                  "requires flashing custom RTSP firmware (currently "
+                  "in beta status; Wyze removed firmware files from "
+                  "site). 3+ Wyze cameras on one network reportedly "
+                  "causes instability."),
+        "throttle_type":            "requires_custom_firmware",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "RTSP firmware aging/beta; not officially supported",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("Wyze stock firmware has no RTSP. Beta RTSP "
+                           "firmware exists but support is aging — "
+                           "files removed from Wyze website. 3+ "
+                           "cameras on same network → community-reported "
+                           "instability."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": ("With custom firmware, standard RTSP. "
+                              "Without it, no local stream protocols."),
+        "request_behaviors_confidence":"HIGH",
     },
     {
         "name": "Eufy / Anker",
@@ -969,7 +1225,21 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["eufy"],
         "onvif_scopes": ["eufy"],
         "default_ports": [554, 80, 443],
-        "notes": "Eufy (Anker) IP camera",
+        "notes": ("Eufy (Anker) IP camera. CLOUD-ONLY by design — most "
+                  "models do not expose RTSP. Some HomeBase-paired "
+                  "cameras can be enabled for local RTSP via the Eufy "
+                  "app (URL /live0) but the feature is not universal."),
+        "throttle_type":            "no_rtsp_support",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "n/a (most models)",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("No RTSP server on most models. HomeBase users "
+                           "can opt in to local RTSP per-camera in the "
+                           "Eufy mobile app, exposing /live0."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": ("Cloud-only by default. Optional local "
+                              "RTSP /live0 on HomeBase-paired models."),
+        "request_behaviors_confidence":"HIGH",
     },
     {
         "name": "Arlo",
@@ -980,7 +1250,16 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["arlo"],
         "onvif_scopes": ["arlo"],
         "default_ports": [554, 443, 80],
-        "notes": "Arlo wireless IP camera",
+        "notes": ("Arlo wireless IP camera. CLOUD-ONLY by design — no "
+                  "RTSP or ONVIF support."),
+        "throttle_type":            "no_rtsp_support",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "n/a",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": "No RTSP server on device. Cloud-only by Arlo design.",
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": "No local stream protocols supported.",
+        "request_behaviors_confidence":"HIGH",
     },
     {
         "name": "Verkada",
@@ -991,7 +1270,19 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["verkada"],
         "onvif_scopes": ["verkada"],
         "default_ports": [443, 80],
-        "notes": "Verkada cloud-managed IP camera",
+        "notes": ("Verkada cloud-managed IP camera. Hardware is "
+                  "Vivotek-OEM. CLOUD-ONLY API — no local RTSP exposed "
+                  "to end users."),
+        "throttle_type":            "no_rtsp_support",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "n/a (cloud-only)",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("Cloud-only by design. Underlying Vivotek "
+                           "hardware is locked behind Verkada Command "
+                           "platform — no direct RTSP access."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": "Cloud-only. No local stream protocols exposed.",
+        "request_behaviors_confidence":"HIGH",
     },
     {
         "name": "Luxonis / OAK",
@@ -1035,7 +1326,17 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["q-see", "qsee"],
         "onvif_scopes": ["qsee"],
         "default_ports": [554, 80, 34567],
-        "notes": "Q-See consumer DVR/NVR or IP camera",
+        "notes": ("Q-See consumer DVR/NVR or IP camera. OEM rebrand — "
+                  "uses Hikvision or Dahua hardware. Native DVR protocol "
+                  "on port 34567 (Hisilicon)."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "LOW",
+        "throttle_amount":          "Inherits upstream (Hikvision/Dahua)",
+        "throttle_amount_confidence":"LOW",
+        "throttle_notes": "OEM rebrand — behavior inherits from upstream.",
+        "throttle_notes_confidence":"LOW",
+        "request_behaviors": "Inherits Hikvision/Dahua RTSP/HTTP behavior.",
+        "request_behaviors_confidence":"LOW",
     },
     {
         "name": "LaView",
@@ -1046,7 +1347,16 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["laview"],
         "onvif_scopes": ["laview"],
         "default_ports": [554, 80, 8080],
-        "notes": "LaView IP camera or NVR",
+        "notes": ("LaView IP camera or NVR. OEM rebrand — uses Hikvision "
+                  "or Dahua hardware."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "LOW",
+        "throttle_amount":          "Inherits upstream (Hikvision/Dahua)",
+        "throttle_amount_confidence":"LOW",
+        "throttle_notes": "OEM rebrand — behavior inherits from upstream.",
+        "throttle_notes_confidence":"LOW",
+        "request_behaviors": "Inherits Hikvision/Dahua RTSP/HTTP behavior.",
+        "request_behaviors_confidence":"LOW",
     },
     {
         "name": "Zosi",
@@ -1057,18 +1367,44 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["zosi"],
         "onvif_scopes": ["zosi"],
         "default_ports": [554, 80, 34567],
-        "notes": "Zosi budget security camera or NVR/DVR",
+        "notes": ("Zosi budget security camera or NVR/DVR. OEM rebrand — "
+                  "uses Hikvision or Dahua hardware. Native DVR on "
+                  "port 34567 (Hisilicon)."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "LOW",
+        "throttle_amount":          "Inherits upstream (Hikvision/Dahua)",
+        "throttle_amount_confidence":"LOW",
+        "throttle_notes": "OEM rebrand — behavior inherits from upstream.",
+        "throttle_notes_confidence":"LOW",
+        "request_behaviors": "Inherits Hikvision/Dahua RTSP/HTTP behavior.",
+        "request_behaviors_confidence":"LOW",
     },
     {
         "name": "Sricam / Srihome",
         "aliases": ["sricam", "srihome"],
         "http_titles": ["sricam", "srihome"],
         "http_body":   ["sricam", "srihome", "sricam.com"],
-        "http_headers":["sricam", "srihome"],
+        "http_headers":["sricam", "srihome", "rtspserver_0.0.0"],
         "nmap_products":["sricam", "srihome"],
         "onvif_scopes": ["sricam", "srihome"],
         "default_ports": [554, 80, 8080],
-        "notes": "Sricam / Srihome budget IP camera",
+        "notes": ("Sricam / Srihome budget IP camera. Uses Hipcam "
+                  "RealServer firmware family (see Hipcam/Microseven "
+                  "entry for shared throttle behavior). URL path "
+                  "/onvif2 also seen on some models. Server header: "
+                  "\"RtspServer_0.0.0.2\"."),
+        "throttle_type":            "rate_limit_per_ip_tcp",
+        "throttle_type_confidence": "MED",
+        "throttle_amount":          "~5s cooldown (inherits Hipcam family)",
+        "throttle_amount_confidence":"MED",
+        "throttle_notes": ("Hipcam RealServer firmware family — see "
+                           "Hipcam/Microseven entry for full throttle "
+                           "details and probe strategy."),
+        "throttle_notes_confidence":"MED",
+        "request_behaviors": ("Hipcam family — Digest auth (realm="
+                              "\"Hipcam RealServer\"). URLs /11, /12, "
+                              "/onvif2."),
+        "request_behaviors_confidence":"MED",
     },
     {
         "name": "Vstarcam",
@@ -1079,7 +1415,21 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["vstarcam"],
         "onvif_scopes": ["vstarcam"],
         "default_ports": [554, 80, 8080],
-        "notes": "Vstarcam budget WiFi IP camera",
+        "notes": ("Vstarcam budget WiFi IP camera. Uses Hipcam "
+                  "RealServer firmware family on most models — see "
+                  "Hipcam/Microseven entry for shared throttle "
+                  "behavior."),
+        "throttle_type":            "rate_limit_per_ip_tcp",
+        "throttle_type_confidence": "MED",
+        "throttle_amount":          "~5s cooldown (inherits Hipcam family)",
+        "throttle_amount_confidence":"MED",
+        "throttle_notes": ("Hipcam RealServer firmware family — see "
+                           "Hipcam/Microseven entry for full throttle "
+                           "details."),
+        "throttle_notes_confidence":"MED",
+        "request_behaviors": ("Hipcam family. URLs /udp/av0_0, "
+                              "/tcp/av0_0 also seen on some models."),
+        "request_behaviors_confidence":"MED",
     },
     {
         "name": "Wansview",
@@ -1090,7 +1440,24 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["wansview"],
         "onvif_scopes": ["wansview"],
         "default_ports": [554, 80, 8080],
-        "notes": "Wansview budget IP camera",
+        "notes": ("Wansview budget IP camera. W2/W3 models use Hipcam "
+                  "RealServer firmware family — URL /live/ch0. "
+                  "WARNING: newer firmware versions are CLOUD-ONLY with "
+                  "NO RTSP or ONVIF support (Wansview switched to "
+                  "cloud-only on most products). Block firmware updates "
+                  "via DNS to keep RTSP working on W2/W3."),
+        "throttle_type":            "rate_limit_per_ip_tcp",
+        "throttle_type_confidence": "MED",
+        "throttle_amount":          "W2/W3: ~5s cooldown (Hipcam family); newer: no RTSP",
+        "throttle_amount_confidence":"MED",
+        "throttle_notes": ("W2/W3 inherit Hipcam family throttle. "
+                           "Post-2019 firmware on most other models is "
+                           "cloud-only with no RTSP support at all."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": ("W2/W3 (older FW): Hipcam family, URL "
+                              "/live/ch0. Newer FW: cloud-only, no "
+                              "RTSP."),
+        "request_behaviors_confidence":"HIGH",
     },
     {
         "name": "Tenvis",
@@ -1101,7 +1468,18 @@ CAMERA_DB: list[dict] = [
         "nmap_products":["tenvis"],
         "onvif_scopes": ["tenvis"],
         "default_ports": [554, 80, 8080],
-        "notes": "Tenvis IP camera",
+        "notes": ("Tenvis IP camera. Uses Hipcam RealServer firmware "
+                  "family on many models — see Hipcam/Microseven entry "
+                  "for shared throttle behavior."),
+        "throttle_type":            "rate_limit_per_ip_tcp",
+        "throttle_type_confidence": "MED",
+        "throttle_amount":          "~5s cooldown (inherits Hipcam family)",
+        "throttle_amount_confidence":"MED",
+        "throttle_notes": ("Hipcam RealServer firmware family — see "
+                           "Hipcam/Microseven entry for full details."),
+        "throttle_notes_confidence":"MED",
+        "request_behaviors": "Hipcam family — Digest auth, URLs /11, /12.",
+        "request_behaviors_confidence":"MED",
     },
     {
         "name": "Instar",
@@ -1225,6 +1603,44 @@ CAMERA_DB: list[dict] = [
         "notes": "Samsung standalone IP camera (pre-Hanwha rebranding)",
     },
     {
+        "name": "Hipcam/Microseven",
+        "aliases": ["microseven", "hipcam", "hiipcam", "m7d", "m7b", "m7t",
+                    "srihome", "sricam", "vstarcam", "wansview"],
+        "http_titles": ["microseven", "hipcam", "ipcam", "rtspserver"],
+        "http_body":   ["microseven", "hipcam realserver", "rtspserver_0.0.0"],
+        "http_headers":["hipcam realserver", "hipcam realserver/v1.0",
+                        "hiipcam/v100r003", "vodserver/1.0.0",
+                        "rtspserver_0.0.0.2", "rtspserver_0.0.0"],
+        "nmap_products":["hipcam realserver", "hiipcam", "rtspserver_0.0.0"],
+        "onvif_scopes": ["microseven", "hipcam"],
+        "default_ports": [554, 80],
+        "notes": "Hipcam RealServer firmware family — Microseven, Sricam, "
+                 "Vstarcam, Wansview (W2/W3), Tenvis, many cheap Chinese "
+                 "baby monitors / IPCAM rebrands. URL paths /11 (main) /12 "
+                 "(sub) /13 /h264major /h264minor; HTTP snap at "
+                 "/tmpfs/snap.jpg. Per-IP TCP rate-limit on RTSP port — "
+                 "single-socket multi-method probing required.",
+        # ─── rc2 throttle fields ───────────────────────────────────────
+        "throttle_type":            "rate_limit_per_ip_tcp",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "~5s cooldown between TCP opens from same source IP",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("First TCP connection from a source IP always succeeds; "
+                           "subsequent connections within ~5s are RST'd at the TCP layer. "
+                           "Single-socket multi-method (OPTIONS+DESCRIBE+SETUP+TEARDOWN "
+                           "on one socket) bypasses the throttle entirely. "
+                           "CVE-2023-50685: malformed client_port in SETUP crashes the "
+                           "RTSP service for ~45s. Tested on Microseven (4 browser "
+                           "automation runs)."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": ("Digest auth required (realm=\"Hipcam RealServer\"); "
+                              "rejects Basic auth. ONVIF returns no profiles for some "
+                              "models — direct-RTSP probing required. Server header: "
+                              "\"Hipcam RealServer/V1.0\" or "
+                              "\"HiIpcam/V100R003 VodServer/1.0.0\"."),
+        "request_behaviors_confidence":"HIGH",
+    },
+    {
         "name": "Generic IP Camera",
         "aliases": ["webcam", "ipcam", "network camera"],
         "http_titles": ["ip camera", "network camera", "webcam", "ipcam",
@@ -1288,6 +1704,52 @@ def identify_manufacturer(text: str) -> dict | None:
     for entry in CAMERA_DB:
         if entry["name"] == best_name:
             return entry
+    return None
+
+
+def _identify_camera_brand(cam: dict, force: bool = False) -> dict | None:
+    """rc2: Identify a camera's brand from ALL available signals (MAC OUI
+    vendor, HTTP page title/server header, ONVIF vendor, hostname, nmap
+    product banner) and write the result to cam["manufacturer"] in place.
+
+    Returns the matched CAMERA_DB entry (containing throttle_type,
+    request_behaviors, etc.) or None if no specific brand was identified.
+
+    Critical for cameras whose ONVIF returns no usable vendor info — the
+    OUI lookup field (cam["mac_vendor"]) often identifies them by their
+    IEEE-registered manufacturer (e.g. "Microseven Inc"). Without this
+    helper, such cameras were falling through to "Generic IP Camera" and
+    missing their brand-specific throttle metadata.
+
+    If cam already has a non-empty "manufacturer" field, returns the
+    matching CAMERA_DB entry without overwriting (unless force=True).
+    """
+    if cam.get("manufacturer") and not force:
+        # Brand already identified — return existing entry without overwriting
+        return next(
+            (e for e in CAMERA_DB if e["name"] == cam["manufacturer"]),
+            None,
+        )
+
+    haystack = " ".join([
+        str(cam.get("name", "") or ""),
+        str(cam.get("vendor", "") or ""),
+        str(cam.get("model", "") or ""),
+        str(cam.get("hostname", "") or ""),
+        str(cam.get("verdict_reason", "") or ""),
+        str(cam.get("mac_vendor", "") or ""),       # OUI lookup result
+        str(cam.get("page_title", "") or ""),
+        str(cam.get("server_header", "") or ""),
+        str(cam.get("nmap_product", "") or ""),
+    ]).strip()
+
+    if not haystack:
+        return None
+
+    entry = identify_manufacturer(haystack)
+    if entry and entry["name"] != "Generic IP Camera":
+        cam["manufacturer"] = entry["name"]
+        return entry
     return None
 
 
@@ -2366,13 +2828,408 @@ def probe_rtsp(url: str, username: str = "", password: str = "",
         return False
 
 
+def _probe_rtsp_paths_single_socket(
+    host: str,
+    port: int,
+    paths: list[str],
+    username: str = "",
+    password: str = "",
+    timeout: float = 6.0,
+    extra_query: str = "",
+    label: str = "",
+) -> str | None:
+    """rc2 Layer 1: Walk multiple RTSP paths through OPTIONS+DESCRIBE+
+    SETUP+TEARDOWN on a SINGLE TCP socket. Returns the first matching
+    rtsp:// URL or None if no path produced a streamable track.
+
+    This is the universal-safe probe per RFC 2326 §9.1 (servers must
+    queue per-socket requests in order; no documented camera firmware
+    rejects sequential request-response on the same socket). Critical
+    for cameras with per-IP TCP rate-limits (Hipcam/Microseven family
+    — opening a second socket within ~5s of the first is RST'd, but
+    walking paths on ONE socket bypasses the throttle entirely).
+
+    Always reads the full response (headers + Content-Length-bounded
+    body) before sending the next request — never pipelines.
+
+    extra_query — appended to every path (e.g. "?Axis-Orig-Sw=true"
+    for Axis Companion). Empty by default.
+    """
+    if not paths:
+        return None
+
+    pfx = f"  [probe_rtsp_walk {label or host + ':' + str(port)}]"
+
+    def _log(msg: str) -> None:
+        if label:
+            log.info(pfx + " " + msg)
+        else:
+            log.debug(pfx + " " + msg)
+
+    CRLF     = chr(13) + chr(10)
+    CRLFCRLF = CRLF + CRLF
+
+    def _build_auth(auth_val: str, method: str, uri: str) -> str | None:
+        """Identical to probe_rtsp_socket's _build_auth — RFC 2617 nonce
+        reuse with per-method+uri response digest recompute."""
+        if auth_val.lower().startswith("digest"):
+            realm_m = re.search(r'realm="([^"]*)"', auth_val)
+            nonce_m = re.search(r'nonce="([^"]*)"', auth_val)
+            if not (realm_m and nonce_m):
+                return None
+            realm, nonce = realm_m.group(1), nonce_m.group(1)
+            ha1 = hashlib.md5(f"{username}:{realm}:{password}".encode()).hexdigest()
+            ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
+            rsp = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
+            return (f'Digest username="{username}", realm="{realm}", '
+                    f'nonce="{nonce}", uri="{uri}", response="{rsp}"')
+        elif auth_val.lower().startswith("basic"):
+            return "Basic " + base64.b64encode(
+                f"{username}:{password}".encode()).decode()
+        return None
+
+    def _parse_track_url(sdp: str, base_url: str) -> str | None:
+        """Identical to probe_rtsp_socket's _parse_track_url."""
+        in_video        = False
+        video_control   = None
+        session_control = None
+        for raw in sdp.split("\n"):
+            line = raw.rstrip("\r").strip()
+            if line.startswith("m="):
+                if in_video:
+                    break
+                in_video = line.startswith("m=video")
+            elif line.startswith("a=control:"):
+                ctrl = line[len("a=control:"):].strip()
+                if in_video:
+                    video_control = ctrl
+                else:
+                    session_control = ctrl
+        ctrl = video_control or session_control
+        if not ctrl:
+            return None
+        if ctrl == "*":
+            return base_url
+        if ctrl.lower().startswith("rtsp://"):
+            return ctrl
+        return base_url.rstrip("/") + "/" + ctrl
+
+    sock      = None
+    next_cseq = 1
+    # auth_val is captured from first 401 and reused across all paths on
+    # this socket. Per RFC 2617, nonce reuse is allowed; we just recompute
+    # the response digest for each method+uri pair.
+    auth_val: str | None = None
+
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.settimeout(timeout)
+
+        def roundtrip(method: str, cseq: int,
+                      extra: dict | None = None,
+                      uri: str = "") -> str:
+            """Send RTSP request on the persistent sock, read full response
+            (headers + body if Content-Length present). Returns response text.
+            Raises socket exceptions if the connection dies — caller must
+            decide whether to bail."""
+            extra = extra or {}
+            target = uri
+            hdr = "".join(k + ": " + v + CRLF for k, v in extra.items())
+            req = method + " " + target + " RTSP/1.0" + CRLF
+            req += "CSeq: " + str(cseq) + CRLF + hdr + CRLF
+            sock.sendall(req.encode())
+            buf = b""
+            while CRLFCRLF.encode() not in buf and len(buf) < 65536:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            text = buf.decode("utf-8", errors="replace")
+            cl = 0
+            for line in text.split(CRLF):
+                if line.lower().startswith("content-length:"):
+                    try:
+                        cl = int(line.split(":", 1)[1].strip())
+                    except (ValueError, IndexError):
+                        cl = 0
+                    break
+            if cl > 0:
+                sep_idx   = text.find(CRLFCRLF)
+                already   = (len(buf) - (sep_idx + 4)) if sep_idx >= 0 else 0
+                remaining = max(0, cl - already)
+                while remaining > 0:
+                    chunk = sock.recv(min(remaining, 4096))
+                    if not chunk:
+                        break
+                    buf       += chunk
+                    remaining -= len(chunk)
+            return buf.decode("utf-8", errors="replace")
+
+        for path_idx, path in enumerate(paths):
+            full_path = path + extra_query
+            rtsp_url = f"rtsp://{host}:{port}{full_path}"
+            _log(f"({path_idx+1}/{len(paths)}) trying {full_path}")
+
+            # ── OPTIONS ──────────────────────────────────────────────
+            try:
+                resp = roundtrip("OPTIONS", next_cseq, uri=rtsp_url)
+                next_cseq += 1
+            except Exception as e:
+                _log(f"OPTIONS exception → bailing single-socket walk: {e}")
+                return None  # socket dead, caller should fall back to Layer 2
+            if "RTSP/1.0 2" not in resp:
+                _log(f"OPTIONS → {resp.split(CRLF)[0].strip()!r} — skipping path")
+                # Path-level rejection: try next path, socket likely still alive
+                continue
+
+            # ── DESCRIBE (with optional 401-retry) ───────────────────
+            try:
+                resp = roundtrip("DESCRIBE", next_cseq,
+                                 {"Accept": "application/sdp"},
+                                 uri=rtsp_url)
+                next_cseq += 1
+            except Exception as e:
+                _log(f"DESCRIBE exception → bailing: {e}")
+                return None
+            if "RTSP/1.0 200" in resp:
+                pass  # continue to SDP parse
+            elif "401" in resp:
+                if not username:
+                    _log(f"DESCRIBE → 401 (no creds) — skipping {path}")
+                    continue
+                # Capture auth_val from this 401 if we haven't already
+                if not auth_val:
+                    auth_line = next(
+                        (l for l in resp.splitlines()
+                         if l.lower().startswith("www-authenticate:")), "")
+                    auth_val = auth_line.split(":", 1)[-1].strip() if auth_line else ""
+                if not auth_val:
+                    _log("DESCRIBE → 401 with no WWW-Authenticate — skipping")
+                    continue
+                auth_hdr = _build_auth(auth_val, "DESCRIBE", rtsp_url)
+                if not auth_hdr:
+                    _log(f"DESCRIBE → unparseable auth: {auth_val[:60]!r}")
+                    continue
+                try:
+                    resp = roundtrip("DESCRIBE", next_cseq,
+                                     {"Accept": "application/sdp",
+                                      "Authorization": auth_hdr},
+                                     uri=rtsp_url)
+                    next_cseq += 1
+                except Exception as e:
+                    _log(f"DESCRIBE-auth exception → bailing: {e}")
+                    return None
+                if "RTSP/1.0 200" not in resp:
+                    _log(f"DESCRIBE-auth → {resp.split(CRLF)[0].strip()!r}")
+                    continue
+            else:
+                _log(f"DESCRIBE → {resp.split(CRLF)[0].strip()!r} — skipping")
+                continue
+
+            # ── Parse SDP for first m=video track URL ───────────────
+            body_idx  = resp.find(CRLFCRLF)
+            sdp_text  = resp[body_idx + 4:] if body_idx >= 0 else ""
+            track_url = _parse_track_url(sdp_text, rtsp_url)
+            if not track_url:
+                _log(f"DESCRIBE 200 but SDP has no m=video — skipping {path}")
+                continue
+
+            # ── SETUP: TCP-interleaved first, UDP fallback ──────────
+            transports = [
+                ("RTP/AVP/TCP;unicast;interleaved=0-1",            "TCP"),
+                ("RTP/AVP/UDP;unicast;client_port=50000-50001",    "UDP"),
+            ]
+            setup_ok = False
+            session  = ""
+            for transport_hdr, tlabel in transports:
+                extra: dict[str, str] = {"Transport": transport_hdr}
+                if auth_val:
+                    ah = _build_auth(auth_val, "SETUP", track_url)
+                    if ah:
+                        extra["Authorization"] = ah
+                try:
+                    resp = roundtrip("SETUP", next_cseq, extra, uri=track_url)
+                    next_cseq += 1
+                except Exception as e:
+                    _log(f"SETUP exception → bailing: {e}")
+                    return None
+                if "RTSP/1.0 200" in resp:
+                    for line in resp.split(CRLF):
+                        if line.lower().startswith("session:"):
+                            session = (line.split(":", 1)[1]
+                                           .strip().split(";")[0].strip())
+                            break
+                    _log(f"SETUP ({tlabel}) → 200 OK at {path}")
+                    setup_ok = True
+                    break
+                _log(f"SETUP ({tlabel}) → {resp.split(CRLF)[0].strip()!r}")
+
+            if not setup_ok:
+                # SETUP failed for this path — the socket is still alive
+                # (server replied with status), so we can try the next path.
+                # No TEARDOWN needed since SETUP didn't succeed.
+                continue
+
+            # ── TEARDOWN — release session before returning ─────────
+            td_extra: dict[str, str] = {}
+            if session:
+                td_extra["Session"] = session
+            if auth_val:
+                ah = _build_auth(auth_val, "TEARDOWN", track_url)
+                if ah:
+                    td_extra["Authorization"] = ah
+            try:
+                roundtrip("TEARDOWN", next_cseq, td_extra, uri=track_url)
+                next_cseq += 1
+            except Exception:
+                pass  # TEARDOWN failure is non-fatal — socket close releases state
+
+            return rtsp_url
+
+        # Walked every path without finding a streamable track
+        return None
+
+    except Exception as e:
+        _log(f"single-socket walk exception: {e}")
+        return None
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
+def _get_brand_throttle_info(host_meta: dict | None) -> tuple[dict | None, str]:
+    """rc2: Identify the camera's CAMERA_DB brand entry and throttle_type
+    BEFORE any RTSP probe begins. This lets find_rtsp_path apply
+    brand-specific short-circuits (skip Layer 2 for rate-limited brands,
+    extend timeout for sleeping cameras, append query params for Axis
+    Companion, return None for cloud-only brands).
+
+    Returns (entry_or_None, throttle_type_str). throttle_type is "" if
+    no brand identified or no throttle data on the entry."""
+    if not host_meta:
+        return None, ""
+    cam = dict(host_meta)
+    entry = _identify_camera_brand(cam)
+    if not entry:
+        return None, ""
+    return entry, str(entry.get("throttle_type", "") or "")
+
+
 def find_rtsp_path(ip: str, port: int,
-                   username: str = "", password: str = "") -> str | None:
-    for path in RTSP_PATHS:
+                   username: str = "", password: str = "",
+                   host_meta: dict | None = None) -> str | None:
+    """rc2 Two-layer RTSP path probe with brand-aware short-circuits.
+
+    Layer 1 — Single-socket walk through all paths (always tried first
+    unless the brand has throttle_type='no_rtsp_support').
+
+    Layer 2 — Multi-socket fallback with 5s delay between attempts and
+    bail-after-10 consecutive failures. Skipped for brands with
+    throttle_type='rate_limit_per_ip_tcp' (Hipcam/Microseven family) —
+    multi-socket would be RST'd before it could complete.
+
+    host_meta — optional camera dict (mac_vendor, hostname, page_title,
+    etc.) used to identify the brand BEFORE the probe begins. Without it,
+    the function falls back to brand-agnostic two-layer behavior.
+    """
+    # ── Brand identification (uses OUI mac_vendor + other signals) ───
+    brand_entry, throttle_type = _get_brand_throttle_info(host_meta)
+    brand_name = (brand_entry or {}).get("name", "")
+
+    # Cloud-only brands: skip RTSP entirely
+    if throttle_type == "no_rtsp_support":
+        log.info(f"  RTSP skipped: {brand_name} does not support RTSP "
+                 f"(throttle_type=no_rtsp_support)")
+        return None
+
+    # Adjust per-socket timeout for sleeping/slow-wakeup brands
+    sock_timeout: float = 6.0
+    if throttle_type == "session_time_cap":
+        sock_timeout = 25.0  # Reolink battery-WiFi wake-up window
+        log.info(f"  RTSP timeout extended to {sock_timeout}s "
+                 f"({brand_name}, session_time_cap)")
+
+    # Compose path priority — brand-specific paths from STREAM_DB first,
+    # then the universal RTSP_PATHS, deduped while preserving order.
+    db_paths: list[str] = []
+    if host_meta is not None and brand_name:
+        cam_with_brand = dict(host_meta)
+        cam_with_brand["manufacturer"] = brand_name
+        sdb = _match_stream_db(cam_with_brand)
+        if sdb:
+            db_paths = list(sdb.get("rtsp", []))
+
+    seen: set[str]   = set()
+    ordered: list[str] = []
+    for p in db_paths + RTSP_PATHS:
+        if p not in seen:
+            seen.add(p)
+            ordered.append(p)
+
+    # ── Layer 1: single-socket walk ──────────────────────────────────
+    label_for_log = f"{ip}:{port}"
+    if brand_name:
+        label_for_log += f" ({brand_name})"
+    log.info(f"  RTSP probe: Layer 1 (single-socket walk, "
+             f"{len(ordered)} paths) — {label_for_log}")
+    found = _probe_rtsp_paths_single_socket(
+        ip, port, ordered, username, password,
+        timeout=sock_timeout, label="",
+    )
+    if found:
+        log.info(f"  RTSP OK (Layer 1): {found}")
+        return found
+
+    # ── Layer 1 fallback: Axis Companion query-param retry ───────────
+    # Only triggers when the brand DB explicitly says this camera needs
+    # the query param. Cheap to attempt; one extra single-socket pass.
+    if throttle_type == "requires_query_param":
+        log.info(f"  RTSP probe: Layer 1 retry with Axis-Orig-Sw=true "
+                 f"({brand_name}, requires_query_param)")
+        found = _probe_rtsp_paths_single_socket(
+            ip, port, ordered, username, password,
+            timeout=sock_timeout, extra_query="?Axis-Orig-Sw=true",
+            label="",
+        )
+        if found:
+            log.info(f"  RTSP OK (Layer 1+query): {found}")
+            return found
+
+    # ── Layer 2 short-circuit: per-IP TCP rate-limit ─────────────────
+    if throttle_type == "rate_limit_per_ip_tcp":
+        log.info(f"  RTSP Layer 2 skipped: {brand_name} has per-IP TCP "
+                 f"rate-limit (multi-socket would be RST'd)")
+        return None
+
+    # ── Layer 2: multi-socket fallback with 5s delay + bail-after-10 ─
+    log.info(f"  RTSP probe: Layer 2 (multi-socket fallback, "
+             f"5s delay + bail-after-10) — {label_for_log}")
+    consecutive_failures = 0
+    for i, path in enumerate(ordered):
+        if i > 0:
+            time.sleep(5.0)   # cooldown between sockets
+
         url = f"rtsp://{ip}:{port}{path}"
-        if probe_rtsp(url, username, password):
-            log.info(f"  RTSP OK: {url}")
+        if probe_rtsp(url, username, password, timeout=sock_timeout):
+            log.info(f"  RTSP OK (Layer 2): {url}")
             return url
+
+        # Axis Companion retry-on-failure with query param
+        if throttle_type == "requires_query_param":
+            url_q = f"rtsp://{ip}:{port}{path}?Axis-Orig-Sw=true"
+            if probe_rtsp(url_q, username, password, timeout=sock_timeout):
+                log.info(f"  RTSP OK (Layer 2+query): {url_q}")
+                return url_q
+
+        consecutive_failures += 1
+        if consecutive_failures >= 10:
+            log.info(f"  RTSP Layer 2 bailing after "
+                     f"{consecutive_failures} consecutive failures")
+            break
+
     return None
 
 
@@ -5010,13 +5867,24 @@ async def api_scan_cancel(request) -> web.Response:
 
 
 def _match_stream_db(camera: dict) -> dict | None:
-    """Return the best-matching STREAM_DB entry for a camera, or None."""
+    """Return the best-matching STREAM_DB entry for a camera, or None.
+
+    rc2: includes mac_vendor (OUI lookup result) in the haystack so that
+    cameras identified by MAC address alone — before any HTTP/RTSP probe —
+    can be matched to their vendor recipe. This is critical for cameras
+    like Microseven where ONVIF returns no useful vendor info but the
+    OUI lookup gives "Microseven Inc"."""
     haystack = " ".join([
         camera.get("name", ""),
         camera.get("vendor", ""),
         camera.get("model", ""),
         camera.get("verdict_reason", ""),
         camera.get("hostname", ""),
+        camera.get("mac_vendor", ""),       # rc2: OUI vendor name
+        camera.get("manufacturer", ""),     # rc2: previously-identified brand
+        camera.get("page_title", ""),       # rc2: HTTP page title
+        camera.get("server_header", ""),    # rc2: HTTP/RTSP Server header
+        camera.get("nmap_product", ""),     # rc2: nmap service banner
     ]).lower()
     best_slug, best_len = None, 0
     for slug, entry in STREAM_DB.items():
@@ -5027,13 +5895,21 @@ def _match_stream_db(camera: dict) -> dict | None:
 
 
 def _match_stream_db_slug(camera: dict) -> str | None:
-    """Return the STREAM_DB slug that matched, or None."""
+    """Return the STREAM_DB slug that matched, or None.
+
+    rc2: includes mac_vendor + manufacturer + page_title + server_header +
+    nmap_product in the haystack — see _match_stream_db for rationale."""
     haystack = " ".join([
         camera.get("name", ""),
         camera.get("vendor", ""),
         camera.get("model", ""),
         camera.get("verdict_reason", ""),
         camera.get("hostname", ""),
+        camera.get("mac_vendor", ""),       # rc2: OUI vendor name
+        camera.get("manufacturer", ""),     # rc2: previously-identified brand
+        camera.get("page_title", ""),       # rc2: HTTP page title
+        camera.get("server_header", ""),    # rc2: HTTP/RTSP Server header
+        camera.get("nmap_product", ""),     # rc2: nmap service banner
     ]).lower()
     best_slug, best_len = None, 0
     for slug, entry in STREAM_DB.items():
@@ -5344,19 +6220,19 @@ async def api_set_credentials(request) -> web.Response:
         # Try stored port first
         log.info(f"  Trying direct RTSP on {ip}:{port}")
         url = await loop.run_in_executor(
-            _THREAD_POOL, find_rtsp_path, ip, port, username, password)
+            _THREAD_POOL, find_rtsp_path, ip, port, username, password, camera)
         # For ONVIF cards the stored port is often 80; always also try 554
         if not url and port != 554:
             log.info(f"  Trying direct RTSP on {ip}:554 (standard RTSP port)")
             url = await loop.run_in_executor(
-                _THREAD_POOL, find_rtsp_path, ip, 554, username, password)
+                _THREAD_POOL, find_rtsp_path, ip, 554, username, password, camera)
         if not url and camera.get("xaddrs"):
             parsed = urlparse(camera["xaddrs"])
             rtsp_port = parsed.port or 554
             log.info(f"  Trying RTSP via xaddrs {ip}:{rtsp_port}")
             url = await loop.run_in_executor(
                 _THREAD_POOL, find_rtsp_path, parsed.hostname or ip,
-                rtsp_port, username, password)
+                rtsp_port, username, password, camera)
         log.info(f"  RTSP result: {_strip_creds(url) if url else 'None'}")
     elif proto == "MJPEG":
         url = await loop.run_in_executor(
@@ -7540,10 +8416,18 @@ async def _try_hevc_plus_fallback(camera_id: str, camera: dict,
 
 async def _probe_host_port(ip: str, port: int, hostname: str,
                             initial_protocol: str, prev: dict,
-                            verdict: str, reason: str, loop) -> dict | None:
+                            verdict: str, reason: str, loop,
+                            host_meta: dict | None = None) -> dict | None:
     """
     Probe a single host:port and return a camera dict if a stream is found,
     or None if nothing reachable. Uses saved credentials from prev if available.
+
+    rc2: host_meta — optional dict containing mac_vendor, server_header,
+    page_title, nmap_product, etc. captured during the scan stage.
+    Passed through to find_rtsp_path so brand-aware probe short-circuits
+    can fire (skip Layer 2 for Hipcam family, extend timeout for Reolink
+    battery, append Axis Companion query param, return None for Eufy/Ring/
+    Nest/Arlo/Verkada).
     """
     # Never treat our own ingress port as a camera — it's AnyCam's own web UI
     local_ip = get_local_ip()
@@ -7560,6 +8444,15 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
         except Exception:
             pass
 
+    # rc2: Run brand identification BEFORE any RTSP probe so the
+    # find_rtsp_path orchestrator can apply throttle-aware short-circuits.
+    # Sets host_meta["manufacturer"] in place if a brand is identified.
+    if host_meta is not None:
+        try:
+            _identify_camera_brand(host_meta)
+        except Exception as e:
+            log.debug(f"  brand-id pre-probe: {e}")
+
     def base(proto: str, url: str, status: str, display: str = "proxy") -> dict:
         return {
             "id": cid, "ip": ip, "hostname": hostname, "port": port,
@@ -7571,11 +8464,14 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
         }
 
     if initial_protocol in ("RTSP", "DVR"):
-        url = await loop.run_in_executor(_THREAD_POOL, find_rtsp_path, ip, port, "", "")
+        url = await loop.run_in_executor(
+            _THREAD_POOL, find_rtsp_path, ip, port, "", "", host_meta)
         if url:
             return base("RTSP", url, "ready")
         if saved_u:
-            url = await loop.run_in_executor(_THREAD_POOL, find_rtsp_path, ip, port, saved_u, saved_p)
+            url = await loop.run_in_executor(
+                _THREAD_POOL, find_rtsp_path, ip, port,
+                saved_u, saved_p, host_meta)
             if url:
                 cam = base("RTSP", url, "ready")
                 cam["credentials"] = prev_creds
@@ -7610,7 +8506,8 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
                 cam["credentials"] = prev_creds
                 return cam
 
-        url = await loop.run_in_executor(_THREAD_POOL, find_rtsp_path, ip, port, "", "")
+        url = await loop.run_in_executor(
+            _THREAD_POOL, find_rtsp_path, ip, port, "", "", host_meta)
         if url:
             return base("RTSP", url, "ready")
 
@@ -7729,8 +8626,21 @@ async def run_scan() -> None:
                 initial = _initial_protocol(port, port_info.get("service", ""),
                                              port_info.get("product", ""))
                 prev = saved.get(cid, {})
+                # rc2: assemble a host_meta dict so brand identification
+                # can run BEFORE the RTSP probe begins (mac_vendor + nmap
+                # service banner + product feed into _identify_camera_brand)
+                host_meta = {
+                    "ip":            ip,
+                    "hostname":      hostname,
+                    "mac_addr":      host.get("mac_addr", ""),
+                    "mac_vendor":    host.get("mac_vendor", ""),
+                    "vendor":        host.get("mac_vendor", ""),
+                    "nmap_product":  port_info.get("product", ""),
+                    "verdict_reason": reason,
+                }
                 cam  = await _probe_host_port(ip, port, hostname, initial,
-                                              prev, verdict, reason, loop)
+                                              prev, verdict, reason, loop,
+                                              host_meta=host_meta)
                 if cam:
                     CAMERAS[cam["id"]] = cam
 
@@ -7754,8 +8664,19 @@ async def run_scan() -> None:
                     initial = _initial_protocol(port, port_info.get("service", ""),
                                                  port_info.get("product", ""))
                     prev = saved.get(cid, {})
+                    # rc2: pass host_meta for brand-aware probe short-circuits
+                    host_meta = {
+                        "ip":            ip,
+                        "hostname":      hostname,
+                        "mac_addr":      host.get("mac_addr", ""),
+                        "mac_vendor":    host.get("mac_vendor", ""),
+                        "vendor":        host.get("mac_vendor", ""),
+                        "nmap_product":  port_info.get("product", ""),
+                        "verdict_reason": reason,
+                    }
                     cam  = await _probe_host_port(ip, port, hostname, initial,
-                                                  prev, verdict, reason, loop)
+                                                  prev, verdict, reason, loop,
+                                                  host_meta=host_meta)
                     if cam:
                         CAMERAS[cam["id"]] = cam
 
@@ -7779,8 +8700,18 @@ async def run_scan() -> None:
                 # prompt entirely and create a ready card right away.
                 unauth_url = ""
                 if not prev.get("credentials"):
+                    # rc2: pass ONVIF metadata as host_meta so brand-aware
+                    # probe short-circuits can fire (especially relevant
+                    # for Microseven/Hipcam — ONVIF often returns 0
+                    # profiles, forcing this RTSP path-walking fallback)
+                    onvif_meta = {
+                        "ip": ip,
+                        "hostname": onvif.get("name", ip),
+                        "name": onvif.get("name", ""),
+                        "xaddrs": onvif.get("xaddrs", ""),
+                    }
                     unauth_url = await loop.run_in_executor(
-                        _THREAD_POOL, find_rtsp_path, ip, 554, "", "")
+                        _THREAD_POOL, find_rtsp_path, ip, 554, "", "", onvif_meta)
                 if unauth_url:
                     log.info(f"  ONVIF {ip}: unauthenticated RTSP works "
                              f"({_strip_creds(unauth_url)}) — skipping cred prompt")
