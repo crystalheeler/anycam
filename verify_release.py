@@ -66,6 +66,17 @@ CONTRACTS = {
                               "_THREAD_POOL.shutdown", "terminate"],
     "probe_rtsp_socket":     ["DESCRIBE", "SETUP", "TEARDOWN",
                               "_parse_track_url", "m=video"],
+    # rc2 — single-socket Layer 1 walker bounded by RFC 2326 §9.1 semantics
+    "_probe_rtsp_paths_single_socket": ["DESCRIBE", "SETUP", "TEARDOWN",
+                                         "next_cseq", "auth_val", "extra_query"],
+    # rc2 — find_rtsp_path orchestrator with brand-aware short-circuits
+    "find_rtsp_path":        ["_probe_rtsp_paths_single_socket",
+                              "rate_limit_per_ip_tcp", "no_rtsp_support",
+                              "session_time_cap", "requires_query_param",
+                              "Layer 2"],
+    # rc2 — brand-id helper that wires mac_vendor into manufacturer detection
+    "_identify_camera_brand": ["mac_vendor", "manufacturer",
+                               "identify_manufacturer"],
 }
 all_ok = True
 for node in ast.walk(tree):
@@ -78,6 +89,126 @@ for node in ast.walk(tree):
                     all_ok = False
 if all_ok:
     ok(f"All {len(CONTRACTS)} function contracts satisfied")
+
+# ── 2b. rc2 CAMERA_DB structure contracts ─────────────────────────────────────
+# These checks pull CAMERA_DB out of the AST (not by importing) so they don't
+# need any runtime deps installed.
+print("\n[2b/5] rc2 CAMERA_DB throttle field validation")
+
+VALID_THROTTLE_TYPES = {
+    "rate_limit_per_ip_tcp",
+    "concurrent_user_cap",
+    "concurrent_stream_cap",
+    "session_time_cap",
+    "restart_cooldown",
+    "socket_close_after_play",
+    "unique_profile_cap",
+    "shared_session_id_required",
+    "requires_query_param",
+    "requires_custom_firmware",
+    "unstable_rtsp",
+    "no_rtsp_support",
+}
+VALID_CONFIDENCE = {"HIGH", "MED", "LOW"}
+
+# Pull the CAMERA_DB literal out of the AST — find the Assign node that
+# binds CAMERA_DB to a list literal of dict literals.
+camera_db_node = None
+for node in ast.iter_child_nodes(tree):
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) \
+            and node.target.id == "CAMERA_DB":
+        camera_db_node = node.value
+        break
+    if isinstance(node, ast.Assign):
+        for tgt in node.targets:
+            if isinstance(tgt, ast.Name) and tgt.id == "CAMERA_DB":
+                camera_db_node = node.value
+                break
+        if camera_db_node:
+            break
+
+if not camera_db_node or not isinstance(camera_db_node, ast.List):
+    fail("CAMERA_DB literal not found at module top level")
+else:
+    # Walk each entry and validate
+    rc2_throttle_ok = True
+    rc2_pair_ok = True
+    entries_with_throttle = 0
+    entries_total = len(camera_db_node.elts)
+
+    DATA_FIELDS = ("throttle_type", "throttle_amount",
+                   "throttle_notes", "request_behaviors")
+    DATA_FIELD_SET = set(DATA_FIELDS)
+
+    for idx, elt in enumerate(camera_db_node.elts):
+        if not isinstance(elt, ast.Dict):
+            continue
+        # Build a {key: value_node} dict for this entry
+        kv = {}
+        for k, v in zip(elt.keys, elt.values):
+            if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                kv[k.value] = v
+
+        entry_name = ""
+        n_node = kv.get("name")
+        if isinstance(n_node, ast.Constant) and isinstance(n_node.value, str):
+            entry_name = n_node.value
+
+        # Contract: throttle_type values must be in the valid enum
+        tt_node = kv.get("throttle_type")
+        if tt_node is not None:
+            entries_with_throttle += 1
+            if isinstance(tt_node, ast.Constant) and isinstance(tt_node.value, str):
+                if tt_node.value not in VALID_THROTTLE_TYPES:
+                    fail(f"rc2-throttle-fields-valid: '{entry_name}' has "
+                         f"throttle_type='{tt_node.value}' not in valid enum")
+                    rc2_throttle_ok = False
+            else:
+                fail(f"rc2-throttle-fields-valid: '{entry_name}' throttle_type "
+                     f"is not a string literal")
+                rc2_throttle_ok = False
+
+        # Contract: every <field>_confidence has a matching <field>, and
+        # every <field> in DATA_FIELDS has a matching <field>_confidence,
+        # and every confidence value is HIGH/MED/LOW.
+        for field in DATA_FIELDS:
+            has_data = field in kv
+            has_conf = (field + "_confidence") in kv
+            if has_data and not has_conf:
+                fail(f"rc2-confidence-fields-paired: '{entry_name}' has "
+                     f"'{field}' but no '{field}_confidence'")
+                rc2_pair_ok = False
+            if has_conf and not has_data:
+                fail(f"rc2-confidence-fields-paired: '{entry_name}' has "
+                     f"'{field}_confidence' but no '{field}'")
+                rc2_pair_ok = False
+            if has_conf:
+                cf_node = kv[field + "_confidence"]
+                if isinstance(cf_node, ast.Constant) and isinstance(cf_node.value, str):
+                    if cf_node.value not in VALID_CONFIDENCE:
+                        fail(f"rc2-confidence-fields-paired: '{entry_name}' "
+                             f"{field}_confidence='{cf_node.value}' not in "
+                             f"{{HIGH,MED,LOW}}")
+                        rc2_pair_ok = False
+
+        # No stray confidence fields outside DATA_FIELDS
+        for k in kv:
+            if k.endswith("_confidence"):
+                base = k[:-len("_confidence")]
+                if base not in DATA_FIELD_SET:
+                    fail(f"rc2-confidence-fields-paired: '{entry_name}' has "
+                         f"unexpected '{k}' (no matching data field in "
+                         f"{DATA_FIELDS})")
+                    rc2_pair_ok = False
+
+    if rc2_throttle_ok:
+        ok(f"rc2-throttle-fields-valid: all throttle_type values in valid "
+           f"enum ({entries_with_throttle} of {entries_total} entries have "
+           f"throttle data)")
+    if rc2_pair_ok:
+        ok(f"rc2-confidence-fields-paired: every data field has its "
+           f"_confidence sibling and vice versa, all confidence values "
+           f"in {{HIGH,MED,LOW}}")
 
 # ── 3. Best-practice audit ────────────────────────────────────────────────────
 print("\n[3/5] Best-practice audit")
