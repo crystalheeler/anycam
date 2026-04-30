@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.8-rc2.1"  # must match config.yaml
+CURRENT_VERSION = "2.2.8-rc2.1.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1741,6 +1741,11 @@ def _identify_camera_brand(cam: dict, force: bool = False) -> dict | None:
         str(cam.get("page_title", "") or ""),
         str(cam.get("server_header", "") or ""),
         str(cam.get("nmap_product", "") or ""),
+        # rc2.1.1: ONVIF scopes from WS-Discovery often contain
+        # `onvif://www.onvif.org/manufacturer/<Brand>` or
+        # `/hardware/<Model>` strings — primary identification signal
+        # for cameras that aren't in nmap_results (no mac_vendor).
+        str(cam.get("onvif_scopes", "") or ""),
     ]).strip()
 
     if not haystack:
@@ -2440,8 +2445,18 @@ def onvif_discover(timeout: int = 5) -> list[dict]:
                 m      = re.search(r"onvif://www\.onvif\.org/name/([^\s]+)",
                                    " ".join(scopes))
                 name   = m.group(1).replace("%20", " ") if m else ip
+                # rc2.1.1: capture the full scopes string (not just the
+                # name). Many ONVIF cameras populate scopes with their
+                # manufacturer/hardware/model identifiers, e.g.
+                # `onvif://www.onvif.org/manufacturer/Microseven`. These
+                # strings are fed into the brand-id haystack downstream
+                # so the Hipcam/Microseven CAMERA_DB entry can match
+                # against its `aliases` and `onvif_scopes` fields even
+                # for cameras whose ONVIF Name field returns just "IPCAM".
+                onvif_scopes_str = " ".join(scopes)
                 results.append({"ip": ip, "name": name,
-                                 "xaddrs": xaddrs[0].strip() if xaddrs else ""})
+                                 "xaddrs": xaddrs[0].strip() if xaddrs else "",
+                                 "onvif_scopes": onvif_scopes_str})
                 log.info(f"  ONVIF: {name} @ {ip}")
             except socket.timeout:
                 break
@@ -2837,6 +2852,7 @@ def _probe_rtsp_paths_single_socket(
     timeout: float = 6.0,
     extra_query: str = "",
     label: str = "",
+    host_meta: dict | None = None,
 ) -> tuple[str | None, bool]:
     """rc2 Layer 1: Walk multiple RTSP paths through OPTIONS+DESCRIBE+
     SETUP+TEARDOWN on a SINGLE TCP socket. Returns a tuple
@@ -2861,6 +2877,14 @@ def _probe_rtsp_paths_single_socket(
 
     extra_query — appended to every path (e.g. "?Axis-Orig-Sw=true"
     for Axis Companion). Empty by default.
+
+    rc2.1.1: host_meta — when provided, the walker captures the RTSP
+    'Server:' header from the first response that includes one and
+    writes it to host_meta["server_header"] in place. The orchestrator
+    then re-runs brand identification post-walk so cameras that didn't
+    identify from MAC OUI alone (Microseven — not in nmap_results,
+    so no mac_vendor) can still be identified by their Hipcam RealServer
+    server string.
     """
     if not paths:
         return (None, False)
@@ -2869,6 +2893,10 @@ def _probe_rtsp_paths_single_socket(
     # "RTSP/" — used by the orchestrator to skip Layer 2 when we
     # confirmed the host doesn't speak RTSP at this port.
     looks_like_rtsp: bool = False
+
+    # rc2.1.1: capture Server header from first response that has one.
+    # Written back to host_meta at end so brand-id can re-run with it.
+    captured_server: str = ""
 
     pfx = f"  [probe_rtsp_walk {label or host + ':' + str(port)}]"
 
@@ -2995,6 +3023,18 @@ def _probe_rtsp_paths_single_socket(
             # orchestrator skips Layer 2 (wrong port / not an RTSP server).
             if resp.startswith("RTSP/"):
                 looks_like_rtsp = True
+                # rc2.1.1: capture Server header — first one found wins.
+                # The Hipcam RealServer firmware family always returns
+                # `Server: Hipcam RealServer/V1.0` even on auth-required
+                # responses, so this fires for the Microseven case
+                # (no mac_vendor available, but Server header reliably
+                # identifies the firmware family).
+                if not captured_server:
+                    for _line in resp.split(CRLF):
+                        if _line.lower().startswith("server:"):
+                            captured_server = _line.split(":", 1)[1].strip()
+                            _log(f"captured Server: {captured_server!r}")
+                            break
             if "RTSP/1.0 2" not in resp:
                 _log(f"OPTIONS → {resp.split(CRLF)[0].strip()!r} — skipping path")
                 # Path-level rejection: try next path, socket likely still alive
@@ -3111,29 +3151,19 @@ def _probe_rtsp_paths_single_socket(
         _log(f"single-socket walk exception: {e}")
         return (None, looks_like_rtsp)
     finally:
+        # rc2.1.1: persist captured Server header to host_meta on EVERY
+        # return path (success, no-match, exception, socket-dead). The
+        # orchestrator re-runs brand-id post-walk using this signal,
+        # which is critical for cameras like the Microseven whose
+        # mac_vendor isn't available (camera not in nmap_results due to
+        # its own TCP rate-limit defeating the focused port scan).
+        if host_meta is not None and captured_server:
+            host_meta["server_header"] = captured_server
         if sock:
             try:
                 sock.close()
             except Exception:
                 pass
-
-
-def _get_brand_throttle_info(host_meta: dict | None) -> tuple[dict | None, str]:
-    """rc2: Identify the camera's CAMERA_DB brand entry and throttle_type
-    BEFORE any RTSP probe begins. This lets find_rtsp_path apply
-    brand-specific short-circuits (skip Layer 2 for rate-limited brands,
-    extend timeout for sleeping cameras, append query params for Axis
-    Companion, return None for cloud-only brands).
-
-    Returns (entry_or_None, throttle_type_str). throttle_type is "" if
-    no brand identified or no throttle data on the entry."""
-    if not host_meta:
-        return None, ""
-    cam = dict(host_meta)
-    entry = _identify_camera_brand(cam)
-    if not entry:
-        return None, ""
-    return entry, str(entry.get("throttle_type", "") or "")
 
 
 def find_rtsp_path(ip: str, port: int,
@@ -3153,8 +3183,23 @@ def find_rtsp_path(ip: str, port: int,
     etc.) used to identify the brand BEFORE the probe begins. Without it,
     the function falls back to brand-agnostic two-layer behavior.
     """
-    # ── Brand identification (uses OUI mac_vendor + other signals) ───
-    brand_entry, throttle_type = _get_brand_throttle_info(host_meta)
+    # ── Brand identification — first pass (uses signals already in
+    #    host_meta: mac_vendor, page_title, server_header, nmap_product,
+    #    onvif_scopes, hostname, verdict_reason). rc2.1.1: this is a
+    #    DIRECT call to _identify_camera_brand which mutates host_meta in
+    #    place, writing host_meta["manufacturer"] when a brand is found.
+    #    Caller (e.g. ONVIF post-scan loop) reads it back after we return.
+    #    Replaces rc2's _get_brand_throttle_info() which made a dict copy
+    #    and silently dropped the manufacturer assignment.
+    brand_entry: dict | None = None
+    throttle_type: str = ""
+    if host_meta is not None:
+        try:
+            brand_entry = _identify_camera_brand(host_meta)
+        except Exception as e:
+            log.debug(f"  brand-id (pre-probe): {e}")
+        if brand_entry:
+            throttle_type = str(brand_entry.get("throttle_type", "") or "")
     brand_name = (brand_entry or {}).get("name", "")
 
     # Cloud-only brands: skip RTSP entirely
@@ -3195,8 +3240,28 @@ def find_rtsp_path(ip: str, port: int,
              f"{len(ordered)} paths) — {label_for_log}")
     found, looks_like_rtsp = _probe_rtsp_paths_single_socket(
         ip, port, ordered, username, password,
-        timeout=sock_timeout, label="",
+        timeout=sock_timeout, label="", host_meta=host_meta,
     )
+    # rc2.1.1: re-run brand identification after the walk. The walker
+    # captured the RTSP Server: header into host_meta["server_header"],
+    # which is a strong identification signal especially for cameras
+    # whose mac_vendor was unavailable (e.g. Microseven — its TCP
+    # rate-limit prevented inclusion in nmap_results, so OUI lookup
+    # had nothing to feed). The Hipcam RealServer firmware family
+    # always returns `Server: Hipcam RealServer/V1.0` which matches
+    # the http_headers field in the Hipcam/Microseven CAMERA_DB entry.
+    if host_meta is not None and not brand_name and host_meta.get("server_header"):
+        try:
+            re_id = _identify_camera_brand(host_meta, force=True)
+            if re_id and re_id["name"] != "Generic IP Camera":
+                brand_entry = re_id
+                brand_name = re_id["name"]
+                throttle_type = str(re_id.get("throttle_type", "") or "")
+                log.info(f"  Brand identified post-walk: {brand_name} "
+                         f"(via Server header: "
+                         f"{host_meta.get('server_header','')!r})")
+        except Exception as e:
+            log.debug(f"  brand-id (post-walk): {e}")
     if found:
         log.info(f"  RTSP OK (Layer 1): {found}")
         return found
@@ -3210,7 +3275,7 @@ def find_rtsp_path(ip: str, port: int,
         found, lr2 = _probe_rtsp_paths_single_socket(
             ip, port, ordered, username, password,
             timeout=sock_timeout, extra_query="?Axis-Orig-Sw=true",
-            label="",
+            label="", host_meta=host_meta,
         )
         looks_like_rtsp = looks_like_rtsp or lr2
         if found:
@@ -5916,6 +5981,7 @@ def _match_stream_db(camera: dict) -> dict | None:
         camera.get("page_title", ""),       # rc2: HTTP page title
         camera.get("server_header", ""),    # rc2: HTTP/RTSP Server header
         camera.get("nmap_product", ""),     # rc2: nmap service banner
+        camera.get("onvif_scopes", ""),     # rc2.1.1: WS-Discovery scopes
     ]).lower()
     best_slug, best_len = None, 0
     for slug, entry in STREAM_DB.items():
@@ -5941,6 +6007,7 @@ def _match_stream_db_slug(camera: dict) -> str | None:
         camera.get("page_title", ""),       # rc2: HTTP page title
         camera.get("server_header", ""),    # rc2: HTTP/RTSP Server header
         camera.get("nmap_product", ""),     # rc2: nmap service banner
+        camera.get("onvif_scopes", ""),     # rc2.1.1: WS-Discovery scopes
     ]).lower()
     best_slug, best_len = None, 0
     for slug, entry in STREAM_DB.items():
@@ -8525,8 +8592,11 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
         # this copy the identification result is silently lost when the
         # local host_meta dict goes out of scope, leaving cam["manufacturer"]
         # empty and the UI displaying just the generic ONVIF name.
+        # rc2.1.1: server_header is also persisted — populated by the
+        # walker if it captured a Server: line from any RTSP response.
         if host_meta:
-            for k in ("manufacturer", "mac_addr", "mac_vendor"):
+            for k in ("manufacturer", "mac_addr", "mac_vendor",
+                      "server_header"):
                 v = host_meta.get(k, "")
                 if v:
                     d[k] = v
@@ -8800,6 +8870,13 @@ async def run_scan() -> None:
                     "mac_vendor":   _scan_extra.get("mac_vendor", ""),
                     "vendor":       _scan_extra.get("mac_vendor", ""),
                     "nmap_product": _scan_extra.get("nmap_product", ""),
+                    # rc2.1.1: ONVIF scopes string from WS-Discovery
+                    # response — often contains manufacturer/hardware/
+                    # model identifiers that brand-id uses to match
+                    # CAMERA_DB entries. Critical for cameras whose
+                    # mac_vendor isn't available (Microseven not in
+                    # nmap_results due to its own TCP rate-limit).
+                    "onvif_scopes": onvif.get("onvif_scopes", ""),
                 }
                 if not prev.get("credentials"):
                     unauth_url = await loop.run_in_executor(
@@ -8809,9 +8886,13 @@ async def run_scan() -> None:
                 # was identified. Capture it for the record below so the
                 # UI shows the real brand (e.g. "Hipcam/Microseven")
                 # instead of just the generic ONVIF name ("IPCAM").
-                _brand = onvif_meta.get("manufacturer", "")
-                _mac_v = onvif_meta.get("mac_vendor", "")
-                _mac_a = onvif_meta.get("mac_addr", "")
+                # rc2.1.1: also capture server_header — populated by the
+                # walker mid-probe — for downstream display + diagnosis
+                # in the camera Identity panel.
+                _brand   = onvif_meta.get("manufacturer", "")
+                _mac_v   = onvif_meta.get("mac_vendor", "")
+                _mac_a   = onvif_meta.get("mac_addr", "")
+                _srv_hdr = onvif_meta.get("server_header", "")
                 if unauth_url:
                     log.info(f"  ONVIF {ip}: unauthenticated RTSP works "
                              f"({_strip_creds(unauth_url)}) — skipping cred prompt")
@@ -8827,9 +8908,10 @@ async def run_scan() -> None:
                         "rtsp_probe_ok": True,
                         "onvif": True, "user_saved": bool(prev), "display": "proxy",
                         "verdict": "camera", "verdict_reason": "ONVIF + unauth RTSP",
-                        "manufacturer": _brand,
-                        "mac_addr":     _mac_a,
-                        "mac_vendor":   _mac_v,
+                        "manufacturer":  _brand,
+                        "mac_addr":      _mac_a,
+                        "mac_vendor":    _mac_v,
+                        "server_header": _srv_hdr,
                     }
                 else:
                     CAMERAS[cid] = {
@@ -8843,9 +8925,10 @@ async def run_scan() -> None:
                         "status": "needs_credentials",
                         "onvif": True, "user_saved": bool(prev), "display": "proxy",
                         "verdict": "camera", "verdict_reason": "ONVIF discovered",
-                        "manufacturer": _brand,
-                        "mac_addr":     _mac_a,
-                        "mac_vendor":   _mac_v,
+                        "manufacturer":  _brand,
+                        "mac_addr":      _mac_a,
+                        "mac_vendor":    _mac_v,
+                        "server_header": _srv_hdr,
                     }
 
         # Merge multicast-only SSDP cameras
