@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.8-rc2.2"  # must match config.yaml
+CURRENT_VERSION = "2.2.8-rc2.3"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3549,7 +3549,7 @@ def probe_http_identity(ip: str, port: int, timeout: int = 5) -> dict:
             result["manufacturer"] = entry["name"]
             result["notes"]        = entry["notes"]
             result["is_camera"]    = True
-            log.info(f"  HTTP identity: {ip}:{port}{url} → {entry['name']}")
+            log.info(f"  HTTP identity {url}: → {entry['name']}")
             return True
 
         # Generic camera keyword fallback
@@ -5590,13 +5590,35 @@ async def handle_focus_set_tier(request: web.Request) -> web.Response:
 
 async def handle_focus_profiles(request: web.Request) -> web.Response:
     """GET /snap/focus/profiles — return the stream profiles for the focused
-    camera, so the JS can populate the resolution dropdown."""
+    camera, so the JS can populate the resolution dropdown.
+
+    rc2.3: response shape changed from a bare profile array to an object
+    that also includes the server's current adaptive-tier state. The JS
+    uses `current_tier` to seed the Resolution / FPS dropdowns and the
+    `_manualTierActive` flag so that the controls reflect what's actually
+    streaming — not just the dropdowns' default `selected` option.
+
+    Without this, when a user closes Enhanced view and re-opens it, the
+    server may have a preserved `manual_override` (e.g. tier 31 = profile[1])
+    while the dropdowns reset to profile[0]. The result is a UI lie:
+    Resolution shows "3840x2160" while the actual stream is "1280x720".
+
+    Response shape:
+        {
+          "profiles": [{"idx": 0, "label": "...", "width": ..., ...}, ...],
+          "current_tier": {
+              "manual_override": true|false,
+              "profile_idx":     int,
+              "fps":             int|null   # null == uncapped
+          }
+        }
+    """
     camera_id = _FOCUSED_CAMERA
     if not camera_id:
-        return web.json_response([])
+        return web.json_response({"profiles": [], "current_tier": None})
     camera = CAMERAS.get(camera_id)
     if not camera:
-        return web.json_response([])
+        return web.json_response({"profiles": [], "current_tier": None})
     profiles = camera.get("stream_profiles") or []
     if not profiles:
         # Synthesise from legacy stream_url / sub_stream_url
@@ -5628,7 +5650,25 @@ async def handle_focus_profiles(request: web.Request) -> web.Response:
             label = f"Stream {i+1}"
         result.append({"idx": i, "label": label, "width": w, "height": h,
                        "codec": c or "?"})
-    return web.json_response(result)
+
+    # rc2.3: read the server's current adaptive-tier state so the JS can
+    # seed the Resolution / FPS dropdowns to match what's actually streaming.
+    # _FOCUS_ADAPTIVE may be empty (camera just entered focus and hasn't
+    # locked yet) — return None in that case so the JS uses its defaults.
+    ada = _FOCUS_ADAPTIVE.get(camera_id)
+    current_tier = None
+    if ada and ada.get("ladder"):
+        ladder    = ada["ladder"]
+        tier_idx  = ada.get("tier_idx", 0)
+        if 0 <= tier_idx < len(ladder):
+            prof_idx, fps_val = ladder[tier_idx]
+            current_tier = {
+                "manual_override": bool(ada.get("manual_override", False)),
+                "profile_idx":     prof_idx,
+                "fps":             fps_val,   # None == uncapped
+            }
+
+    return web.json_response({"profiles": result, "current_tier": current_tier})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7565,8 +7605,22 @@ async function _loadFocusProfiles() {
   try {
     const r = await fetch(BASE + '/snap/focus/profiles');
     if (!r.ok) return;
-    const profiles = await r.json();
-    if (!profiles || profiles.length === 0) return;  // keep placeholder if empty
+    const data = await r.json();
+
+    // rc2.3: response is now an object {profiles, current_tier}.
+    // Older shape was a bare array — handle both for safety even though
+    // server and JS ship together (defensive against split deployments
+    // and stale browser caches across upgrades).
+    let profiles, currentTier;
+    if (Array.isArray(data)) {
+      profiles    = data;
+      currentTier = null;
+    } else {
+      profiles    = data.profiles    || [];
+      currentTier = data.current_tier || null;
+    }
+    if (profiles.length === 0) return;  // keep placeholder if empty
+
     _focusProfiles = profiles;
     const sel = document.getElementById('focus-res-sel');
     if (!sel) return;
@@ -7578,9 +7632,46 @@ async function _loadFocusProfiles() {
       opt.textContent = p.label;
       sel.appendChild(opt);
     });
-    // Default to first (highest-res) profile
-    sel.value = '0';
-    _focusCurProf = 0;
+
+    // rc2.3: seed both dropdowns from the server's current adaptive-tier
+    // state. Without this, re-entering enhanced view after a manual tier
+    // change resets the dropdowns to profile[0]/uncapped while the server
+    // is still streaming whatever the user last selected — the dropdowns
+    // become a UI lie. When current_tier is null (server hasn't locked
+    // a tier yet), fall through to the default "0 / uncapped".
+    const fpsSel = document.getElementById('focus-fps-sel');
+    if (currentTier && currentTier.profile_idx !== undefined) {
+      // Resolution: only set if the profile_idx is actually in the dropdown.
+      const profIdxStr = String(currentTier.profile_idx);
+      const optExists  = _focusProfiles.some(p => String(p.idx) === profIdxStr);
+      if (optExists) {
+        sel.value      = profIdxStr;
+        _focusCurProf  = currentTier.profile_idx;
+      } else {
+        sel.value      = '0';
+        _focusCurProf  = 0;
+      }
+      // FPS: server returns null for uncapped, int for a cap.
+      if (fpsSel) {
+        const fpsVal = currentTier.fps;
+        const newVal = (fpsVal === null || fpsVal === undefined)
+                         ? 'uncapped' : String(fpsVal);
+        // Only set if the option exists (defensive — in case the FPS
+        // dropdown was changed in a future build to have fewer rungs).
+        const fpsOptExists = Array.from(fpsSel.options)
+                                  .some(o => o.value === newVal);
+        fpsSel.value = fpsOptExists ? newVal : 'uncapped';
+      }
+      // If it's a manual override on the server, the user previously
+      // pinned a tier — surface that immediately so "Adapted Quality"
+      // shows up without waiting for the next dropdown change.
+      _manualTierActive = !!currentTier.manual_override;
+    } else {
+      sel.value      = '0';
+      _focusCurProf  = 0;
+      if (fpsSel) fpsSel.value = 'uncapped';
+      _manualTierActive = false;
+    }
   } catch(e) {}
 }
 
