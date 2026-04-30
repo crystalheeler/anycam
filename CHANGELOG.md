@@ -1,3 +1,87 @@
+## 2.2.8-rc2.1.1
+The Microseven still showed as "IPCAM" after rc2.1. Live test
+exposed two problems my smoke tests missed:
+
+1. The Microseven wasn't in `nmap_results` at all. Its own per-IP TCP rate-limit
+   defeats nmap's port-sweep — only the Hikvision responded to the
+   focused scan. So `scan_meta_by_ip` had no entry for the Microseven and the
+   rc2.1 `mac_vendor` plumbing silently did nothing.
+
+2. Even if the Microseven had been in `nmap_results`, `_get_brand_throttle_info`
+   in `find_rtsp_path` made a `dict(host_meta)` COPY before calling
+   `_identify_camera_brand`. Brand-id wrote `manufacturer` to the copy,
+   which was then discarded. The rc2.1 ONVIF wiring read
+   `onvif_meta["manufacturer"]` after `find_rtsp_path` returned, but
+   that field was never actually populated.
+
+### Fixes
+
+- `find_rtsp_path` now calls `_identify_camera_brand(host_meta)` directly
+  (replacing the rc2 `_get_brand_throttle_info` indirection that made
+  a dict copy). The mutation is in place — caller reads it back after
+  return, as originally intended.
+
+- `_probe_rtsp_paths_single_socket` accepts an optional `host_meta`
+  parameter and captures the RTSP `Server:` header from the first
+  response that includes one. Written to `host_meta["server_header"]`
+  in a `finally` block so it persists on every return path (success,
+  no-match, exception, socket-dead). The Hipcam RealServer firmware
+  family always returns `Server: Hipcam RealServer/V1.0` even on auth-
+  required responses, which directly matches the `http_headers`
+  keywords in the Hipcam/Microseven CAMERA_DB entry.
+
+- `find_rtsp_path` runs a SECOND brand-identification pass after the
+  Layer 1 walker returns. If the first pass didn't identify anything
+  (no `mac_vendor` available), the post-walk pass uses the newly
+  captured `server_header`. This is the path that catches the
+  Microseven case — its OUI may not register under "Microseven" in
+  the IEEE database, but its RTSP server header reliably does.
+
+- `onvif_discover` now captures the FULL ONVIF Scopes list from the
+  WS-Discovery response (joined into a space-separated string), not
+  just the `name` scope. Many ONVIF cameras populate Scopes with
+  manufacturer/hardware/model identifiers
+  (e.g. `onvif://www.onvif.org/manufacturer/Microseven`), which match
+  CAMERA_DB `aliases` and `onvif_scopes` keywords.
+
+- The new `onvif_scopes` field flows through:
+  - `onvif_discover` → result dict
+  - ONVIF post-scan loop → `onvif_meta`
+  - `_identify_camera_brand` haystack
+  - `_match_stream_db` and `_match_stream_db_slug` haystacks
+  - persisted on `CAMERAS[cid]["server_header"]` so it shows in the
+    Identity panel for diagnosis
+
+### Smoke tests added (all pass)
+
+- ONVIF scopes string alone → identifies Microseven
+- RTSP Server header alone → identifies Hipcam family
+- STREAM_DB recipe matches via either signal alone
+- Walker correctly writes `server_header` to `host_meta` (or leaves
+  empty when the host is unreachable)
+
+### What this means at runtime
+
+For the Microseven (the test camera that motivated this release):
+- ONVIF discovery captures the full Scopes string (likely contains
+  manufacturer/Microseven info, identifying it before any RTSP probe).
+- Even if Scopes are sparse, the Layer 1 RTSP walker captures
+  `Server: Hipcam RealServer/V1.0` from the OPTIONS or DESCRIBE
+  response on the first path attempted.
+- The post-walk brand-id pass identifies it as Hipcam/Microseven.
+- The card title displays "Hipcam/Microseven" instead of "IPCAM".
+
+### Code paths that don't change
+
+- The CAMERA_DB structure and STREAM_DB recipes from rc2 — unchanged.
+- `probe_rtsp_socket` (Layer 2's strict per-path probe) — unchanged.
+- Layer 2 itself — unchanged.
+- The `RTSP_PATHS` list — unchanged (2.2.9 rollback rule still applies).
+- The rc2.1 fixes (Layer 2 fast-bail, cred-relogin reorder, `displayName`
+  helper) — unchanged.
+
+---
+
 ## 2.2.8-rc2.1
 Bug-fix release for rc2. Four issues surfaced during the Microseven /
 Hikvision live test:

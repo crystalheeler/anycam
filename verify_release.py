@@ -68,15 +68,19 @@ CONTRACTS = {
                               "_parse_track_url", "m=video"],
     # rc2 — single-socket Layer 1 walker bounded by RFC 2326 §9.1 semantics
     # rc2.1 — additionally tracks looks_like_rtsp for Layer 2 fast-bail
+    # rc2.1.1 — captures Server: header into host_meta for post-walk brand-id
     "_probe_rtsp_paths_single_socket": ["DESCRIBE", "SETUP", "TEARDOWN",
                                          "next_cseq", "auth_val", "extra_query",
-                                         "looks_like_rtsp"],
+                                         "looks_like_rtsp", "captured_server",
+                                         "host_meta"],
     # rc2 — find_rtsp_path orchestrator with brand-aware short-circuits
     # rc2.1 — adds Layer 2 fast-bail when looks_like_rtsp is False
+    # rc2.1.1 — direct _identify_camera_brand call + post-walk re-id pass
     "find_rtsp_path":        ["_probe_rtsp_paths_single_socket",
                               "rate_limit_per_ip_tcp", "no_rtsp_support",
                               "session_time_cap", "requires_query_param",
-                              "Layer 2", "looks_like_rtsp"],
+                              "Layer 2", "looks_like_rtsp",
+                              "_identify_camera_brand", "post-walk"],
     # rc2 — brand-id helper that wires mac_vendor into manufacturer detection
     "_identify_camera_brand": ["mac_vendor", "manufacturer",
                                "identify_manufacturer"],
