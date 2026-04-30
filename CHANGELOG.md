@@ -1,3 +1,103 @@
+## 2.2.8-rc2.2
+**Empirically-driven fix** — replaces rc2.1.1's speculation-based work.
+Used Claude in Chrome to inspect the live rc2.1 install on the user's
+Pi, then probed the Microseven directly via the HA terminal:
+
+```
+RTSP OPTIONS: Server: Hipcam RealServer/V1.0
+HTTP HEAD /:  Server: Hipcam
+HTTP body:    <title>Microseven Cameras works with Amazon Alexa</title>
+              <meta name="keywords" content="Microseven Surveillance...">
+```
+
+Three confirmed identification signals — any one alone matches the
+Hipcam/Microseven CAMERA_DB entry. The CAMERA_DB tuning from rc2 was
+correct; the problem was elsewhere in the flow.
+
+### Bugs fixed
+
+**1. Cred-auth wipes identification fields.** When a user enters
+credentials and the camera transitions from `<ip>_onvif` →
+`<ip>_onvif_<profileToken>`, the cred-auth handler at line ~6269
+does a complete `CAMERAS[cid] = {...}` dict-replacement that
+silently drops `manufacturer`/`mac_*`/`page_title`/`server_header`
+fields. This affected ALL cameras that needed credentials, including
+the Hikvision (which rc2.1's brand-id correctly identified as
+"Hikvision" during scan but lost during cred-acceptance). Fixed by
+spreading a `_id_preserve` dict from the OLD record into the new
+dict literal.
+
+**2. The Microseven has no usable identification signals during scan.**
+- Not in nmap_results (own per-IP TCP rate-limit defeats the focused
+  port sweep), so no mac_vendor.
+- ONVIF Scopes capture from rc2.1.1 didn't trigger because the Microseven's
+  WS-Discovery response is sparse.
+- Walker's RTSP Server header capture never fired — the unauth-RTSP
+  shortcut hits 401 immediately on auth-required cameras and the
+  walker doesn't get to the response-reading stage that captures
+  Server. (rc2.1.1's walker change is still useful for OTHER scenarios
+  — see "what didn't change" below.)
+
+Fixed by adding an HTTP identity probe in the ONVIF post-scan loop,
+called BEFORE find_rtsp_path. probe_http_identity already exists and
+already runs identify_manufacturer against the response — its results
+just weren't being wired in for ONVIF-discovered cameras. The function
+captures Server header, page title, and runs CAMERA_DB matching on
+the body. For the Microseven this matches via `Server: Hipcam` (CAMERA_DB
+http_headers keyword), `<title>Microseven...</title>` (CAMERA_DB
+aliases keyword), or both.
+
+**3. Brand-id never re-runs in the cred-auth handler.** Even with
+fix #1 preserving fields, if the pre-cred discovery stage didn't
+identify the brand (rare but possible — slow ONVIF responses or
+HTTP timeout), the cred-auth handler wouldn't try again with the
+newly-acquired stream URL or other signals. Added re-id passes
+after both the ONVIF profile path's dict-replace (line ~6302)
+and the RTSP fallback's `camera.update()` (line ~6427). New log
+line on hit: `Brand identified post-cred-auth: Hipcam/Microseven`.
+
+### What didn't change
+
+- rc2.1.1's walker `Server:` header capture is preserved. It doesn't
+  help the Microseven's auth-required scenario specifically (the walker
+  runs in find_rtsp_path discovery flow, not cred-auth flow), but
+  it provides defense-in-depth for cameras with HTTP disabled,
+  HTTP-behind-auth, RTSP-only firmware, or cross-VLAN configs where
+  HTTP doesn't reach AnyCam.
+- All earlier rc2 work (CAMERA_DB throttle fields, STREAM_DB recipes,
+  single-socket Layer 1 walker, brand-aware short-circuits).
+- All earlier rc2.1 work (Layer 2 fast-bail, cred-relogin reorder,
+  `displayName` JS helper).
+- All earlier rc2.1.1 work (direct `_identify_camera_brand` call,
+  walker's Server-header capture, ONVIF Scopes capture).
+
+### Smoke tests (all 5 pass)
+
+- HTTP body+title combined identifies Microseven (matches the Microseven HTTP)
+- RTSP `Server: Hipcam RealServer/V1.0` identifies Microseven (matches the Microseven RTSP)
+- HTTP `Server: Hipcam` short form identifies Microseven (matches the Microseven HEAD)
+- page_title alone identifies Microseven (defense-in-depth)
+- `_id_preserve` dict captures non-empty fields, skips empties
+
+Critical: tests 1-3 use the EXACT byte strings the Microseven returns in
+production (validated empirically via the HA terminal). Not speculation.
+
+### What this means at runtime
+
+For the Microseven, `[INFO] HTTP identity 10.0.0.22:
+'Hipcam/Microseven' (server='Hipcam', title='Microseven Cameras works
+with Amazon Alexa')` should appear during the ONVIF post-scan loop,
+BEFORE the RTSP probe. The card title displays "Hipcam/Microseven"
+instead of "IPCAM" both before AND after cred-auth.
+
+For the Hikvision, identification was already happening during
+scan (rc2.1) but getting wiped during cred-auth. The card title
+should now display "HIKVISION DS-2DE4A425IW-DE" (ONVIF name) AND
+the Identity panel should show Manufacturer: Hikvision (preserved
+through cred-acceptance).
+
+---
+
 ## 2.2.8-rc2.1.1
 The Microseven still showed as "IPCAM" after rc2.1. Live test
 exposed two problems my smoke tests missed:

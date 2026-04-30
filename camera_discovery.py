@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.8-rc2.1.1"  # must match config.yaml
+CURRENT_VERSION = "2.2.8-rc2.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -6266,6 +6266,19 @@ async def api_set_credentials(request) -> web.Response:
                 # from previous sessions or wrong stream URLs don't carry forward.
                 # _drain_stderr will re-set it at runtime if ffmpeg actually sees
                 # "Multi-layer HEVC coding is not implemented" on this stream.
+                # rc2.2: preserve identification fields from the OLD camera
+                # record across this dict-replacement. Without this, anything
+                # the scan stage identified (manufacturer via mac_vendor /
+                # ONVIF scopes / HTTP probe / RTSP Server header) is silently
+                # wiped when the user enters credentials and the camera
+                # transitions to a profile-based id (e.g. _onvif → _onvif_<token>).
+                _id_preserve = {
+                    k: camera.get(k, "")
+                    for k in ("manufacturer", "mac_addr", "mac_vendor",
+                              "page_title", "server_header", "onvif_scopes",
+                              "device_notes")
+                    if camera.get(k)
+                }
                 CAMERAS[cid] = {
                     "id": cid, "ip": ip,
                     "hostname": camera.get("hostname", ip),
@@ -6281,10 +6294,28 @@ async def api_set_credentials(request) -> web.Response:
                     "http_snap_url":       http_snap_url,
                     "http_snap_auth_mode": http_snap_auth_mode,
                     "rtsp_probe_ok":       bool(main_s.get("probe_ok")),
+                    **_id_preserve,
                     **extra_urls,
                     **main_details,
                 }
                 CAMERAS.pop(camera_id, None)
+                # rc2.2: re-run brand identification on the new record
+                # one last time. The dict-replacement above retained
+                # any preserved manufacturer via _id_preserve, but if
+                # NONE was identified pre-cred (e.g. the Microseven was unable to
+                # identify because nmap-rate-limit blocked it AND the
+                # rc2.2 HTTP probe was racing against the user entering
+                # creds) this gives one more chance using all current
+                # signals on the record.
+                _new = CAMERAS[cid]
+                if not _new.get("manufacturer"):
+                    try:
+                        _re_id = _identify_camera_brand(_new, force=True)
+                        if _re_id and _re_id["name"] != "Generic IP Camera":
+                            log.info(f"  Brand identified post-cred-auth: "
+                                     f"{_re_id['name']}")
+                    except Exception as e:
+                        log.debug(f"  brand-id (post-cred-auth ONVIF): {e}")
                 save_cameras()
                 cam = CAMERAS.get(cid)
                 if cam:
@@ -6393,6 +6424,20 @@ async def api_set_credentials(request) -> web.Response:
                   http_snap_url=http_snap_url,
                   http_snap_auth_mode=http_snap_auth_mode,
                   **details)
+    # rc2.2: brand-id pass on the updated camera record. camera.update()
+    # above merges fields onto the existing record (so manufacturer
+    # survives if it was already set), but if pre-cred discovery never
+    # identified the brand (no mac_vendor / no usable HTTP signals /
+    # no captured RTSP server header), this catches the case where the
+    # newly-stored stream_url + db_entry match would identify it now.
+    if not camera.get("manufacturer"):
+        try:
+            _re_id = _identify_camera_brand(camera, force=True)
+            if _re_id and _re_id["name"] != "Generic IP Camera":
+                log.info(f"  Brand identified post-cred-auth: "
+                         f"{_re_id['name']}")
+        except Exception as e:
+            log.debug(f"  brand-id (post-cred-auth RTSP): {e}")
     save_cameras()
     log.info(f"Credentials accepted for {camera_id}: {_strip_creds(url)}")
     return web.json_response({"status": "ok", "stream_url": _strip_creds(url), **details})
@@ -8878,6 +8923,37 @@ async def run_scan() -> None:
                     # nmap_results due to its own TCP rate-limit).
                     "onvif_scopes": onvif.get("onvif_scopes", ""),
                 }
+                # rc2.2: HTTP identity probe before RTSP. Catches cameras
+                # whose ONVIF returns only a generic name and whose MAC
+                # OUI isn't available (Microseven case — empirically
+                # verified to return `Server: Hipcam` HTTP header and
+                # `<title>Microseven Cameras...</title>` page title, both
+                # of which match the Hipcam/Microseven CAMERA_DB entry).
+                # Runs on port 80 first, then xaddrs port if different.
+                # Doesn't fail loudly if the camera has HTTP disabled —
+                # rc2.1.1 walker Server-header capture is the fallback.
+                try:
+                    http_id = await loop.run_in_executor(
+                        _THREAD_POOL, probe_http_identity, ip, 80, 4)
+                    if http_id.get("server"):
+                        onvif_meta["server_header"] = http_id["server"]
+                    if http_id.get("title"):
+                        onvif_meta["page_title"] = http_id["title"]
+                    if http_id.get("manufacturer"):
+                        # probe_http_identity already matched against
+                        # CAMERA_DB — adopt directly rather than re-running
+                        onvif_meta["manufacturer"] = http_id["manufacturer"]
+                        log.info(f"  HTTP identity {ip}: "
+                                 f"{http_id['manufacturer']!r} "
+                                 f"(server={http_id.get('server','')!r}, "
+                                 f"title={http_id.get('title','')!r})")
+                    elif http_id.get("server") or http_id.get("title"):
+                        log.info(f"  HTTP identity {ip}: unmatched "
+                                 f"(server={http_id.get('server','')!r}, "
+                                 f"title={http_id.get('title','')!r})")
+                except Exception as e:
+                    log.debug(f"  HTTP identity probe failed for {ip}: {e}")
+
                 if not prev.get("credentials"):
                     unauth_url = await loop.run_in_executor(
                         _THREAD_POOL, find_rtsp_path, ip, 554, "", "", onvif_meta)
@@ -8889,10 +8965,12 @@ async def run_scan() -> None:
                 # rc2.1.1: also capture server_header — populated by the
                 # walker mid-probe — for downstream display + diagnosis
                 # in the camera Identity panel.
+                # rc2.2: page_title also captured — set by HTTP probe above.
                 _brand   = onvif_meta.get("manufacturer", "")
                 _mac_v   = onvif_meta.get("mac_vendor", "")
                 _mac_a   = onvif_meta.get("mac_addr", "")
                 _srv_hdr = onvif_meta.get("server_header", "")
+                _pg_ttl  = onvif_meta.get("page_title", "")
                 if unauth_url:
                     log.info(f"  ONVIF {ip}: unauthenticated RTSP works "
                              f"({_strip_creds(unauth_url)}) — skipping cred prompt")
@@ -8912,6 +8990,12 @@ async def run_scan() -> None:
                         "mac_addr":      _mac_a,
                         "mac_vendor":    _mac_v,
                         "server_header": _srv_hdr,
+                        # rc2.2: persist page_title + onvif_scopes so
+                        # the cred-auth dict-replacement at line ~6269
+                        # can preserve them, and so they're visible in
+                        # the camera Identity panel.
+                        "page_title":    _pg_ttl,
+                        "onvif_scopes":  onvif_meta.get("onvif_scopes", ""),
                     }
                 else:
                     CAMERAS[cid] = {
@@ -8929,6 +9013,9 @@ async def run_scan() -> None:
                         "mac_addr":      _mac_a,
                         "mac_vendor":    _mac_v,
                         "server_header": _srv_hdr,
+                        # rc2.2: see comment above
+                        "page_title":    _pg_ttl,
+                        "onvif_scopes":  onvif_meta.get("onvif_scopes", ""),
                     }
 
         # Merge multicast-only SSDP cameras
