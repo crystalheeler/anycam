@@ -1,3 +1,73 @@
+## 2.2.8-rc2.4
+**Bugfix release on rc2.3.** Two fixes prompted by live observation that
+manual tier changes back to 4K silently no-op'd and the 4K-fallback toast
+fired on user-driven dropdown changes.
+
+### Bugs fixed
+
+**1. Manual tier change silently no-ops (the primary fix).** Race
+condition in `snap_loop`'s outer `finally` block. When Enhanced view
+re-entry cancelled an existing background snap_loop task and started a
+fresh native-res task, the OLD task's outer `finally` ran AFTER the NEW
+task had already set `state["proc"] = new_proc`. The old task's cleanup
+unconditionally cleared `state["proc"] = None`, clobbering the new
+task's reference. Subsequent `handle_focus_set_tier` calls (manual
+Resolution / FPS dropdown changes) read `state.get("proc")` to find
+ffmpeg and kill it for relaunch at the new profile/fps — but the read
+returned `None`, so the kill was skipped, ada was updated, and ffmpeg
+kept running the previous profile indefinitely. From the user's
+perspective, picking 4K from the dropdown looked correct but the stream
+stayed at 720p forever.
+
+Reproduction in rc2.3 log (11:55:38 → 11:55:49): re-entered Enhanced
+view at 11:55:38, server resumed at preserved tier 31 (profile[1]
+720p), task race nuked `state["proc"]`. User picked 4K at 11:55:49,
+saw the `Focus: manual tier [0] profile[0]` log line but no
+`killed ffmpeg to apply manual tier change` line. ffmpeg kept running
+720p (frames stayed at ~360KB) for the next 4 minutes.
+
+Fix: apply the same conditional-clear pattern that already protects
+`state["task"]` to `state["proc"]`. Both fields are now only cleared
+when the exiting task is `asyncio.current_task()` — preventing a
+zombie cleanup from corrupting a successor's state. The same protection
+was added for `state["task"]` in an earlier release for the analogous
+duplicate-loop bug; missing the same fix on `state["proc"]` was an
+oversight.
+
+**2. 4K-fallback toast fires on manual dropdown changes.** The
+"4K too demanding for this hardware — falling back to secondary
+stream" toast was triggered whenever the `X-Step-Res` header changed
+from a 4K-class resolution to anything smaller — without distinguishing
+server-driven auto-degrade from user-driven manual change. When the
+user clicked the Resolution dropdown to pick 720p, the toast popped up
+incorrectly implying the system was overloaded, when in fact the user
+was driving the change.
+
+Fix: gate the toast on `!_manualTierActive`. When the user has
+manually pinned a tier (via the Resolution / FPS dropdowns), the toast
+is suppressed. The genuine auto-degrade case (adaptive controller
+stepping down due to fast-death / repeated EOF when the user has NOT
+touched the controls) still surfaces the toast as before.
+
+### What didn't change
+
+- No changes to the adaptive controller's decision logic.
+  `manual_override` already correctly bypassed `fast_death` and
+  `restart_overflow` checks (lines 4960, 4976) — the "locking" the
+  user observed was actually the proc-race blocking the relaunch, not
+  the adaptive logic ignoring `manual_override`.
+- No changes to `handle_focus_set_tier` itself. The kill path was
+  correct; the bug was upstream in `state["proc"]` getting nulled out
+  before the kill ran.
+- No CAMERA_DB or schema changes.
+- The latent dropdown-flicker bug (poll loop unconditionally setting
+  `sel.disabled` / `sel.title` / `opacity` every 60ms — surfaces when
+  `snapMode` oscillates between rtsp and http) remains unfixed at
+  user's request — flagged for rc3+ work.
+- The "Unknown child process pid X" cosmetic asyncio warning remains.
+- 4K HEVC software-decode instability remains — expected to improve
+  with rc3 hardware decode.
+
 ## 2.2.8-rc2.3
 **Targeted UI consistency fix** — addresses a UI lie where the Resolution
 and FPS dropdowns in Enhanced view show stale defaults after re-entering
