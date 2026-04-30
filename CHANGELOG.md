@@ -1,3 +1,74 @@
+## 2.2.8-rc2.3
+**Targeted UI consistency fix** — addresses a UI lie where the Resolution
+and FPS dropdowns in Enhanced view show stale defaults after re-entering
+Enhanced view on a camera with a previously-set manual tier override.
+
+### Bugs fixed
+
+**1. Dropdown-state-sync (the main fix).** Server-side adaptive-tier state
+(`_FOCUS_ADAPTIVE[camera_id]["manual_override"]` + `tier_idx`) is preserved
+across Enhanced view sessions, but the JS dropdown state was not. When a
+user closed Enhanced view and re-opened it, `_startFocusPoll` reset
+`_focusCurProf = 0` and the dropdowns initialized to their first option —
+while the server immediately resumed streaming the previously-selected
+manual tier. Result: Resolution dropdown displayed e.g. "3840x2160 HEVC"
+while the actual stream was "1280x720" (visible in the info bar). The
+"Adapted Quality" indicator also failed to appear until the user manually
+changed a dropdown.
+
+Fix in two parts:
+
+  a. Server: `GET /snap/focus/profiles` response shape changed from a
+     bare profile array to an object that includes both the profiles and
+     the server's current tier state:
+
+       {
+         "profiles":     [{"idx": 0, "label": "...", ...}, ...],
+         "current_tier": {"manual_override": bool,
+                          "profile_idx":     int,
+                          "fps":             int|null}
+       }
+
+     `current_tier` is null when no tier has locked yet (camera just
+     entered focus mode). The endpoint reads `_FOCUS_ADAPTIVE[camera_id]`
+     and indexes its ladder by `tier_idx` to derive the current
+     `(profile_idx, fps)` pair.
+
+  b. JS: `_loadFocusProfiles` now handles both response shapes (defensive
+     against split deployments and stale browser caches across upgrades).
+     When `current_tier` is present, it seeds the Resolution dropdown
+     from `profile_idx`, the FPS dropdown from `fps` (null → "uncapped"),
+     and sets `_manualTierActive` from `manual_override` so the "Adapted
+     Quality" indicator surfaces immediately on Enhanced view open.
+
+**2. Malformed `HTTP identity:` log line.** Format string at the
+HTTP-identity DB-match log call concatenated `{port}` directly to `{url}`,
+where `url` is already a full URL (e.g. `http://10.0.0.22:80/`),
+producing log lines like:
+
+    HTTP identity: 10.0.0.22:80http://10.0.0.22:80/ → Hipcam/Microseven
+
+Cosmetic-only — no other code path read this log line, the HTTP-identity
+return value and side-effects were correct. Fixed to:
+
+    HTTP identity http://10.0.0.22:80/: → Hipcam/Microseven
+
+### Investigation results carried forward
+
+- "Unknown child process pid X, will report returncode 255" warning
+  remains. Confirmed cosmetic via code review: comes from Python's
+  asyncio `MultiLoopChildWatcher._do_waitpid` race between SIGCHLD
+  delivery and explicit `proc.wait()` after PIPE-attached stdout EOF.
+  No zombie accumulation (the warning means the process was already
+  reaped, not that it wasn't). snap_loop control flow uses `frames`
+  count, not `proc.returncode`, so the synthesized `rc=255` has no
+  functional effect. Future cleanup: `asyncio.set_child_watcher(
+  asyncio.PidfdChildWatcher())` at app startup (Python 3.9+ Linux).
+
+- the Microseven 4K HEVC ffmpeg EOF every ~30 frames remains. Camera-firmware /
+  software-decode-cost issue; expected to improve with rc3 hardware
+  decode work.
+
 ## 2.2.8-rc2.2
 **Empirically-driven fix** — replaces rc2.1.1's speculation-based work.
 Used Claude in Chrome to inspect the live rc2.1 install on the user's
