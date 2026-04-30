@@ -1,3 +1,96 @@
+## 2.2.8-rc2.1
+Bug-fix release for rc2. Four issues surfaced during the Microseven /
+Hikvision live test:
+
+1. The Microseven card still rendered as "IPCAM" (the generic ONVIF name)
+   because the brand identification we added in rc2 only ran in
+   `_probe_host_port`. The Microseven actually flowed through the ONVIF
+   unauth-RTSP shortcut path, which never received the mac_vendor signal
+   from the focused-scan stage and never persisted the manufacturer back
+   to the camera record.
+
+2. The Hikvision cred-relogin took 30-45s before recovering. The flow
+   tried direct RTSP on the stored ONVIF/HTTP port (80) before falling
+   through to the standard RTSP port (554). Since port 80 is HTTP and
+   doesn't speak RTSP, Layer 1 walked all paths fast (each got an HTTP
+   400 reply, not an RTSP reply), then Layer 2 ground through 10 sockets
+   × 5s sleep before its bail-after-10 finally fired.
+
+3. The `_probe_rtsp_paths_single_socket` walker had no way to tell its
+   caller "this server isn't speaking RTSP at all" vs "this server is
+   speaking RTSP but no path matched." Both cases returned `None`,
+   leaving the orchestrator to spend Layer 2 retrying anyway.
+
+4. Card titles for cameras whose ONVIF returned a generic name (IPCAM,
+   Network Camera, Camera, ONVIF Device, Webcam, Video Server) had no
+   way to display the more useful brand string from CAMERA_DB.
+
+### Fixes
+
+- `_probe_rtsp_paths_single_socket` now returns a tuple
+  `(url_or_none, looks_like_rtsp_server)`. The second element is True if
+  any response from the host started with `RTSP/` (any status, even 4xx),
+  False if no RTSP-formatted reply was ever received. `find_rtsp_path`
+  uses this to fast-bail Layer 2 when Layer 1 confirmed the server isn't
+  RTSP. The two callers (Layer 1 normal walk, Layer 1 Axis-Companion
+  query-param retry) both unpack the tuple. Failure paths preserve the
+  current `looks_like_rtsp` state at the moment of the exception.
+
+- The cred-relogin flow now tries port 554 BEFORE the stored port when
+  they differ. Most cameras run RTSP on 554 and ONVIF/HTTP on 80; for
+  cameras where the stored port is 80 (the ONVIF discovery port), this
+  saves the round-trip through port 80 entirely. The Layer 2 fast-bail
+  also covers this case as a safety net.
+
+- The focused-scan stage now builds a `scan_meta_by_ip` lookup
+  (`mac_addr`, `mac_vendor`, `nmap_product` per IP) immediately after
+  `nmap_results` is populated. The downstream ONVIF unauth-RTSP shortcut
+  uses this lookup to populate `onvif_meta` with the mac_vendor signal,
+  so brand identification fires for ONVIF-discovered cameras whose ONVIF
+  returns 0 profiles (the Microseven case). After `find_rtsp_path`
+  returns, the manufacturer that `_identify_camera_brand` wrote to
+  `onvif_meta` in place is captured and persisted to the resulting
+  CAMERAS record (both the unauth-RTSP-success path and the
+  needs-credentials path).
+
+- `_probe_host_port`'s `base()` builder now copies `manufacturer`,
+  `mac_addr`, and `mac_vendor` from `host_meta` onto the returned cam
+  dict. Without this, the brand identification result was being silently
+  lost when `host_meta` went out of scope at end of probe. The fix
+  applies to all flows through `_probe_host_port` (focused-scan,
+  broad-sweep, and any other call site that passes `host_meta`).
+
+- Frontend: new `displayName(cam)` helper prefers `cam.manufacturer`
+  over `cam.name` when the latter matches a generic-name regex
+  (`IPCAM`, `IP Camera`, `Network Camera`, `Camera`, `ONVIF Device`,
+  `Webcam`, `Video Server` — anchored full-string match). User-given
+  names that happen to contain "Camera" (e.g. "Front Porch Camera") are
+  NOT treated as generic. Used in `cardHTML` (main grid) and
+  `openFocus` (enhanced view).
+
+### What this means at runtime
+
+- The Microseven now displays as "Hipcam/Microseven" in the card
+  title instead of "IPCAM".
+- The Hikvision cred-relogin finds the stream within ~5-10 seconds
+  instead of 30-45 seconds.
+- Any camera whose discovery flowed through the ONVIF unauth-RTSP
+  shortcut now gets the mac_vendor / manufacturer / mac_addr fields
+  populated on its camera record.
+
+### Code paths that don't change
+
+- The CAMERA_DB structure, throttle fields, and STREAM_DB extensions
+  from rc2 are unchanged.
+- `probe_rtsp_socket` (the strict per-path probe used by Layer 2) is
+  unchanged. Layer 2 itself is unchanged behaviorally — only the entry
+  condition into Layer 2 changed.
+- The 2.2.9 RTSP_PATHS rollback rule still applies: list itself
+  unchanged, brand-specific paths from STREAM_DB still prepended
+  per-probe.
+
+---
+
 ## 2.2.8-rc2
 This release candidate adds a single-socket two-layer RTSP path-walking probe,
 brand-aware throttle short-circuits driven by the new CAMERA_DB throttle

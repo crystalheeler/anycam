@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.8-rc2"  # must match config.yaml
+CURRENT_VERSION = "2.2.8-rc2.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2837,10 +2837,17 @@ def _probe_rtsp_paths_single_socket(
     timeout: float = 6.0,
     extra_query: str = "",
     label: str = "",
-) -> str | None:
+) -> tuple[str | None, bool]:
     """rc2 Layer 1: Walk multiple RTSP paths through OPTIONS+DESCRIBE+
-    SETUP+TEARDOWN on a SINGLE TCP socket. Returns the first matching
-    rtsp:// URL or None if no path produced a streamable track.
+    SETUP+TEARDOWN on a SINGLE TCP socket. Returns a tuple
+    (url_or_none, looks_like_rtsp_server).
+
+    looks_like_rtsp_server is True if at least one response started with
+    "RTSP/" — even if the status was 4xx/5xx, the server demonstrably
+    speaks RTSP. False means we received NO RTSP-formatted responses
+    (server is HTTP, raw TCP, or the path failed before any handshake).
+    rc2.1 callers use this to fast-bail Layer 2 when the wrong port was
+    probed (e.g. RTSP path-walk against port 80 of a Hikvision NVR).
 
     This is the universal-safe probe per RFC 2326 §9.1 (servers must
     queue per-socket requests in order; no documented camera firmware
@@ -2856,7 +2863,12 @@ def _probe_rtsp_paths_single_socket(
     for Axis Companion). Empty by default.
     """
     if not paths:
-        return None
+        return (None, False)
+
+    # rc2.1: tracks whether ANY response from the server started with
+    # "RTSP/" — used by the orchestrator to skip Layer 2 when we
+    # confirmed the host doesn't speak RTSP at this port.
+    looks_like_rtsp: bool = False
 
     pfx = f"  [probe_rtsp_walk {label or host + ':' + str(port)}]"
 
@@ -2976,7 +2988,13 @@ def _probe_rtsp_paths_single_socket(
                 next_cseq += 1
             except Exception as e:
                 _log(f"OPTIONS exception → bailing single-socket walk: {e}")
-                return None  # socket dead, caller should fall back to Layer 2
+                return (None, looks_like_rtsp)  # socket dead
+            # rc2.1: detect RTSP-server-ness. ANY response starting with
+            # "RTSP/" — even 4xx/5xx — confirms the server speaks RTSP.
+            # If no path ever produces an RTSP-formatted reply, the
+            # orchestrator skips Layer 2 (wrong port / not an RTSP server).
+            if resp.startswith("RTSP/"):
+                looks_like_rtsp = True
             if "RTSP/1.0 2" not in resp:
                 _log(f"OPTIONS → {resp.split(CRLF)[0].strip()!r} — skipping path")
                 # Path-level rejection: try next path, socket likely still alive
@@ -2990,7 +3008,7 @@ def _probe_rtsp_paths_single_socket(
                 next_cseq += 1
             except Exception as e:
                 _log(f"DESCRIBE exception → bailing: {e}")
-                return None
+                return (None, looks_like_rtsp)
             if "RTSP/1.0 200" in resp:
                 pass  # continue to SDP parse
             elif "401" in resp:
@@ -3018,7 +3036,7 @@ def _probe_rtsp_paths_single_socket(
                     next_cseq += 1
                 except Exception as e:
                     _log(f"DESCRIBE-auth exception → bailing: {e}")
-                    return None
+                    return (None, looks_like_rtsp)
                 if "RTSP/1.0 200" not in resp:
                     _log(f"DESCRIBE-auth → {resp.split(CRLF)[0].strip()!r}")
                     continue
@@ -3052,7 +3070,7 @@ def _probe_rtsp_paths_single_socket(
                     next_cseq += 1
                 except Exception as e:
                     _log(f"SETUP exception → bailing: {e}")
-                    return None
+                    return (None, looks_like_rtsp)
                 if "RTSP/1.0 200" in resp:
                     for line in resp.split(CRLF):
                         if line.lower().startswith("session:"):
@@ -3084,14 +3102,14 @@ def _probe_rtsp_paths_single_socket(
             except Exception:
                 pass  # TEARDOWN failure is non-fatal — socket close releases state
 
-            return rtsp_url
+            return (rtsp_url, True)
 
         # Walked every path without finding a streamable track
-        return None
+        return (None, looks_like_rtsp)
 
     except Exception as e:
         _log(f"single-socket walk exception: {e}")
-        return None
+        return (None, looks_like_rtsp)
     finally:
         if sock:
             try:
@@ -3175,7 +3193,7 @@ def find_rtsp_path(ip: str, port: int,
         label_for_log += f" ({brand_name})"
     log.info(f"  RTSP probe: Layer 1 (single-socket walk, "
              f"{len(ordered)} paths) — {label_for_log}")
-    found = _probe_rtsp_paths_single_socket(
+    found, looks_like_rtsp = _probe_rtsp_paths_single_socket(
         ip, port, ordered, username, password,
         timeout=sock_timeout, label="",
     )
@@ -3189,11 +3207,12 @@ def find_rtsp_path(ip: str, port: int,
     if throttle_type == "requires_query_param":
         log.info(f"  RTSP probe: Layer 1 retry with Axis-Orig-Sw=true "
                  f"({brand_name}, requires_query_param)")
-        found = _probe_rtsp_paths_single_socket(
+        found, lr2 = _probe_rtsp_paths_single_socket(
             ip, port, ordered, username, password,
             timeout=sock_timeout, extra_query="?Axis-Orig-Sw=true",
             label="",
         )
+        looks_like_rtsp = looks_like_rtsp or lr2
         if found:
             log.info(f"  RTSP OK (Layer 1+query): {found}")
             return found
@@ -3202,6 +3221,18 @@ def find_rtsp_path(ip: str, port: int,
     if throttle_type == "rate_limit_per_ip_tcp":
         log.info(f"  RTSP Layer 2 skipped: {brand_name} has per-IP TCP "
                  f"rate-limit (multi-socket would be RST'd)")
+        return None
+
+    # ── rc2.1: Layer 2 fast-bail — host doesn't speak RTSP at all ───
+    # If Layer 1 walked every path and got NO RTSP-formatted responses
+    # (server is HTTP, raw TCP, or otherwise non-RTSP), Layer 2 will
+    # waste 50+s grinding through 10 sockets × 5s sleep before its own
+    # bail kicks in. Skip it. Common when a Hikvision NVR is probed on
+    # port 80 (HTTP) instead of 554 (RTSP) by the cred-relogin flow.
+    if not looks_like_rtsp:
+        log.info(f"  RTSP Layer 2 skipped: {ip}:{port} did not respond "
+                 f"with RTSP format on any path — likely wrong port or "
+                 f"non-RTSP service")
         return None
 
     # ── Layer 2: multi-socket fallback with 5s delay + bail-after-10 ─
@@ -6217,22 +6248,30 @@ async def api_set_credentials(request) -> web.Response:
 
     # RTSP direct — for ONVIF cards always try port 554 in addition to stored port
     if proto in ("RTSP", "DVR", "ONVIF"):
-        # Try stored port first
-        log.info(f"  Trying direct RTSP on {ip}:{port}")
-        url = await loop.run_in_executor(
-            _THREAD_POOL, find_rtsp_path, ip, port, username, password, camera)
-        # For ONVIF cards the stored port is often 80; always also try 554
-        if not url and port != 554:
-            log.info(f"  Trying direct RTSP on {ip}:554 (standard RTSP port)")
+        # rc2.1: try standard RTSP port 554 BEFORE stored port when they
+        # differ. Prevents the Hikvision-NVR-probed-on-port-80 case where
+        # find_rtsp_path Layer 1 would burn 30-45s grinding paths against
+        # the HTTP/ONVIF port before falling through to 554. The Layer 2
+        # fast-bail ALSO covers this (skips when Layer 1 sees no RTSP
+        # responses), but trying 554 first short-circuits even Layer 1.
+        url = None
+        if port != 554:
+            log.info(f"  Trying direct RTSP on {ip}:554 (standard RTSP port, "
+                     f"before stored port {port})")
             url = await loop.run_in_executor(
                 _THREAD_POOL, find_rtsp_path, ip, 554, username, password, camera)
+        if not url:
+            log.info(f"  Trying direct RTSP on {ip}:{port}")
+            url = await loop.run_in_executor(
+                _THREAD_POOL, find_rtsp_path, ip, port, username, password, camera)
         if not url and camera.get("xaddrs"):
             parsed = urlparse(camera["xaddrs"])
             rtsp_port = parsed.port or 554
-            log.info(f"  Trying RTSP via xaddrs {ip}:{rtsp_port}")
-            url = await loop.run_in_executor(
-                _THREAD_POOL, find_rtsp_path, parsed.hostname or ip,
-                rtsp_port, username, password, camera)
+            if rtsp_port != 554 and rtsp_port != port:
+                log.info(f"  Trying RTSP via xaddrs {ip}:{rtsp_port}")
+                url = await loop.run_in_executor(
+                    _THREAD_POOL, find_rtsp_path, parsed.hostname or ip,
+                    rtsp_port, username, password, camera)
         log.info(f"  RTSP result: {_strip_creds(url) if url else 'None'}")
     elif proto == "MJPEG":
         url = await loop.run_in_executor(
@@ -7234,7 +7273,7 @@ async function _startFocusPoll(camId, cam) {
   const img    = document.getElementById('focus-img');
   const infoEl = document.getElementById('focus-info');
   const codec  = (cam.stream_codec || '?').toUpperCase();
-  const name   = cam.name || cam.ip;
+  const name   = displayName(cam);
 
   // Show placeholder until first real measurements arrive
   infoEl.textContent = name + ' — loading…';
@@ -7740,8 +7779,26 @@ async function testStream(ev, cid) {
   finally { btn.textContent = orig; btn.disabled = false; }
 }
 
+/* rc2.1: generic-name detector. ONVIF often returns boilerplate names
+   like "IPCAM" or "Network Camera" instead of a real model. When the
+   camera record has a manufacturer (typically set from MAC OUI lookup),
+   prefer that over the generic ONVIF default. Regex anchors the entire
+   string so user-given names that happen to contain "Camera" (e.g.
+   "Front Porch Camera") are NOT treated as generic. */
+function _isGenericCamName(s) {
+  if (!s) return true;
+  return /^(ip\s*cam(era)?|network\s*camera|camera|onvif[\s_-]*(device|camera)?|webcam|video\s*server)$/i.test(s.trim());
+}
+
+function displayName(cam) {
+  if (cam.manufacturer && _isGenericCamName(cam.name || '')) {
+    return cam.manufacturer;
+  }
+  return cam.name || cam.hostname || cam.ip;
+}
+
 function cardHTML(cam) {
-  const name     = esc(cam.name || cam.hostname || cam.ip);
+  const name     = esc(displayName(cam));
   // Lock badge: yellow key when creds not stored, green key when stored.
   // Only shown for cameras that actually involve credentials — pure-public
   // streams (e.g. open MJPEG with no auth) get no badge.
@@ -8454,7 +8511,7 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
             log.debug(f"  brand-id pre-probe: {e}")
 
     def base(proto: str, url: str, status: str, display: str = "proxy") -> dict:
-        return {
+        d = {
             "id": cid, "ip": ip, "hostname": hostname, "port": port,
             "protocol": proto, "stream_url": url,
             "requires_credentials": False, "credentials": None,
@@ -8462,6 +8519,18 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
             "user_saved": bool(prev), "display": display,
             "verdict": verdict, "verdict_reason": reason,
         }
+        # rc2.1: persist brand identity from host_meta onto the camera
+        # record. _identify_camera_brand() set host_meta["manufacturer"]
+        # in place during the pre-probe brand-id step above; without
+        # this copy the identification result is silently lost when the
+        # local host_meta dict goes out of scope, leaving cam["manufacturer"]
+        # empty and the UI displaying just the generic ONVIF name.
+        if host_meta:
+            for k in ("manufacturer", "mac_addr", "mac_vendor"):
+                v = host_meta.get(k, "")
+                if v:
+                    d[k] = v
+        return d
 
     if initial_protocol in ("RTSP", "DVR"):
         url = await loop.run_in_executor(
@@ -8589,6 +8658,22 @@ async def run_scan() -> None:
         nmap_results  = await loop.run_in_executor(_THREAD_POOL, focused_nmap_scan, sorted(all_live))
         responding_ips = {h["ip"] for h in nmap_results}
 
+        # rc2.1: build a per-IP lookup of (mac_addr, mac_vendor, nmap_product)
+        # so the ONVIF unauth-RTSP shortcut downstream can identify the
+        # camera's brand from MAC OUI before its RTSP probe runs. Without
+        # this, ONVIF-discovered cameras whose ONVIF returns 0 profiles
+        # (e.g. Microseven) fell through to find_rtsp_path with no
+        # host_meta, brand-id never fired, and the UI showed only the
+        # generic ONVIF name "IPCAM" instead of "Hipcam/Microseven".
+        scan_meta_by_ip: dict[str, dict] = {}
+        for _h in nmap_results:
+            _ports = _h.get("open_ports", [])
+            scan_meta_by_ip[_h["ip"]] = {
+                "mac_addr":   _h.get("mac_addr", ""),
+                "mac_vendor": _h.get("mac_vendor", ""),
+                "nmap_product": (_ports[0].get("product", "") if _ports else ""),
+            }
+
         SCAN_STATE.update(progress=55, stage=3,
                           stage_label="Stage 3/4 — Stream probing",
                           message=f"Stage 3/4 — Probing {len(nmap_results)} responding host(s)…")
@@ -8699,19 +8784,34 @@ async def run_scan() -> None:
                 # works AND the user hasn't already saved creds, skip the cred
                 # prompt entirely and create a ready card right away.
                 unauth_url = ""
+                # rc2.1: pull mac_vendor + nmap_product from the focused
+                # scan results (built above into scan_meta_by_ip). This
+                # gives the ONVIF flow the OUI vendor signal it needs to
+                # identify Microseven/Hipcam-family cameras (whose ONVIF
+                # often returns 0 profiles, forcing the path-walking
+                # shortcut taken below).
+                _scan_extra = scan_meta_by_ip.get(ip, {})
+                onvif_meta = {
+                    "ip": ip,
+                    "hostname":     onvif.get("name", ip),
+                    "name":         onvif.get("name", ""),
+                    "xaddrs":       onvif.get("xaddrs", ""),
+                    "mac_addr":     _scan_extra.get("mac_addr", ""),
+                    "mac_vendor":   _scan_extra.get("mac_vendor", ""),
+                    "vendor":       _scan_extra.get("mac_vendor", ""),
+                    "nmap_product": _scan_extra.get("nmap_product", ""),
+                }
                 if not prev.get("credentials"):
-                    # rc2: pass ONVIF metadata as host_meta so brand-aware
-                    # probe short-circuits can fire (especially relevant
-                    # for Microseven/Hipcam — ONVIF often returns 0
-                    # profiles, forcing this RTSP path-walking fallback)
-                    onvif_meta = {
-                        "ip": ip,
-                        "hostname": onvif.get("name", ip),
-                        "name": onvif.get("name", ""),
-                        "xaddrs": onvif.get("xaddrs", ""),
-                    }
                     unauth_url = await loop.run_in_executor(
                         _THREAD_POOL, find_rtsp_path, ip, 554, "", "", onvif_meta)
+                # rc2.1: find_rtsp_path → _identify_camera_brand mutated
+                # onvif_meta in place, setting manufacturer if a brand
+                # was identified. Capture it for the record below so the
+                # UI shows the real brand (e.g. "Hipcam/Microseven")
+                # instead of just the generic ONVIF name ("IPCAM").
+                _brand = onvif_meta.get("manufacturer", "")
+                _mac_v = onvif_meta.get("mac_vendor", "")
+                _mac_a = onvif_meta.get("mac_addr", "")
                 if unauth_url:
                     log.info(f"  ONVIF {ip}: unauthenticated RTSP works "
                              f"({_strip_creds(unauth_url)}) — skipping cred prompt")
@@ -8727,6 +8827,9 @@ async def run_scan() -> None:
                         "rtsp_probe_ok": True,
                         "onvif": True, "user_saved": bool(prev), "display": "proxy",
                         "verdict": "camera", "verdict_reason": "ONVIF + unauth RTSP",
+                        "manufacturer": _brand,
+                        "mac_addr":     _mac_a,
+                        "mac_vendor":   _mac_v,
                     }
                 else:
                     CAMERAS[cid] = {
@@ -8740,6 +8843,9 @@ async def run_scan() -> None:
                         "status": "needs_credentials",
                         "onvif": True, "user_saved": bool(prev), "display": "proxy",
                         "verdict": "camera", "verdict_reason": "ONVIF discovered",
+                        "manufacturer": _brand,
+                        "mac_addr":     _mac_a,
+                        "mac_vendor":   _mac_v,
                     }
 
         # Merge multicast-only SSDP cameras
