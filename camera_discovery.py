@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.8-rc2.3"  # must match config.yaml
+CURRENT_VERSION = "2.2.8-rc2.4"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -5055,13 +5055,21 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             await asyncio.sleep(backoff * random.uniform(0.9, 1.1))
 
     finally:
-        state["proc"] = None
-        # Only clear state["task"] if it still points to this task.
-        # If handle_snapshot already started a new card-view loop while this
-        # focus task was winding down, state["task"] now points to that newer
-        # loop — clearing it unconditionally would cause handle_snapshot to
-        # start yet another loop (the root cause of the duplicate-loop bug).
+        # rc2.4: Gate state["proc"] = None on current-task ownership to fix
+        # the "manual tier change silently no-ops" bug. Without this guard, an
+        # OLD snap_loop task whose cancellation finalises AFTER the NEW task
+        # has already written `state["proc"] = new_proc` would overwrite that
+        # reference back to None on its way out. handle_focus_set_tier then
+        # reads `state.get("proc")` → None → skips the kill path → the new
+        # ffmpeg keeps running its old profile/fps forever despite the manual
+        # tier change being recorded server-side.
+        #
+        # The same conditional already protects state["task"] below for the
+        # analogous reason (clearing it unconditionally caused the duplicate-
+        # loop bug that handle_snapshot's task-presence check was supposed to
+        # prevent). Apply the same pattern to state["proc"].
         if state.get("task") is asyncio.current_task():
+            state["proc"] = None
             state["task"] = None
         log.info(f"SNAP [{camera_id}]: loop done")
 
@@ -7486,7 +7494,16 @@ async function _startFocusPoll(camId, cam) {
           // _stepRes is the previously seen tier resolution; if it was 4K-class
           // (≥3840 wide) and the new tier is smaller, the adaptive controller
           // just stepped down due to fast-death (CPU couldn't keep up with 4K).
-          if (_stepRes && _stepRes !== stepRes) {
+          //
+          // rc2.4: Only surface the toast when the step-down is *automatic*.
+          // When _manualTierActive is true, the user is driving the resolution
+          // change themselves and the popup is misleading — it implies the
+          // system is auto-degrading when in fact the user just clicked a
+          // smaller resolution from the dropdown. Gating on !_manualTierActive
+          // suppresses the popup in that case while preserving it for the
+          // genuine auto-degrade path (when the adaptive controller steps
+          // down on its own due to repeated EOF / fast-death).
+          if (_stepRes && _stepRes !== stepRes && !_manualTierActive) {
             const oldW = parseInt((_stepRes.split('x')[0]) || '0');
             const newW = parseInt((stepRes.split('x')[0])  || '0');
             if (oldW >= 3840 && newW > 0 && newW < oldW) {
