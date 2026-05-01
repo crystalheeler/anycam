@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.8-rc2.6"  # must match config.yaml
+CURRENT_VERSION = "2.2.9"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2616,17 +2616,45 @@ def probe_rtsp_socket(host: str, port: int, path: str,
     def _build_auth(auth_val: str, method: str, uri: str) -> str | None:
         """Build an Authorization header value for the given method+uri,
         given the WWW-Authenticate value from a prior 401 response.
-        Reuses the nonce — RFC 2617 allows nonce reuse for subsequent
-        requests in the same session, recomputing the response digest
-        with the new method+uri in HA2."""
+
+        2.2.9 — qop-aware per RFC 2617 §3.2.2. When the challenge carries
+        qop="auth" (observed live on Hikvision DS-2DE4A425IW with realm
+        "IP Camera(F0818)" — was previously emitting a no-qop challenge,
+        switched to qop="auth" sometime during rc2.x debugging), the
+        response digest formula changes to
+            MD5(HA1:nonce:nc:cnonce:qop:HA2)
+        and the Authorization header must include qop, cnonce, and nc.
+        Falls back to the no-qop formula MD5(HA1:nonce:HA2) when qop is
+        absent (Hipcam family, older Hikvision firmware, etc.).
+
+        Reuses the server's nonce — RFC 2617 allows nonce reuse for
+        subsequent requests in the same session, recomputing the response
+        digest with the new method+uri in HA2 (and incrementing nc when
+        qop is in play, though we only issue one qop-aware request per
+        nonce here so nc=00000001 is correct)."""
         if auth_val.lower().startswith("digest"):
             realm_m = re.search(r'realm="([^"]*)"', auth_val)
             nonce_m = re.search(r'nonce="([^"]*)"', auth_val)
             if not (realm_m and nonce_m):
                 return None
             realm, nonce = realm_m.group(1), nonce_m.group(1)
+            qop_m = re.search(r'qop="?([^",]+)"?', auth_val)
             ha1 = hashlib.md5(f"{username}:{realm}:{password}".encode()).hexdigest()
             ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
+            if qop_m:
+                qop_val = qop_m.group(1).strip()
+                # Pick "auth" when offered (most common); some servers send
+                # "auth,auth-int" and we only do auth (no message-body integrity).
+                qop = "auth" if "auth" in qop_val else qop_val.split(",")[0].strip()
+                cnonce = os.urandom(8).hex()
+                nc = "00000001"
+                rsp = hashlib.md5(
+                    f"{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}".encode()
+                ).hexdigest()
+                return (f'Digest username="{username}", realm="{realm}", '
+                        f'nonce="{nonce}", uri="{uri}", '
+                        f'qop={qop}, nc={nc}, cnonce="{cnonce}", '
+                        f'response="{rsp}"')
             rsp = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
             return (f'Digest username="{username}", realm="{realm}", '
                     f'nonce="{nonce}", uri="{uri}", response="{rsp}"')
@@ -2911,15 +2939,30 @@ def _probe_rtsp_paths_single_socket(
 
     def _build_auth(auth_val: str, method: str, uri: str) -> str | None:
         """Identical to probe_rtsp_socket's _build_auth — RFC 2617 nonce
-        reuse with per-method+uri response digest recompute."""
+        reuse with per-method+uri response digest recompute. 2.2.9 — adds
+        qop=auth handling per RFC 2617 §3.2.2 for cameras (e.g. Hikvision
+        DS-2DE4A425IW) that emit qop="auth" in the challenge."""
         if auth_val.lower().startswith("digest"):
             realm_m = re.search(r'realm="([^"]*)"', auth_val)
             nonce_m = re.search(r'nonce="([^"]*)"', auth_val)
             if not (realm_m and nonce_m):
                 return None
             realm, nonce = realm_m.group(1), nonce_m.group(1)
+            qop_m = re.search(r'qop="?([^",]+)"?', auth_val)
             ha1 = hashlib.md5(f"{username}:{realm}:{password}".encode()).hexdigest()
             ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
+            if qop_m:
+                qop_val = qop_m.group(1).strip()
+                qop = "auth" if "auth" in qop_val else qop_val.split(",")[0].strip()
+                cnonce = os.urandom(8).hex()
+                nc = "00000001"
+                rsp = hashlib.md5(
+                    f"{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}".encode()
+                ).hexdigest()
+                return (f'Digest username="{username}", realm="{realm}", '
+                        f'nonce="{nonce}", uri="{uri}", '
+                        f'qop={qop}, nc={nc}, cnonce="{cnonce}", '
+                        f'response="{rsp}"')
             rsp = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
             return (f'Digest username="{username}", realm="{realm}", '
                     f'nonce="{nonce}", uri="{uri}", response="{rsp}"')
@@ -6004,6 +6047,26 @@ def _safe_cam(cam: dict) -> dict:
         s["stream_url"] = _strip_creds(s["stream_url"])
     if s.get("sub_stream_url"):
         s["sub_stream_url"] = _strip_creds(s["sub_stream_url"])
+    # 2.2.9 — strip embedded creds from per-profile URL fields too. Without
+    # this, GET /api/cameras leaked username:password in stream_profiles[].url
+    # and stream_profile_N_url top-level keys (middle profiles only — main is
+    # stored in stream_url and tail is in sub_stream_url, both already stripped
+    # above). The leak only surfaced after a camera was authenticated, since
+    # cred-less cards have no stream_profiles populated yet.
+    if isinstance(s.get("stream_profiles"), list):
+        clean_profiles = []
+        for prof in s["stream_profiles"]:
+            if isinstance(prof, dict):
+                pcopy = dict(prof)
+                if pcopy.get("url"):
+                    pcopy["url"] = _strip_creds(pcopy["url"])
+                clean_profiles.append(pcopy)
+            else:
+                clean_profiles.append(prof)
+        s["stream_profiles"] = clean_profiles
+    for k in list(s.keys()):
+        if k.startswith("stream_profile_") and k.endswith("_url") and s.get(k):
+            s[k] = _strip_creds(s[k])
     s["has_credentials"]  = bool(s.get("credentials"))
     s["upgrade_missing"]  = bool(s.get("upgrade_missing"))
     s["has_sub_stream"]   = bool(s.get("sub_stream_url"))
@@ -7475,21 +7538,7 @@ setInterval(pollMotion, 3000);
 /* ── Focus / enhanced view ───────────────────────────────────────────────── */
 let _focusCamId   = null;
 let _focusTimer   = null;
-let _focusWarnOK  = {};   // camId → bool (user acknowledged warning this session)
 let _focus4kWarnTimer = null;   // auto-dismiss timer for the 4K-fallback toast
-
-function _estimateCpuPct(cam) {
-  // Rough heuristic: hevc cost based on pixels × fps relative to Pi 4 capacity
-  const codec = (cam.stream_codec || '').toLowerCase();
-  const w     = cam.stream_width  || 1280;
-  const h     = cam.stream_height || 720;
-  const fps   = cam.stream_fps    || 10;
-  const isH   = codec === 'hevc' || codec === 'h265';
-  // Pi 4 baseline: hevc 1920×1080×30 ≈ 50% of 4 cores = 200% cpu equiv
-  const basePx = 1920 * 1080 * 30;
-  const thisPx = w * h * fps * (isH ? 2.5 : 1.0);   // hevc costs ~2.5× h264
-  return Math.round((thisPx / basePx) * 50);
-}
 
 async function openFocus(camId) {
   const cam = cameras.find(c => c.id === camId);
