@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.8-rc2.5"  # must match config.yaml
+CURRENT_VERSION = "2.2.8-rc2.6"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -4516,6 +4516,26 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         return
 
     state        = _snap_state(camera_id)
+
+    # rc2.6: Each snap_loop call is a fresh failure-tracking session.
+    # zero_frame_streak persists in _SNAP[cid] across calls (which is needed
+    # for proc/task tracking), but the streak counter should NOT inherit from
+    # the previous session — that broke the streak==N equality triggers below
+    # (transport flip at 3, http_snap fallback at 3 in native_res, codec clear
+    # at 5 in non-native). Once streak got bumped past a threshold in one
+    # session, the next snap_loop call started with that elevated value and
+    # never went back through the equality-trigger value. Result on the Microseven
+    # Microseven (rc2.5): stuck in failure loop with backoff=16s indefinitely
+    # because streak was already >=5 when we entered, never went back through
+    # 3 to fire the http_snap fallback. Reset on entry fixes that. The
+    # *_fired flags accompany the streak: each safety-net trigger fires at
+    # most once per session, and the flag prevents re-firing if streak ever
+    # hits the threshold again later.
+    state["zero_frame_streak"]  = 0
+    state["transport_flip_fired"] = False
+    state["http_snap_fired"]      = False
+    state["codec_clear_fired"]    = False
+
     stream_codec = camera.get("stream_codec", "").lower()
     stream_w     = camera.get("stream_width")  or 0
     stream_h     = camera.get("stream_height") or 0
@@ -4889,7 +4909,11 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 # Flipping to UDP fixes this class of camera entirely.
                 # We try TCP→UDP first; if UDP also fails 3 more times we
                 # flip back to TCP (so the backoff loop still applies).
-                if streak == 3 and not native_res:
+                #
+                # rc2.6: Use >= with fired-flag pattern so the trigger fires
+                # at most once per session even if streak skips past 3.
+                if (streak >= 3 and not native_res
+                        and not state.get("transport_flip_fired")):
                     cam_now = CAMERAS.get(camera_id, {})
                     cur_transport = cam_now.get("preferred_transport", "tcp")
                     if cur_transport == "tcp":
@@ -4898,17 +4922,22 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                                     f"not support TCP RTSP)")
                         CAMERAS[camera_id]["preferred_transport"] = "udp"
                         state["zero_frame_streak"] = 0   # fresh count for UDP
+                        state["transport_flip_fired"] = True
                     elif cur_transport == "udp":
                         log.warning(f"SNAP [{camera_id}]: 3 consecutive 0-frame failures "
                                     f"with UDP also — reverting to TCP")
                         CAMERAS[camera_id]["preferred_transport"] = "tcp"
                         state["zero_frame_streak"] = 0
+                        state["transport_flip_fired"] = True
 
                 # After 3 consecutive 0-frame failures in native_res (enhanced
                 # view) mode, fall back to http_snap_loop if the camera has one.
                 # This handles cameras like the Microseven whose RTSP is
                 # stored but non-functional — ffmpeg keeps crashing, wasting CPU.
-                if streak == 3 and native_res:
+                #
+                # rc2.6: >= with fired-flag pattern (see above).
+                if (streak >= 3 and native_res
+                        and not state.get("http_snap_fired")):
                     cam_now = CAMERAS.get(camera_id, camera)
                     if cam_now.get("http_snap_url"):
                         log.warning(
@@ -4918,14 +4947,21 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         )
                         # Mark state so JS can disable resolution/fps controls
                         _snap_state(camera_id)["http_snap_active"] = True
+                        state["http_snap_fired"] = True
                         await http_snap_loop(camera_id, cam_now)
                         _snap_state(camera_id)["http_snap_active"] = False
                         return
 
-                # After 5 consecutive 0-frame failures on the main stream,
-                # it may be a codec mismatch (e.g. ONVIF says h264, camera sends hevc).
-                # Clear the stored codec so snap_loop lets ffmpeg auto-detect next restart.
-                if streak == 5 and not native_res:
+                # rc2.6: clear stored codec on persistent failure, regardless
+                # of native_res. Was non-native only — but the same wrong-codec
+                # issue affects focus mode too (a sub-stream can have a wrong
+                # codec hint just like the main stream). Without this,
+                # native_res sessions stayed stuck if the cred-auth codec
+                # correction had failed (Hipcam rate-limit window), since the
+                # http_snap fallback above (also new fix) at least lets the UI
+                # degrade gracefully but does not retry RTSP at the corrected
+                # codec.
+                if (streak >= 5 and not state.get("codec_clear_fired")):
                     cam_now = CAMERAS.get(camera_id, {})
                     if cam_now.get("stream_codec"):
                         log.warning(f"SNAP [{camera_id}]: 5 consecutive 0-frame failures — "
@@ -4935,6 +4971,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         profs = CAMERAS[camera_id].get("stream_profiles") or []
                         if profs:
                             profs[0]["stream_codec"] = None
+                        state["codec_clear_fired"] = True
                         # Don't save_cameras here — this is a runtime override only
             else:
                 backoff = 2
@@ -6379,8 +6416,36 @@ async def api_set_credentials(request) -> web.Response:
                     cam_url = build_authenticated_url(cam) or ""
                     async def _fix_codec(cam_id=cid, auth_url=cam_url) -> None:
 
-                        await asyncio.sleep(1.0)
-                        det = await probe_stream_details(auth_url, "RTSP")
+                        # rc2.6: retry with backoff. The original single-shot
+                        # 1s sleep + ffprobe could fail when the camera was
+                        # still in a per-IP TCP rate-limit cooldown from the
+                        # cred-auth probe sequence (Hipcam family: 5s+ window
+                        # between TCP opens). When ffprobe failed, real_codec
+                        # came back empty, the if-check below was False, and
+                        # the codec stayed at the wrong ONVIF-reported value
+                        # — leaving snap_loop using the wrong stream_codec for
+                        # the rest of the session, which propagates into
+                        # downstream behavior (UI labels, hw_decoder selection,
+                        # focus ladder construction).
+                        #
+                        # Retry up to 3 attempts with 5s backoff. Stops on
+                        # first success. Logs each retry so the failure mode
+                        # is observable in logs even if the corrections never
+                        # succeeds (e.g. camera firmware doesn't expose the
+                        # stream to ffprobe).
+                        det = {}
+                        for attempt in range(3):
+                            await asyncio.sleep(1.0 if attempt == 0 else 5.0)
+                            det = await probe_stream_details(auth_url, "RTSP")
+                            if det.get("stream_codec"):
+                                if attempt > 0:
+                                    log.info(f"  Codec correction probe succeeded "
+                                             f"on retry {attempt + 1}/3")
+                                break
+                            if attempt < 2:
+                                log.info(f"  Codec correction probe attempt "
+                                         f"{attempt + 1}/3 returned no codec — "
+                                         f"retrying in 5s")
                         real_codec = (det.get("stream_codec") or "").lower()
                         stored = (CAMERAS.get(cam_id, {}).get("stream_codec") or "").lower()
                         if real_codec and real_codec != stored:
@@ -6392,6 +6457,11 @@ async def api_set_credentials(request) -> web.Response:
                                 if profs:
                                     profs[0]["stream_codec"] = real_codec
                                 save_cameras()
+                        elif not real_codec:
+                            log.warning(f"  Codec correction: all 3 ffprobe attempts "
+                                        f"failed for {cam_id} — stream_codec stays "
+                                        f"as {stored!r} (may be wrong if ONVIF "
+                                        f"misreported)")
                     asyncio.create_task(_fix_codec())
 
                 return web.json_response({"status": "ok", "channels": 1})

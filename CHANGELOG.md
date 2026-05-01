@@ -1,3 +1,108 @@
+## 2.2.8-rc2.6
+**Bugfix release on rc2.5.** Three fixes prompted by live observation that
+the Microseven got stuck in a 16s-backoff failure loop after a manual
+tier change to 720p, with the http_snap safety-net never firing to gracefully
+degrade.
+
+### Bugs fixed
+
+**1. Codec correction was single-shot and could fail silently.** The
+`_fix_codec` task spawned at cred-auth completion did one `await
+asyncio.sleep(1.0)` then a single `probe_stream_details` ffprobe call.
+For cameras with per-IP TCP rate-limit (Hipcam family — 5s+ cooldown
+between TCP opens), that 1-second wait was inside the rate-limit
+window after cred-auth's probe sequence. ffprobe got RST'd, returned
+empty, the if-check `if real_codec and real_codec != stored:` was
+False, and stream_codec stayed at the wrong ONVIF-reported value
+(usually "h264" when the camera actually streams HEVC) for the
+remainder of the session. The wrong codec then propagated into UI
+labels (Resolution dropdown shows "H264" on a HEVC camera), focus
+ladder construction, and hardware-decoder selection.
+
+Fix: retry up to 3 attempts with 5-second backoff. Stops on first
+success. Logs failed attempts so the failure is observable in logs
+even if all retries fail (e.g. camera firmware never exposes the
+stream to ffprobe). Final attempt's failure is logged at WARNING level.
+
+**2. Snap_loop's persistent-failure codec clear was non-native only.**
+The `streak == 5` codec-clear safety net at line 4928 only fired in
+non-native (background thumbnail) mode. The reasoning at the time was
+"native_res mode falls back to http_snap at streak==3, so the codec
+clear isn't needed there." But that reasoning assumed the codec clear
+would have fired in non-native mode FIRST (before user entered Enhanced
+view). Two cases broke this assumption:
+- User enters Enhanced view immediately after cred-auth before any
+  background failures. Codec is wrong, never cleared, native_res
+  fails repeatedly.
+- The streak counter inherited across sessions could skip past the
+  trigger value (see Fix 3 below).
+
+Fix: lifted the `not native_res` restriction. Codec clear now fires
+in BOTH modes. A wrong codec is a wrong codec regardless of which
+loop type is running — the self-heal should be available in both.
+
+**3. Streak counter persisted across snap_loop sessions.** This was
+the highest-impact bug. `state["zero_frame_streak"]` lives in the
+`_SNAP[camera_id]` dict, which is intentionally persistent across
+snap_loop calls (proc/task tracking depends on that). But the streak
+counter is per-failure-tracking-session — it should reset when a new
+snap_loop call starts.
+
+What happened: the Microseven went into a fail loop in non-native mode after
+cred-auth, hit streak >= 5 (codec cleared), eventually self-healed
+on /11, frames flowed, streak reset to 0. User entered Enhanced view.
+Background snap_loop cancelled, native_res snap_loop spawned. New
+session inherited zero_frame_streak from previous session — which
+had been bumped to elevated values during the earlier failures. When
+user picked 720p, /12 started failing immediately (probably Hipcam
+rate-limit on the rapid /11→/12 TCP transition, possibly /12 just
+non-functional on this firmware). Each /12 failure incremented
+streak: 6, 7, 8, ... never landing on the equality-match value of 3
+that would have triggered the http_snap fallback. Result: stuck in
+an indefinite 16-second-backoff loop, no http fallback, dropdowns
+remained enabled but the stream was frozen on the last 4K frame from
+before the kill.
+
+Confirmed in live log: at 15:47–15:49 the Microseven was at restart #130–139
+with `restarting in 16s` on every iteration, all firing `ffmpeg
+starting profile[1] (1280x720)` followed by `Invalid data found ...
+EOF after 0 frames` within ~1 second — and zero `falling back to
+HTTP snap loop` log lines.
+
+Fix (three-part):
+- Reset `state["zero_frame_streak"]` to 0 at snap_loop entry. Each
+  call is now a fresh failure-tracking session.
+- Reset three new "fired" flags at entry: `transport_flip_fired`,
+  `http_snap_fired`, `codec_clear_fired`. Each safety-net trigger
+  consults these to fire at most once per session.
+- Change all three streak triggers from `streak == N` equality to
+  `streak >= N AND not state.fired_flag`. Defensive against any
+  scenario where streak skips past the threshold value (e.g. if a
+  future change to the increment path bumps by more than 1).
+
+### What didn't change
+
+- All rc2.5 fixes (build_authenticated_url url= parameter, snap_loop
+  adaptive launch using prof.url, cardPort badge from stream_url).
+- All earlier fixes through rc2.4.
+- No CAMERA_DB or schema changes. No `verify_release.py` contract
+  changes. No version-symbol renames.
+- The Microseven `/12` sub-stream is currently non-functional in
+  this user's environment (ffmpeg fails immediately on every TCP
+  open even with 16-second backoffs between attempts). This is
+  either Hipcam rate-limit operating below TCP layer or a firmware
+  variant where /12 just doesn't work. rc2.6 doesn't fix that —
+  it only ensures the system gracefully degrades to http_snap when
+  /12 fails repeatedly, instead of getting stuck. With rc2.6, the
+  user picking 720p on a camera with broken /12 will see: stream
+  pause briefly → after ~3 failed attempts (~5–10 seconds) → switch
+  to HTTP snap mode → dropdowns disable with the existing tooltip
+  ("Stream switching unavailable — RTSP not accessible on this
+  camera"). That's the intended graceful-degradation path.
+- The dropdown rapid-flicker bug (latent, deferred at user request).
+- 4K HEVC software-decode instability on the Microseven (separate camera/decoder
+  issue).
+
 ## 2.2.8-rc2.5
 **Bugfix release on rc2.4.** Two fixes prompted by live testing on the Microseven
 Microseven where (1) manual switch back to 720p showed "Adapted Quality:
