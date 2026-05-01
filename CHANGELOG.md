@@ -1,3 +1,84 @@
+## 2.2.9
+**Three small, contained fixes that don't touch the streaming or scan
+paths.** First general release after the rc2.x bugfix cycle.
+
+### Bugs fixed
+
+**1. Digest auth ignored qop="auth" challenges (RFC 2617 non-compliance).**
+The Hikvision camera (DS-2DE4A425IW, realm "IP Camera(F0818)") was
+intermittently emitting Digest challenges with `qop="auth"` and `stale="FALSE"`.
+Historical captures of the same camera's challenge in past sessions showed
+the no-qop form (`Digest realm="IP Camera(F0818)", nonce="..."`), so the
+qop-required form is something the firmware switched to mid-rc2.x debugging
+— probably a state-machine change after repeated probing, or a quiet
+firmware tick. Either way, our `_build_auth` always used the no-qop response
+formula `MD5(HA1:nonce:HA2)`, which is non-compliant when the server's
+challenge advertises qop. The Hikvision rejected every cred-auth attempt, with
+all 31 paths failing in the Layer 1 single-socket walk.
+
+Fix: parse the `qop=` field out of the WWW-Authenticate header. When
+present (qop="auth"), generate a fresh 16-hex-char cnonce per request,
+set nc=00000001, and use the qop-aware response formula
+`MD5(HA1:nonce:nc:cnonce:qop:HA2)` with `qop`, `cnonce`, `nc` included
+in the Authorization header. When absent (the Microseven Hipcam, older Hikvision
+firmware, every other camera in our dataset), the existing no-qop path
+is preserved unchanged. Applied at both `_build_auth` sites — the one
+inside `probe_rtsp_socket` and the one inside `_probe_rtsp_paths_single_socket`.
+
+**2. Credential leak in `GET /api/cameras` per-profile URLs.** The
+`_safe_cam` helper that sanitizes camera records before serializing them
+to the API stripped credentials from `stream_url` and `sub_stream_url`
+but not from the per-profile fields populated after authentication:
+`stream_profiles[i].url` (every profile entry), and the top-level
+`stream_profile_N_url` keys for middle profiles (1..N-2 when there are
+3+ profiles). For an authenticated camera with 2+ ONVIF profiles, an
+HTTP GET against `/api/cameras` returned URLs of the form
+`rtsp://username:password@10.0.0.22:554/12` embedded inside the
+`stream_profiles` array. The leak only surfaced post-cred-auth, since
+unauthenticated cards have no `stream_profiles` populated.
+
+Fix: `_safe_cam` now recurses into `stream_profiles[]`, calling
+`_strip_creds` on each entry's `url` field; and walks all top-level keys
+matching `stream_profile_*_url`, stripping creds from each. Both kinds of
+leak were observed live by inspecting the `/api/cameras` response in the
+browser during rc2 debugging.
+
+**3. Dead JS removed from frontend.** Two leftover identifiers from
+removed features (predate 2.2.7) had been carried forward across every
+release without any references: a `_focusWarnOK = {}` dict declaration
+(1 line) and an `_estimateCpuPct` function (12 lines). Removing both
+saves a small amount of bandwidth per page load. No behavior change.
+
+### Verification
+
+All five `verify_release.py` gates pass: ast.parse, semantic contracts
+(now including `cnonce` in both auth-aware functions and `_safe_cam`'s
+new symbols), CAMERA_DB throttle/confidence-field validation, best-practice
+audit, version consistency, changelog top-entry match. Smoke tests for
+the qop-aware Digest formula validated against RFC 2617 §3.2.2 worked
+example output.
+
+### What didn't change
+
+- RTSP_PATHS list (same 31 paths) — the post-2.2.9 rollback rule still applies
+- CAMERA_DB throttle data, STREAM_DB recipes, single-socket Layer 1 walker
+- Layer 2 multi-socket fallback (5s spacing + bail-after-10)
+- Any of the existing snap_loop, http_snap_loop, or codec-fix machinery
+- ONVIF SOAP, HTTP probe, MJPEG/HLS/WebRTC/WS-RTSP probes
+- Cred-auth UI, scan UI, focus/enhanced view UI
+
+### Known latent issues carried forward
+
+- Pi 4 dtoverlay HEVC HW decode killed permanently — incompatible with
+  HA add-on s6-overlay init (host_pid: true crashes container with
+  "s6-overlay-suexec: fatal: can only run as pid 1"). Software decode
+  remains for HEVC.
+- "Unknown child process pid X" asyncio race — cosmetic, no impact
+- the Microseven 4K HEVC software-decode instability — out of scope
+- Scan progress bar jumpy/inaccurate — out of scope
+- Throttle-Aware Probe Pacing scoped and planned but deferred — see
+  `Throttle_Aware_Probe_Pacing_Plan.md` in the project root
+
 ## 2.2.8-rc2.6
 **Bugfix release on rc2.5.** Three fixes prompted by live observation that
 the Microseven got stuck in a 16s-backoff failure loop after a manual

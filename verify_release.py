@@ -65,14 +65,19 @@ CONTRACTS = {
     "_on_shutdown":          ["_SNAP", "last_frame_wall", "save_cameras",
                               "_THREAD_POOL.shutdown", "terminate"],
     "probe_rtsp_socket":     ["DESCRIBE", "SETUP", "TEARDOWN",
-                              "_parse_track_url", "m=video"],
+                              "_parse_track_url", "m=video", "cnonce"],
+    # 2.2.9 — _safe_cam strips creds from stream_profiles[].url and
+    # stream_profile_N_url top-level keys (rc2.x leak)
+    "_safe_cam":             ["_strip_creds", "stream_profiles",
+                              "stream_profile_"],
     # rc2 — single-socket Layer 1 walker bounded by RFC 2326 §9.1 semantics
     # rc2.1 — additionally tracks looks_like_rtsp for Layer 2 fast-bail
     # rc2.1.1 — captures Server: header into host_meta for post-walk brand-id
+    # 2.2.9 — _build_auth is qop-aware (RFC 2617 §3.2.2)
     "_probe_rtsp_paths_single_socket": ["DESCRIBE", "SETUP", "TEARDOWN",
                                          "next_cseq", "auth_val", "extra_query",
                                          "looks_like_rtsp", "captured_server",
-                                         "host_meta"],
+                                         "host_meta", "cnonce"],
     # rc2 — find_rtsp_path orchestrator with brand-aware short-circuits
     # rc2.1 — adds Layer 2 fast-bail when looks_like_rtsp is False
     # rc2.1.1 — direct _identify_camera_brand call + post-walk re-id pass
