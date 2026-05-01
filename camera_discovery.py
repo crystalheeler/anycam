@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.8-rc2.4"  # must match config.yaml
+CURRENT_VERSION = "2.2.8-rc2.5"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -4570,10 +4570,17 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             prof_idx, tier_fps = ladder[tier_idx]
             profiles  = cam_now.get("stream_profiles") or []
             prof      = profiles[prof_idx] if prof_idx < len(profiles) else {}
-            # Use the profile's URL directly (already has credentials stripped;
-            # build_authenticated_url re-adds them from camera["credentials"]).
-            prof_url_key = prof.get("_url_key", "stream_url")
-            tier_url     = build_authenticated_url(cam_now, url_key=prof_url_key)
+            # rc2.5: use the URL stored in the profile entry directly. Falling
+            # back to camera[url_key] is unreliable — when the cred-auth path
+            # excludes a probe-failed sub-stream from `sub_s` (line ~6269), the
+            # camera dict has sub_stream_url=None even though stream_profiles
+            # still contains the failed candidate's URL. Without this, manual
+            # tier changes to profile[1] silently launched on profile[0]'s URL
+            # because build_authenticated_url's old `or stream_url` fallback
+            # substituted the main stream URL.
+            prof_url     = prof.get("url") or cam_now.get(prof.get("_url_key", "stream_url"))
+            tier_url     = build_authenticated_url(cam_now, url=prof_url) if prof_url \
+                           else build_authenticated_url(cam_now)
             if tier_url and tier_url != url:
                 log.info(f"SNAP [{camera_id}]: adaptive focus — switching to "
                          f"profile[{prof_idx}] for tier {tier_idx}")
@@ -7863,6 +7870,16 @@ function protoBadge(proto) {
        + (PROTO_ICONS[proto] || '') + ' ' + proto + '</span>';
 }
 
+/* rc2.5: pick the most useful port to show in the card badge.
+   cam.port is the camera's primary HTTP/identification port (set at ONVIF
+   discovery, often 80) and may differ from where the actual feed comes
+   from (RTSP on 554, custom HTTP-snap port, etc.). Prefer the port parsed
+   out of stream_url when present so the badge reflects the feed source. */
+function cardPort(cam) {
+  const m = (cam.stream_url || '').match(/:\/\/[^\/]*?:(\d+)/);
+  return m ? m[1] : cam.port;
+}
+
 /* onerror helper — avoids embedding quotes in the generated HTML string */
 function imgError(img) {
   img.style.display = 'none';
@@ -8065,7 +8082,7 @@ function cardHTML(cam) {
     + name + '</span></div>'
     + '<div class="badges">' + protoBadge(cam.protocol)
     + '<span class="badge" style="background:#2d2020;color:#e88">' + cam.ip + '</span>'
-    + '<span class="badge" style="background:#1e2d1e;color:#6fcf97">:' + cam.port + '</span>'
+    + '<span class="badge" style="background:#1e2d1e;color:#6fcf97">:' + cardPort(cam) + '</span>'
     + credBdg + uncBdg + upgradeBdg + hevcPlusBdg + '</div>'
     + '</div>'
     + identityHTML(cam)
@@ -8489,15 +8506,28 @@ function esc(s) {
 # Core streaming / scan functions
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_authenticated_url(camera: dict, url_key: str = "stream_url") -> str | None:
+def build_authenticated_url(camera: dict, url_key: str = "stream_url",
+                            url: str | None = None) -> str | None:
     """Return stream URL with credentials embedded, or None if no URL.
 
+    Lookup order:
+      1. If `url=` is passed, use that string directly (preferred for
+         adaptive-tier launch, where the profile entry stores the URL).
+      2. Otherwise, look up `camera[url_key]`. NO fallback to stream_url
+         when an explicit non-default url_key is requested — silently
+         substituting the main stream's URL when sub_stream_url is None
+         caused manual tier changes to launch ffmpeg with the wrong URL
+         (rc2.4 Microseven sub-stream probe failure → sub_stream_url=None
+         → profile[1] launched on /11 instead of /12; "1280x720" label
+         on actual 4K stream).
+
     Credentials are percent-encoded per RFC 3986 §3.2.1 so that special
-    characters in passwords (e.g. '!' '?' '@' '#' '%') don't corrupt the URL.
-    The safe set matches characters that RTSP/HTTP stacks accept raw in the
-    userinfo component without confusion.
+    characters in passwords (e.g. '!' '?' '@' '#' '%') don't corrupt the
+    URL. The safe set matches characters that RTSP/HTTP stacks accept
+    raw in the userinfo component without confusion.
     """
-    url = camera.get(url_key) or camera.get("stream_url")
+    if url is None:
+        url = camera.get(url_key)
     if not url:
         return None
     creds = camera.get("credentials")

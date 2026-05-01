@@ -1,3 +1,104 @@
+## 2.2.8-rc2.5
+**Bugfix release on rc2.4.** Two fixes prompted by live testing on the Microseven
+Microseven where (1) manual switch back to 720p showed "Adapted Quality:
+1280x720" but Actual Feed stayed at 3840x2160, and (2) the card port badge
+displayed `:80` (the camera's HTTP identification port) instead of `:554`
+(the RTSP stream port).
+
+### Bugs fixed
+
+**1. Manual tier change relaunches ffmpeg with the wrong URL when sub-stream
+probe failed at credential time (primary fix).** rc2.4's proc-race fix made
+the kill path fire correctly on every manual tier change — but uncovered a
+second bug downstream. The relaunch was using the wrong URL.
+
+Reproduction in rc2.4 log at 12:49:48–12:49:50:
+```
+12:49:48 manual tier [31] profile[1] fps=None
+12:49:48 killed ffmpeg to apply manual tier change   (rc2.4 fix working)
+12:49:50 ffmpeg starting (codec=hevc, sw, adaptive:uncapped profile[1] (1280x720), ...)
+12:49:50 ffmpeg stderr: rtsp://10.0.0.22:554/11: Invalid data found
+                                              ^^ profile[0]'s URL, not profile[1]'s
+```
+
+The label said "profile[1] (1280x720)" but ffmpeg connected to `/11` (the
+4K main stream). After the relaunch, frame sizes were 2.3MB (4K JPEG
+signature), not the ~340KB seen on a real 720p run.
+
+**Root cause** — two compounding gaps:
+
+(a) `build_authenticated_url(camera, url_key="sub_stream_url")` had a silent
+    fallback: `url = camera.get(url_key) or camera.get("stream_url")`. When
+    `camera["sub_stream_url"]` was None, the `or` returned the main stream
+    URL. The caller had no way to detect the substitution — it got back
+    "a URL" and used it.
+
+(b) The cred-auth path at line 6268 only sets `sub_stream_url` from sub-
+    stream candidates that *passed probe_rtsp*:
+    ```
+    ok_subs = [c for c in stream_candidates[1:] if c.get("probe_ok")]
+    sub_s   = ok_subs[-1] if ok_subs else None
+    ```
+    For the Microseven, the first probe (MainStream, /11) opened a TCP
+    socket, then the second probe (SecondStream, /12) tried within ~5s and
+    got hit by the documented Hipcam per-IP TCP rate-limit:
+    ```
+    12:46:54 [probe_rtsp ... SecondStreamProfile] exception:
+             [Errno 104] Connection reset by peer
+    12:46:54 probe_rtsp OK: False
+    ```
+    Stochastic — the same probe sequence had succeeded on rc2.3 in an
+    earlier session. So `sub_s = None`, `sub_stream_url = None`, and the
+    silent-fallback substitution kicked in on every adaptive launch
+    targeting profile[1].
+
+Note that `stream_profiles[1]` was always populated correctly with
+`url = "rtsp://10.0.0.22:554/12"` (line 6281 stores the URL alongside
+the `_url_key` indirection). The information was there; the lookup path
+just didn't use it.
+
+**Fix:**
+
+- `build_authenticated_url`: drop the silent fallback. Add an optional
+  `url=` parameter so callers can pass a URL string directly. With
+  `url_key` alone, an explicit non-default key with a missing value now
+  returns `None` instead of substituting `stream_url`.
+- snap_loop's adaptive launch: pull the URL from `prof["url"]` directly
+  (it's already stored alongside `_url_key`), passing it via the new
+  `url=` parameter. The `camera[url_key]` indirection is now a fallback
+  for legacy/synthesised profile entries that may lack `url`.
+
+After the fix, even if `sub_stream_url` is None due to transient probe
+failure at cred-auth time, the manual tier change to profile[1] uses
+the URL stored in stream_profiles[1] and ffmpeg gets the correct `/12`.
+
+**2. Card port badge shows feed source port, not identification port.**
+The card's port badge displayed `cam.port`, which for ONVIF-discovered
+cameras is hardcoded to 80 (line 9111 — the HTTP/identification port
+where ONVIF discovery happens). For an RTSP camera streaming on 554,
+the badge said `:80` — misleading because the actual feed comes from
+`:554` per `cam.stream_url`.
+
+Fix: new `cardPort(cam)` JS helper that parses the port out of
+`cam.stream_url` and falls back to `cam.port` only when no `stream_url`
+is set (e.g. cameras still in `needs_credentials` state). Card badge
+now reflects where the feed actually comes from.
+
+### What didn't change
+
+- Probe behavior at cred-auth — still excludes failed sub-stream
+  candidates from `sub_stream_url` (the field used by the background
+  thumbnail loop). The thumbnail loop wants a probe-confirmed URL
+  because it polls continuously; firing ffmpeg at a broken URL there
+  would loop indefinitely. Adaptive/manual mode is different — it's
+  user-initiated and self-recovers via the EOF restart path, so
+  trying the unverified URL is the correct trade-off.
+- No CAMERA_DB or schema changes.
+- `verify_release.py` contract is unchanged (no symbol renames).
+- The dropdown rapid-flicker bug remains latent at user's request.
+- 4K HEVC decode instability on the Microseven unchanged — separate camera/decoder
+  issue, expected to improve with rc3 hardware decode.
+
 ## 2.2.8-rc2.4
 **Bugfix release on rc2.3.** Two fixes prompted by live observation that
 manual tier changes back to 4K silently no-op'd and the 4K-fallback toast
