@@ -1,3 +1,43 @@
+## 2.2.9-rc1
+**Hotfix for a crash introduced by 2.2.9's codec-clear path.** `snap_loop`
+crashed with `AttributeError: 'NoneType' object has no attribute 'lower'`
+on the Microseven after the camera record's `stream_codec` was set
+to `None` by the runtime codec-clear logic and that `None` got persisted
+into `cameras.json` (against the comment's claim of "runtime override only").
+The crash happened *before* any RTSP socket opened, so the camera looked
+unreachable when in fact the snap_loop never made it to the network.
+
+### Bugs fixed
+
+**1. `stream_codec` value of `None` crashed `snap_loop`.** Line 4582 used
+`camera.get("stream_codec", "").lower()`, where the default `""` only
+fires when the key is missing — not when its value is explicitly `None`.
+Fixed to `(camera.get("stream_codec") or "").lower()`, which handles
+both missing and `None`. This is the unblock for any existing
+`cameras.json` already containing the bad value, since the persisted
+state survives a fresh install.
+
+**2. Codec-clear path wrote `None` instead of `""`.** Lines 5013/5016
+in the `streak >= 5` codec-clear branch set both `CAMERAS[id]["stream_codec"]`
+and `profs[0]["stream_codec"]` to `None`. The accompanying comment
+("Don't save_cameras here — this is a runtime override only") is not
+enforced by anything; any subsequent `save_cameras()` call (scan
+completion, periodic save, shutdown) persists the `None`. Changed the
+sentinel to `""` — same falsy behavior at every read site, but safe
+under `.lower()` if it ever gets read before the next clear.
+
+### What didn't change
+
+* RTSP_PATHS list (still 31 paths) — the post-2.2.9 rollback rule still applies.
+* CAMERA_DB throttle data, STREAM_DB recipes.
+* qop-aware `_build_auth` from 2.2.9 (Hikvision fix).
+* `_safe_cam` credential-leak fix from 2.2.9.
+* All single-socket Layer 1 walker, Layer 2 fallback, brand-aware
+  short-circuits, identification work from rc2.x.
+* Throttle-Aware Probe Pacing — still deferred. The `None` crash is
+  unrelated to throttle pacing; this hotfix just stops the crash so the
+  underlying pacing question can be tackled cleanly in a future release.
+
 ## 2.2.9
 **Three small, contained fixes that don't touch the streaming or scan
 paths.** First general release after the rc2.x bugfix cycle.
