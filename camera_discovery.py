@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.9"  # must match config.yaml
+CURRENT_VERSION = "2.2.9-rc1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -4579,7 +4579,12 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     state["http_snap_fired"]      = False
     state["codec_clear_fired"]    = False
 
-    stream_codec = camera.get("stream_codec", "").lower()
+    # 2.2.9-rc1: `or ""` handles both missing key AND explicit None. The
+    # codec-clear path below used to write None into the camera record; if
+    # save_cameras() ran between the clear and shutdown, the None persisted
+    # to cameras.json and was reloaded on next startup, crashing snap_loop
+    # here with `AttributeError: 'NoneType' object has no attribute 'lower'`.
+    stream_codec = (camera.get("stream_codec") or "").lower()
     stream_w     = camera.get("stream_width")  or 0
     stream_h     = camera.get("stream_height") or 0
     stream_fps   = camera.get("stream_fps")    or 0
@@ -5010,10 +5015,16 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         log.warning(f"SNAP [{camera_id}]: 5 consecutive 0-frame failures — "
                                     f"clearing stored codec {cam_now['stream_codec']!r} "
                                     f"so ffmpeg can auto-detect on next attempt")
-                        CAMERAS[camera_id]["stream_codec"] = None
+                        # 2.2.9-rc1: write "" not None. Sentinel was None
+                        # in 2.2.9, but if save_cameras() runs between the
+                        # clear and shutdown the None persists to disk and
+                        # crashes the next startup at the .lower() above.
+                        # "" is falsy in the same places None was used and
+                        # safe under .lower().
+                        CAMERAS[camera_id]["stream_codec"] = ""
                         profs = CAMERAS[camera_id].get("stream_profiles") or []
                         if profs:
-                            profs[0]["stream_codec"] = None
+                            profs[0]["stream_codec"] = ""
                         state["codec_clear_fired"] = True
                         # Don't save_cameras here — this is a runtime override only
             else:
