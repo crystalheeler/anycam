@@ -1,3 +1,124 @@
+## 2.3.0
+**Single-socket cred-auth refactor + throttle-aware runtime pacing.**
+Eliminates the firmware-level RTSP lockout that hit the Microseven
+in rc2.x by removing the multi-socket pressure inside `api_set_credentials`
+and adding runtime safety nets where TCP opens still happen (ffprobe,
+snap_loop ffmpeg restarts). Also implements user-designed db_probe skip
+rule: skip db_probe entirely when ONVIF cred-auth already returned
+≥2 working streams (or ≥1 ONVIF + a pre-existing unauthenticated stream).
+
+### What changed
+
+**1. New validate-all single-socket walker.**
+`_validate_rtsp_urls_single_socket(host, port, urls, ...)` is a sibling
+to the existing `_probe_rtsp_paths_single_socket`. Difference: walks the
+full URL list and returns `dict[url, probe_ok]` instead of stopping on
+the first match. Designed for AFTER cred-auth, where we have known URLs
+and just need per-URL validation. Reuses the same RFC 2326 §9.1
+sequential request-response mechanics, the same RFC 2617 nonce reuse
+across requests on one socket, and the same Server-header capture.
+
+**2. ONVIF cred-auth path refactored to use the new walker.**
+The `for prof in profiles` loop in `api_set_credentials` no longer calls
+`probe_rtsp` per profile (one TCP per profile). Instead: collect all
+ONVIF profile stream URLs, pass them to the new walker as one batch
+over ONE TCP socket, then iterate profiles using the validation results
+dict. For a typical Hipcam camera with 2 profiles, this drops the TCP
+open count from 2 (one per profile) to 1 (one for all profiles
+together) — well inside the 5s rate-limit window.
+
+**3. `_probe_db_streams` refactored to use the new walker.**
+Same change: all DB-listed paths now validated through one socket
+instead of one socket per path. Drops 3 sockets to 1 for typical
+3-path STREAM_DB recipes.
+
+**4. User-designed db_probe skip rule.**
+After ONVIF profile validation, db_probe is skipped entirely if we
+already have main+sub coverage:
+  * ≥2 ONVIF profiles probed OK (typical case for 2-profile cameras), OR
+  * ≥1 ONVIF profile + a pre-existing unauthenticated stream (fires
+    when user manually opens cred dialog on already-streaming card to
+    add auth'd profiles).
+Otherwise db_probe runs as the safety net for cameras whose firmware
+exposes streams ONVIF doesn't return. New log line:
+`Skipping db_probe — main+sub coverage achieved (onvif_working=2, unauth_stream=False)`.
+This rule, suggested by CrystalHeeler, is more universal than the original
+plan's brand-specific skip — it skips db_probe for *every* camera that
+doesn't need it, not just rate-limited brands.
+
+**5. ffprobe pacing for rate_limit brands.**
+ffprobe (`probe_stream_details`) opens its own RTSP socket per call —
+not covered by the single-socket validator. For `rate_limit_per_ip_tcp`
+brands, `_throttle_wait_if_needed(ip, throttle_s)` is called before each
+`probe_stream_details` invocation. Tracker is keyed by IP, so even if
+multiple threads/coroutines race, each TCP open respects the cooldown
+window.
+
+**6. snap_loop ffmpeg backoff floored at brand throttle window.**
+Restart backoff was `min(2 ** min(streak-1, 4), 32)` (sequence:
+2s, 4s, 8s, 16s, 32s). For Hipcam-family brands the early values
+(2s, 4s) are inside the documented 5s rate-limit window. Now floored
+at the brand's `throttle_amount` parsed value, so the sequence
+becomes `5s, 5s, 8s, 16s, 32s` for those brands. Other brands see
+no change. New log line at snap_loop init when this fires:
+`SNAP [<id>]: rate_limit_per_ip_tcp brand — flooring ffmpeg backoff at 5s`.
+
+**7. Cross-sequence runtime tracker.**
+New module-level `_THROTTLE_TRACK: dict[ip, float]` mapping each IP to
+the timestamp of its most recent RTSP TCP-open from any code path. The
+`_throttle_wait_if_needed(ip, throttle_s, log_label)` helper checks the
+tracker and sleeps the remainder of the cooldown window before
+returning. Universal safety net for any code path that opens a fresh
+TCP — keeps independent code paths (cred-auth, ffprobe, snap_loop
+restart) from accidentally violating the per-IP rate limit even when
+their individual logic looks fine in isolation.
+
+**8. UI status text for throttled cred-auth.**
+The `submitCreds` JS handler now reads the camera's `manufacturer` field
+and shows `Authenticating (Camera rate-limited, ~30 seconds)…` instead
+of `Verifying…` when the brand matches the Hipcam family pattern. Tells
+users the longer cred-auth time is expected, not a hang. Server-side
+sets `camera["status_text"]` to the same string so any future UI surface
+that polls camera state has access to the same message.
+
+### Behavior changes for affected brands
+
+For a Hipcam-family camera (Microseven, Sricam, Vstarcam, Wansview-old,
+Tenvis):
+  * rc2.x cred-auth: 8 TCP opens in ~3 seconds → all fail with RST/400,
+    camera enters firmware lockout requiring power-cycle.
+  * 2.3.0 cred-auth: 1 TCP open for ONVIF validation + 2 ffprobe sockets
+    paced at 5s apart = ~12s total, all succeed, no lockout.
+
+For all other brands (~95% of the camera market): no behavior change
+beyond a tiny per-call function lookup overhead. Brand throttle lookup
+returns 0 immediately for `throttle_type` other than `rate_limit_per_ip_tcp`.
+
+### What didn't change
+
+* `RTSP_PATHS` list (2.2.9 rollback rule still applies).
+* `CAMERA_DB` throttle field schema.
+* `STREAM_DB` recipes.
+* Single-socket walker for the SCAN phase
+  (`_probe_rtsp_paths_single_socket`).
+* `find_rtsp_path` orchestrator and its Layer 1/2 short-circuits.
+* HTTP MJPEG / HLS / WebRTC / WS-RTSP probes.
+* HTTP identity flow.
+* `probe_rtsp` and `probe_rtsp_socket` (still used by `find_rtsp_path`
+  Layer 2 fallback and by external callers that probe a single URL).
+
+### Known latent issues carried forward (unchanged)
+
+* `_estimateCpuPct` and `_focusWarnOK` orphaned dead code in JS (since
+  2.2.7).
+* Scan progress bar jumpy/inaccurate.
+* Pi 4 dtoverlay auto-toggle flow — still deferred.
+* Layered Stream Discovery — filed as separate future feature where
+  unauth-stream-found cards continue scanning in background to surface
+  a "View Locked Streams" badge.
+
+---
+
 ## 2.2.9-rc1
 **Hotfix for a crash introduced by 2.2.9's codec-clear path.** `snap_loop`
 crashed with `AttributeError: 'NoneType' object has no attribute 'lower'`
