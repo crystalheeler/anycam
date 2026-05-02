@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.2.9-rc1"  # must match config.yaml
+CURRENT_VERSION = "2.3.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -513,6 +513,73 @@ _SNAP: dict = {}
 # snap_loop uses this to detect idle (>30s) and stop automatically.
 _snap_last_access: dict = {}
 
+
+# ─── 2.3.0: Throttle-aware probe pacing (Hipcam family rate-limit) ───────
+#
+# Some camera firmware (Hipcam RealServer family — Microseven, Sricam,
+# Vstarcam, Wansview-old, Tenvis) rejects multiple TCP opens from the
+# same source IP within a short window (~5s). Sustained violation
+# escalates to firmware-level RTSP lockout requiring power-cycle.
+# CAMERA_DB has throttle metadata already — this infra USES it at runtime.
+#
+# Strategy: cross-sequence runtime tracker keyed by IP. Any code path
+# that's about to open a new TCP socket against a throttled IP first
+# calls _throttle_wait_if_needed(ip, throttle_s), which sleeps the
+# remainder of the cooldown window before returning. The 2.3.0 cred-auth
+# refactor moves probing onto a single TCP socket per camera per phase,
+# which mostly eliminates the issue at the source — but ffprobe and
+# snap_loop ffmpeg restarts STILL open their own sockets, so the tracker
+# remains as a runtime safety net.
+_THROTTLE_TRACK: dict = {}   # ip → last RTSP TCP-open timestamp
+
+
+def _parse_throttle_seconds(amount_str: str) -> float:
+    """Extract seconds from a CAMERA_DB throttle_amount string. Returns
+    0.0 if no parseable value. All current rate_limit_per_ip_tcp entries
+    match the '~Ns' or 'Ns' pattern — see camera_discovery.CAMERA_DB
+    entries for Hipcam, Sricam, Vstarcam, Wansview, Tenvis."""
+    if not amount_str:
+        return 0.0
+    m = re.search(r"~?\s*(\d+)\s*s", amount_str)
+    return float(m.group(1)) if m else 0.0
+
+
+def _brand_throttle_seconds(camera: dict) -> float:
+    """Return the cooldown seconds for this camera's brand, or 0.0 if
+    the camera isn't subject to a per-IP TCP rate-limit. Looks up the
+    CAMERA_DB entry via _identify_camera_brand and parses throttle_amount.
+    Default 5.0 for rate_limit_per_ip_tcp brands when amount fails to
+    parse — the documented Hipcam window is 5s and erring on the safe
+    side costs nothing."""
+    if not camera:
+        return 0.0
+    entry = _identify_camera_brand(dict(camera))
+    if not entry:
+        return 0.0
+    if entry.get("throttle_type") != "rate_limit_per_ip_tcp":
+        return 0.0
+    secs = _parse_throttle_seconds(entry.get("throttle_amount", ""))
+    return secs if secs > 0 else 5.0
+
+
+async def _throttle_wait_if_needed(ip: str, throttle_s: float,
+                                    log_label: str = "") -> None:
+    """If the IP is in cooldown, sleep until it clears. Updates the
+    last-open timestamp before returning so the NEXT caller waits from
+    THIS call's TCP-open moment. Cheap no-op when throttle_s <= 0 or
+    when no recent open is recorded."""
+    if throttle_s <= 0:
+        return
+    now  = time.monotonic()
+    last = _THROTTLE_TRACK.get(ip, 0.0)
+    elapsed = now - last
+    if last and elapsed < throttle_s:
+        wait_s = throttle_s - elapsed
+        if log_label:
+            log.info(f"  Throttle wait {wait_s:.1f}s for {ip} "
+                     f"(brand cooldown ~{throttle_s:.0f}s): {log_label}")
+        await asyncio.sleep(wait_s)
+    _THROTTLE_TRACK[ip] = time.monotonic()
 
 
 # IPs/cam-ids the user has explicitly dismissed (loaded from disk)
@@ -3209,6 +3276,307 @@ def _probe_rtsp_paths_single_socket(
                 pass
 
 
+def _validate_rtsp_urls_single_socket(
+    host: str,
+    port: int,
+    urls: list[str],
+    username: str = "",
+    password: str = "",
+    timeout: float = 6.0,
+    host_meta: dict | None = None,
+    label: str = "",
+) -> dict:
+    """2.3.0: Validate a list of FULL RTSP URLs over a SINGLE TCP socket.
+
+    Sibling to _probe_rtsp_paths_single_socket but with two key
+    differences:
+      • Walks the ENTIRE list (no early return on first match) and
+        returns a dict mapping each URL → bool (probe_ok).
+      • Designed for AFTER cred-auth: callers already have working
+        credentials from the user. We capture the auth challenge from
+        the first 401 (if any) and reuse the nonce across all URLs
+        per RFC 2617.
+
+    Used by the cred-auth handler to validate all ONVIF profile stream
+    URLs (and any STREAM_DB-supplemental URLs) over ONE TCP connection
+    instead of opening N sockets in rapid sequence — which is what
+    triggered the Microseven firmware-level lockout in rc2.x.
+
+    Mechanics — same as the discovery walker:
+      • Full Content-Length-bounded reads before next request (no
+        pipelining — universal-safe per RFC 2326 §9.1).
+      • OPTIONS → DESCRIBE (with optional 401 retry) → SETUP → TEARDOWN
+        per URL. SETUP confirms the server can stream the track.
+      • TCP-interleaved transport tried first, UDP fallback second.
+      • Captures Server: header into host_meta on first response.
+
+    Returns: dict {url: probe_ok}. URLs are validated in order; if the
+    socket dies mid-way, all remaining URLs return False (caller can
+    retry on a fresh socket if it cares — most callers don't, since
+    the dead socket itself indicates a broken stream).
+
+    Empty input → returns {}.
+    """
+    if not urls:
+        return {}
+
+    results: dict = {url: False for url in urls}
+    captured_server: str = ""
+
+    pfx = f"  [validate_rtsp_walk {label or host + ':' + str(port)}]"
+
+    def _log(msg: str) -> None:
+        if label:
+            log.info(pfx + " " + msg)
+        else:
+            log.debug(pfx + " " + msg)
+
+    CRLF     = chr(13) + chr(10)
+    CRLFCRLF = CRLF + CRLF
+
+    def _build_auth(auth_val: str, method: str, uri: str) -> str | None:
+        """Identical to _probe_rtsp_paths_single_socket._build_auth — RFC
+        2617 nonce reuse, qop=auth handling for Hikvision-style challenges."""
+        if auth_val.lower().startswith("digest"):
+            realm_m = re.search(r'realm="([^"]*)"', auth_val)
+            nonce_m = re.search(r'nonce="([^"]*)"', auth_val)
+            if not (realm_m and nonce_m):
+                return None
+            realm, nonce = realm_m.group(1), nonce_m.group(1)
+            qop_m = re.search(r'qop="?([^",]+)"?', auth_val)
+            ha1 = hashlib.md5(f"{username}:{realm}:{password}".encode()).hexdigest()
+            ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
+            if qop_m:
+                qop_val = qop_m.group(1).strip()
+                qop = "auth" if "auth" in qop_val else qop_val.split(",")[0].strip()
+                cnonce = os.urandom(8).hex()
+                nc = "00000001"
+                rsp = hashlib.md5(
+                    f"{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}".encode()
+                ).hexdigest()
+                return (f'Digest username="{username}", realm="{realm}", '
+                        f'nonce="{nonce}", uri="{uri}", '
+                        f'qop={qop}, nc={nc}, cnonce="{cnonce}", '
+                        f'response="{rsp}"')
+            rsp = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
+            return (f'Digest username="{username}", realm="{realm}", '
+                    f'nonce="{nonce}", uri="{uri}", response="{rsp}"')
+        elif auth_val.lower().startswith("basic"):
+            return "Basic " + base64.b64encode(
+                f"{username}:{password}".encode()).decode()
+        return None
+
+    def _parse_track_url(sdp: str, base_url: str) -> str | None:
+        """Identical to _probe_rtsp_paths_single_socket._parse_track_url."""
+        in_video        = False
+        video_control   = None
+        session_control = None
+        for raw in sdp.split("\n"):
+            line = raw.rstrip("\r").strip()
+            if line.startswith("m="):
+                if in_video:
+                    break
+                in_video = line.startswith("m=video")
+            elif line.startswith("a=control:"):
+                ctrl = line[len("a=control:"):].strip()
+                if in_video:
+                    video_control = ctrl
+                else:
+                    session_control = ctrl
+        ctrl = video_control or session_control
+        if not ctrl:
+            return None
+        if ctrl == "*":
+            return base_url
+        if ctrl.lower().startswith("rtsp://"):
+            return ctrl
+        return base_url.rstrip("/") + "/" + ctrl
+
+    sock      = None
+    next_cseq = 1
+    auth_val: str | None = None
+
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.settimeout(timeout)
+
+        def roundtrip(method: str, cseq: int,
+                      extra: dict | None = None,
+                      uri: str = "") -> str:
+            extra = extra or {}
+            hdr = "".join(k + ": " + v + CRLF for k, v in extra.items())
+            req = method + " " + uri + " RTSP/1.0" + CRLF
+            req += "CSeq: " + str(cseq) + CRLF + hdr + CRLF
+            sock.sendall(req.encode())
+            buf = b""
+            while CRLFCRLF.encode() not in buf and len(buf) < 65536:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            text = buf.decode("utf-8", errors="replace")
+            cl = 0
+            for line in text.split(CRLF):
+                if line.lower().startswith("content-length:"):
+                    try:
+                        cl = int(line.split(":", 1)[1].strip())
+                    except (ValueError, IndexError):
+                        cl = 0
+                    break
+            if cl > 0:
+                sep_idx   = text.find(CRLFCRLF)
+                already   = (len(buf) - (sep_idx + 4)) if sep_idx >= 0 else 0
+                remaining = max(0, cl - already)
+                while remaining > 0:
+                    chunk = sock.recv(min(remaining, 4096))
+                    if not chunk:
+                        break
+                    buf       += chunk
+                    remaining -= len(chunk)
+            return buf.decode("utf-8", errors="replace")
+
+        for url_idx, rtsp_url in enumerate(urls):
+            _log(f"({url_idx+1}/{len(urls)}) validating {rtsp_url}")
+
+            # ── OPTIONS ──────────────────────────────────────────────
+            try:
+                resp = roundtrip("OPTIONS", next_cseq, uri=rtsp_url)
+                next_cseq += 1
+            except Exception as e:
+                _log(f"OPTIONS exception → bailing remaining: {e}")
+                return results  # remaining urls stay False
+            if resp.startswith("RTSP/") and not captured_server:
+                for _line in resp.split(CRLF):
+                    if _line.lower().startswith("server:"):
+                        captured_server = _line.split(":", 1)[1].strip()
+                        _log(f"captured Server: {captured_server!r}")
+                        break
+            if "RTSP/1.0 2" not in resp:
+                _log(f"OPTIONS → {resp.split(CRLF)[0].strip()!r} — skipping URL")
+                continue
+
+            # ── DESCRIBE (with optional 401 retry) ───────────────────
+            try:
+                # If we already captured auth_val from a prior URL's 401,
+                # send it pre-emptively to avoid a second roundtrip.
+                describe_extra: dict = {"Accept": "application/sdp"}
+                if auth_val:
+                    ah = _build_auth(auth_val, "DESCRIBE", rtsp_url)
+                    if ah:
+                        describe_extra["Authorization"] = ah
+                resp = roundtrip("DESCRIBE", next_cseq, describe_extra,
+                                 uri=rtsp_url)
+                next_cseq += 1
+            except Exception as e:
+                _log(f"DESCRIBE exception → bailing: {e}")
+                return results
+            if "RTSP/1.0 200" in resp:
+                pass
+            elif "401" in resp:
+                if not username:
+                    _log(f"DESCRIBE → 401 (no creds) — skipping {rtsp_url}")
+                    continue
+                if not auth_val:
+                    auth_line = next(
+                        (l for l in resp.splitlines()
+                         if l.lower().startswith("www-authenticate:")), "")
+                    auth_val = auth_line.split(":", 1)[-1].strip() if auth_line else ""
+                if not auth_val:
+                    _log("DESCRIBE → 401 with no WWW-Authenticate — skipping")
+                    continue
+                auth_hdr = _build_auth(auth_val, "DESCRIBE", rtsp_url)
+                if not auth_hdr:
+                    _log(f"DESCRIBE → unparseable auth: {auth_val[:60]!r}")
+                    continue
+                try:
+                    resp = roundtrip("DESCRIBE", next_cseq,
+                                     {"Accept": "application/sdp",
+                                      "Authorization": auth_hdr},
+                                     uri=rtsp_url)
+                    next_cseq += 1
+                except Exception as e:
+                    _log(f"DESCRIBE-auth exception → bailing: {e}")
+                    return results
+                if "RTSP/1.0 200" not in resp:
+                    _log(f"DESCRIBE-auth → {resp.split(CRLF)[0].strip()!r}")
+                    continue
+            else:
+                _log(f"DESCRIBE → {resp.split(CRLF)[0].strip()!r} — skipping")
+                continue
+
+            # ── Parse SDP for first m=video track URL ───────────────
+            body_idx  = resp.find(CRLFCRLF)
+            sdp_text  = resp[body_idx + 4:] if body_idx >= 0 else ""
+            track_url = _parse_track_url(sdp_text, rtsp_url)
+            if not track_url:
+                _log(f"DESCRIBE 200 but SDP has no m=video — skipping {rtsp_url}")
+                continue
+
+            # ── SETUP: TCP-interleaved first, UDP fallback ──────────
+            transports = [
+                ("RTP/AVP/TCP;unicast;interleaved=0-1",            "TCP"),
+                ("RTP/AVP/UDP;unicast;client_port=50000-50001",    "UDP"),
+            ]
+            setup_ok = False
+            session  = ""
+            for transport_hdr, tlabel in transports:
+                extra: dict = {"Transport": transport_hdr}
+                if auth_val:
+                    ah = _build_auth(auth_val, "SETUP", track_url)
+                    if ah:
+                        extra["Authorization"] = ah
+                try:
+                    resp = roundtrip("SETUP", next_cseq, extra, uri=track_url)
+                    next_cseq += 1
+                except Exception as e:
+                    _log(f"SETUP exception → bailing: {e}")
+                    return results
+                if "RTSP/1.0 200" in resp:
+                    for line in resp.split(CRLF):
+                        if line.lower().startswith("session:"):
+                            session = (line.split(":", 1)[1]
+                                           .strip().split(";")[0].strip())
+                            break
+                    _log(f"SETUP ({tlabel}) → 200 OK")
+                    setup_ok = True
+                    break
+                _log(f"SETUP ({tlabel}) → {resp.split(CRLF)[0].strip()!r}")
+
+            if not setup_ok:
+                continue
+
+            # ── TEARDOWN — release session before next URL ──────────
+            td_extra: dict = {}
+            if session:
+                td_extra["Session"] = session
+            if auth_val:
+                ah = _build_auth(auth_val, "TEARDOWN", track_url)
+                if ah:
+                    td_extra["Authorization"] = ah
+            try:
+                roundtrip("TEARDOWN", next_cseq, td_extra, uri=track_url)
+                next_cseq += 1
+            except Exception:
+                pass  # TEARDOWN failure is non-fatal
+
+            results[rtsp_url] = True
+            _log(f"  → probe_ok=True for {rtsp_url}")
+
+        return results
+
+    except Exception as e:
+        _log(f"validate-all walk exception: {e}")
+        return results
+    finally:
+        if host_meta is not None and captured_server:
+            host_meta["server_header"] = captured_server
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
 def find_rtsp_path(ip: str, port: int,
                    username: str = "", password: str = "",
                    host_meta: dict | None = None) -> str | None:
@@ -4579,6 +4947,14 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     state["http_snap_fired"]      = False
     state["codec_clear_fired"]    = False
 
+    # 2.3.0: per-session throttle window for this camera's brand. Looked
+    # up once here, then floor backoff at this value below so ffmpeg
+    # restart cycles never violate the firmware's per-IP TCP rate-limit.
+    _snap_throttle_s = _brand_throttle_seconds(camera)
+    if _snap_throttle_s > 0:
+        log.info(f"SNAP [{camera_id}]: rate_limit_per_ip_tcp brand — "
+                 f"flooring ffmpeg backoff at {_snap_throttle_s:.0f}s")
+
     # 2.2.9-rc1: `or ""` handles both missing key AND explicit None. The
     # codec-clear path below used to write None into the camera record; if
     # save_cameras() ran between the clear and shutdown, the None persisted
@@ -4942,12 +5318,23 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
             # Exponential backoff when ffmpeg keeps dying with 0 frames
             # (e.g. wrong codec, bad URL, camera rejecting connection).
-            # 0-frame failures: 2s, 4s, 8s, 16s, 32s (cap at 32s).
+            # 0-frame failures: 1s, 2s, 4s, 8s, 16s, 32s (cap at 32s).
             # Normal failures (got some frames): always 2s.
+            #
+            # 2.3.0: For rate_limit_per_ip_tcp brands (Hipcam family),
+            # floor the backoff at the brand's documented cooldown so
+            # ffmpeg restart cycles never violate the per-IP TCP limit.
+            # Without this, the early sequence (1s, 2s, 4s) is inside the
+            # Hipcam 5s window and accumulates lockout pressure across
+            # restarts.
             if frames == 0:
                 streak = state.get("zero_frame_streak", 0) + 1
                 state["zero_frame_streak"] = streak
-                backoff = min(2 ** min(streak - 1, 4), 32)
+                _raw_backoff = min(2 ** min(streak - 1, 4), 32)
+                if _snap_throttle_s > 0:
+                    backoff = max(_snap_throttle_s, _raw_backoff)
+                else:
+                    backoff = _raw_backoff
 
                 # After 3 consecutive 0-frame failures, try flipping the
                 # RTSP transport.  Many cheap/generic ONVIF cameras (Sricam,
@@ -6190,32 +6577,69 @@ async def _probe_db_streams(ip: str, port: int, creds: str | None,
     Probe RTSP paths from a STREAM_DB entry.
     Returns list of {url, width, height, codec} dicts for responding paths,
     skipping any URLs already in existing_urls.
+
+    2.3.0: All paths now validated through ONE TCP socket via
+    _validate_rtsp_urls_single_socket instead of opening a fresh socket
+    per path. Eliminates the multi-socket pressure that triggered
+    Hipcam-family lockout in rc2.x. ffprobe is still per-URL (its own
+    subprocess opens its own socket) so we pace it for rate_limit brands.
     """
     loop = asyncio.get_event_loop()
-    results = []
+    results: list = []
     rtsp_port = db_entry.get("port", 554)
 
     cred_pfx = ""
+    username = ""
+    password = ""
     if creds:
         try:
             from urllib.parse import quote as _q
-            u, pw = decrypt_creds(creds)
+            username, password = decrypt_creds(creds)
             _SAFE = "!$&'()*+,;=~-._"
-            cred_pfx = f"{_q(u, safe=_SAFE)}:{_q(pw, safe=_SAFE)}@"
+            cred_pfx = f"{_q(username, safe=_SAFE)}:{_q(password, safe=_SAFE)}@"
         except Exception:
             pass
 
+    # Build URL list, deduping against caller's existing_urls set
+    urls_to_validate: list = []
+    bare_for_url:     dict = {}   # cred-bearing URL → bare URL (for de-dup)
     for path in db_entry.get("rtsp", []):
-        url = f"rtsp://{cred_pfx}{ip}:{rtsp_port}{path}"
+        url  = f"rtsp://{cred_pfx}{ip}:{rtsp_port}{path}"
         bare = f"rtsp://{ip}:{rtsp_port}{path}"
         if bare in existing_urls or url in existing_urls:
             continue
+        urls_to_validate.append(url)
+        bare_for_url[url] = bare
+
+    if not urls_to_validate:
+        return results
+
+    # 2.3.0: throttle awareness — even though we use one TCP socket for
+    # validation now, ffprobe per match still opens its own socket, so
+    # we register the validation TCP open with the tracker.
+    throttle_s = 0.0
+    # Build a minimal camera-like dict for brand lookup.  db_entry has
+    # all CAMERA_DB metadata already, so we can use it directly.
+    if db_entry.get("throttle_type") == "rate_limit_per_ip_tcp":
+        throttle_s = _parse_throttle_seconds(
+            db_entry.get("throttle_amount", "")) or 5.0
+        await _throttle_wait_if_needed(ip, throttle_s, "db_probe validation")
+
+    url_results = await loop.run_in_executor(
+        _THREAD_POOL, _validate_rtsp_urls_single_socket,
+        ip, rtsp_port, urls_to_validate,
+        username, password, 4.0, None,
+        f"db_probe:{ip}")
+
+    for url in urls_to_validate:
+        if not url_results.get(url, False):
+            continue
         try:
-            ok = await loop.run_in_executor(
-                _THREAD_POOL, probe_rtsp, url, "", "", 4, f"db_probe:{ip}{path}")
-            if ok:
-                det = await probe_stream_details(url, "RTSP")
-                results.append({"url": url, **det})
+            if throttle_s > 0:
+                await _throttle_wait_if_needed(ip, throttle_s,
+                                               f"db_probe ffprobe {url}")
+            det = await probe_stream_details(url, "RTSP")
+            results.append({"url": url, **det})
         except Exception:
             pass
     return results
@@ -6247,26 +6671,65 @@ async def api_set_credentials(request) -> web.Response:
     if proto in ("ONVIF",) or camera.get("onvif"):
         media_url = _onvif_media_url(ip, port, camera.get("xaddrs",""))
         log.info(f"  ONVIF media URL: {media_url}")
+
+        # 2.3.0: brand throttle awareness — surface a status text the UI
+        # polls so users see "Authenticating (Camera rate-limited, ~30
+        # seconds)" instead of a silent 25s pause for Hipcam-family
+        # cameras. The throttle pacing itself happens before each ffprobe
+        # call below; the cred-auth handler shows the status while it works.
+        throttle_s = _brand_throttle_seconds(camera)
+        if throttle_s > 0:
+            camera["status"] = "authenticating_throttled"
+            camera["status_text"] = (f"Authenticating "
+                                     f"(Camera rate-limited, ~30 seconds)")
+            log.info(f"  Brand has rate_limit_per_ip_tcp ({throttle_s:.0f}s) — "
+                     f"using single-socket validation + throttled ffprobe")
+
         profiles  = await loop.run_in_executor(
             _THREAD_POOL, onvif_get_profiles, media_url, username, password)
         log.info(f"  ONVIF profiles found: {len(profiles)} — {[p['name'] for p in profiles]}")
         if profiles:
             enc_creds = encrypt_creds(username, password)
-            # ── Collect all streams from ONVIF profiles ───────────────────────
-            stream_candidates = []   # list of {url, width, height, codec, token, name}
+
+            # ── 2.3.0: Collect all stream URLs first, then validate them
+            # all over a SINGLE TCP socket. Replaces the per-profile
+            # probe_rtsp loop (one TCP per profile) that triggered Hipcam
+            # firmware-level lockout in rc2.x.
+            profile_urls = []   # list of (prof, stream_url)
             for prof in profiles:
                 stream_url = await loop.run_in_executor(
                     _THREAD_POOL, onvif_get_stream_uri, media_url, prof["token"], username, password)
                 log.info(f"  Profile '{prof['name']}' stream_url: {stream_url}")
-                if not stream_url:
-                    continue
-                ok = await loop.run_in_executor(
-                    _THREAD_POOL, probe_rtsp, stream_url, username, password,
-                    6, f"{camera_id}/{prof['name']}")
-                log.info(f"  probe_rtsp OK: {ok}")
+                if stream_url:
+                    profile_urls.append((prof, stream_url))
+
+            url_results: dict = {}
+            if profile_urls:
+                # Mark the TCP open in the throttle tracker before the call
+                if throttle_s > 0:
+                    await _throttle_wait_if_needed(ip, throttle_s,
+                                                   "ONVIF profile validation")
+                url_results = await loop.run_in_executor(
+                    _THREAD_POOL, _validate_rtsp_urls_single_socket,
+                    ip, port, [u for _, u in profile_urls],
+                    username, password, 6.0, None,
+                    f"{camera_id}/onvif-profiles")
+                log.info(f"  Single-socket profile validation: "
+                         f"{sum(1 for v in url_results.values() if v)}/"
+                         f"{len(profile_urls)} OK")
+
+            # ── Build stream_candidates from validated results ────────────────
+            stream_candidates = []   # list of {url, width, height, codec, token, name}
+            for prof, stream_url in profile_urls:
+                ok = url_results.get(stream_url, False)
                 if not ok:
-                    log.warning(f"  probe_rtsp returned False for '{prof['name']}' "
+                    log.warning(f"  validate returned False for '{prof['name']}' "
                                 f"— including anyway (ONVIF confirmed creds)")
+                # 2.3.0: pace ffprobe (it opens its own RTSP socket per call,
+                # not covered by the single-socket validation above).
+                if throttle_s > 0:
+                    await _throttle_wait_if_needed(ip, throttle_s,
+                                                   f"ffprobe '{prof['name']}'")
                 det = await probe_stream_details(stream_url, "RTSP")
 
                 # ── Resolution: highest pixel area wins ───────────────────────
@@ -6341,7 +6804,19 @@ async def api_set_credentials(request) -> web.Response:
                     else:
                         log.debug(f"  HTTP snap URL: not available (DB=None, ONVIF=None)")
 
-            if db_entry:
+            # ── 2.3.0: Modified db_probe skip rule (CrystalHeeler's design) ────────
+            # Skip db_probe if we already have ≥2 stream URL coverage:
+            #   • ≥2 ONVIF profiles probed OK (typical case: main + sub), OR
+            #   • ≥1 ONVIF profile + a pre-existing unauth stream from scan
+            #     (this fires when user manually opens cred dialog on an
+            #     already-streaming card to add auth'd profiles).
+            # Otherwise run db_probe as the safety net for finding streams
+            # ONVIF didn't expose. Replaces the old "always run" behavior.
+            onvif_working    = sum(1 for c in stream_candidates if c.get("probe_ok"))
+            have_unauth      = bool(camera.get("rtsp_probe_ok") and camera.get("stream_url"))
+            have_main_n_sub  = (onvif_working >= 2) or (onvif_working >= 1 and have_unauth)
+
+            if db_entry and not have_main_n_sub:
                 existing = {c["url"] for c in stream_candidates}
                 db_streams = await _probe_db_streams(ip, port, enc_creds,
                                                      db_entry, existing)
@@ -6350,6 +6825,10 @@ async def api_set_credentials(request) -> web.Response:
                     for s in db_streams:
                         stream_candidates.append({**s, "token": "db_probe",
                                                   "name": "DB stream"})
+            elif db_entry and have_main_n_sub:
+                log.info(f"  Skipping db_probe — main+sub coverage achieved "
+                         f"(onvif_working={onvif_working}, "
+                         f"unauth_stream={have_unauth})")
 
             if stream_candidates:
                 # ── Rank by resolution: highest first, lowest last ─────────────
@@ -6545,6 +7024,17 @@ async def api_set_credentials(request) -> web.Response:
 
     # RTSP direct — for ONVIF cards always try port 554 in addition to stored port
     if proto in ("RTSP", "DVR", "ONVIF"):
+        # 2.3.0: brand throttle awareness for non-ONVIF cred-auth.
+        # find_rtsp_path already does single-socket walking (Layer 1) +
+        # brand-aware Layer 2 short-circuit, so no socket pressure here,
+        # but we still surface the status text + pace ffprobe below.
+        throttle_s = _brand_throttle_seconds(camera)
+        if throttle_s > 0 and not camera.get("status_text"):
+            camera["status"] = "authenticating_throttled"
+            camera["status_text"] = (f"Authenticating "
+                                     f"(Camera rate-limited, ~30 seconds)")
+            log.info(f"  Brand has rate_limit_per_ip_tcp ({throttle_s:.0f}s) — "
+                     f"pacing ffprobe and db_probe")
         # rc2.1: try standard RTSP port 554 BEFORE stored port when they
         # differ. Prevents the Hikvision-NVR-probed-on-port-80 case where
         # find_rtsp_path Layer 1 would burn 30-45s grinding paths against
@@ -6581,6 +7071,10 @@ async def api_set_credentials(request) -> web.Response:
         log.warning(f"Credential attempt FAILED for {camera_id} — no working stream found")
         return web.json_response({"error": "Could not connect with those credentials."}, status=401)
 
+    # 2.3.0: pace ffprobe on rate_limit brands (it opens its own RTSP socket)
+    _t_s = _brand_throttle_seconds(camera)
+    if _t_s > 0:
+        await _throttle_wait_if_needed(ip, _t_s, "non-ONVIF ffprobe")
     details = await probe_stream_details(url, proto)
     enc_creds = encrypt_creds(username, password)
 
@@ -8240,7 +8734,17 @@ async function submitCreds(cid) {
   const u = document.getElementById('u_' + cid)?.value.trim() || '';
   const p = document.getElementById('p_' + cid)?.value || '';
   const e = document.getElementById('err_' + cid);
-  e.textContent = 'Verifying…'; e.classList.add('visible');
+  /* 2.3.0: rate_limit_per_ip_tcp brands need single-socket validation +
+     paced ffprobe, which makes cred-auth take ~25–30s. Tell the user
+     that's expected so they don't think the UI is hung. */
+  const cam = (typeof cameras !== 'undefined') ?
+    cameras.find(c => c.id === cid) : null;
+  const _throttledBrand = cam && (
+    /^Hipcam|^Microseven|^Sricam|^Vstarcam|^Wansview|^Tenvis/i.test(cam.manufacturer || ''));
+  e.textContent = _throttledBrand
+    ? 'Authenticating (Camera rate-limited, ~30 seconds)…'
+    : 'Verifying…';
+  e.classList.add('visible');
   try {
     const r = await fetch(BASE + '/api/credentials', {
       method: 'POST', headers: {'Content-Type': 'application/json'},

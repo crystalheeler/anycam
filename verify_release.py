@@ -89,6 +89,22 @@ CONTRACTS = {
     # rc2 — brand-id helper that wires mac_vendor into manufacturer detection
     "_identify_camera_brand": ["mac_vendor", "manufacturer",
                                "identify_manufacturer"],
+    # 2.3.0 — sibling walker that validates a list of full URLs over one
+    # TCP socket. Used by the cred-auth handler to replace per-profile
+    # probe_rtsp loops that triggered Hipcam-family firmware lockout.
+    "_validate_rtsp_urls_single_socket": ["DESCRIBE", "SETUP", "TEARDOWN",
+                                           "next_cseq", "auth_val",
+                                           "host_meta", "captured_server",
+                                           "cnonce", "results"],
+    # 2.3.0 — throttle helpers
+    "_parse_throttle_seconds": ["amount_str"],
+    "_brand_throttle_seconds": ["_identify_camera_brand",
+                                 "rate_limit_per_ip_tcp"],
+    "_throttle_wait_if_needed": ["_THROTTLE_TRACK", "asyncio.sleep",
+                                  "monotonic"],
+    # 2.3.0 — _probe_db_streams refactored to use single-socket walker
+    "_probe_db_streams":     ["_validate_rtsp_urls_single_socket",
+                              "_throttle_wait_if_needed"],
 }
 all_ok = True
 for node in ast.walk(tree):
