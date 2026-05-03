@@ -1,4 +1,118 @@
-## 2.3.1
+## 2.3.2
+**Fixes the actual root cause of the Microseven validator-400 bug — the
+validator was connecting to the wrong port — and reverts the 2.3.1
+hotfix that was working around the symptom without addressing it.**
+
+### What changed
+
+**1. Validator now uses the actual RTSP port from the profile URL.**
+The 2.3.0 single-socket validator at `_validate_rtsp_urls_single_socket`
+opens its TCP socket via `socket.create_connection((host, port))` where
+`port` is passed in by the caller. In `api_set_credentials` line 6798
+(2.3.1), this argument was the camera's stored `port` attribute —
+which is the **discovery port**, not the RTSP port. For Hipcam/Microseven
+and other HTTP-discovered cameras, that's port 80, not 554.
+
+The validator was therefore opening TCP to `10.0.0.22:80` (the camera's
+HTTP admin server) and sending the request:
+
+    OPTIONS rtsp://10.0.0.22:554/11 RTSP/1.0
+    CSeq: 1
+
+Port 80's HTTP server saw `OPTIONS` (a valid HTTP method) followed by
+`RTSP/1.0` (an invalid HTTP version) and responded with the textbook
+HTTP rejection: `HTTP/1.1 400 Bad Request`. The HTTP/1.0 connection
+then closed, so the second URL on the same (now-dead) socket got an
+empty response. The validator dutifully logged `0/2 OK` every time, but
+the existing fallback ("ONVIF confirmed creds → including anyway")
+masked the symptom — streams came up via ffprobe, so nothing visible
+to the user was broken.
+
+This bug has existed since 2.3.0. The validator has **never** worked on
+HTTP-discovered cameras, including the Microseven we've been
+debugging for weeks.
+
+Confirmed empirically via terminal-side tests on the live the Microseven:
+  * **Test A** (1 SOAP → 1s → OPTIONS to :554) — `RTSP/1.0 200 OK`
+  * **Test B** (4 SOAPs → 1s → OPTIONS to :554) — `RTSP/1.0 200 OK`
+  * **Test C** (4 SOAPs → 1s → full validator-style multi-URL walk
+    with Digest auth nonce reuse, all on ONE socket to :554) —
+    **2/2 URLs validated successfully in 1.6 seconds**.
+
+**Fix:** parse the actual RTSP port from the first profile URL via
+`urlparse(profile_urls[0][1]).port` and pass that to the validator
+instead of the camera's stored discovery port. The parse is wrapped in
+try/except for ValueError/AttributeError (ONVIF responses are
+untrusted input, malformed URLs fall back to the RTSP default 554).
+A diagnostic log line surfaces when the parsed port differs from the
+stored port — making the fix's effect visible in install logs.
+
+**Also added a defense-in-depth check inside `_validate_rtsp_urls_single_socket` itself:**
+the validator now warns if the host or port parsed from the first URL
+doesn't match the host:port it was passed for the socket connection.
+This catches the same class of caller bug at the validator boundary —
+any future caller misconfiguring the connection target gets an
+immediate WARNING in the logs rather than silent 0/N validation
+results masked by fallback paths.
+
+**2. Reverted the 2.3.1 throttle hotfix.**
+The hotfix added `_THROTTLE_TRACK[ip] = time.monotonic()` after each
+ONVIF SOAP call (port 8080) plus a `_throttle_wait_if_needed` call
+before the validator, on the theory that SOAP TCP opens on :8080 were
+racing the validator's TCP open on :554 inside the per-IP rate-limit
+window. With the actual root cause known (port bug), the hotfix's
+premise is wrong:
+  * The 2.3.0 validator was never opening TCP to :554 in cred-auth on
+    Hipcam-family cameras — it was opening TCP to :80. The race the
+    hotfix tried to prevent didn't exist.
+  * The hotfix added a 5-second `_throttle_wait_if_needed` delay before
+    the validator that fixed nothing (the validator still got 400
+    every single time) but degraded downstream timing — particularly
+    visible in the install log: codec correction failed all 3 attempts
+    on the Microseven, ffmpeg launched with the wrong codec (h264 vs hevc),
+    Enhanced View dropped to HTTP-snap fallback, resolution greyed out.
+  * Empirically, Test C confirms that 4 rapid SOAPs to :8080 followed
+    by 1 second of wall-clock time then a full multi-URL validator
+    walk on :554 succeeds completely. No pre-validator wait needed.
+
+Removing the hotfix restores 2.3.0's faster cred-auth timing on
+Hipcam-family cams while the port fix above gives us actual working
+validator output (2/2 OK instead of 0/2 OK with fallback).
+
+**3. Kept all other 2.3.1 changes:** focus-leave fast shutdown
+(`proc.kill()` direct in `handle_focus_clear` + `focus_leave_kill`
+flag) and H.265+ false-alarm badge clearing on clean run
+(`hevc_plus_noise_confirmed` flag). Both worked correctly in
+production observation.
+
+### Files modified
+
+| File | Change |
+|---|---|
+| `camera_discovery.py` | Port fix + revert 3 hotfix sites (~30 LoC net subtractive) |
+| `config.yaml` | version 2.3.1 → 2.3.2 |
+| `CHANGELOG.md` | This entry |
+
+### Test plan
+
+After install, delete + rescan the Microseven + enter creds. Expected log lines:
+
+    [validate_rtsp_walk 10.0.0.22_onvif/onvif-profiles] (1/2) validating rtsp://10.0.0.22:554/11
+    [validate_rtsp_walk 10.0.0.22_onvif/onvif-profiles] OPTIONS → OK
+    [validate_rtsp_walk 10.0.0.22_onvif/onvif-profiles] DESCRIBE → 401 (Digest)
+    [validate_rtsp_walk 10.0.0.22_onvif/onvif-profiles] DESCRIBE → 200 OK
+    [validate_rtsp_walk 10.0.0.22_onvif/onvif-profiles] SETUP → 200 OK
+    [validate_rtsp_walk 10.0.0.22_onvif/onvif-profiles] (2/2) validating rtsp://10.0.0.22:554/12
+    [validate_rtsp_walk 10.0.0.22_onvif/onvif-profiles] (auth reused)
+    ...
+    Single-socket profile validation: 2/2 OK
+
+Replacing the previous `0/2 OK` + fallback warnings. Total cred-auth
+time should also be ~5 seconds shorter than 2.3.1.
+
+---
+
+
 **Three small fixes layered on 2.3.0: validator throttle plumbing, fast
 focus-leave shutdown, and H.265+ false-alarm badge clearing.**
 
