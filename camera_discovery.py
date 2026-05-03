@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.3.0"  # must match config.yaml
+CURRENT_VERSION = "2.3.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -5201,8 +5201,18 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                             buf      = b""
                             hw_tried = False
                             continue
-                        log.warning(f"SNAP [{camera_id}]: "
-                                    f"ffmpeg EOF after {frames} frames (rc={rc})")
+                        # 2.3.1: distinguish focus-leave kill (clean shutdown,
+                        # we caused it) from natural EOF (ffmpeg actually died).
+                        # The flag is set in handle_focus_clear right before the
+                        # proc.kill() that triggers this EOF — log it differently
+                        # so the warning channel doesn't carry a false alarm.
+                        if state.get("focus_leave_kill"):
+                            log.info(f"SNAP [{camera_id}]: ffmpeg killed "
+                                     f"by focus-leave after {frames} frames "
+                                     f"(rc={rc})")
+                        else:
+                            log.warning(f"SNAP [{camera_id}]: "
+                                        f"ffmpeg EOF after {frames} frames (rc={rc})")
                         break
 
                     buf += chunk
@@ -5288,6 +5298,19 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s after exit — not restarting")
                 return
 
+            # 2.3.1: If this exit was due to focus-leave (we killed ffmpeg in
+            # handle_focus_clear), don't restart here — return to let the next
+            # handle_snapshot poll spawn a fresh thumbnail-mode (native_res=False)
+            # snap_loop. Without this, after the user leaves enhanced view we
+            # would either restart at native_res=True (still high-res, wrong
+            # mode) or run a stale loop. The flag is one-shot: consumed here
+            # so future natural restarts behave normally.
+            if state.get("focus_leave_kill"):
+                state.pop("focus_leave_kill", None)
+                log.info(f"SNAP [{camera_id}]: returning to thumbnail polling "
+                         f"(focus-leave clean exit, {frames} frames)")
+                return
+
             # rc1 (Item B1): track clean runs to eventually clear the
             # -fflags +discardcorrupt flag. A "clean run" is one that produced
             # at least 50 frames before exiting — partial runs that died early
@@ -5313,6 +5336,29 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         except Exception as ex:
                             log.debug(f"SNAP [{camera_id}]: save_cameras after "
                                       f"fflags clear failed: {ex}")
+
+            # 2.3.1: After a clean run (>=50 frames), clear the H.265+ red
+            # badge if it was set. _drain_stderr fires the "Multi-layer HEVC"
+            # warning whenever ffmpeg emits that stderr line — but on many
+            # Hikvision streams that line appears even though the camera is
+            # NOT actually on H.265+ (false positive in ffmpeg's codec
+            # detection). If frames flowed cleanly, we have direct evidence
+            # the stream is decodable, so the badge is misleading. Clear it
+            # and set hevc_plus_noise_confirmed=True so future ffmpeg cycles
+            # don't re-set the badge from the same stderr noise. The
+            # -fflags +discardcorrupt workaround stays applied as defensive
+            # cover (it's harmless on a clean stream).
+            if cam_now and frames >= 50 and cam_now.get("hevc_plus_warning"):
+                cam_now["hevc_plus_warning"] = False
+                cam_now["hevc_plus_noise_confirmed"] = True
+                log.info(f"SNAP [{camera_id}]: clean run ({frames} frames) "
+                         f"— clearing H.265+ badge "
+                         f"(ffmpeg's Multi-layer HEVC warning was a false alarm)")
+                try:
+                    save_cameras()
+                except Exception as ex:
+                    log.debug(f"SNAP [{camera_id}]: save_cameras after "
+                              f"badge clear failed: {ex}")
 
             state["restart_count"] += 1
 
@@ -5994,6 +6040,29 @@ async def handle_focus_clear(request: web.Request) -> web.Response:
     if prev:
         state = _SNAP.get(prev)
         if state:
+            # 2.3.1: directly kill ffmpeg in addition to cancelling the task.
+            # task.cancel() alone is cooperative — the task only sees the
+            # cancellation at the next await checkpoint, but if ffmpeg keeps
+            # producing chunks the read() keeps returning data successfully
+            # and the cancellation never gets delivered cleanly. Result was a
+            # 12+ second lag between focus-leave and snap_loop actually
+            # exiting (observed on Hikvision: focus-leave at 14:58:14,
+            # ffmpeg EOF only logged at 14:58:26). Killing the process
+            # directly forces the next read() to return empty immediately,
+            # the snap_loop drops into the EOF branch and unwinds in <1s.
+            # The focus_leave_kill flag tells snap_loop's restart logic that
+            # this exit was OUR doing — skip the restart; the next
+            # handle_snapshot poll will spawn a fresh thumbnail task.
+            state["focus_leave_kill"] = True
+            proc = state.get("proc")
+            if proc is not None:
+                try:
+                    proc.kill()
+                    log.info(f"Focus: killed ffmpeg for {prev} — "
+                             f"snap_loop will exit and thumbnail polling will restart")
+                except Exception as ex:
+                    log.debug(f"Focus: ffmpeg kill for {prev} failed "
+                              f"(probably already dead): {ex}")
             task = state.get("task")
             if task and not task.done():
                 task.cancel()
@@ -6689,6 +6758,18 @@ async def api_set_credentials(request) -> web.Response:
             _THREAD_POOL, onvif_get_profiles, media_url, username, password)
         log.info(f"  ONVIF profiles found: {len(profiles)} — {[p['name'] for p in profiles]}")
         if profiles:
+            # 2.3.0 hotfix: ONVIF SOAP calls (above and per-profile below)
+            # open TCP sockets to port 8080 — to the camera's per-IP
+            # rate-limit logic, those count exactly the same as RTSP opens
+            # on port 554. Mark the most recent SOAP call in the tracker
+            # so the upcoming RTSP validator waits the remainder of the
+            # cooldown before opening on 554. Observed in the wild:
+            # Hipcam-family cameras returning 'HTTP/1.1 400 Bad Request'
+            # on RTSP port 554 when an RTSP TCP open landed within ~1s
+            # of the previous SOAP TCP close.
+            if throttle_s > 0:
+                _THROTTLE_TRACK[ip] = time.monotonic()
+
             enc_creds = encrypt_creds(username, password)
 
             # ── 2.3.0: Collect all stream URLs first, then validate them
@@ -6702,6 +6783,9 @@ async def api_set_credentials(request) -> web.Response:
                 log.info(f"  Profile '{prof['name']}' stream_url: {stream_url}")
                 if stream_url:
                     profile_urls.append((prof, stream_url))
+                # Refresh tracker timestamp after each SOAP call too
+                if throttle_s > 0:
+                    _THROTTLE_TRACK[ip] = time.monotonic()
 
             url_results: dict = {}
             if profile_urls:
@@ -9273,11 +9357,18 @@ async def _drain_stderr(proc: object, label: str) -> None:
         cam_id = label.replace("SNAP:", "").strip()
         if cam_id in CAMERAS:
             cam = CAMERAS[cam_id]
-            first_time = not cam.get("hevc_plus_warning")
-            if first_time:
-                cam["hevc_plus_warning"] = True
-                log.warning(f"Camera {cam_id}: H.265+ (Hikvision proprietary) detected — "
-                            f"fix: camera UI → Video → Encoding → change H.265+ to H.265")
+            # 2.3.1: If a prior clean run (>=50 frames) confirmed this is just
+            # Hikvision's noisy stderr (not actual broken H.265+), skip setting
+            # the badge. We still apply the -fflags +discardcorrupt workaround
+            # below as defensive cover (it's harmless on a clean stream and
+            # helpful if the stream ever does have real corruption).
+            noise_confirmed = cam.get("hevc_plus_noise_confirmed", False)
+            if not noise_confirmed:
+                first_time = not cam.get("hevc_plus_warning")
+                if first_time:
+                    cam["hevc_plus_warning"] = True
+                    log.warning(f"Camera {cam_id}: H.265+ (Hikvision proprietary) detected — "
+                                f"fix: camera UI → Video → Encoding → change H.265+ to H.265")
             # rc1 (Item B1): enable -fflags +discardcorrupt for future ffmpeg
             # launches on this camera. ffmpeg's discardcorrupt flag drops frames
             # that fail decoding instead of bailing the entire process — most
