@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.3.1"  # must match config.yaml
+CURRENT_VERSION = "2.3.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3395,6 +3395,27 @@ def _validate_rtsp_urls_single_socket(
     sock      = None
     next_cseq = 1
     auth_val: str | None = None
+
+    # 2.3.2 defense-in-depth: warn if the URLs being walked don't actually
+    # point to the host:port we're about to connect to. The 2.3.0+ caller
+    # in api_set_credentials was passing a wrong port for two minor
+    # versions before this was caught — this check makes the same class
+    # of misuse visible immediately in any future caller's logs.
+    if urls:
+        try:
+            first_parsed = urlparse(urls[0])
+            url_host = first_parsed.hostname
+            url_port = first_parsed.port or 554
+            if url_host and url_host != host:
+                log.warning(f"  [{label or 'validator'}] URL host "
+                            f"{url_host!r} != socket host {host!r} — "
+                            f"validator will likely fail (caller bug)")
+            if url_port != port:
+                log.warning(f"  [{label or 'validator'}] URL port "
+                            f"{url_port} != socket port {port} — "
+                            f"validator will likely fail (caller bug)")
+        except (ValueError, AttributeError):
+            pass  # malformed URL — surfaces below as parse/probe failure
 
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
@@ -6758,18 +6779,6 @@ async def api_set_credentials(request) -> web.Response:
             _THREAD_POOL, onvif_get_profiles, media_url, username, password)
         log.info(f"  ONVIF profiles found: {len(profiles)} — {[p['name'] for p in profiles]}")
         if profiles:
-            # 2.3.0 hotfix: ONVIF SOAP calls (above and per-profile below)
-            # open TCP sockets to port 8080 — to the camera's per-IP
-            # rate-limit logic, those count exactly the same as RTSP opens
-            # on port 554. Mark the most recent SOAP call in the tracker
-            # so the upcoming RTSP validator waits the remainder of the
-            # cooldown before opening on 554. Observed in the wild:
-            # Hipcam-family cameras returning 'HTTP/1.1 400 Bad Request'
-            # on RTSP port 554 when an RTSP TCP open landed within ~1s
-            # of the previous SOAP TCP close.
-            if throttle_s > 0:
-                _THROTTLE_TRACK[ip] = time.monotonic()
-
             enc_creds = encrypt_creds(username, password)
 
             # ── 2.3.0: Collect all stream URLs first, then validate them
@@ -6783,19 +6792,46 @@ async def api_set_credentials(request) -> web.Response:
                 log.info(f"  Profile '{prof['name']}' stream_url: {stream_url}")
                 if stream_url:
                     profile_urls.append((prof, stream_url))
-                # Refresh tracker timestamp after each SOAP call too
-                if throttle_s > 0:
-                    _THROTTLE_TRACK[ip] = time.monotonic()
 
             url_results: dict = {}
             if profile_urls:
-                # Mark the TCP open in the throttle tracker before the call
-                if throttle_s > 0:
-                    await _throttle_wait_if_needed(ip, throttle_s,
-                                                   "ONVIF profile validation")
+                # 2.3.2: Parse the actual RTSP port from the first profile
+                # URL. The camera's stored `port` attribute is the
+                # DISCOVERY port (often 80 for HTTP-discovered cams like
+                # the Hipcam/Microseven family), NOT the RTSP port. The
+                # 2.3.0+ validator was being passed `port` directly, so on
+                # those cameras it was opening TCP to :80 — the HTTP admin
+                # server — and sending RTSP-shaped requests there. The
+                # HTTP server replied 'HTTP/1.1 400 Bad Request' to the
+                # first request and closed the connection, leaving the
+                # second request with an empty response. The validator
+                # logged 0/2 OK every time, but the "ONVIF confirmed creds
+                # → including anyway" fallback masked the symptom so
+                # streams still came up via ffprobe. Confirmed empirically
+                # on Microseven via direct port-554 RTSP walks (Test
+                # C: 2/2 URLs OK in 1.6s through one socket after a
+                # 4-SOAP burst with 1s gap).
+                #
+                # Defensive parse: ONVIF responses are untrusted input;
+                # urlparse can raise ValueError on malformed port. Fall
+                # back to 554 (RTSP default) on any parse failure rather
+                # than letting the exception bubble up and break the
+                # whole cred-auth flow.
+                _, first_stream_url = profile_urls[0]
+                try:
+                    rtsp_port = urlparse(first_stream_url).port or 554
+                except (ValueError, AttributeError) as ex:
+                    log.warning(f"  Could not parse RTSP port from "
+                                f"{first_stream_url!r} ({ex}) "
+                                f"— falling back to 554")
+                    rtsp_port = 554
+                if rtsp_port != port:
+                    log.info(f"  Validator using RTSP port {rtsp_port} "
+                             f"(parsed from profile URL; camera-stored "
+                             f"port was {port})")
                 url_results = await loop.run_in_executor(
                     _THREAD_POOL, _validate_rtsp_urls_single_socket,
-                    ip, port, [u for _, u in profile_urls],
+                    ip, rtsp_port, [u for _, u in profile_urls],
                     username, password, 6.0, None,
                     f"{camera_id}/onvif-profiles")
                 log.info(f"  Single-socket profile validation: "
