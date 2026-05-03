@@ -1,3 +1,92 @@
+## 2.3.1
+**Three small fixes layered on 2.3.0: validator throttle plumbing, fast
+focus-leave shutdown, and H.265+ false-alarm badge clearing.**
+
+### What changed
+
+**1. Validator hotfix — throttle tracker updated after each ONVIF SOAP call.**
+On the Microseven (and other Hipcam-family cameras with `rate_limit_per_ip_tcp`),
+the 2.3.0 validator was reliably failing on its first OPTIONS to port 554
+with a malformed `'HTTP/1.1 400 Bad Request'` response. The fallback
+("ONVIF confirmed creds → include anyway") covered the symptom so streams
+ended up working, but the validator's job was being undermined.
+
+Live diagnostic on the Microseven reproduced 2-for-2: each cred-auth, the validator
+opened TCP to :554 within milliseconds of the last ONVIF SOAP call to
+:8080. Hipcam's per-IP throttle counts SOAP TCP opens on :8080 the same
+as RTSP TCP opens on :554 — to the camera, the validator's TCP open was
+inside the cooldown window and got served by the wrong protocol handler.
+
+Fix: `_THROTTLE_TRACK[ip] = time.monotonic()` after each ONVIF SOAP call
+in `api_set_credentials` so the validator's `_throttle_wait_if_needed`
+sees the most recent activity and waits the remainder of the cooldown
+before opening on :554. ~10 lines added. No behavior change for any
+brand without `rate_limit_per_ip_tcp`.
+
+**2. Tight focus-leave shutdown — kill ffmpeg directly on Enhanced View exit.**
+On the Hikvision, leaving Enhanced View was logging
+`ffmpeg EOF after N frames (rc=None)` 12+ seconds after the leave event.
+Diagnostic on a 60-second focus session showed: focus-leave fired
+`task.cancel()` at t=64s, but ffmpeg kept producing frames for another
+12s before naturally dying — visible in the log as a frame-counter that
+kept advancing past the cancel call. The cancellation was never being
+delivered to a sleeping await because every chunk read returned data
+quickly and synchronous frame parsing dominated the loop.
+
+The 12-second lag was visible in the UI as a laggy card return after
+Enhanced View — during that window ffmpeg was still running (consuming
+camera bandwidth) and the snap_loop couldn't switch back to thumbnail
+mode, then there was an extra 2-second restart backoff.
+
+Fix in `handle_focus_clear`: in addition to `task.cancel()`, directly
+`proc.kill()` the ffmpeg subprocess via `state["proc"]`. Set a one-shot
+`state["focus_leave_kill"]=True` flag. snap_loop's EOF branch checks it,
+logs cleanly ("ffmpeg killed by focus-leave after N frames" at INFO,
+not WARNING), and the post-finally code returns instead of restarting —
+the next `handle_snapshot` poll spawns a fresh thumbnail-mode snap_loop
+with `native_res=False`. New lag: <1 second.
+
+**3. H.265+ red badge clears on clean-run evidence.**
+The Hikvision was permanently flagged with the red H.265+ warning
+badge despite NOT being on H.265+. Root cause: ffmpeg's "Multi-layer HEVC
+coding is not implemented" stderr line is a known false positive on some
+Hikvision streams (camera UI shows H.265, ffmpeg complains anyway).
+2.3.0 had three pieces of the right behavior: detect the warning, set
+`needs_fflags_discardcorrupt` for defensive workaround, and after 10
+clean runs clear the discardcorrupt flag. But the clean-run logic
+**never cleared `hevc_plus_warning`** — the badge flag — so once set, it
+stayed forever.
+
+Fix:
+- New persistent flag `hevc_plus_noise_confirmed`. Set when a clean run
+  (≥50 frames) shows the stream actually decodes — direct evidence the
+  ffmpeg warning was noise, not a real codec failure.
+- `_drain_stderr` now respects `hevc_plus_noise_confirmed`: if True,
+  skip re-setting `hevc_plus_warning` even when the noisy stderr fires
+  again. The defensive `-fflags +discardcorrupt` workaround still
+  applies (harmless on a clean stream).
+- In snap_loop's post-iteration code, after any run with frames ≥ 50,
+  if `hevc_plus_warning` is set, clear it AND set `hevc_plus_noise_confirmed=True`.
+  Persisted via `save_cameras()`.
+
+For the Hikvision: badge will clear automatically the next time it racks up
+50 frames in a single ffmpeg cycle (typically ~5 seconds in Enhanced
+View, longer in thumbnail mode). For real H.265+ cameras: the badge
+appears once, stays until a clean run proves the stream works
+(unlikely if the camera really is on H.265+ — those usually fail to
+decode entirely). Logs are unchanged.
+
+### Files modified
+
+| File | Change |
+|---|---|
+| `camera_discovery.py` | All three fixes (~50 lines net additive) |
+| `config.yaml` | version 2.3.0 → 2.3.1 |
+| `CHANGELOG.md` | This entry |
+
+---
+
+
 ## 2.3.0
 **Single-socket cred-auth refactor + throttle-aware runtime pacing.**
 Eliminates the firmware-level RTSP lockout that hit the Microseven
