@@ -136,6 +136,8 @@ VALID_THROTTLE_TYPES = {
     "requires_custom_firmware",
     "unstable_rtsp",
     "no_rtsp_support",
+    "auth_attempt_lockout",         # 2.4.0: Lorex/Dahua DVR-NVR family
+                                    # (lockout after N failed Digest auth)
 }
 VALID_CONFIDENCE = {"HIGH", "MED", "LOW"}
 
@@ -165,7 +167,14 @@ else:
     entries_total = len(camera_db_node.elts)
 
     DATA_FIELDS = ("throttle_type", "throttle_amount",
-                   "throttle_notes", "request_behaviors")
+                   "throttle_notes", "request_behaviors",
+                   # 2.4.0-rc1.0: rtsp_realm_regex is a new optional
+                   # CAMERA_DB field used by _identify_camera_brand to
+                   # match brands by RTSP Digest realm pattern. Optional
+                   # like the others — only entries with high-confidence
+                   # known realm patterns populate it (currently just
+                   # the Lorex/Dahua DVR-NVR Family).
+                   "rtsp_realm_regex")
     DATA_FIELD_SET = set(DATA_FIELDS)
 
     for idx, elt in enumerate(camera_db_node.elts):

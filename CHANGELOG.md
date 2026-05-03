@@ -1,3 +1,65 @@
+## 2.4.0-rc1.0
+**Adds the `_rtsp_options_fingerprint` helper that opens a single TCP
+socket, sends one RTSP OPTIONS request, and captures Server header,
+auth realm, auth scheme, and Public methods. Wires this fingerprint
+into the discovery flow at two sites and extends the brand-id pipeline
+to score on `rtsp_realm_regex`. Pure additive infrastructure — no
+behavioral changes to existing camera handling.**
+
+### What changed
+
+**1. New helper: `_rtsp_options_fingerprint(host, port=554, timeout=3.0)`.**
+Opens one TCP socket, sends an RTSP OPTIONS request with no User-Agent
+(keeps the request minimal — avoids any User-Agent-based filtering some
+servers might do), reads up to 4KB of response or until `\r\n\r\n`,
+parses the status line + WWW-Authenticate + Server + Public headers.
+Returns a dict with `status`, `looks_like_rtsp`, `server_header`,
+`auth_scheme`, `auth_realm`, `auth_algorithm`, `public_methods`,
+`cseq`, `raw_response`, `elapsed_ms`, `error`. Failure-tolerant:
+timeouts, connection refused, non-RTSP servers, multi-line continuation
+headers all handled without raising.
+
+**2. Wired into the discovery flow at two sites.** First, in the ONVIF
+post-scan path, right after `probe_http_identity` runs — populates
+`onvif_meta` with `server_header`, `auth_realm`, `auth_scheme`, and
+`rtsp_public_methods` when the fingerprint succeeds. Second, in
+`_probe_host_port` for non-ONVIF discoveries (nmap-only, mDNS) — same
+field-population, before path-walking starts.
+
+**3. Brand-id pipeline now scores on `rtsp_realm_regex`.** When a
+CAMERA_DB entry has the new optional `rtsp_realm_regex` field (regex
+pattern matched against the captured `auth_realm`), `_identify_camera_brand`
+treats a match as a HIGH-confidence signal — realm strings are
+server-baked and not user-customizable. The Lorex/Dahua DVR-NVR Family
+entry now has `rtsp_realm_regex: r"^Login to [0-9a-f]{32}$"` populated.
+
+**4. New camera-record fields.** `rtsp_server_header`, `rtsp_auth_realm`,
+`rtsp_auth_scheme`, `rtsp_public_methods` added to the camera dict and
+to the safe-camera redaction allowlist. The Identity panel displays
+`RTSP Auth Realm` and `RTSP Server` when populated.
+
+### Cost / risk
+
+- One extra TCP open per host during ONVIF post-scan. ~3s timeout,
+  expected <0.05s for a responsive host. <1s added to the typical
+  15-host scan on a healthy network.
+- Zero risk to throttled hosts (Hipcam family): the fingerprint probe
+  IS the first TCP open, no preceding probe to collide with.
+- Zero risk to lockout-throttled hosts (Lorex/Dahua DVR family):
+  OPTIONS doesn't authenticate, just gets the 401 challenge. No counter
+  increment.
+
+### Files modified
+
+| `camera_discovery.py` | New `_rtsp_options_fingerprint` helper |
+| `camera_discovery.py` | Wire into ONVIF post-scan + non-ONVIF flow |
+| `camera_discovery.py` | Extend `_identify_camera_brand` for rtsp_realm_regex |
+| `camera_discovery.py` | New camera record fields + redaction list |
+| `camera_discovery.py` | UI: Identity panel new fields |
+| `config.yaml` | version 2.3.2 → 2.4.0-rc1.0 |
+
+---
+
 ## 2.3.2
 **Fixes the actual root cause of the Microseven validator-400 bug — the
 validator was connecting to the wrong port — and reverts the 2.3.1

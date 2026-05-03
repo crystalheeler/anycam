@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.3.2"  # must match config.yaml
+CURRENT_VERSION = "2.4.0-rc1.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1708,6 +1708,294 @@ CAMERA_DB: list[dict] = [
         "request_behaviors_confidence":"HIGH",
     },
     {
+        "name": "Honeywell",
+        "aliases": ["honeywell", "hbt", "performance series", "hc30"],
+        "http_titles": ["honeywell"],
+        "http_body":   ["honeywell", "hbt"],
+        "http_headers":["honeywell"],
+        "nmap_products":["honeywell"],
+        "onvif_scopes": ["honeywell"],
+        "default_ports": [554, 80, 443],
+        "notes": ("Honeywell IP camera — Performance Series HC30 line. "
+                  "Mixed OEM (Hikvision or Dahua firmware depending on "
+                  "year/line per SCW). Try Hikvision /Streaming/Channels/101 "
+                  "and Dahua /cam/realmonitor first; fall back to ONVIF "
+                  "discovery."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "LOW",
+        "throttle_amount":          "Inherits upstream OEM",
+        "throttle_amount_confidence":"LOW",
+        "throttle_notes": ("OEM rebrand — behavior inherits from upstream "
+                           "Hikvision or Dahua firmware (varies by year/line)."),
+        "throttle_notes_confidence":"LOW",
+        "request_behaviors": ("OEM-rebrand. Try Hikvision-style and "
+                              "Dahua-style URL families before falling back "
+                              "to ONVIF."),
+        "request_behaviors_confidence":"LOW",
+    },
+    {
+        "name": "Arecont Vision",
+        "aliases": ["arecont", "arecont vision", "contera", "megavideo"],
+        "http_titles": ["arecont", "contera"],
+        "http_body":   ["arecont vision", "megavideo"],
+        "http_headers":["arecont"],
+        "nmap_products":["arecont"],
+        "onvif_scopes": ["arecont"],
+        "default_ports": [554, 80, 443],
+        "notes": ("Arecont Vision IP camera (multi-megapixel, "
+                  "multi-imager surround). Single-sensor URL pattern: "
+                  "/h264.sdp?res=[half/full]&ssn=N&doublescan=0&fps=N. "
+                  "Multi-sensor: /h264.sdp<sensor#> where sensor# is 1..4. "
+                  "ssn must be unique per stream."),
+        "throttle_type":            "concurrent_stream_cap",
+        "throttle_type_confidence": "LOW",
+        "throttle_amount":          "Camera-dependent — not all units handle multiple full-res sessions",
+        "throttle_amount_confidence":"LOW",
+        "throttle_notes": ("Per OpenEye/AvertX docs: not all Arecont cameras "
+                           "can handle multiple full-resolution sessions. "
+                           "Reduce to half-res or single session per sensor "
+                           "on overload."),
+        "throttle_notes_confidence":"MED",
+        "request_behaviors": ("HTTP Basic auth. Multi-imager pattern uses "
+                              "/h264.sdp<N> per sensor. Streaming recipe is "
+                              "deterministic — Layer 2 grinding wasteful."),
+        "request_behaviors_confidence":"MED",
+    },
+    {
+        "name": "IQinVision",
+        "aliases": ["iqinvision", "iqeye"],
+        "http_titles": ["iqinvision", "iqeye"],
+        "http_body":   ["iqinvision", "iqeye"],
+        "http_headers":["iqinvision"],
+        "nmap_products":["iqinvision"],
+        "onvif_scopes": ["iqinvision"],
+        "default_ports": [554, 80],
+        "notes": ("IQinVision IQeye IP camera (acquired by Vicon — older "
+                  "line). ONVIF and PSIA compliant. Try generic /track1, "
+                  "/track2 or ONVIF discovery."),
+        "request_behaviors": ("Older PSIA-compliant line. ONVIF Profile S "
+                              "on later firmware."),
+        "request_behaviors_confidence":"LOW",
+    },
+    {
+        "name": "OpenEye",
+        "aliases": ["openeye", "ows", "apex", "owe"],
+        "http_titles": ["openeye", "ows"],
+        "http_body":   ["openeye", "openeye.net", "ows server"],
+        "http_headers":["openeye"],
+        "nmap_products":["openeye"],
+        "onvif_scopes": ["openeye"],
+        "default_ports": [554, 80, 443],
+        "notes": ("OpenEye OWS Apex server / IP camera. Generic ONVIF + "
+                  "RTSP /track1, /track2 paths."),
+        "request_behaviors": ("OWS Apex server can ingest most third-party "
+                              "cameras. Direct OpenEye cameras use ONVIF + "
+                              "/track[N] paths."),
+        "request_behaviors_confidence":"LOW",
+    },
+    {
+        "name": "Verint",
+        "aliases": ["verint", "nextiva", "s1700", "s1708"],
+        "http_titles": ["verint", "nextiva"],
+        "http_body":   ["verint", "nextiva", "video solutions"],
+        "http_headers":["verint"],
+        "nmap_products":["verint"],
+        "onvif_scopes": ["verint"],
+        "default_ports": [554, 80, 2543],
+        "notes": ("Verint Nextiva enterprise camera/encoder. Older Nextiva "
+                  "encoders (S1700/S1708) are RTP/UDP only on port 2543 "
+                  "(no RTSP, telnet config). Newer Verint models are "
+                  "ONVIF-compliant."),
+        "request_behaviors": ("Older models lack RTSP entirely — RTP/UDP on "
+                              "port 2543. Newer models ONVIF Profile S."),
+        "request_behaviors_confidence":"LOW",
+    },
+    {
+        "name": "Ubiquiti UniFi Protect",
+        "aliases": ["ubiquiti", "unifi", "unifi protect", "ubnt", "g3", "g4", "g5"],
+        "http_titles": ["unifi", "unifi protect"],
+        "http_body":   ["ubiquiti", "unifi protect", "ui.com"],
+        "http_headers":["ubnt", "ubiquiti"],
+        "nmap_products":["ubiquiti", "unifi"],
+        "onvif_scopes": [],
+        "default_ports": [7447, 7441, 443, 80],
+        "notes": ("Ubiquiti UniFi Protect cameras (G3/G4/G5/AI Port). RTSP "
+                  "must be enabled per-camera in UniFi Protect controller "
+                  "Settings -> Advanced. Camera ID is alphanumeric slug "
+                  "from UniFi UI. Non-standard ports: 7447 (RTSP) / "
+                  "7441 (RTSPS). Cameras do NOT speak ONVIF directly — "
+                  "all access goes through the Protect controller."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "MED",
+        "throttle_amount":          "Configurable in Protect controller",
+        "throttle_amount_confidence":"MED",
+        "throttle_notes": ("Bandwidth/session caps live in the Protect "
+                           "controller, not the camera."),
+        "throttle_notes_confidence":"MED",
+        "request_behaviors": ("Streams via UniFi Protect controller — not "
+                              "direct from camera. ONVIF discovery will "
+                              "fail; use vendor's API or copy the camera_id "
+                              "from Protect UI. Skip ONVIF + skip Layer 2."),
+        "request_behaviors_confidence":"HIGH",
+    },
+    {
+        "name": "Hiseeu",
+        "aliases": ["hiseeu", "eseecloud", "esee"],
+        "http_titles": ["hiseeu"],
+        "http_body":   ["hiseeu", "eseecloud"],
+        "http_headers":["hiseeu"],
+        "nmap_products":["hiseeu"],
+        "onvif_scopes": ["hiseeu"],
+        "default_ports": [554, 80, 8554, 34567],
+        "notes": ("Hiseeu wireless IP camera or NVR/gateway system. "
+                  "Gateway-based: gateway exposes RTSP at port 80 with "
+                  "/ch[N]_[feed].264 paths. Standalone cameras use "
+                  "/onvif1 or generic /Streaming/Channels paths. "
+                  "Inconsistent across models."),
+        "request_behaviors": ("Wireless gateway-based system. URL pattern "
+                              "varies — try /onvif1 and ONVIF discovery."),
+        "request_behaviors_confidence":"LOW",
+    },
+    {
+        "name": "Grandstream",
+        "aliases": ["grandstream", "gxv", "gsc"],
+        "http_titles": ["grandstream"],
+        "http_body":   ["grandstream networks", "grandstream.com"],
+        "http_headers":["grandstream"],
+        "nmap_products":["grandstream"],
+        "onvif_scopes": ["grandstream"],
+        "default_ports": [554, 80, 443, 8000],
+        "notes": ("Grandstream GXV/GSC IP camera. Standard ONVIF Profile "
+                  "S/T. Multiple stream profiles configurable."),
+        "request_behaviors": "Standard ONVIF. Multiple configurable stream profiles.",
+        "request_behaviors_confidence":"LOW",
+    },
+    {
+        "name": "TRENDnet",
+        "aliases": ["trendnet", "tv-ip"],
+        "http_titles": ["trendnet", "tv-ip"],
+        "http_body":   ["trendnet", "trendnet.com"],
+        "http_headers":["trendnet"],
+        "nmap_products":["trendnet"],
+        "onvif_scopes": ["trendnet"],
+        "default_ports": [554, 80],
+        "notes": ("TRENDnet TV-IP series IP camera. URL pattern varies by "
+                  "model generation. Newer: /Streaming/Channels/101 "
+                  "(Hikvision-style). Older: /h264 or /play1.sdp. "
+                  "Some use /live/0/SUB."),
+        "request_behaviors": ("URL pattern varies by model generation — "
+                              "try Hik-style, then /play1.sdp, then "
+                              "/h264, then ONVIF discovery."),
+        "request_behaviors_confidence":"MED",
+    },
+    {
+        "name": "D-Link",
+        "aliases": ["d-link", "dlink", "dcs-"],
+        "http_titles": ["d-link", "dlink", "dcs-"],
+        "http_body":   ["d-link", "dlink.com"],
+        "http_headers":["d-link"],
+        "nmap_products":["d-link", "dlink"],
+        "onvif_scopes": ["dlink"],
+        "default_ports": [554, 80],
+        "notes": ("D-Link DCS-series IP camera. URL pattern varies by "
+                  "model. Older DCS-9xx: /play1.sdp. DCS-8526LH: "
+                  "/live/profile.0 (main), /live/profile.1 (sub). "
+                  "Some use /onvif/profile.0 or /live/ch00_0."),
+        "request_behaviors": ("URL pattern varies by model. Try "
+                              "/play1.sdp, /live/profile.0, "
+                              "/onvif/profile.0, then ONVIF discovery."),
+        "request_behaviors_confidence":"MED",
+    },
+    {
+        "name": "SCW (Security Camera Warehouse)",
+        "aliases": ["scw", "security camera warehouse", "getscw"],
+        "http_titles": ["scw", "security camera warehouse"],
+        "http_body":   ["getscw.com", "security camera warehouse"],
+        "http_headers":["scw"],
+        "nmap_products":["scw"],
+        "onvif_scopes": ["scw"],
+        "default_ports": [554, 80],
+        "notes": ("SCW Hikvision-compatible firmware on most lines. Use "
+                  "/Streaming/Channels/101 pattern. SCW-branded NVRs "
+                  "follow Hikvision NVR conventions."),
+        "throttle_type":            "concurrent_user_cap",
+        "throttle_type_confidence": "LOW",
+        "throttle_amount":          "Inherits Hikvision firmware",
+        "throttle_amount_confidence":"LOW",
+        "throttle_notes": "Hikvision OEM — inherits parent throttle behavior.",
+        "throttle_notes_confidence":"MED",
+        "request_behaviors": ("Hikvision OEM. Use /Streaming/Channels/N0X "
+                              "pattern. ISAPI snapshot URL works."),
+        "request_behaviors_confidence":"MED",
+    },
+    {
+        "name": "Blink",
+        "aliases": ["blink", "amazon blink", "blink mini", "blink outdoor"],
+        "http_titles": ["blink"],
+        "http_body":   ["blink", "amazon blink"],
+        "http_headers":[],
+        "nmap_products":["blink"],
+        "onvif_scopes": [],
+        "default_ports": [],
+        "notes": ("Blink (Amazon) cloud-only camera. No local RTSP, no "
+                  "local HTTP UI for streaming. Footage routes through "
+                  "Amazon servers. Local discovery should mark these "
+                  "as 'Not a Camera' since no controllable stream exists."),
+        "throttle_type":            "no_rtsp_support",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "N/A — cloud only",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("Cloud-only camera — no local RTSP path exists. "
+                           "Sync Module 2 offers local storage but no RTSP."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": ("Cloud-only — no local stream access. Skip "
+                              "ONVIF, skip Layer 2, skip all probes."),
+        "request_behaviors_confidence":"HIGH",
+    },
+    {
+        "name": "Lorex / Dahua DVR-NVR Family",
+        "aliases": ["lorex dvr", "lorex nvr", "dahua dvr", "dahua nvr",
+                    "amcrest dvr", "amcrest nvr",
+                    "d861", "d862", "d863", "d871", "d841", "d881",
+                    "n841", "n844", "n846", "n861", "n864", "n881", "n882",
+                    "n910", "n920"],
+        "http_titles": ["web service"],
+        "http_body":   [],
+        "http_headers":[],
+        "nmap_products":[],
+        "onvif_scopes": [],
+        "default_ports": [554, 80, 35000, 37777, 443, 8000],
+        "rtsp_realm_regex": r"^Login to [0-9a-f]{32}$",
+        "rtsp_realm_regex_confidence": "HIGH",
+        "notes": ("Multi-channel DVR/NVR family — Lorex (post-Dahua-"
+                  "acquisition), Dahua direct, Amcrest (rebrand). "
+                  "Series: D861/862/863/871/841/881, N841/844/846/861/"
+                  "864/881/882/910/920. Web admin shows page title 'WEB "
+                  "SERVICE' before init. Default Dahua/Amcrest TCP/UDP "
+                  "ports 37777/37778 are user-configurable (one observed "
+                  "live unit had them on 35000/35001). RTSP Server: "
+                  "header omitted. ONVIF disabled by default. URL pattern "
+                  "/cam/realmonitor?channel={ch}&subtype={st} requires "
+                  "channel iteration to find populated channels."),
+        "throttle_type":            "auth_attempt_lockout",
+        "throttle_type_confidence": "HIGH",
+        "throttle_amount":          "10 failed auth attempts then ~30 min lockout (or until power cycle)",
+        "throttle_amount_confidence":"HIGH",
+        "throttle_notes": ("Lockout only counts FAILED auth (bad Digest "
+                           "response). Successful auth followed by 200/404 "
+                           "on subsequent paths does NOT increment the "
+                           "counter. Channel iteration with valid creds is "
+                           "unthrottled."),
+        "throttle_notes_confidence":"HIGH",
+        "request_behaviors": ("Digest auth only (no Basic). Realm pattern "
+                              "'Login to <32-hex>'. Server header omitted "
+                              "from RTSP responses. ONVIF disabled by "
+                              "default — lives under Network -> Connection "
+                              "or Network -> Advanced depending on firmware "
+                              "minor build."),
+        "request_behaviors_confidence":"HIGH",
+    },
+    {
         "name": "Generic IP Camera",
         "aliases": ["webcam", "ipcam", "network camera"],
         "http_titles": ["ip camera", "network camera", "webcam", "ipcam",
@@ -1814,6 +2102,34 @@ def _identify_camera_brand(cam: dict, force: bool = False) -> dict | None:
         # for cameras that aren't in nmap_results (no mac_vendor).
         str(cam.get("onvif_scopes", "") or ""),
     ]).strip()
+
+    # 2.4.0-rc1.0: rtsp_realm_regex pre-pass.
+    # If we have a captured RTSP auth realm (from _rtsp_options_fingerprint),
+    # check it against any CAMERA_DB entries that define rtsp_realm_regex.
+    # A regex match here is HIGH-confidence: realm strings are server-baked
+    # and not user-customizable, so this overrides any weaker haystack
+    # match (e.g. a substring hit on "web service" page title alone). The
+    # primary motivation is the Lorex/Dahua DVR-NVR Family, whose
+    # "Login to <32-hex>" realm is a stronger discriminator than the
+    # generic "WEB SERVICE" HTTP title.
+    rtsp_realm = str(cam.get("rtsp_auth_realm", "") or "").strip()
+    if rtsp_realm:
+        import re as _re_realm
+        for entry in CAMERA_DB:
+            pattern = entry.get("rtsp_realm_regex")
+            if not pattern:
+                continue
+            try:
+                if _re_realm.search(pattern, rtsp_realm):
+                    cam["manufacturer"] = entry["name"]
+                    return entry
+            except _re_realm.error:
+                # Bad regex in CAMERA_DB — log and skip; never raise to caller
+                log.debug(
+                    f"  bad rtsp_realm_regex on {entry['name']!r}: "
+                    f"{pattern!r}"
+                )
+                continue
 
     if not haystack:
         return None
@@ -2162,6 +2478,10 @@ def build_fingerprint(cam: dict) -> dict:
         "service":      cam.get("server_header",""),
         "page_title":   cam.get("page_title",""),
         "manufacturer": cam.get("manufacturer",""),
+        # 2.4.0-rc1.0: RTSP fingerprint fields captured by
+        # _rtsp_options_fingerprint. Server-baked metadata, no PII.
+        "rtsp_server":  cam.get("rtsp_server_header",""),
+        "rtsp_realm":   cam.get("rtsp_auth_realm",""),
     }
 
 async def submit_to_community(record: dict) -> None:
@@ -3922,7 +4242,201 @@ def _make_ssl_ctx() -> ssl.SSLContext:
     return ctx
 
 
-def probe_http_identity(ip: str, port: int, timeout: int = 5) -> dict:
+def _rtsp_options_fingerprint(
+    host: str,
+    port: int = 554,
+    *,
+    timeout: float = 3.0,
+    path: str = "/",
+) -> dict:
+    """Open one TCP socket to host:port, send a single RTSP OPTIONS
+    request, read the response, and return a dict of captured fingerprint
+    fields.
+
+    Returns dict with keys:
+        status:           int|None      e.g. 200, 401, 404
+        looks_like_rtsp:  bool          True if any line started with "RTSP/"
+        server_header:    str|None      value of Server: header
+        auth_scheme:      str|None      "Digest" | "Basic" | None
+        auth_realm:       str|None      realm from WWW-Authenticate
+        auth_algorithm:   str|None      algorithm from WWW-Authenticate
+        public_methods:   list[str]     parsed from Public: header
+        cseq:             str|None      echoed CSeq
+        raw_response:     str           full response text (truncated to 4 KB)
+        elapsed_ms:       float         wall-clock time of round-trip
+        error:            str|None      populated only on socket-level failure
+
+    Failure semantics:
+      - Connection refused / timeout / RST: returns dict with `error`
+        populated, `looks_like_rtsp=False`, all other fields None or empty.
+      - Server speaks something else (HTTP, FTP): `looks_like_rtsp=False`,
+        `status=None`, `raw_response` captures whatever was received.
+      - Server speaks RTSP but returns 4xx: `looks_like_rtsp=True`,
+        `status` set, `auth_*` fields populated if challenge present.
+      - Server speaks RTSP and returns 200: full population including
+        `public_methods`.
+
+    Implementation notes:
+      - Single TCP open + close. No retries. ~3s timeout.
+      - No User-Agent header sent — keeps the request minimal.
+      - Reads up to 4 KB or until "\\r\\n\\r\\n" or socket close.
+      - Parses headers via simple line-split + ":" partition.
+      - Multi-line continuation headers (RFC 822 folding) collapsed onto
+        the previous header before parsing.
+
+    Risk profile:
+      - Zero risk to Hipcam-family rate-limited hosts: this IS the first
+        TCP open, no preceding probe to collide with.
+      - Zero risk to Lorex/Dahua DVR auth-lockout hosts: OPTIONS doesn't
+        authenticate, just receives the 401 challenge. No counter increment.
+
+    Added in 2.4.0-rc1.0 per RTSP_OPTIONS_Fingerprint_Helper_Plan.md.
+    """
+    import socket as _sock
+    import re as _re_local
+    import time as _time_local
+
+    result: dict = {
+        "status": None,
+        "looks_like_rtsp": False,
+        "server_header": None,
+        "auth_scheme": None,
+        "auth_realm": None,
+        "auth_algorithm": None,
+        "public_methods": [],
+        "cseq": None,
+        "raw_response": "",
+        "elapsed_ms": 0.0,
+        "error": None,
+    }
+
+    # Build the request. Use 'rtsp://host:port/path' as the request URI per
+    # RFC 2326 §10. CSeq is mandatory per spec. No User-Agent — keeps the
+    # request minimal and avoids any User-Agent-based filtering some
+    # servers might do (per user request 2026-05-03).
+    request_uri = f"rtsp://{host}:{port}{path}"
+    request_lines = [
+        f"OPTIONS {request_uri} RTSP/1.0",
+        "CSeq: 1",
+        "",   # blank line terminating headers
+        "",   # extra CRLF
+    ]
+    request_bytes = "\r\n".join(request_lines).encode("ascii", errors="replace")
+
+    t0 = _time_local.monotonic()
+    sock = None
+    try:
+        sock = _sock.create_connection((host, port), timeout=timeout)
+        sock.settimeout(timeout)
+        sock.sendall(request_bytes)
+
+        # Read up to 4 KB or until "\r\n\r\n" or socket close
+        buf = b""
+        max_bytes = 4096
+        while len(buf) < max_bytes:
+            try:
+                chunk = sock.recv(min(1024, max_bytes - len(buf)))
+            except _sock.timeout:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if b"\r\n\r\n" in buf:
+                break
+
+        result["elapsed_ms"] = (_time_local.monotonic() - t0) * 1000.0
+        try:
+            text = buf.decode("utf-8", errors="replace")
+        except Exception:
+            text = buf.decode("latin-1", errors="replace")
+        result["raw_response"] = text[:4096]
+
+    except (_sock.timeout, OSError) as exc:
+        result["elapsed_ms"] = (_time_local.monotonic() - t0) * 1000.0
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    # ---- Parse the response ----
+    text = result["raw_response"]
+    if not text:
+        result["error"] = "empty_response"
+        return result
+
+    # Split into lines on CRLF or LF
+    lines = text.replace("\r\n", "\n").split("\n")
+
+    # Status line: "RTSP/1.0 200 OK" or "HTTP/1.1 400 Bad Request" etc
+    if lines:
+        status_line = lines[0].strip()
+        if status_line.startswith("RTSP/"):
+            result["looks_like_rtsp"] = True
+            # Parse status code
+            parts = status_line.split(None, 2)
+            if len(parts) >= 2:
+                try:
+                    result["status"] = int(parts[1])
+                except ValueError:
+                    pass
+        # If it's not RTSP, we still capture the raw text but leave
+        # looks_like_rtsp=False and status=None.
+
+    # Collapse RFC 822 continuation lines (lines starting with whitespace
+    # are continuations of the previous header)
+    folded: list[str] = []
+    for line in lines[1:]:
+        if line.startswith((" ", "\t")) and folded:
+            folded[-1] += " " + line.strip()
+        else:
+            folded.append(line)
+
+    # Parse headers — simple ":"-split
+    for line in folded:
+        if not line.strip():
+            continue
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key_l = key.strip().lower()
+        value = value.strip()
+
+        if key_l == "server":
+            result["server_header"] = value
+        elif key_l == "cseq":
+            result["cseq"] = value
+        elif key_l == "public":
+            # Public: OPTIONS, DESCRIBE, SETUP, PLAY, ...
+            methods = [m.strip().upper() for m in value.split(",") if m.strip()]
+            result["public_methods"] = methods
+        elif key_l == "www-authenticate":
+            # "Digest realm=\"foo\", algorithm=MD5, nonce=..."
+            # or "Basic realm=\"bar\""
+            scheme_match = _re_local.match(r"^\s*(\w+)\s+", value)
+            if scheme_match:
+                result["auth_scheme"] = scheme_match.group(1)
+            # realm="..." — handle escaped quotes inside
+            realm_match = _re_local.search(
+                r'realm\s*=\s*"((?:[^"\\]|\\.)*)"', value
+            )
+            if realm_match:
+                # Unescape \" → "
+                result["auth_realm"] = realm_match.group(1).replace('\\"', '"')
+            # algorithm=MD5 (unquoted) or algorithm="SHA-256" (quoted)
+            algo_match = _re_local.search(
+                r'algorithm\s*=\s*("([^"]+)"|([\w\-]+))', value
+            )
+            if algo_match:
+                result["auth_algorithm"] = algo_match.group(2) or algo_match.group(3)
+
+    return result
+
+
+
     """
     Fetch HTTP pages from a device and extract identity info:
       - Page title, Server header
@@ -6560,7 +7074,13 @@ def _safe_cam(cam: dict) -> dict:
     s["has_sub_stream"]   = bool(s.get("sub_stream_url"))
     # Ensure identity fields always present
     for f in ("manufacturer", "device_notes", "page_title", "server_header",
-              "mac_addr", "mac_vendor"):
+              "mac_addr", "mac_vendor",
+              # 2.4.0-rc1.0: RTSP OPTIONS fingerprint fields. Distinct from
+              # the HTTP-layer server_header / page_title above — these are
+              # captured from the RTSP layer at port 554. None contain PII;
+              # they're server-baked metadata (e.g. realm "IP Camera(NN)").
+              "rtsp_server_header", "rtsp_auth_realm", "rtsp_auth_scheme",
+              "rtsp_public_methods"):
         s.setdefault(f, "")
     # Stream technical details (populated after credentials are accepted)
     for f in ("stream_codec", "stream_audio", "stream_profile"):
@@ -7041,7 +7561,13 @@ async def api_set_credentials(request) -> web.Response:
                     k: camera.get(k, "")
                     for k in ("manufacturer", "mac_addr", "mac_vendor",
                               "page_title", "server_header", "onvif_scopes",
-                              "device_notes")
+                              "device_notes",
+                              # 2.4.0-rc1.0: RTSP fingerprint fields are
+                              # captured pre-auth; preserve across the
+                              # cred-auth dict replacement so the Identity
+                              # panel shows them after the user authenticates.
+                              "rtsp_server_header", "rtsp_auth_realm",
+                              "rtsp_auth_scheme", "rtsp_public_methods")
                     if camera.get(k)
                 }
                 CAMERAS[cid] = {
@@ -8689,6 +9215,10 @@ function identityHTML(cam) {
   }
   if (cam.page_title)     rows.push(['Page title',   cam.page_title]);
   if (cam.server_header)  rows.push(['Server',       cam.server_header]);
+  // 2.4.0-rc1.0: RTSP-layer fingerprint fields, captured by the OPTIONS
+  // pre-probe. Distinct from the HTTP-layer Server / Page title above.
+  if (cam.rtsp_server_header) rows.push(['RTSP server', cam.rtsp_server_header]);
+  if (cam.rtsp_auth_realm)    rows.push(['RTSP realm',  cam.rtsp_auth_realm]);
   if (cam.hostname && cam.hostname !== cam.ip) rows.push(['Hostname', cam.hostname]);
   if (cam.device_notes)   rows.push(['Notes',        cam.device_notes]);
   // Stream technical details (populated once credentials are accepted)
@@ -9515,7 +10045,39 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
     # rc2: Run brand identification BEFORE any RTSP probe so the
     # find_rtsp_path orchestrator can apply throttle-aware short-circuits.
     # Sets host_meta["manufacturer"] in place if a brand is identified.
+    #
+    # 2.4.0-rc1.0: RTSP OPTIONS fingerprint runs first so brand-id has
+    # access to the auth_realm and rtsp_server_header signals. Same
+    # populate-then-identify pattern as Site A in the ONVIF post-scan
+    # path. Skipped when port != 554 — the helper assumes RTSP service
+    # on a known RTSP port; running it against port 80 is wasteful.
     if host_meta is not None:
+        if port == 554:
+            try:
+                rtsp_fp = await loop.run_in_executor(
+                    _THREAD_POOL, _rtsp_options_fingerprint, ip, 554)
+                if rtsp_fp.get("server_header"):
+                    host_meta["rtsp_server_header"] = rtsp_fp["server_header"]
+                if rtsp_fp.get("auth_realm"):
+                    host_meta["rtsp_auth_realm"] = rtsp_fp["auth_realm"]
+                if rtsp_fp.get("auth_scheme"):
+                    host_meta["rtsp_auth_scheme"] = rtsp_fp["auth_scheme"]
+                if rtsp_fp.get("public_methods"):
+                    host_meta["rtsp_public_methods"] = ",".join(
+                        rtsp_fp["public_methods"])
+                if rtsp_fp.get("looks_like_rtsp"):
+                    log.info(
+                        f"  RTSP fingerprint {ip}: status="
+                        f"{rtsp_fp.get('status')}, "
+                        f"server={rtsp_fp.get('server_header','')!r}, "
+                        f"realm={rtsp_fp.get('auth_realm','')!r}, "
+                        f"elapsed={rtsp_fp.get('elapsed_ms',0):.0f}ms")
+                elif rtsp_fp.get("error"):
+                    log.debug(
+                        f"  RTSP fingerprint {ip}: {rtsp_fp['error']}")
+            except Exception as e:
+                log.debug(f"  RTSP fingerprint probe failed for {ip}: {e}")
+
         try:
             _identify_camera_brand(host_meta)
         except Exception as e:
@@ -9540,7 +10102,11 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
         # walker if it captured a Server: line from any RTSP response.
         if host_meta:
             for k in ("manufacturer", "mac_addr", "mac_vendor",
-                      "server_header"):
+                      "server_header",
+                      # 2.4.0-rc1.0: RTSP fingerprint fields populated by
+                      # the OPTIONS pre-probe at line ~10030.
+                      "rtsp_server_header", "rtsp_auth_realm",
+                      "rtsp_auth_scheme", "rtsp_public_methods"):
                 v = host_meta.get(k, "")
                 if v:
                     d[k] = v
@@ -9853,6 +10419,45 @@ async def run_scan() -> None:
                 except Exception as e:
                     log.debug(f"  HTTP identity probe failed for {ip}: {e}")
 
+                # 2.4.0-rc1.0: RTSP OPTIONS fingerprint.
+                # One TCP open to port 554, one OPTIONS request, capture
+                # the Server header, auth realm/scheme, and Public methods.
+                # Populates onvif_meta so _identify_camera_brand can score
+                # on rtsp_realm_regex, and the Identity panel can display
+                # realm + RTSP server header.
+                # Worst-case cost: ~3s timeout per dead host. Zero risk to
+                # throttled/lockout-protected hosts (OPTIONS doesn't auth).
+                try:
+                    rtsp_fp = await loop.run_in_executor(
+                        _THREAD_POOL, _rtsp_options_fingerprint, ip, 554)
+                    if rtsp_fp.get("server_header"):
+                        onvif_meta["rtsp_server_header"] = rtsp_fp["server_header"]
+                    if rtsp_fp.get("auth_realm"):
+                        onvif_meta["rtsp_auth_realm"] = rtsp_fp["auth_realm"]
+                    if rtsp_fp.get("auth_scheme"):
+                        onvif_meta["rtsp_auth_scheme"] = rtsp_fp["auth_scheme"]
+                    if rtsp_fp.get("public_methods"):
+                        onvif_meta["rtsp_public_methods"] = ",".join(
+                            rtsp_fp["public_methods"])
+                    if rtsp_fp.get("looks_like_rtsp"):
+                        log.info(
+                            f"  RTSP fingerprint {ip}: status="
+                            f"{rtsp_fp.get('status')}, "
+                            f"server={rtsp_fp.get('server_header','')!r}, "
+                            f"realm={rtsp_fp.get('auth_realm','')!r}, "
+                            f"elapsed={rtsp_fp.get('elapsed_ms',0):.0f}ms")
+                    elif rtsp_fp.get("error"):
+                        log.debug(
+                            f"  RTSP fingerprint {ip}: {rtsp_fp['error']}")
+
+                    # Re-run brand identification — _identify_camera_brand
+                    # now has the realm available and may upgrade an earlier
+                    # weak match (or identify a brand we missed entirely).
+                    if onvif_meta.get("rtsp_auth_realm"):
+                        _identify_camera_brand(onvif_meta, force=True)
+                except Exception as e:
+                    log.debug(f"  RTSP fingerprint probe failed for {ip}: {e}")
+
                 if not prev.get("credentials"):
                     unauth_url = await loop.run_in_executor(
                         _THREAD_POOL, find_rtsp_path, ip, 554, "", "", onvif_meta)
@@ -9870,6 +10475,12 @@ async def run_scan() -> None:
                 _mac_a   = onvif_meta.get("mac_addr", "")
                 _srv_hdr = onvif_meta.get("server_header", "")
                 _pg_ttl  = onvif_meta.get("page_title", "")
+                # 2.4.0-rc1.0: RTSP-layer fingerprint fields (distinct from
+                # HTTP-layer server_header / page_title above).
+                _rtsp_srv  = onvif_meta.get("rtsp_server_header", "")
+                _rtsp_rlm  = onvif_meta.get("rtsp_auth_realm", "")
+                _rtsp_sch  = onvif_meta.get("rtsp_auth_scheme", "")
+                _rtsp_pub  = onvif_meta.get("rtsp_public_methods", "")
                 if unauth_url:
                     log.info(f"  ONVIF {ip}: unauthenticated RTSP works "
                              f"({_strip_creds(unauth_url)}) — skipping cred prompt")
@@ -9895,6 +10506,11 @@ async def run_scan() -> None:
                         # the camera Identity panel.
                         "page_title":    _pg_ttl,
                         "onvif_scopes":  onvif_meta.get("onvif_scopes", ""),
+                        # 2.4.0-rc1.0: RTSP fingerprint fields
+                        "rtsp_server_header":  _rtsp_srv,
+                        "rtsp_auth_realm":     _rtsp_rlm,
+                        "rtsp_auth_scheme":    _rtsp_sch,
+                        "rtsp_public_methods": _rtsp_pub,
                     }
                 else:
                     CAMERAS[cid] = {
@@ -9915,6 +10531,11 @@ async def run_scan() -> None:
                         # rc2.2: see comment above
                         "page_title":    _pg_ttl,
                         "onvif_scopes":  onvif_meta.get("onvif_scopes", ""),
+                        # 2.4.0-rc1.0: RTSP fingerprint fields
+                        "rtsp_server_header":  _rtsp_srv,
+                        "rtsp_auth_realm":     _rtsp_rlm,
+                        "rtsp_auth_scheme":    _rtsp_sch,
+                        "rtsp_public_methods": _rtsp_pub,
                     }
 
         # Merge multicast-only SSDP cameras
