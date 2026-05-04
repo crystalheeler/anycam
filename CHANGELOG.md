@@ -1,3 +1,135 @@
+## 2.4.0-rc2.0
+**Adds Layered Stream Discovery (continue path-walker after first success
+to surface 401-locked stream candidates), syncs spreadsheet v9 →
+CAMERA_DB (8 new NVR/DVR family entries with `streaming_recipe`,
+plus the existing Lorex/Dahua family backfilled with the same field),
+and augments the focused nmap port list with 6 brand-specific ports
+not in nmap's top-1000 (UniFi Protect 7441/7447, GeoVision 4550/8765,
+Dahua-variant 34567/35000). Code-side feature work is the path-walker
+mod + UI badge/modal; the CAMERA_DB additions are pure data (consumed
+in rc3.x).**
+
+### What changed
+
+**1. Layered Stream Discovery — `_probe_rtsp_paths_single_socket` extended
+with `collect_locked` + `expected_realm` parameters.** When `collect_locked=True`,
+the walker no longer bails on the first working unauthenticated URL.
+Instead it captures the first working URL and continues walking remaining
+paths in the candidate list, examining each subsequent DESCRIBE 401
+response and adding the path to a locked-stream-candidates list when
+the response's realm matches `expected_realm`. The first working URL is
+still returned as the function's primary `found` value; the locked list
+is persisted to `host_meta["locked_streams"]` (alongside the existing
+`server_header` capture) so the orchestrator and UI can read it back.
+
+**2. `find_rtsp_path` opt-in to locked-stream collection.** Enabled when
+all three conditions hold: (a) no credentials supplied to this call —
+authenticated camera traffic is handled by the cred-auth flow which
+enumerates streams directly; (b) brand is NOT marked `skip_layer2` —
+fragile-multi-attempt brands (per-IP TCP rate-limit, lockout counters)
+get one careful walk only, no extra DESCRIBEs after first success; (c)
+`host_meta["rtsp_auth_realm"]` was captured by the rc1.0 OPTIONS
+fingerprint helper — without a realm to match against we'd surface
+locked streams that may need different credentials than the camera's
+primary auth domain.
+
+**3. Camera record lifecycle plumbing.** `_safe_cam` defaults
+`locked_streams` to `[]`. `_id_preserve` (the cred-auth dict-replacement
+preserve-list) carries `locked_streams` through credential acceptance.
+Both record-build sites (`_probe_host_port::base()` and the ONVIF
+post-scan record build at the unauth-RTSP and needs-credentials
+branches) copy the field from the in-flight `onvif_meta`/`host_meta`
+dict onto the persisted camera record. UI receives the list as
+`cam.locked_streams`.
+
+**4. UI: "🔒 N Locked Stream(s)" badge + modal.** When `cam.locked_streams`
+is non-empty AND the camera has no stored credentials, a clickable
+purple badge appears in the camera card's badge row. Clicking the
+badge opens a modal listing each locked path with its realm and auth
+scheme, plus a credential entry form (username + password). Submitting
+credentials reuses the existing `/api/credentials` endpoint — the
+server-side cred-auth flow re-attempts path-walking with the supplied
+credentials, automatically authenticating against any same-realm
+locked paths since they're already in the path candidate list. After
+success the badge disappears (camera now has `has_credentials=true`)
+and the unlocked streams populate the standard `stream_url` /
+`sub_stream_url` fields.
+
+**5. CAMERA_DB sync from spreadsheet v9.** 8 new NVR/DVR family entries
+added with `streaming_recipe` populated:
+  - **Hikvision NVR:** `/Streaming/Channels/{ch}{st:02d}` (1-based ch, st=01 main / 02 sub)
+  - **Hanwha NVR:** `/LiveChannel/{ch}/media.smp/profile={st}` (**0-based** ch, **port 558** not 554)
+  - **Uniview NVR:** `/unicast/c{ch}/s{st}/live` (1-based, s=0 main / s=1 sub)
+  - **Reolink NVR:** `/Preview_{ch:02d}_{st}` where st="main"/"sub" (1-based RTSP, **0-based snap CGI** → `snap_channel_offset=-1`)
+  - **Vivotek NVR:** `/Media/Live/Normal?camera=C_{ch}&streamindex={st}`
+  - **Amcrest NVR:** Dahua-OEM, `/cam/realmonitor?channel={ch}&subtype={st}`
+  - **Swann NVR:** Hikvision-OEM (newer), Raysharp fallback `/ch{ch:02d}/{st}`
+  - **ANNKE NVR:** Hikvision-OEM, Dahua fallback `/cam/realmonitor?channel={ch}&subtype=0`
+
+The existing Lorex/Dahua DVR-NVR Family entry is backfilled with the same
+`streaming_recipe` field to make the format consistent across all 9
+NVR/DVR families (was previously only documented in the spreadsheet's
+Streaming Recipe column for that one row).
+
+**Brands deliberately left without `streaming_recipe` (HIGH-confidence rule):**
+Honeywell, FLIR Commercial (mixed OEM); EZVIZ, Wyze, Ring, Nest, Arlo,
+Blink (cloud-only); Verkada (cloud-only Vivotek hardware).
+
+**6. Focused nmap scan augmented with 6 brand-specific ports.**
+`focused_nmap_scan()` now passes `-p 4550,7441,7447,8765,34567,35000`
+alongside `--top-ports 1000`. These cover GeoVision (4550, 8765), UniFi
+Protect (7441, 7447), and Dahua-variant admin ports (34567, 35000) that
+aren't in nmap's standard top-1000 list. nmap deduplicates the union,
+so the only cost is 6 additional port probes per host. Existing nmap
+flags (`-sV --open --host-timeout 30s -T4 -oX -`) unchanged.
+
+**7. CAMERA_DB hits 76 entries** (was 68 in rc1.0). All 5 release gates
+pass with all confidence-paired correctly. `verify_release.py`
+`DATA_FIELDS` extended to recognize `streaming_recipe` as an optional
+data field with `streaming_recipe_confidence` sibling.
+
+### Research foundation
+
+17 manufacturers researched across 63+ unique sources (manufacturer-
+official documentation, support knowledge bases, third-party VMS
+docs, user forums, GitHub discussions). All HIGH-confidence findings
+only — anywhere data was mixed across firmwares/OEMs the entry was
+deliberately left without a recipe rather than guess. Full
+bibliography in `Layered_Stream_Discovery_Plan.md` and
+`AnyCam_RTSP_Stream_URL_Database_v9.xlsx` Legend changelog.
+
+### Live test expectations
+
+- **Microseven Hipcam:** unauth URL still works (existing behavior).
+  No `rtsp_auth_realm` captured (Hipcam returns `realm=None` per rc1.0
+  test), so `enable_locked_collect` is False — no continued walk, no
+  extra grinding against the rate-limited camera. Identical behavior
+  to rc1.0.
+- **Hikvision DS-2DE4A425IW:** unauth URL works on 101. With realm
+  captured (`"IP Camera(...)"`) and brand `skip_layer2=False`, continued
+  walk runs; if the camera's RTSP server emits 401 on /102, /103,
+  channel-zero, or other DB paths (with same-realm), they'll surface as
+  locked candidates. UI badge shows count, modal lists them, user can
+  enter creds to unlock.
+- **Lorex DVR:** brand identified by realm regex (rc1.0). Brand has
+  `skip_layer2=True`, so `enable_locked_collect=False` — no continued
+  walk. Lorex DVRs use channel iteration which is rc3.x territory; for
+  rc2.0 we deliberately don't grind against the lockout-prone DVR.
+
+### Non-goals (deferred to later builds)
+
+- **Brand-recipe path discovery during initial scan** — consuming
+  `streaming_recipe` to short-circuit Layer 1's generic path walk.
+  Deferred to rc3.x where the Lorex/Dahua DVR Family work needs it
+  for channel iteration.
+- **Channel iteration logic** — DVR/NVR channel-by-channel probing,
+  populated_channel_test SDP parsing. rc3.x.
+- **STREAM_DB → CAMERA_DB consolidation.** rc4.x.
+- **Runtime consumption of `default_ports`** — per-camera port preference.
+  rc3.x+.
+
+---
+
 ## 2.4.0-rc1.0
 **Adds the `_rtsp_options_fingerprint` helper that opens a single TCP
 socket, sends one RTSP OPTIONS request, and captures Server header,

@@ -174,7 +174,13 @@ else:
                    # like the others — only entries with high-confidence
                    # known realm patterns populate it (currently just
                    # the Lorex/Dahua DVR-NVR Family).
-                   "rtsp_realm_regex")
+                   "rtsp_realm_regex",
+                   # 2.4.0-rc2.0: streaming_recipe is a new optional
+                   # CAMERA_DB field describing brand-specific path
+                   # generation (channel iteration, profile selection,
+                   # etc.) for multi-channel NVR/DVR boxes. Populated
+                   # in rc2.0 for 9 NVR/DVR families; consumed in rc3.x.
+                   "streaming_recipe")
     DATA_FIELD_SET = set(DATA_FIELDS)
 
     for idx, elt in enumerate(camera_db_node.elts):
