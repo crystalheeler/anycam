@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.4.0-rc1.0"  # must match config.yaml
+CURRENT_VERSION = "2.4.0-rc2.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1967,6 +1967,21 @@ CAMERA_DB: list[dict] = [
         "default_ports": [554, 80, 35000, 37777, 443, 8000],
         "rtsp_realm_regex": r"^Login to [0-9a-f]{32}$",
         "rtsp_realm_regex_confidence": "HIGH",
+        # 2.4.0-rc2.0: streaming_recipe added (data only; consumed in rc3.x).
+        # Channel iteration for Dahua-format DVR/NVRs. populated_channel_test
+        # uses SDP video-track presence to detect connected channels.
+        "streaming_recipe": {
+            "type": "channel_iterate",
+            "path_template": "/cam/realmonitor?channel={ch}&subtype={st}",
+            "channels": list(range(1, 33)),
+            "channel_base": 1,
+            "subtypes": [0, 1],
+            "subtype_main": 0,
+            "subtype_sub": 1,
+            "fallback_paths": ["/h264/ch{ch}/main/av_stream", "/live/ch{ch}/main"],
+            "populated_channel_test": "sdp_has_video_track",
+        },
+        "streaming_recipe_confidence": "HIGH",
         "notes": ("Multi-channel DVR/NVR family — Lorex (post-Dahua-"
                   "acquisition), Dahua direct, Amcrest (rebrand). "
                   "Series: D861/862/863/871/841/881, N841/844/846/861/"
@@ -2007,6 +2022,234 @@ CAMERA_DB: list[dict] = [
         "onvif_scopes": [],
         "default_ports": [554, 80, 8080],
         "notes": "Generic IP camera (manufacturer unidentified)",
+    },
+    # ============================================================================
+    # 2.4.0-rc2.0: NVR/DVR family entries with streaming_recipe (channel iteration)
+    # ============================================================================
+    # These are SEPARATE entries from the IP camera entries above because (per
+    # design) channel iteration only applies to multi-channel boxes. Single
+    # IP cameras of the same brand keep their static-path entries.
+    # streaming_recipe field consumed in 2.4.0-rc3.x (Lorex/Dahua DVR family
+    # support build); populated here in rc2.0 as the data foundation.
+    {
+        "name": "Hikvision NVR",
+        "aliases": ["hikvision nvr", "hikvision dvr", "hilook nvr", "hilook dvr",
+                    "ds-7604", "ds-7608", "ds-7616", "ds-7708", "ds-7716",
+                    "ds-7732", "ds-9632", "ds-77 hghi", "ds-77 huhi",
+                    "ds-77 hqhi", "turbo hd"],
+        "http_titles": ["hikvision", "hikvision-webs"],
+        "http_body":   [],
+        "http_headers":["app-webs/"],
+        "nmap_products":[],
+        "onvif_scopes": ["onvif://www.onvif.org/Profile/Streaming"],
+        "default_ports": [554, 80, 8000, 443],
+        "notes": ("Hikvision multi-channel NVR/DVR. DS-7xxx series NVRs and "
+                  "DS-77xxx HUHI/HQHI/HGHI Turbo HD DVRs. HiLook is a "
+                  "Hikvision sub-brand using identical RTSP format. Some "
+                  "firmwares require disabling stream encryption "
+                  "(Configuration > Network > Advanced Settings > Stream "
+                  "Encryption > OFF) — must be done from direct-connected "
+                  "monitor."),
+        "streaming_recipe": {
+            "type": "channel_iterate",
+            "path_template": "/Streaming/Channels/{ch}{st:02d}",
+            "channels": list(range(1, 33)),
+            "channel_base": 1,
+            "subtypes": [1, 2],
+            "subtype_main": 1,
+            "subtype_sub": 2,
+            "populated_channel_test": "sdp_has_video_track",
+        },
+        "streaming_recipe_confidence": "HIGH",
+    },
+    {
+        "name": "Hanwha NVR / Wisenet NVR",
+        "aliases": ["hanwha nvr", "wisenet nvr", "samsung nvr",
+                    "qrn", "prn", "xrn", "hrx", "hrd", "srn"],
+        "http_titles": ["wisenet", "samsung"],
+        "http_body":   [],
+        "http_headers":[],
+        "nmap_products":[],
+        "onvif_scopes": [],
+        "default_ports": [558, 554, 80, 8080, 443],
+        "notes": ("Hanwha (formerly Samsung Techwin) Wisenet NVRs. IMPORTANT: "
+                  "Channels are 0-based (Channel 1 in UI = 0 in RTSP URL). "
+                  "RTSP port is the LAST device port in the configured range, "
+                  "default 558 (NOT 554). Profile selection via /stw-cgi/ "
+                  "media.cgi CGI command. HRX series with newer firmware uses "
+                  "NVR-style URLs."),
+        "streaming_recipe": {
+            "type": "channel_iterate",
+            "path_template": "/LiveChannel/{ch}/media.smp/profile={st}",
+            "channels": list(range(0, 32)),
+            "channel_base": 0,
+            "subtypes": [1, 2],
+            "subtype_main": 1,
+            "subtype_sub": 2,
+            "default_port": 558,
+            "populated_channel_test": "sdp_has_video_track",
+        },
+        "streaming_recipe_confidence": "HIGH",
+    },
+    {
+        "name": "Uniview NVR (UNV)",
+        "aliases": ["uniview nvr", "unv nvr", "nvr301", "nvr3", "nvr5",
+                    "nvr8", "ezview nvr"],
+        "http_titles": ["uniview", "unv"],
+        "http_body":   [],
+        "http_headers":[],
+        "nmap_products":[],
+        "onvif_scopes": [],
+        "default_ports": [554, 80, 9090],
+        "notes": ("Uniview (UNV) NVR301/3/5/8 series. Channel iteration: c1, "
+                  "c2, c3, ... (1-based). Stream s0=main, s1=sub. Some firmwares "
+                  "have s0/s1 swapped — fall back accordingly."),
+        "streaming_recipe": {
+            "type": "channel_iterate",
+            "path_template": "/unicast/c{ch}/s{st}/live",
+            "channels": list(range(1, 33)),
+            "channel_base": 1,
+            "subtypes": [0, 1],
+            "subtype_main": 0,
+            "subtype_sub": 1,
+            "populated_channel_test": "sdp_has_video_track",
+        },
+        "streaming_recipe_confidence": "HIGH",
+    },
+    {
+        "name": "Reolink NVR / Home Hub",
+        "aliases": ["reolink nvr", "rln8", "rln16", "rln36", "home hub",
+                    "reolink home hub"],
+        "http_titles": ["reolink"],
+        "http_body":   [],
+        "http_headers":[],
+        "nmap_products":[],
+        "onvif_scopes": [],
+        "default_ports": [554, 80, 8080, 9000],
+        "notes": ("Reolink RLN8-410, RLN16-410, RLN36 NVRs and Home Hub. "
+                  "Channel ch is zero-padded 2-digit (01, 02, ...). 1-based "
+                  "in RTSP URLs but 0-based in CGI/snapshot URLs (snap_channel_"
+                  "offset=-1). Use api.cgi?cmd=GetChannelstatus to query "
+                  "populated channels. Same RTSP format as Reolink IP cameras "
+                  "(single camera = ch=01 only)."),
+        "streaming_recipe": {
+            "type": "channel_iterate",
+            "path_template": "/Preview_{ch:02d}_{st}",
+            "channels": list(range(1, 17)),
+            "channel_base": 1,
+            "subtypes": ["main", "sub"],
+            "subtype_main": "main",
+            "subtype_sub": "sub",
+            "snap_channel_offset": -1,
+            "populated_channel_test": "sdp_has_video_track",
+        },
+        "streaming_recipe_confidence": "HIGH",
+    },
+    {
+        "name": "Vivotek NVR (Linux-based)",
+        "aliases": ["vivotek nvr", "nd8321", "nd8322", "nd9322", "nd9442"],
+        "http_titles": ["vivotek"],
+        "http_body":   [],
+        "http_headers":[],
+        "nmap_products":[],
+        "onvif_scopes": [],
+        "default_ports": [554, 80, 8080],
+        "notes": ("Vivotek Linux-based NVR (ND8x21, ND8322P, ND9x42P, ND9x44P "
+                  "series). Camera ID format C_<N> where N is channel number. "
+                  "Different format from Vivotek IP cameras themselves "
+                  "(which use /live.sdp or /media2/stream.sdp?profile=)."),
+        "streaming_recipe": {
+            "type": "channel_iterate",
+            "path_template": "/Media/Live/Normal?camera=C_{ch}&streamindex={st}",
+            "channels": list(range(1, 33)),
+            "channel_base": 1,
+            "subtypes": [1, 2],
+            "subtype_main": 1,
+            "subtype_sub": 2,
+            "populated_channel_test": "sdp_has_video_track",
+        },
+        "streaming_recipe_confidence": "HIGH",
+    },
+    {
+        "name": "Amcrest NVR",
+        "aliases": ["amcrest nvr", "amcrest dvr", "nv4108", "nv4216", "nv5216",
+                    "nv4108-hs"],
+        "http_titles": ["amcrest"],
+        "http_body":   [],
+        "http_headers":[],
+        "nmap_products":[],
+        "onvif_scopes": [],
+        "default_ports": [554, 37777, 80],
+        "notes": ("Amcrest NVR (NV4108E, NV4216E, NV5216E series). Dahua-OEM. "
+                  "Same RTSP recipe as Dahua. Some older Amcrest NVRs also "
+                  "support Reolink-style h264Preview format as a fallback."),
+        "streaming_recipe": {
+            "type": "channel_iterate",
+            "path_template": "/cam/realmonitor?channel={ch}&subtype={st}",
+            "channels": list(range(1, 33)),
+            "channel_base": 1,
+            "subtypes": [0, 1],
+            "subtype_main": 0,
+            "subtype_sub": 1,
+            "fallback_paths": ["/h264Preview_{ch:02d}_main"],
+            "populated_channel_test": "sdp_has_video_track",
+        },
+        "streaming_recipe_confidence": "HIGH",
+    },
+    {
+        "name": "Swann NVR / DVR",
+        "aliases": ["swann nvr", "swann dvr", "nvr-7090", "nvr-8580",
+                    "nvr8000", "dvr-1590", "dvr-4575", "dvr-4980", "swnvk"],
+        "http_titles": ["swann"],
+        "http_body":   [],
+        "http_headers":[],
+        "nmap_products":[],
+        "onvif_scopes": [],
+        "default_ports": [554, 80, 1085],
+        "notes": ("Swann NVR/DVR mostly Hikvision-OEM (newer NVR-7090, "
+                  "NVR-8580). Older models may be Raysharp-OEM with "
+                  "/ch{NN}/{stream} format. Try Hikvision format first, "
+                  "fall back to Raysharp."),
+        "streaming_recipe": {
+            "type": "channel_iterate",
+            "path_template": "/Streaming/Channels/{ch}{st:02d}",
+            "channels": list(range(1, 17)),
+            "channel_base": 1,
+            "subtypes": [1, 2],
+            "subtype_main": 1,
+            "subtype_sub": 2,
+            "fallback_paths": ["/ch{ch:02d}/0", "/ch{ch:02d}/1"],
+            "populated_channel_test": "sdp_has_video_track",
+        },
+        "streaming_recipe_confidence": "MED",
+    },
+    {
+        "name": "ANNKE NVR / DVR",
+        "aliases": ["annke nvr", "annke dvr", "h800", "h500", "n48pbb",
+                    "n46pbb", "dn81r", "dn82r"],
+        "http_titles": ["annke"],
+        "http_body":   [],
+        "http_headers":[],
+        "nmap_products":[],
+        "onvif_scopes": [],
+        "default_ports": [554, 80, 8000],
+        "notes": ("ANNKE NVR/DVR (H800, H500, N48PBB, N46PBB, DN81R, DN82R "
+                  "series). Hikvision-OEM. Same recipe as Hikvision NVR. "
+                  "Older ANNKE may use Dahua-OEM (cam/realmonitor) — fall "
+                  "back if Hikvision format fails entirely."),
+        "streaming_recipe": {
+            "type": "channel_iterate",
+            "path_template": "/Streaming/Channels/{ch}{st:02d}",
+            "channels": list(range(1, 17)),
+            "channel_base": 1,
+            "subtypes": [1, 2],
+            "subtype_main": 1,
+            "subtype_sub": 2,
+            "fallback_paths": ["/H264/ch{ch}/main/av_stream",
+                               "/cam/realmonitor?channel={ch}&subtype=0"],
+            "populated_channel_test": "sdp_has_video_track",
+        },
+        "streaming_recipe_confidence": "HIGH",
     },
 ]
 
@@ -2858,20 +3101,34 @@ def onvif_discover(timeout: int = 5) -> list[dict]:
 
 def focused_nmap_scan(host_list: list[str]) -> list[dict]:
     """
-    Scan only known-live hosts on the top 1000 most common ports.
+    Scan only known-live hosts on the top 1000 most common ports plus a
+    small set of camera-specific ports that aren't in nmap's top-1000.
     Using nmap --top-ports 1000 covers all standard camera ports plus
     thousands of other well-known ports, catching cameras on non-standard
     ports and identifying devices by service banner even without a camera
     protocol.  Because hosts are pre-confirmed alive via ARP, no timeout
     waste on dead IPs.
+
+    2.4.0-rc2.0: augmented with 6 camera-specific ports likely missing
+    from nmap top-1000:
+      - 4550, 8765    : GeoVision admin / streaming
+      - 7441, 7447    : Ubiquiti UniFi Protect HTTPS / RTSP
+      - 34567, 35000  : Dahua admin (newer firmware variants)
+    These come from the union of CAMERA_DB default_ports for brands that
+    expose RTSP/HTTP services on non-standard ports. Adding them via
+    nmap's `-p` flag in addition to `--top-ports 1000` ensures we find
+    UniFi Protect, GeoVision, and non-default-port Dahua installations
+    that the standard scan would miss entirely.
+
     Typical time: 30-90 seconds for 20 hosts.
     """
     if not host_list:
         return []
-    log.info(f"Focused scan: {len(host_list)} host(s), top 1000 ports")
+    log.info(f"Focused scan: {len(host_list)} host(s), top 1000 ports + 6 brand-specific")
     try:
         r = subprocess.run(
             ["nmap", "-sV", "--open", "--top-ports", "1000",
+             "-p", "4550,7441,7447,8765,34567,35000",
              "--host-timeout", "30s", "-T4", "-oX", "-"] + host_list,
             capture_output=True, text=True, timeout=360,
         )
@@ -3268,6 +3525,8 @@ def _probe_rtsp_paths_single_socket(
     extra_query: str = "",
     label: str = "",
     host_meta: dict | None = None,
+    collect_locked: bool = False,
+    expected_realm: str = "",
 ) -> tuple[str | None, bool]:
     """rc2 Layer 1: Walk multiple RTSP paths through OPTIONS+DESCRIBE+
     SETUP+TEARDOWN on a SINGLE TCP socket. Returns a tuple
@@ -3300,6 +3559,25 @@ def _probe_rtsp_paths_single_socket(
     identify from MAC OUI alone (Microseven — not in nmap_results,
     so no mac_vendor) can still be identified by their Hipcam RealServer
     server string.
+
+    2.4.0-rc2.0 (Layered Stream Discovery): collect_locked — when True,
+    AFTER finding a working unauthenticated URL the walker continues
+    through remaining paths, collecting 401 responses whose realm
+    matches expected_realm (or any 401 if expected_realm is empty).
+    Each match is added to host_meta["locked_streams"] as a dict
+    {"path": <path>, "realm": <realm>, "scheme": <scheme>}. The first
+    working URL is still returned as the primary `found` value; the
+    locked list surfaces in the UI as a "View Locked Streams (N)" badge
+    so the user can supply credentials and unlock additional streams
+    (sub-streams, third streams, audio-only feeds) that the unauth
+    walk found but couldn't authenticate against.
+
+    expected_realm — when non-empty, restricts locked-stream candidates
+    to 401s whose realm matches. Prevents surfacing locked streams that
+    need different credentials than the camera's primary auth domain.
+    Captured upstream by the OPTIONS fingerprint helper (rc1.0) into
+    host_meta["rtsp_auth_realm"]; the orchestrator passes that value
+    here as expected_realm.
     """
     if not paths:
         return (None, False)
@@ -3312,6 +3590,14 @@ def _probe_rtsp_paths_single_socket(
     # rc2.1.1: capture Server header from first response that has one.
     # Written back to host_meta at end so brand-id can re-run with it.
     captured_server: str = ""
+
+    # 2.4.0-rc2.0 (Layered Stream Discovery): once a working URL is
+    # found AND collect_locked=True, we keep walking and accumulate
+    # 401-with-matching-realm into this list. Persisted to host_meta
+    # at the finally block (alongside server_header) so the orchestrator
+    # can surface them in the UI badge.
+    locked_streams: list[dict] = []
+    found_working_url: str | None = None
 
     pfx = f"  [probe_rtsp_walk {label or host + ':' + str(port)}]"
 
@@ -3482,6 +3768,40 @@ def _probe_rtsp_paths_single_socket(
             if "RTSP/1.0 200" in resp:
                 pass  # continue to SDP parse
             elif "401" in resp:
+                # 2.4.0-rc2.0: when collect_locked=True AND we already
+                # found a working unauth URL, treat this 401 as a
+                # locked-stream candidate. Filter by expected_realm so
+                # we only surface streams that share the camera's
+                # primary auth domain (avoids prompting for creds that
+                # won't work). Captures realm from the WWW-Authenticate
+                # header before falling through to the existing skip-
+                # without-creds path.
+                if collect_locked and found_working_url and not username:
+                    auth_line = next(
+                        (l for l in resp.splitlines()
+                         if l.lower().startswith("www-authenticate:")), "")
+                    if auth_line:
+                        auth_v = auth_line.split(":", 1)[-1].strip()
+                        scheme = auth_v.split(None, 1)[0] if auth_v else ""
+                        realm_m = re.search(r'realm="([^"]*)"', auth_v)
+                        realm = realm_m.group(1) if realm_m else ""
+                        # Same-realm filter: only surface 401s that match
+                        # the camera's captured rtsp_auth_realm. If
+                        # expected_realm is empty (caller didn't supply
+                        # one), accept all realms — but the orchestrator
+                        # only enables collect_locked when a realm WAS
+                        # captured upstream, so this fallback is rare.
+                        if not expected_realm or realm == expected_realm:
+                            locked_streams.append({
+                                "path": path,
+                                "realm": realm,
+                                "scheme": scheme,
+                            })
+                            _log(f"LOCKED candidate: {path} (realm={realm!r})")
+                        else:
+                            _log(f"DESCRIBE 401 different realm "
+                                 f"(got {realm!r}, expected "
+                                 f"{expected_realm!r}) — not surfacing")
                 if not username:
                     _log(f"DESCRIBE → 401 (no creds) — skipping {path}")
                     continue
@@ -3572,7 +3892,30 @@ def _probe_rtsp_paths_single_socket(
             except Exception:
                 pass  # TEARDOWN failure is non-fatal — socket close releases state
 
+            # 2.4.0-rc2.0 (Layered Stream Discovery): if collect_locked
+            # is on AND we haven't yet recorded the first working URL,
+            # capture it and continue walking. Subsequent paths get
+            # OPTIONS+DESCRIBE only; their SETUPs aren't run because
+            # we've already proven a working stream and don't need to
+            # waste another SETUP/TEARDOWN cycle to enumerate locked
+            # candidates. For 2.4.0-rc2.0 the extension is conservative
+            # — we only collect 401-locked paths from continued
+            # DESCRIBEs after this point. SETUP-tested confirmation of
+            # a *second* working unauth URL would be a future extension
+            # (it isn't useful for current UX since we only need ONE
+            # working URL per camera).
+            if collect_locked and found_working_url is None:
+                found_working_url = rtsp_url
+                _log(f"continuing walk to collect locked candidates "
+                     f"after first success: {rtsp_url}")
+                continue
+            # Normal mode (or second+ success in collect mode): bail
             return (rtsp_url, True)
+
+        # Walked every path. In collect mode, return the first working
+        # URL we found (could be None if nothing worked).
+        if collect_locked and found_working_url:
+            return (found_working_url, True)
 
         # Walked every path without finding a streamable track
         return (None, looks_like_rtsp)
@@ -3589,6 +3932,13 @@ def _probe_rtsp_paths_single_socket(
         # its own TCP rate-limit defeating the focused port scan).
         if host_meta is not None and captured_server:
             host_meta["server_header"] = captured_server
+        # 2.4.0-rc2.0: persist locked_streams to host_meta. We always
+        # write the list (even when empty) so downstream readers can
+        # distinguish "feature ran, found nothing" from "feature didn't
+        # run". The UI badge is shown only when len > 0 AND the camera
+        # has no saved creds.
+        if host_meta is not None and collect_locked:
+            host_meta["locked_streams"] = locked_streams
         if sock:
             try:
                 sock.close()
@@ -3990,9 +4340,37 @@ def find_rtsp_path(ip: str, port: int,
         label_for_log += f" ({brand_name})"
     log.info(f"  RTSP probe: Layer 1 (single-socket walk, "
              f"{len(ordered)} paths) — {label_for_log}")
+
+    # 2.4.0-rc2.0 (Layered Stream Discovery): enable locked-stream
+    # collection when:
+    #  • no credentials are supplied to this call (creds-already-known
+    #    means cred-auth flow handles enumeration directly)
+    #  • brand is NOT marked skip_layer2 — skip_layer2 brands have known
+    #    fragile multi-attempt behavior (per-IP TCP rate-limit, lockout
+    #    counters); we don't grind extra DESCRIBEs against them
+    #  • host_meta has a captured rtsp_auth_realm — without one we
+    #    can't filter by realm; safer to skip collection than surface
+    #    locked streams that need different creds
+    skip_layer2_brand = bool(
+        brand_entry and brand_entry.get("skip_layer2", False)
+    )
+    captured_realm = ""
+    if host_meta is not None:
+        captured_realm = str(host_meta.get("rtsp_auth_realm", "") or "").strip()
+    enable_locked_collect = bool(
+        (not username)
+        and (not skip_layer2_brand)
+        and captured_realm
+    )
+    if enable_locked_collect:
+        log.info(f"  RTSP probe: Layered Stream Discovery enabled "
+                 f"(realm={captured_realm!r})")
+
     found, looks_like_rtsp = _probe_rtsp_paths_single_socket(
         ip, port, ordered, username, password,
         timeout=sock_timeout, label="", host_meta=host_meta,
+        collect_locked=enable_locked_collect,
+        expected_realm=captured_realm,
     )
     # rc2.1.1: re-run brand identification after the walk. The walker
     # captured the RTSP Server: header into host_meta["server_header"],
@@ -7082,6 +7460,11 @@ def _safe_cam(cam: dict) -> dict:
               "rtsp_server_header", "rtsp_auth_realm", "rtsp_auth_scheme",
               "rtsp_public_methods"):
         s.setdefault(f, "")
+    # 2.4.0-rc2.0 (Layered Stream Discovery): list of paths returning 401
+    # on the same auth realm during the path-walker run. Populated by
+    # the path walker, surfaced as a "View Locked Streams (N)" badge in
+    # the UI when len > 0 AND no creds are saved. Default empty list.
+    s.setdefault("locked_streams", [])
     # Stream technical details (populated after credentials are accepted)
     for f in ("stream_codec", "stream_audio", "stream_profile"):
         s.setdefault(f, "")
@@ -7567,7 +7950,15 @@ async def api_set_credentials(request) -> web.Response:
                               # cred-auth dict replacement so the Identity
                               # panel shows them after the user authenticates.
                               "rtsp_server_header", "rtsp_auth_realm",
-                              "rtsp_auth_scheme", "rtsp_public_methods")
+                              "rtsp_auth_scheme", "rtsp_public_methods",
+                              # 2.4.0-rc2.0: locked_streams persists across
+                              # cred-auth too — the user just supplied creds
+                              # for some of them, but other locked candidates
+                              # may remain (different sub-streams, etc.).
+                              # The UI will hide the badge once creds are
+                              # saved (camera.user_saved=True), but the data
+                              # stays for diagnostic / debugging visibility.
+                              "locked_streams")
                     if camera.get(k)
                 }
                 CAMERAS[cid] = {
@@ -9347,6 +9738,21 @@ function cardHTML(cam) {
     : cam.hevc_plus_fallback_active || (cam.hevc_plus_warning && cam.has_sub_stream)
     ? '<span class="badge" style="background:#1a3a1a;color:#6fcf97" title="H.265+ detected — switched to compatible sub-stream automatically">✓ H.265+ fallback</span>'
     : '';
+  // 2.4.0-rc2.0 (Layered Stream Discovery): show "View Locked Streams (N)"
+  // badge when the path-walker found additional 401-locked paths AND the
+  // camera doesn't have stored credentials yet. Once credentials are
+  // accepted, the badge disappears (the cred-auth flow handles those
+  // streams, so surfacing them again would be confusing). Click opens
+  // a modal listing the paths + realm with a credential entry prompt.
+  const _locked = Array.isArray(cam.locked_streams) ? cam.locked_streams : [];
+  const lockedBdg = (_locked.length > 0 && !cam.has_credentials)
+    ? '<span class="badge locked-streams-badge" title="' + _locked.length
+      + ' additional stream(s) found that require credentials"'
+      + ' onclick="event.stopPropagation();openLockedStreams(\'' + cam.id + '\')"'
+      + ' style="background:#2d2640;color:#b39ddb;cursor:pointer">'
+      + '🔒 ' + _locked.length + ' Locked Stream' + (_locked.length === 1 ? '' : 's')
+      + '</span>'
+    : '';
 
   return '<div class="feed-wrap">' + feedHTML(cam) + '</div>'
     + '<div class="card-info">'
@@ -9357,7 +9763,7 @@ function cardHTML(cam) {
     + '<div class="badges">' + protoBadge(cam.protocol)
     + '<span class="badge" style="background:#2d2020;color:#e88">' + cam.ip + '</span>'
     + '<span class="badge" style="background:#1e2d1e;color:#6fcf97">:' + cardPort(cam) + '</span>'
-    + credBdg + uncBdg + upgradeBdg + hevcPlusBdg + '</div>'
+    + credBdg + uncBdg + upgradeBdg + hevcPlusBdg + lockedBdg + '</div>'
     + '</div>'
     + identityHTML(cam)
     + credFormHTML(cam)
@@ -9474,6 +9880,79 @@ document.addEventListener('keydown', e => {
 });
 
 async function markNotCamera(cid) { openNotCamModal(cid); }
+
+/* ── 2.4.0-rc2.0 Layered Stream Discovery: Locked Streams modal ─────────── */
+let _lockedCid = null;
+
+function openLockedStreams(cid) {
+  _lockedCid = cid;
+  const cam = cameras.find(c => c.id === cid);
+  if (!cam) return;
+  const label = displayName(cam);
+  const locked = Array.isArray(cam.locked_streams) ? cam.locked_streams : [];
+  document.getElementById('locked-device-label').textContent = label;
+  document.getElementById('locked-count').textContent = locked.length;
+  const list = document.getElementById('locked-list');
+  list.innerHTML = locked.map(ls => {
+    const path = esc(ls.path || '?');
+    const realm = ls.realm ? ' (realm: ' + esc(ls.realm) + ')' : '';
+    const scheme = ls.scheme ? ' [' + esc(ls.scheme) + ']' : '';
+    return '<div class="locked-row"><code>' + path + '</code>'
+         + '<span class="locked-meta">' + scheme + realm + '</span></div>';
+  }).join('');
+  document.getElementById('locked-user').value = '';
+  document.getElementById('locked-pass').value = '';
+  document.getElementById('locked-err').textContent = '';
+  document.getElementById('locked-err').classList.remove('visible');
+  document.getElementById('locked-modal').classList.add('open');
+  setTimeout(() => document.getElementById('locked-user').focus(), 50);
+}
+
+function closeLockedStreams() {
+  document.getElementById('locked-modal').classList.remove('open');
+  _lockedCid = null;
+}
+
+async function submitLockedCreds() {
+  if (!_lockedCid) { closeLockedStreams(); return; }
+  const u = document.getElementById('locked-user').value.trim();
+  const p = document.getElementById('locked-pass').value;
+  const e = document.getElementById('locked-err');
+  if (!u || !p) {
+    e.textContent = 'Username and password are required.';
+    e.classList.add('visible');
+    return;
+  }
+  e.textContent = 'Authenticating…';
+  e.classList.add('visible');
+  try {
+    /* Reuses the existing cred-auth endpoint. The server-side flow runs
+       _identity-preserving cred-auth which retries the path walker WITH
+       credentials supplied, so any same-realm 401-locked paths get
+       authenticated automatically. After success, the camera record is
+       rebuilt with stream_url(s) populated and the locked_streams list
+       remains for diagnostic display (badge hides because user_saved). */
+    const r = await fetch(BASE + '/api/credentials', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({camera_id: _lockedCid, username: u, password: p})
+    });
+    const d = await r.json();
+    if (r.ok) {
+      e.classList.remove('visible');
+      closeLockedStreams();
+      await loadCameras();
+    } else {
+      e.textContent = d.error || 'Authentication failed.';
+    }
+  } catch {
+    e.textContent = 'Network error.';
+  }
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.getElementById('locked-modal').classList.contains('open'))
+    closeLockedStreams();
+});
 
 /* ── Rename ────────────────────────────────────────────────────────────────── */
 function openRename(cid, name) {
@@ -10110,6 +10589,12 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
                 v = host_meta.get(k, "")
                 if v:
                     d[k] = v
+            # 2.4.0-rc2.0 (Layered Stream Discovery): locked_streams is a
+            # list and may legitimately be empty (= feature ran, found
+            # nothing) — copy unconditionally when present in host_meta
+            # so the camera record reflects "feature ran" status.
+            if "locked_streams" in host_meta:
+                d["locked_streams"] = host_meta["locked_streams"]
         return d
 
     if initial_protocol in ("RTSP", "DVR"):
@@ -10481,6 +10966,8 @@ async def run_scan() -> None:
                 _rtsp_rlm  = onvif_meta.get("rtsp_auth_realm", "")
                 _rtsp_sch  = onvif_meta.get("rtsp_auth_scheme", "")
                 _rtsp_pub  = onvif_meta.get("rtsp_public_methods", "")
+                # 2.4.0-rc2.0: locked_streams from path walker
+                _locked    = onvif_meta.get("locked_streams", [])
                 if unauth_url:
                     log.info(f"  ONVIF {ip}: unauthenticated RTSP works "
                              f"({_strip_creds(unauth_url)}) — skipping cred prompt")
@@ -10511,6 +10998,11 @@ async def run_scan() -> None:
                         "rtsp_auth_realm":     _rtsp_rlm,
                         "rtsp_auth_scheme":    _rtsp_sch,
                         "rtsp_public_methods": _rtsp_pub,
+                        # 2.4.0-rc2.0: locked-stream candidates from
+                        # the continued path walk after first success.
+                        # UI shows badge + modal when len > 0 AND no
+                        # creds saved. Always written (may be empty).
+                        "locked_streams":      _locked,
                     }
                 else:
                     CAMERAS[cid] = {
@@ -10536,6 +11028,10 @@ async def run_scan() -> None:
                         "rtsp_auth_realm":     _rtsp_rlm,
                         "rtsp_auth_scheme":    _rtsp_sch,
                         "rtsp_public_methods": _rtsp_pub,
+                        # 2.4.0-rc2.0: locked-stream candidates (may be
+                        # empty if path-walker didn't enable collection
+                        # for this camera).
+                        "locked_streams":      _locked,
                     }
 
         # Merge multicast-only SSDP cameras
@@ -10984,7 +11480,28 @@ header h1{{cursor:pointer}}
 .nc-share-row{{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px}}
 .nc-share-label{{display:flex;align-items:flex-start;gap:8px;font-size:.8rem;cursor:pointer}}
 .nc-share-label input{{flex-shrink:0;margin-top:2px;accent-color:var(--primary)}}
-.nc-share-note{{font-size:.7rem;color:var(--text-dim);margin-top:5px;line-height:1.4}}"""
+.nc-share-note{{font-size:.7rem;color:var(--text-dim);margin-top:5px;line-height:1.4}}
+/* 2.4.0-rc2.0: Locked Streams modal — surfaces 401-locked RTSP paths
+   the path walker found while collecting locked candidates. Same
+   visual treatment as the notCam modal but with a credential-entry
+   pane embedded. */
+.locked-modal-inner{{width:min(520px,94vw)}}
+.locked-subtitle{{font-size:.82rem;color:var(--text-dim);margin-top:-4px;line-height:1.5}}
+.locked-list{{background:var(--surface2);border:1px solid var(--border);border-radius:8px;
+              padding:8px 10px;max-height:180px;overflow-y:auto;font-family:monospace;
+              font-size:.78rem;display:flex;flex-direction:column;gap:6px}}
+.locked-row{{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;
+             padding:4px 6px;border-radius:5px;background:var(--bg)}}
+.locked-row code{{color:var(--primary);background:transparent;font-size:.78rem}}
+.locked-meta{{font-size:.68rem;color:var(--text-dim);font-family:monospace}}
+.locked-cred-form{{display:flex;flex-direction:column;gap:6px;
+                   background:var(--surface2);border:1px solid var(--border);
+                   border-radius:8px;padding:10px}}
+.locked-cred-form label{{font-size:.7rem;color:var(--text-dim);font-weight:600;letter-spacing:.04em}}
+.locked-cred-form input{{width:100%;background:var(--bg);border:1px solid var(--border);
+                         border-radius:8px;color:var(--text);font-size:.82rem;padding:7px 10px;outline:none}}
+.locked-cred-form input:focus{{border-color:var(--primary)}}
+.badge.locked-streams-badge:hover{{background:#3a2e54 !important}}"""
 
     return """<!DOCTYPE html>
 <html lang="en">
@@ -11157,6 +11674,37 @@ header h1{{cursor:pointer}}
     <div class="modal-btns">
       <button class="btn btn-ghost btn-sm" onclick="closeNotCamModal()">Cancel</button>
       <button class="btn btn-danger btn-sm" onclick="submitNotCam()">Confirm — Not a Camera</button>
+    </div>
+  </div>
+</div>
+
+<!-- 2.4.0-rc2.0: Layered Stream Discovery — locked streams modal.
+     Surfaces 401-locked RTSP paths the path walker found while probing
+     this camera. User enters credentials; the existing cred-auth flow
+     attempts to authenticate against ALL paths (working unauth + locked),
+     so successful auth automatically unlocks any of these that share the
+     same auth domain (which they all do — same-realm filter ensures it). -->
+<div class="modal-backdrop" id="locked-modal" onclick="if(event.target.id==='locked-modal')closeLockedStreams()">
+  <div class="modal locked-modal-inner">
+    <h3>&#x1F512; Locked Streams</h3>
+    <p class="locked-subtitle">
+      AnyCam found <strong id="locked-count"></strong> additional stream(s) on
+      <strong id="locked-device-label"></strong> that require credentials.
+      Enter the camera's username and password to unlock them.
+    </p>
+    <div class="locked-list" id="locked-list"></div>
+    <div class="locked-cred-form">
+      <label>USERNAME</label>
+      <input type="text" id="locked-user" placeholder="admin" autocomplete="username">
+      <label>PASSWORD</label>
+      <input type="password" id="locked-pass" placeholder="&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;"
+        autocomplete="current-password"
+        onkeydown="if(event.key==='Enter')submitLockedCreds()">
+      <div class="cred-error" id="locked-err"></div>
+    </div>
+    <div class="modal-btns">
+      <button class="btn btn-ghost btn-sm" onclick="closeLockedStreams()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="submitLockedCreds()">Unlock</button>
     </div>
   </div>
 </div>
