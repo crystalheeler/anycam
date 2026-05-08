@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.5.0-rc1.8"  # must match config.yaml
+CURRENT_VERSION = "2.5.0-rc1.9"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -4888,7 +4888,7 @@ def _validate_rtsp_urls_single_socket(
             return buf.decode("utf-8", errors="replace")
 
         for url_idx, rtsp_url in enumerate(urls):
-            _log(f"({url_idx+1}/{len(urls)}) validating {rtsp_url}")
+            _log(f"({url_idx+1}/{len(urls)}) validating {_strip_creds(rtsp_url)}")
 
             # ── OPTIONS ──────────────────────────────────────────────
             try:
@@ -4947,7 +4947,7 @@ def _validate_rtsp_urls_single_socket(
                             if _opts_auth_line else "")
                     if auth_val:
                         _log(f"OPTIONS → 401 with auth challenge captured "
-                             f"— falling through to DESCRIBE for {rtsp_url}")
+                             f"— falling through to DESCRIBE for {_strip_creds(rtsp_url)}")
                         # Fall through to DESCRIBE; auth retry uses
                         # the captured auth_val.
                     else:
@@ -4978,7 +4978,7 @@ def _validate_rtsp_urls_single_socket(
                 pass
             elif "401" in resp:
                 if not username:
-                    _log(f"DESCRIBE → 401 (no creds) — skipping {rtsp_url}")
+                    _log(f"DESCRIBE → 401 (no creds) — skipping {_strip_creds(rtsp_url)}")
                     continue
                 if not auth_val:
                     auth_line = next(
@@ -5013,7 +5013,7 @@ def _validate_rtsp_urls_single_socket(
             sdp_text  = resp[body_idx + 4:] if body_idx >= 0 else ""
             track_url = _parse_track_url(sdp_text, rtsp_url)
             if not track_url:
-                _log(f"DESCRIBE 200 but SDP has no m=video — skipping {rtsp_url}")
+                _log(f"DESCRIBE 200 but SDP has no m=video — skipping {_strip_creds(rtsp_url)}")
                 continue
 
             # 2.5.0-rc1.2: stricter populated-channel test, used by the
@@ -5085,7 +5085,7 @@ def _validate_rtsp_urls_single_socket(
                 pass  # TEARDOWN failure is non-fatal
 
             results[rtsp_url] = True
-            _log(f"  → probe_ok=True for {rtsp_url}")
+            _log(f"  → probe_ok=True for {_strip_creds(rtsp_url)}")
 
         return results
 
