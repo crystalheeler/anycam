@@ -1,3 +1,3173 @@
+## 2.5.0-rc1.8
+
+**One-feature bumpfix on 2.5.0-rc1.7.** Replaces the fixed +8s
+setTimeout(loadCameras) reload added in 2.5.0-rc1.6 with a poll-until-
+done loop against a new lightweight backend status endpoint. On
+CrystalHeeler's 7-channel Lorex in the 2.5.0-rc1.7 test log, channel
+enumeration actually completed at +3.0s after cred-auth (10:51:16 →
+10:51:19), but the UI waited the full 8s before refetching — costing
+~5s of dead time before cards appeared. 2.5.0-rc1.8 makes the UI
+react to actual completion via three coordinated changes.
+
+### Changes
+
+**1. New `/api/dvr_enum/status/{camera_id}` endpoint.** Lightweight GET
+returning `{done: bool, populated_channels: [...]}`. `done` mirrors
+`camera_id in _DVR_ENUM_DONE`. Pattern matches the existing
+`/api/scan/status`, `/api/pscan/status`, `/snap/status` polling
+endpoints — no new transport mechanism, no SSE/websocket
+infrastructure added.
+
+**2. Backend hardening: every exit path of
+`_enumerate_dvr_channels_after_auth` now adds to `_DVR_ENUM_DONE`.**
+Before 2.5.0-rc1.8, six early-return paths (camera deleted between
+spawn and execution, brand identification miss, recipe type mismatch,
+primary channel extraction failure, missing credentials, decrypt
+failure, empty post-decrypt creds) bailed out without setting the
+flag. With the new poll loop in the UI, any of those silent exits
+would have caused the JS to poll forever (until its 12s hard cap).
+Each early-return now calls `_DVR_ENUM_DONE.add(camera_id)` before
+returning, making the contract explicit: after spawn, the camera_id
+WILL appear in `_DVR_ENUM_DONE` within bounded time, regardless of
+outcome. Six lines added.
+
+**3. Frontend: `submitCreds()` poll loop replaces fixed setTimeout.**
+After cred-auth response carries `dvr_enumeration_pending: true`, the
+UI polls the new status endpoint every 500ms. On `done=true`, calls
+`loadCameras()` once and exits. Hard-capped at 24 polls (12s, +50%
+headroom over the old fixed budget). If the cap is hit without
+`done=true`, falls through to `loadCameras()` anyway — worst case
+matches 2.5.0-rc1.7 behavior, so no regression possible. Network
+blips during polling are caught and silently retried until cap.
+
+### Code delta
+- `camera_discovery.py`:
+  - `_enumerate_dvr_channels_after_auth`: +6 lines (one
+    `_DVR_ENUM_DONE.add(camera_id)` before each of 6 early returns
+    plus an explanatory comment on the first occurrence).
+  - New `api_dvr_enum_status` async handler: +35 lines (most of which
+    is docstring documenting the rationale).
+  - New route registration: +1 line.
+  - `submitCreds()` JS: replaces 14-line fixed-setTimeout block with
+    35-line poll-loop block (most expansion is commentary; net
+    behavioral diff is the polling pattern).
+  - CURRENT_VERSION → 2.5.0-rc1.8.
+- `config.yaml`: version → 2.5.0-rc1.8.
+- `CHANGELOG.md`: this entry.
+
+### Acceptance
+1. Lorex fresh-install cred-auth: cards should appear ~4-5s
+   sooner than 2.5.0-rc1.7 — log timestamps for `Channel enumeration
+   complete` plus ~500ms polling latency should match the wallclock
+   when the cards visibly appear in the UI.
+2. All 8 cards continue producing frames — none idle out at 30s
+   (2.5.0-rc1.7 fix preserved).
+3. Non-DVR cards (Microseven, generic ONVIF): polling loop never
+   starts because `dvr_enumeration_pending=false` — behaviour
+   identical to 2.5.0-rc1.7.
+4. Hard-cap fallback path: if for any reason `done` never flips true
+   within 12s, `loadCameras()` still fires once at +12s, matching
+   2.5.0-rc1.7's worst-case behaviour.
+
+### Validation procedure
+1. Install 2.5.0-rc1.8 on the Pi.
+2. Click into Lorex card, enter admin credentials, click Connect.
+3. In the addon log, find the `Credentials accepted for ...` line
+   and the `Channel enumeration complete for ...` line. Note the
+   delta — should be ~3s on this network.
+4. Watch the UI: cards should appear within ~500ms of the `Channel
+   enumeration complete` log line (one polling interval).
+5. Total wallclock from clicking Connect to seeing all 8 cards
+   should be ~6-9s (vs. ~13-15s under 2.5.0-rc1.7).
+6. Verify all 8 cards continue thumbnail polling without idle-out at
+   30s (2.5.0-rc1.7 stable_key fix still working).
+
+## 2.5.0-rc1.7
+
+**One-fix bumpfix on 2.5.0-rc1.6.** Fixes a frontend renderGrid
+collision bug exposed by the rc1.6 +8s loadCameras() reload that
+shipped in rc1.6: all 8 DVR channel cards on the same ip:port
+collapsed into a single DOM card showing whichever channel was last
+in the iteration order, with the others ghosting in CAMERAS but
+never rendered.
+
+### What 2.5.0-rc1.6 confirmed working
+
+- rpi-ffmpeg version-promise string update — log line at startup
+  reads `Will be fixed in 2.6.0 by bundling rpi-ffmpeg.`
+- Channel enumeration backend still works exactly as in rc1.5 — all
+  7 channels probed cleanly via per-URL walker, all 7 snap_loops
+  kicked off via the rc1.5 fix, all 8 cards in CAMERAS by t+3s
+  after cred-auth.
+
+### What was still broken
+
+Field log shows the rc1.6 +8s reload firing as designed, but the
+result on screen is a single Lorex card showing channel 8's feed
+plus the homeassistant card — not 8 Lorex cards. The log's snap-
+loop activity confirms it:
+
+```
+08:39:55 [INFO] SNAP [192.168.50.217_554_ch{2..8}]: kicking off ...
+08:39:55 [INFO] SNAP [192.168.50.217_554_ch{2..8}]: http starting → ...
+08:40:26 [INFO] SNAP [192.168.50.217_554_ch{2..7}]: idle 31s — stopping
+08:40:30 [INFO] SNAP [192.168.50.217_554]: idle 30s — stopping
+08:40:58 [DEBUG] SNAP [192.168.50.217_554_ch8]: http frame 50 — 7712 bytes
+```
+
+Only ch8 keeps producing frames. Parent + ch2-ch7 idle out at 30s
+because the UI never accesses them. ch8 is the lone Lorex card the
+UI is rendering and polling.
+
+### Root cause: stable_key collision in renderGrid
+
+`_stableCardKey(cam)` returned `cam.ip + ':' + cam.port`, which is
+identical for all 8 DVR channel cards (they share the same
+ip:port). The renderGrid update path uses this key to find the
+existing DOM card across re-renders so login-induced ID changes
+don't reset card position (the rc3.3 fix). With 8 cards collapsing
+onto one key:
+
+1. Pre-cred-auth render: 1 DOM card (parent only).
+2. Cred-auth + enumeration: 7 new cards added to CAMERAS, parent +
+   ch2-ch8 = 8 entries.
+3. +8s reload calls renderGrid with 8 cameras, all sharing one
+   stable_key.
+4. cardsByKey is built once at the top of renderGrid and contains a
+   single entry pointing to the existing parent DOM card.
+5. Iteration 1 (parent): cardsByKey.get(key) → existing card.
+   Update in place.
+6. Iteration 2 (ch2): cardsByKey.get(key) → SAME card (the map
+   isn't updated mid-loop). Update overrides with ch2's HTML.
+7. Iterations 3-8: each overwrites the same DOM card with its own
+   HTML.
+8. Final: ONE DOM card with ch8's HTML (last iteration wins). The
+   new-card-append branch is never taken because the cardsByKey
+   lookup always hits.
+
+Result: only ch8's [data-snap] element exists in the DOM, only ch8
+is polled by initSnaps, only ch8 stays alive. The parent and
+ch2-ch7 idle out at 30s without ever being visible.
+
+This also explains the earlier rc1.5 observation CrystalHeeler reported as
+"went back in and it was displaying all the feeds" — a hard reload
+starts with an empty cardsByKey, and even with the key collision
+every iteration falls through to the new-card-append branch
+because the lookup returns null on an empty map. So a fresh page
+load works; the bug only manifests on in-place updates after the
+DOM already has a card on the colliding key.
+
+### Fix
+
+`_stableCardKey` now appends a `#chN` suffix when `cam.channel` is
+set:
+
+```js
+if (cam.ip) {
+  let key = cam.ip + ':' + (cam.port || '');
+  if (cam.channel) key += '#ch' + cam.channel;
+  return key;
+}
+```
+
+Each DVR channel card gets a distinct key (`192.168.50.217:554#ch1`,
+`...#ch2`, …, `...#ch8`). Non-DVR cards have no `channel` field, so
+they keep plain `ip:port` — the rc3.3 fixed-position-on-login
+behaviour is preserved unchanged.
+
+### First-render-after-cred-auth edge case
+
+The parent card's first render (post-cred-auth, pre-enum) has no
+`channel` field, so its stable_key is `ip:port`. After the +8s
+reload, the parent now has `channel = primary_ch` set by the
+enumeration helper, so its stable_key becomes `ip:port#chN`. These
+don't match. But the renderGrid lookup falls back to cardsById
+(matching by exact `cam.id`):
+
+```js
+let card = cardsByKey.get(key) || cardsById.get(cam.id);
+```
+
+The parent's `cam.id` (`192.168.50.217_554`) is unchanged across the
+two renders, so cardsById finds it. Update in place. New ch2-ch8
+cards have unique cardsByKey entries (none in DOM yet) and unique
+cam.ids (none in DOM yet) — both maps miss → new-card-append
+branch hits → all 7 appended.
+
+End state: 8 distinct DOM cards, all with distinct stable_keys, all
+with [data-snap] elements, all polled by initSnaps.
+
+### Acceptance
+1. Lorex fresh-install cred-auth: 8 distinct cards visible in
+   the UI within ~6-10s of clicking Save Credentials, each with its
+   own thumbnail.
+2. All 8 cards continue producing frames — none idle out at the 30s
+   mark.
+3. Non-DVR cards (Microseven, generic ONVIF) still position-stable
+   across login-induced ID changes (rc3.3 behaviour preserved).
+
+## 2.5.0-rc1.6
+
+**Three-fix bumpfix on 2.5.0-rc1.5.** Targets the UI lag observed in
+the 2.5.0-rc1.5 field log between cred-auth completing and the new
+DVR channel cards becoming visible in the grid, plus updates the
+rpi-ffmpeg version-promise strings now that work has shifted to
+2.6.0. Also reverifies channel enumeration is still firing
+correctly (2.5.0-rc1.5 fix holding).
+
+### What 2.5.0-rc1.5 confirmed working
+
+- All 7 channel-enum snap_loops kicked off correctly:
+  `SNAP [192.168.50.217_554_chN]: kicking off initial thumbnail loop
+  after channel enumeration` for ch2 through ch8.
+- Each card immediately started polling its per-channel snapshot URL
+  (`http://192.168.50.217/cgi-bin/snapshot.cgi?channel=N`).
+- 8 cards rendered correctly in the UI for the Lorex DVR once the UI
+  caught up.
+
+### What was still wrong: UI didn't catch up promptly
+
+Field log timing:
+- 00:20:42 — `Credentials accepted` (cred-auth POST returns 200)
+- 00:20:46 — Channel enum completes, 7 new cards in CAMERAS, all
+  snap_loops started
+- 00:21:16 — All 7 new snap_loops idle out (UI hasn't requested
+  thumbnails yet — it doesn't know the cards exist)
+- 00:22:06 — Periodic scan completes (~80s later); its onComplete
+  side-effect happens to call `loadCameras()` and the UI finally
+  surfaces the new cards
+
+Root cause is in the UI cred-auth flow at the embedded JS:
+```js
+if (r.ok) { e.classList.remove('visible'); await loadCameras(); }
+```
+
+The post-cred-auth `loadCameras()` runs immediately, but the
+channel enumeration is a fire-and-forget background task that hasn't
+completed yet. There's no periodic `/api/cameras` poll, so the UI
+remains stale until the next user-initiated state change (or, as
+in the field log, an unrelated scan happens to complete and trigger
+a refresh side-effect).
+
+### Fix 1 — Backend signals enumeration-pending on cred-auth response
+
+`api_set_credentials` now checks the brand's streaming_recipe type
+after kicking off the enumeration task. If the brand is
+`channel_iterate`, the response includes `dvr_enumeration_pending:
+true`. Non-channel-iterate brands get `false`. Other response fields
+unchanged.
+
+### Fix 2 — UI schedules delayed refetch when flag set
+
+The cred-auth success handler now reads the new flag. When set, it
+schedules a second `loadCameras()` 8 seconds after the immediate one.
+8 seconds covers the worst-case enumeration wallclock budget (15
+URLs × ~300ms walker time + 100ms politeness sleeps + snap_loop
+kickoffs) with comfortable headroom. Non-DVR cred-auth flows skip
+the extra fetch entirely so there's no behaviour change for them.
+
+### Fix 3 — Update rpi-ffmpeg version-promise strings to 2.6.0
+
+The "Will be fixed in 2.5.0 by bundling rpi-ffmpeg" diagnostic
+message and its two preceding code comments referenced 2.5.0 but
+the rpi-ffmpeg bundling work has been shifted to 2.6.0 so the
+addon's own messaging would have been stale at 2.5.0 ship. Updated
+all three references (one user-visible string, two dev comments).
+
+### Out of scope for this rc
+
+The delete-card lag CrystalHeeler mentioned ("they didn't disappear until I
+left the UI and came back") couldn't be reproduced from the rc1.5
+log alone. The `deleteCamera()` JS function already filters local
+state and re-renders, so a delete should be instant. If it persists
+in rc1.6 testing, send a log of the delete actions and we'll
+diagnose separately.
+
+### Acceptance
+1. Lorex fresh-install cred-auth: cards begin appearing within
+   ~6–10 seconds of clicking Save Credentials, no manual refresh
+   needed.
+2. Non-DVR cred-auth (e.g. Microseven, generic ONVIF): no behaviour
+   change. Single card surfaces immediately as before.
+3. Hardware-decoder log line on Pi 4 reads `Will be fixed in 2.6.0
+   by bundling rpi-ffmpeg.` (not 2.5.0).
+4. Channel enumeration still works as it did in 2.5.0-rc1.5 (no
+   regression on the per-URL walker, snap_loop kickoff, or
+   populated_channel_test).
+
+## 2.5.0-rc1.5
+
+**One-fix bumpfix on 2.5.0-rc1.4.** Newly-registered cards from the
+channel enumeration helper now explicitly kick off their own
+snap_loops at registration time, so they appear in the UI with
+working thumbnails immediately.
+
+### What 2.5.0-rc1.4 confirmed working
+
+The 2.5.0-rc1.4 field log was a near-complete success:
+
+- Per-URL socket invocation worked perfectly. Each of the 15 channel
+  probes ran on its own fresh TCP socket. No mid-walk RST bails.
+- All 8 physical channels (1–8) responded with probe_ok=True. SDP-
+  has-video-track populated_channel_test passed all of them.
+- Channels 9–14 returned RTSP 403 Forbidden, channels 15–16 RTSP 404
+  Not Found — correctly filtered out before card registration.
+- ACD escalation didn't fire on the Lorex DVR during enumeration (Fix 2
+  from rc1.4 holding).
+- Final enumeration log: `7 new card(s) registered (populated
+  channels: ['1', '2', '3', '4', '5', '6', '7', '8'])`.
+
+### What was still broken
+
+Despite 7 new cards being correctly registered in CAMERAS and saved
+to disk, the UI didn't show them. The field log diagnoses this:
+after the `Channel enumeration complete` line at 00:07:13, only the
+parent's snap_loop continues running. No `SNAP [192.168.50.217_554_
+chN]: starting background process` lines fire for any of the new
+cards. By contrast, when 2.5.0-rc1.3's saved ch2 card was loaded
+during post-upgrade verification at 00:03:38, it kicked off its own
+snap_loop immediately — that's the path that makes a card visible.
+
+The root cause is architectural: the snap_loop kickoff in
+`handle_snapshot` (line 7916) only runs when the UI requests a
+thumbnail. For cards loaded from disk on startup, the verification
+scan triggers thumbnail requests across the saved set, which
+implicitly starts each card's snap_loop. For cards registered mid-
+session via channel enumeration, no such trigger fires — the cards
+exist in `CAMERAS` and surface in `/api/cameras`, but their snap
+loops never start, and the UI's render pipeline (which expects
+thumbnails to be available before treating a card as "live") shows
+nothing.
+
+### Fix
+
+After registering each new card in `_enumerate_dvr_channels_after_
+auth`, explicitly kick off the snap_loop using the same pattern
+`handle_snapshot` uses:
+
+```python
+authed_url = build_authenticated_url(new_cam)
+if authed_url:
+    _snap_last_access[new_id] = time.monotonic()
+    state = _snap_state(new_id)
+    if state.get("task") is None or state["task"].done():
+        log.info(f"  SNAP [{new_id}]: kicking off initial thumbnail "
+                 f"loop after channel enumeration")
+        state["task"] = asyncio.create_task(
+            snap_loop(new_id, authed_url, new_cam))
+```
+
+Wrapped in try/except so a snap-loop kickoff failure on one card
+doesn't block enumeration of the others. ~12 LoC inside the
+existing for-loop.
+
+### Acceptance
+1. Lorex D861A8B-Z: cred-auth → channel enumeration walks 15
+   channels per-URL, registers populated ones (rc1.4 behaviour).
+2. Each registered card immediately logs `SNAP [192.168.50.217_554_
+   chN]: kicking off initial thumbnail loop after channel
+   enumeration` followed by `SNAP [...]: http starting → http://
+   192.168.50.217/cgi-bin/snapshot.cgi?channel=N`.
+3. UI shows N+1 cards (parent + N new) within seconds of cred-auth
+   complete, each with its own thumbnail polling its own per-channel
+   snapshot URL.
+
+## 2.5.0-rc1.4
+
+**Two-fix bumpfix on 2.5.0-rc1.3.** Fixes a Lorex/Dahua firmware
+behavior the 2.5.0-rc1.3 field log exposed: the DVR closes the TCP
+socket after each full authenticated RTSP transaction, breaking the
+single-socket-multi-URL pattern the channel enumeration helper was
+using.
+
+### What the 2.5.0-rc1.3 log showed
+```
+23:55:21 [INFO]   Channel enumeration starting for 192.168.50.217_554:
+                  walking 15 other channel paths
+23:55:21 [INFO]   [validate_rtsp_walk channel-enum:...] (1/15) ...channel=2&subtype=0
+23:55:21 [INFO]   [validate_rtsp_walk channel-enum:...] SETUP (TCP) → 200 OK
+23:55:21 [INFO]   [validate_rtsp_walk channel-enum:...]   → probe_ok=True
+23:55:21 [INFO]   [validate_rtsp_walk channel-enum:...] (2/15) validating ...channel=3&subtype=0
+23:55:25 [INFO]   [validate_rtsp_walk channel-enum:...] OPTIONS exception
+                  → bailing remaining: [Errno 104] Connection reset by peer
+23:55:25 [WARNING]  ACD: 192.168.50.217 produced 2 RST/broken-pipe events
+                    in <60s — escalating per-IP cooldown to 30s for 300s
+23:55:25 [INFO]   Channel enumeration complete: 1 new card(s) registered
+                  (populated channels: ['1', '2'])
+```
+
+Channel 2 succeeded (probe_ok=True). On the very next URL (channel=3)
+the validate walker got `Connection reset by peer` on OPTIONS and
+bailed all remaining 13 URLs. Then ACD escalated cooldown.
+
+### Root cause: Lorex/Dahua firmware behavior
+The Lorex DVR closes the TCP socket after each completed
+authenticated RTSP transaction (OPTIONS+DESCRIBE+SETUP+TEARDOWN).
+Verified by the same log: the unauthenticated discovery walker at
+23:49:55 walked all 57 paths in a single socket (each path got just
+OPTIONS-401-skip; no full transactions, socket stayed alive). It was
+only the authenticated transactions during the channel enumeration
+that triggered the per-URL socket close.
+
+This is a firmware quirk specific to this brand; Hikvision, Axis,
+generic ONVIF, and Hipcam-family cameras all hold the socket open
+across multiple authenticated transactions, which is why the single-
+socket-multi-URL validate walker has worked for them since rc2.x.
+
+### Fix 1 — Per-URL socket invocation in channel enumeration helper
+
+The channel enumeration helper now loops over candidate URLs and
+calls `_validate_rtsp_urls_single_socket` once per URL with a single-
+element list. Each call gets a fresh TCP socket. ~300ms per URL × 15
+URLs ≈ 5s total wallclock — acceptable for a background task that
+runs after cred-auth has already returned to the user. Adds a
+`asyncio.sleep(0.1)` between URLs as a politeness gap for the DVR's
+RTSP subsystem to finish server-side socket cleanup before the next
+OPTIONS connects.
+
+### Fix 2 — Honor `walker_skip_acd` flag in validate walker
+
+`_validate_rtsp_urls_single_socket` now checks `host_meta["walker_skip_acd"]`
+before recording RST events to the ACD (Aggressive Cooldown
+Detection) escalation system. The channel enumeration helper passes
+this flag so per-URL walks that complete successfully but happen to
+race with a server-side socket close don't pollute ACD with
+spurious RST events. Other walker callers (discovery, db_probe)
+default to ACD-recording behavior — unchanged.
+
+Without this fix, fix 1 alone would have caused ACD to escalate
+cooldown after every 2 URLs (since every URL hits a server close on
+the OPTIONS for the next URL), which would in turn slow down all
+other probes against this IP.
+
+### Acceptance
+1. Lorex D861A8B-Z at 192.168.50.217: cred-auth succeeds on channel 1
+   as before. Within ~5–8s after `Credentials accepted`:
+   `Channel enumeration starting ... walking 15 other channel paths`
+   followed by per-URL probes labeled `channel-enum:...(N/15)`.
+2. Each per-URL walker call should complete its OPTIONS+DESCRIBE+
+   SETUP+TEARDOWN in ~200–400ms. probe_ok=True on each populated
+   channel.
+3. Empty/unconnected channels filtered by populated_channel_test
+   should log `DESCRIBE 200 but SDP failed populated-channel test`
+   or DESCRIBE 404 (DVRs that don't allocate the slot at all).
+4. No ACD escalation on the Lorex DVR from these per-URL walks.
+5. Final log: `Channel enumeration complete: M new card(s)
+   registered (populated channels: ['1', ...])` where M is the
+   number of populated channels minus the parent (channel 1).
+6. UI should show M+1 cards for the Lorex DVR.
+
+### Validation procedure
+1. Confirm the Lorex DVR is not in lockout (power-cycle if needed).
+2. Install 2.5.0-rc1.4 (full restart, not soft reload).
+3. Click into the Lorex card, enter correct admin credentials.
+4. Watch the log for the per-URL channel-enum probes.
+5. Compare populated channel list against your physical camera
+   layout (CrystalHeeler's layout intentionally not shared per his request).
+
+## 2.5.0-rc1.3
+
+**One-line bumpfix on 2.5.0-rc1.2.** Fixes the `AttributeError` crash
+in the channel-enumeration helper that silently failed in the fire-
+and-forget task in 2.5.0-rc1.2.
+
+### The bug
+
+2.5.0-rc1.2 field log:
+```
+23:13:15 [ERROR] Task exception was never retrieved
+future: <Task finished name='Task-296' coro=<_enumerate_dvr_channels_after_auth() ...>
+exception=AttributeError("'str' object has no attribute 'get'")>
+Traceback (most recent call last):
+  File "/camera_discovery.py", line 8807, in _enumerate_dvr_channels_after_auth
+    username = creds.get("username", "")
+               ^^^^^^^^^
+AttributeError: 'str' object has no attribute 'get'
+```
+
+I assumed `cam["credentials"]` was a dict shaped like `{"username":
+..., "password": ...}`. It isn't — it's a Fernet-encrypted JSON
+string. The codebase's pattern (see line ~8690 in `_validate_rtsp_walk`)
+is `username, password = decrypt_creds(creds)`. The bug manifested
+silently in the fire-and-forget task: cred-auth itself still
+succeeded (single card surfaced as expected), but no enumeration
+ever ran, so the user saw the same single-card behavior 2.5.0-rc1.0
+shipped with.
+
+Lesson recorded for myself: when introducing new code that reads
+existing camera-record fields, search for at least one prior consumer
+of the same field to confirm the shape before assuming. Per the
+standing regression rule, the bug was in our code first — and in
+this case our brand-new code, so the field where it manifested
+(silent task failure) was the only data point I needed.
+
+### Fix
+
+Replace `creds.get(...)` with `decrypt_creds(creds)` and handle
+decrypt failure with a debug log + early return. ~5 LoC change in
+`_enumerate_dvr_channels_after_auth`.
+
+### Confirmed by 2.5.0-rc1.2 log
+- The OPTIONS-401 fall-through fix in the validate walker (Fix 1
+  from rc1.2) is working — log shows `OPTIONS → 401 with auth
+  challenge captured — falling through to DESCRIBE` followed by
+  `DESCRIBE → 'RTSP/1.0 404 Not Found' — skipping` (the 404 is
+  expected for `subtype=1` on a Lorex DVR — that variant doesn't
+  exist on this firmware). So Fix 1 is now confirmed in the field.
+- The enumeration TASK was successfully spawned from
+  `api_set_credentials` — the traceback proves the spawn worked.
+  Just the body of the task crashed.
+- Idempotency guard (`_DVR_ENUM_DONE`) was never reached because
+  the crash happened before that point.
+
+### Validation procedure
+1. Install 2.5.0-rc1.3.
+2. Restart the addon to clear the in-memory `_DVR_ENUM_DONE` set
+   (the rc1.2 crash didn't add the camera_id to the set, so the
+   restart isn't strictly required — but cleaner test).
+3. Click into the Lorex card, enter correct admin credentials.
+4. Within ~10s after `Credentials accepted`, log should show:
+   `Channel enumeration starting for 192.168.50.217_554: walking N
+    other channel paths`,
+   per-URL walker output, and finally
+   `Channel enumeration complete for 192.168.50.217_554: M new
+    card(s) registered (populated channels: ['1', '4', '5', ...])`.
+5. UI should show M+1 cards for the Lorex DVR.
+
+## 2.5.0-rc1.2
+
+**Three-fix bumpfix on 2.5.0-rc1.1.** Two bug fixes plus the
+architectural piece (multi-channel multi-card surfacing) that was
+deferred from 2.5.0-rc1.0 and that the original 2026-05-02 plan called
+for. After this build, a Lorex/Dahua DVR with N populated camera
+channels surfaces as N separate camera cards instead of one.
+
+### Fix 1 — OPTIONS-401 fall-through in `_validate_rtsp_urls_single_socket`
+
+Same OPTIONS-401-handling bug that the discovery walker had until
+2.5.0-rc1.1, now also lurking in the validate walker. The 2.5.0-rc1.1
+field log proved it:
+```
+[validate_rtsp_walk db_probe:192.168.50.217] OPTIONS → 'RTSP/1.0 401 Unauthorized' — skipping URL
+[validate_rtsp_walk db_probe:192.168.50.217] OPTIONS → 'RTSP/1.0 401 Unauthorized' — skipping URL
+stream_profiles: built 1 entry/entries (1 main + 0 sub + 0 validated locked)
+```
+The two sub-stream URLs being validated were valid; the walker just
+couldn't authenticate against them on OPTIONS and skipped. Same fix:
+when OPTIONS returns 401 with WWW-Authenticate AND credentials are
+present, capture the auth challenge into `auth_val` and fall through
+to DESCRIBE so the existing 401-retry logic uses the captured nonce.
+~10 LoC, mirror of the discovery walker fix. My oversight in 2.5.0-
+rc1.1 — should have grep'd both walkers.
+
+### Fix 2 — Multi-channel multi-card surfacing on channel_iterate brands
+
+Architectural piece. After cred-auth succeeds on a brand whose
+streaming_recipe is `channel_iterate`, a fire-and-forget background
+task walks the remaining channels with the validated credentials and
+registers each populated channel as its own camera card. Empty/
+virtual slots get filtered by the populated_channel_test SDP heuristic
+(`sdp_has_video_track`). The user gets cred-auth confirmation
+immediately; additional cards appear over the next few seconds as
+the enumeration completes.
+
+Throttle safety: brands with `auth_attempt_lockout` (Lorex/Dahua DVR-
+NVR family) only count FAILED auth attempts toward the lockout
+counter. The credentials we use here have already been validated by
+the cred-auth flow that called us, so walking remaining channels with
+them is unconstrained — no risk of camera lockout from the
+enumeration. The validate walker captures auth on the first 401 and
+reuses the nonce per RFC 2617 across all URLs in a single TCP socket.
+
+Card identity: new cards use ID format `{ip}_{port}_ch{N}`. The
+parent card is renamed to include `chN` to match. Per-channel
+snapshot URLs are built from a new optional `snap_url_template` field
+on the streaming_recipe (added to the Lorex/Dahua entry as
+`http://{ip}/cgi-bin/snapshot.cgi?channel={ch}` — the Dahua snapshot
+endpoint accepts `?channel=N` and returns that physical channel's
+still image).
+
+Idempotency: a `_DVR_ENUM_DONE` set guards against re-enumerating
+the same DVR if cred-auth is clicked again.
+
+### Fix 3 — populated-channel SDP heuristic in `_validate_rtsp_urls_single_socket`
+
+Companion to Fix 2. The validate walker now honors
+`walker_populated_channel_test` on host_meta — same hook the
+discovery walker has had since 2.5.0-rc1.0. Without this, the channel-
+enumeration helper would register cards for empty DVR slots that
+return a 200 OK SDP with `m=video` but no real codec rtpmap.
+
+### Helpers added
+- `_extract_channel_from_rtsp_url(url)` — pulls `channel=N` query
+  value out of a Dahua-format RTSP URL. Tolerant of `?` vs `&`
+  separator and case.
+- `_enumerate_dvr_channels_after_auth(camera_id)` — async helper
+  spawned from `api_set_credentials`. Walks remaining channels,
+  registers populated ones as new cards.
+- `_DVR_ENUM_DONE` set — module-level idempotency guard.
+
+### CAMERA_DB update
+Lorex/Dahua DVR-NVR Family entry's `streaming_recipe` gains
+`snap_url_template: "http://{ip}/cgi-bin/snapshot.cgi?channel={ch}"`.
+
+### Acceptance
+1. Lorex D861A8B-Z at 192.168.50.217: cred-auth succeeds on channel
+   1 (or whichever channel returns first 200 OK after auth). Within
+   ~10s after `Credentials accepted`, additional cards appear for
+   each other populated channel. Empty channels do not get cards.
+2. Each card's thumbnail polls its own `/cgi-bin/snapshot.cgi?channel=N`
+   URL.
+3. Each card's RTSP stream URL is the channel-specific
+   `/cam/realmonitor?channel=N&subtype=0`.
+4. Non-channel_iterate brands (Hikvision, Hipcam, etc.): unchanged.
+5. Re-clicking save credentials on an already-enumerated DVR is a
+   no-op.
+
+### Validation procedure
+1. Power-cycle the Lorex DVR if it's in lockout. Confirm RTSP works in
+   VLC against the camera directly.
+2. Install 2.5.0-rc1.2.
+3. Click into the Lorex card, enter correct admin credentials.
+4. `Credentials accepted` log line should fire within ~10s.
+5. Within another ~10s, log should show:
+   `Channel enumeration starting for 192.168.50.217_554: walking N
+    other channel paths (brand=Lorex / Dahua DVR-NVR Family)`,
+   followed by per-URL validate walker output, and finally
+   `Channel enumeration complete for 192.168.50.217_554: M new
+    card(s) registered (populated channels: ['1', '4', '5', ...])`.
+6. UI should show M+1 cards for the Lorex DVR, one per populated
+   channel.
+
+## 2.5.0-rc1.1
+
+**Bumpfix on 2.5.0-rc1.0.** Fixes the discovery-walker bug that left
+the Lorex D861A8B-Z (and any DVR/NVR firmware that enforces auth on
+RTSP OPTIONS itself) silently failing cred-auth even with correct
+credentials. Plus a tighten on `_expand_channel_iterate_paths` to
+filter unexpanded `{...}` placeholders out of the probe list.
+
+### The bug
+
+Field test of 2.5.0-rc1.0 against the Lorex DVR (2026-05-07 10:00 log)
+showed every Lorex DVR cred-auth attempt walking all 59 paths and
+returning `OPTIONS → 'RTSP/1.0 401 Unauthorized' — skipping path` for
+every single one. RTSP result: None. Credential attempt FAILED.
+
+Root cause is in `_probe_rtsp_paths_single_socket` at line 4274. When
+OPTIONS returns any non-2xx response, the walker logs "skipping path"
+and `continue`s to the next path — without considering that 401 with
+`WWW-Authenticate` means "this path exists, it just needs auth." The
+walker has full Digest-auth retry logic but it lives on the DESCRIBE
+step, which the walker never reaches because OPTIONS already shoved
+it to `continue`.
+
+This bug has been latent since the walker existed. Hikvision-style
+firmware (which allows OPTIONS without auth and only enforces auth on
+DESCRIBE) avoided it. Hipcam-family avoided it too because cred-auth
+goes through ONVIF, not this walker. Lorex/Dahua DVR-NVR family with
+ONVIF disabled (the Lorex DVR's configuration) hits the bug head-on.
+
+### Fix 1: OPTIONS-401 fall-through to DESCRIBE
+
+When OPTIONS returns 401 with WWW-Authenticate AND the walker has
+credentials, capture the auth challenge into `auth_val` and DON'T
+skip the path. Fall through to DESCRIBE. DESCRIBE will also 401
+(same auth requirement), and the existing DESCRIBE-401-retry-with-
+Digest path then runs to completion: builds Digest auth header from
+captured `auth_val`, retries DESCRIBE with Authorization, gets 200
+OK, parses SDP, finds m=video track, returns the working URL.
+
+When OPTIONS returns 401 with NO WWW-Authenticate header (rare —
+malformed firmware), or the walker has no credentials, the existing
+"skip path" behavior is preserved. ~10 LoC, contained to the OPTIONS
+handler.
+
+### Fix 2: filter unexpanded `{...}` placeholders
+
+`_expand_channel_iterate_paths` was emitting recipe `fallback_paths`
+verbatim. Some fallback_paths in CAMERA_DB use `{ch}`/`{st}`
+placeholders for channel/subtype substitution — for example
+`/h264/ch{ch}/main/av_stream` (legacy Dahua firmware) and
+`/live/ch{ch}/main` (very old firmware). The helper was emitting
+these as literal strings, and the walker was probing the literal
+`/h264/ch{ch}/main/av_stream` against the camera, which the camera
+responds 401 to (path can never match). Adds a filter at the end of
+expansion: any path containing `{` or `}` is dropped from the
+result. ~3 LoC. Future improvement (out of scope here): properly
+expand placeholders in fallback_paths the same way path_template is
+expanded, so the legacy-firmware fallbacks get real channel coverage.
+
+### Acceptance
+1. Lorex D861A8B-Z at 192.168.50.217 cred-auth with correct credentials:
+   walker should find a working URL on the first populated channel.
+   Log shows: `OPTIONS → 401 with auth challenge captured — falling
+   through to DESCRIBE for /cam/realmonitor?channel=N&subtype=0`,
+   then `DESCRIBE-auth → 200 OK`, then `RTSP OK (Layer 1)`.
+2. Lorex D861A8B-Z with WRONG credentials: still bails on first
+   auth-retry-rejection per 2.5.0-rc1.0's auth_attempt_lockout
+   policy. One used attempt against the camera's 10-attempt
+   counter.
+3. Hikvision cred-auth: behavior unchanged (OPTIONS still
+   returns 200 OK on Hikvision, falls through to DESCRIBE-401-retry,
+   same path as before).
+4. Hipcam cred-auth: behavior unchanged (goes through ONVIF,
+   doesn't hit this walker path).
+5. The 34 channel-iterate paths logged for the Lorex DVR should no longer
+   include literal `/h264/ch{ch}/main/av_stream` or `/live/ch{ch}/main`
+   entries. Total paths from a 16-channel recipe: 32 channel × 2
+   subtype paths + however many fallback paths have NO placeholders.
+
+### Validation procedure
+1. Install 2.5.0-rc1.1.
+2. Click into the Lorex card, enter correct admin credentials.
+3. Cred-auth should complete in <10s.
+4. Card should display a working stream from the first populated
+   channel.
+5. Scan log should NOT contain literal `{ch}` substrings in any
+   probe_rtsp_walk path entries.
+
+## 2.5.0-rc1.0
+
+**First rc on the 2.5.0 line.** Lorex/Dahua DVR Family Support — the
+consumer side of work that began in 2.4.0-rc2.0 (data scaffolding) and
+the Plan-2 RTSP OPTIONS Fingerprint Helper. Closes the discovery gap
+that left the Lorex D861A8B-Z stuck at "Verifying..." for 90s before
+"Could not connect" on AnyCam 2.4.x.
+
+### What was already in place before 2.5.0-rc1.0
+- CAMERA_DB entry for "Lorex / Dahua DVR-NVR Family" (added 2.4.0-rc2.0)
+  with full streaming_recipe (type=channel_iterate, channels 1..16,
+  subtypes [0,1], fallback paths), throttle_type=auth_attempt_lockout,
+  skip_layer2=True, rtsp_realm_regex matching the canonical Dahua
+  realm pattern `^Login to [0-9a-f]{32}$`, default_ports covering 554,
+  80, 35000, 37777, 443, 8000.
+- Three sibling DVR entries also seeded with streaming_recipe (Hikvision
+  NVR, Uniview NVR, Amcrest direct).
+- _rtsp_options_fingerprint helper + brand-id rtsp_realm_regex matching.
+- skip_layer2 enforcement in find_rtsp_path (already done at line 5104).
+
+### What 2.5.0-rc1.0 adds (the consumer side)
+- **streaming_recipe expansion**: find_rtsp_path now reads brand_entry
+  for streaming_recipe.type == "channel_iterate" and prepends the
+  expanded channel-iterated paths (16 channels × 2 subtypes + recipe
+  fallback paths = 34 paths) to the universal RTSP_PATHS list. Walked
+  through the existing single-socket walker — no new sockets opened.
+- **_sdp_has_video_track populated-channel filter**: stricter SDP
+  heuristic for DVR/NVR devices that return 200 OK with valid-looking
+  SDP on every channel slot regardless of whether a physical camera
+  is connected. Returns True only when SDP contains m=video AND at
+  least one a=rtpmap mapping to a real video codec (H.264/H.265/HEVC/
+  MPEG4). Wired into the walker via host_meta["walker_populated_channel
+  _test"] so single-camera/IP-camera probes are unaffected.
+- **auth_attempt_lockout policy**: brands with throttle_type=
+  auth_attempt_lockout (Lorex/Dahua DVR-NVR family) now bail the entire
+  walk on the FIRST DESCRIBE-with-auth rejection, rather than burning
+  additional lockout-counter attempts on credentials we already know
+  are wrong. Only fires when the walker is invoked WITH credentials AND
+  brand-id has matched — discovery scans (no creds) are unaffected.
+  Surfaces a clean "credentials wrong, 1 of 10 attempts used" failure
+  to the user.
+
+### Helpers added
+- `_sdp_has_video_track(sdp_body)` — module-level
+- `_expand_channel_iterate_paths(recipe, channel_cap=16)` — module-level
+- `_SDP_VIDEO_CODEC_RE` regex — module-level
+
+### Acceptance
+1. Lorex D861A8B-Z at 192.168.50.217: cred-auth completes in <10s
+   instead of 90s, returns the first populated channel as the working
+   stream URL.
+2. Lorex D861A8B-Z: card title displays "Lorex / Dahua DVR-NVR Family".
+3. Lorex D861A8B-Z with wrong password: cred-auth fails in <2s with
+   `walker_auth_lockout_bailed=True` flag set on host_meta (preserves
+   the remaining 9 of 10 attempts before camera lockout).
+4. Hikvision: behavior unchanged (different brand entry, no
+   channel_iterate recipe matches its brand-id).
+5. Hipcam: behavior unchanged (different throttle type
+   `rate_limit_per_ip_tcp`, different code path).
+6. Layer 2 not invoked on the Lorex DVR (already enforced at line 5104).
+
+### Deferred to a follow-up release
+- Multi-channel-multi-card surfacing. Currently a Lorex DVR with N
+  populated channels surfaces as ONE camera card showing the FIRST
+  populated channel's stream. Surfacing all N channels as N separate
+  cards requires architectural changes to the scanner's per-IP-port
+  card output and is outside this rc's scope.
+- Empirical SDP shape data from a known-empty Lorex channel. User
+  opted to ship the populated-channel heuristic blind on the rationale
+  that we will always be guessing for untested hardware. If field test
+  on the Lorex DVR surfaces phantom or missing cards, a 2.5.0-rc1.1 bumpfix
+  refines either the regex or the m=video substring check.
+- NVR channel ranges >16. Cap is hardcoded to 16 in this rc; per-entry
+  override is a future enhancement.
+
+### Validation procedure
+1. With AnyCam 2.5.0-rc1.0 running and a Lorex D861A8B-Z (or any
+   Dahua-family DVR) reachable, scan the network. The DVR's IP should
+   surface as a card titled "Lorex / Dahua DVR-NVR Family".
+2. The scan log should show:
+   `RTSP path list: brand=Lorex / Dahua DVR-NVR Family streaming_recipe
+    channel_iterate expanded to 34 paths (channels capped at 16)`.
+3. Click into the card, enter correct credentials. Cred-auth should
+   complete in <10s and return a working stream URL pointing at the
+   first populated channel (e.g. /cam/realmonitor?channel=3&subtype=0
+   if the camera is connected to channel 3).
+4. Click into the card again, enter WRONG credentials. Cred-auth
+   should fail in <2s with one used attempt against the camera's
+   10-attempt lockout counter.
+
+## 2.4.0
+
+**Final release of the 2.4.0 line.** Code is identical to 2.4.0-rc4.0
+(field-validated on the secondary network on 2026-05-07; deferred the Microseven
+re-test was waived by user given clean primary-network behavior). All
+rc entries below preserved for traceability.
+
+### Headline themes across the 2.4.0 series
+- **Throttle-aware probing infrastructure (rc2.x)**: single-socket
+  cred-auth refactor, brand-static rate_limit_per_ip_tcp data, cross-
+  sequence pacing, snap_loop ffmpeg-restart cadence floor.
+- **Microseven/Hipcam-family field hardening (rc3.x – rc4.0)**: closed
+  the four leaks (E, F, G, plus the rc4.0 G-tightening) that allowed
+  multi-socket hammering during scan, added Aggressive Cooldown
+  Detection (ACD) as a runtime safety net, and corrected two snap_loop
+  edge cases (transport-flip dead-end on persisted UDP, X-Stream-Status
+  using lifetime frame count instead of per-run).
+- **Adaptive enhanced-view UX (rc3.1 – rc3.3)**: env-var pipeline +
+  CFG_ADAPTIVE_QUALITY gating, resolution dropdown grey-out when only
+  one choice exists, fixed camera-card position, dead JS cleanup,
+  Connecting/Switching toasts, focus_leave_kill flag fix.
+- **Adaptive snapMode oscillation fix (rc3.2)**.
+
+### Known limitation deferred to a later release
+- Microseven re-test was deferred at user's request; primary-network
+  validation against unaffected cameras passed cleanly. If field
+  reports surface 2.4.0 issues against Hipcam-family hardware
+  specifically, follow-up addressed in a 2.4.x patch.
+
+## 2.4.0-rc4.0
+
+**Single-fix bumpfix on 2.4.0-rc3.5.** Tightens the Leak G gate
+(alt-port Layer 1 skip) so it fires for cameras that are already in
+firmware-level RTSP lockout when the scan begins, not just for healthy
+cameras whose canonical port confirmed speaker status.
+
+### The gap that surfaced in 2.4.0-rc3.5 field testing
+The 2.4.0-rc3.5 Leak G fix set `host_skip_layer1_alt` only when
+`host_has_rtsp_speaker == True`, which itself required the canonical
+port (554) to respond with RTSP-formatted headers. For a healthy
+Microseven that's the right behavior. For a Microseven already in
+firmware lockout from a prior scan (or a prior build's hammering),
+the canonical port RSTs on path 1, never confirms speaker status, the
+flag stays False, and `_probe_host_port`'s HTTP branch falls through
+into `find_rtsp_path` for every alt port — exactly the multi-socket
+hammering the gate was supposed to prevent. The 2026-05-07 0018 field
+log captured this: 4 Layer 1 walks against a locked Microseven despite ACD
+correctly escalating, because ACD slowed the walks down but the gate
+let them happen at all.
+
+### The fix
+Broaden the gate's truth condition. `host_skip_layer1_alt` now also
+fires when ALL three conditions hold:
+1. The port is non-canonical (alt port — not 554/8554/10554)
+2. Brand-id identifies the host as a `rate_limit_per_ip_tcp` brand
+   (Hipcam, Sricam, Vstarcam, Wansview-old, Tenvis)
+3. AND at least one lockout signal is present:
+   - `_RST_OBSERVED[ip]` has any entry (a prior port's walker bailed
+     on RST/broken-pipe), OR
+   - `_ACD_ESCALATED[ip]` is currently active
+
+Brand-id is run inline at the host_meta build site using
+`_identify_camera_brand` against the same fields the existing brand
+pre-probe uses (mac_vendor + nmap_product + hostname). Cheap.
+
+### Why this won't false-positive
+- Healthy cameras of any brand: existing speaker-confirmed branch
+  fires; new branch's RST signal is absent.
+- Brand-throttled cameras with no RSTs yet: new branch's RST signal
+  absent → falls through to existing speaker-confirmed branch.
+- Non-throttled brands (Hikvision, Dahua, Axis, Hanwha, etc.): new
+  branch's brand-throttled check fails; existing behavior unchanged.
+
+### Validation procedure
+1. Power-cycle the Microseven, wait for VLC to confirm RTSP works against
+   the camera directly.
+2. Install 2.4.0-rc4.0. First scan should walk the canonical port
+   once, then for each alt port log:
+   `RTSP fall-through skipped: 10.0.0.22:80 — canonical RTSP port
+   already established speaker status (no alt-port Layer 1 walk
+   needed)` — same as a healthy 2.4.0-rc3.5 scan would.
+3. Without recovering the camera, attempt a second install (or
+   restart the addon). The canonical port will RST. The new gate
+   should fire on alt ports with the new log line:
+   `Alt-port Layer 1 walk pre-skipped: 10.0.0.22:80 — brand=Microseven
+   is rate_limit_per_ip_tcp AND lockout signals present (RST
+   observed=True, ACD active=False) — canonical port never confirmed
+   speaker but camera is misbehaving; further walks would extend the
+   lockout`.
+4. Total Layer 1 socket opens against a locked Microseven should be 1 (just
+   the canonical port that surfaces the RST), not 4.
+
+## 2.4.0-rc3.5
+
+**Four-fix bumpfix on 2.4.0-rc3.4.** Closes the two leaks (E and F) that
+were explicitly out-of-scope when the original Throttle-Aware Probe
+Pacing Plan shipped in 2.3.0, plus a newly-discovered seventh leak (G)
+that surfaced when the Microseven was hammered into firmware-level
+lockout during back-to-back rc2.0/rc3.4/rc2.0 install testing, plus
+Aggressive Cooldown Detection (ACD) as a runtime safety net for any
+RST-class behavior that the brand-static throttle data fails to predict.
+
+### Background — why the Microseven was getting hammered in rc3.x
+
+The original Throttle-Aware Probe Pacing Plan was filed during 2.2.8-rc2.6
+debugging and identified six leaks (A–F). Plan items A, B, C, D shipped
+in 2.3.0 as part of the single-socket cred-auth refactor. Items E and F
+were explicitly deferred. A seventh leak — alt-port Layer 1 walks
+multiplying TCP socket opens during scan — was not in the original plan
+because it didn't exist as a problem at the time: rc2.0 had a separate
+nmap intersection bug (`-p` AND'd with `--top-ports` instead of unioned)
+that silently shrunk the focused scan to ~4 ports per host, so alt
+ports 80/443/8080 weren't being discovered for the Microseven. rc2.1
+fixed the nmap bug (correct fix), exposing the latent multi-socket
+issue in the alt-port probe loop.
+
+### Bug fixes
+- **Leak E — `_fix_codec` first attempt was hard-coded 1.0s**: the
+  cross-sequence pacing for retries (5.0s) was correct in rc2.6, but
+  the FIRST attempt's sleep was hard-coded to 1.0 unconditionally,
+  ignoring `_THROTTLE_TRACK[ip]`. For Hipcam-family cameras whose
+  preceding cred-auth ffprobe at line 8498 already left an entry in
+  `_THROTTLE_TRACK`, the codec correction probe would land inside the
+  cooldown window, fail with no codec, and the misreported codec would
+  persist. Now uses `_throttle_wait_if_needed(ip, throttle_s, ...)`
+  for attempt 0; retries unchanged.
+
+- **Leak F — `handle_stream_test` had no throttle gate**: the Test
+  Stream button fires a single ffprobe — fine for one click, hazardous
+  if the user double-clicks or clicks while a scan is running on the
+  same IP. Added `_throttle_wait_if_needed` before the ffprobe call.
+  User-visible cost: up to ~throttle_s (5s for Hipcam) for affected
+  cameras only; zero impact otherwise.
+
+- **Leak G — alt-port Layer 1 skip-gate had a hole**: rc2.4 added an
+  optimization: once a canonical RTSP port (554/8554/10554) confirms
+  the host speaks RTSP, alt ports skip the Layer 1 path walk. The gate
+  fires correctly when `_initial_protocol` returns "RTSP" for the alt
+  port — but for cameras whose alt-port nmap banner doesn't contain
+  "rtsp"/"camera" (the common case for Hipcam-family on port 80, where
+  nmap sees the GoAhead web admin and classifies as plain "http"),
+  `initial` is already "HTTP", the gate's `initial == "RTSP"` condition
+  is False, no downgrade fires, and `_probe_host_port`'s HTTP branch
+  falls through to `find_rtsp_path` anyway — opening a fresh TCP socket
+  per alt port. For the Microseven on a populated network, this added
+  3 unnecessary Layer 1 walks per scan (4 sockets in 31s observed in
+  the rc3.4 field log) against a camera with a 5s per-IP TCP rate-limit,
+  enough to push it into a firmware-level lockout that persisted
+  through addon uninstall and required a power-cycle. Plumbed a new
+  `host_skip_layer1_alt` flag through `host_meta` (parallel to the
+  existing `host_skip_layer2`) and gated the HTTP-branch
+  `find_rtsp_path` call on it for non-canonical ports.
+
+### New feature
+- **Aggressive Cooldown Detection (ACD)**: per-IP RST observation
+  tracker that escalates the cooldown to 30s for 5 minutes when 2+
+  RSTs/broken-pipes are observed within a 60s window. Defense-in-depth
+  for cameras whose actual rate-limit is stricter than CAMERA_DB
+  documents, or for cameras already in firmware-escalated lockout from
+  prior pressure (e.g. a previous build's hammering). Hooks into both
+  the `_probe_rtsp_paths_single_socket` and
+  `_validate_rtsp_urls_single_socket` exception handlers — the two
+  places where mid-walk RSTs surface — and applies via the existing
+  `_throttle_wait_if_needed` mechanism so all cred-auth, ffprobe, and
+  snap_loop call sites benefit automatically. Logs a warning on the
+  first escalation per IP so the behavior is observable.
+
+### Validation procedure
+1. Install 2.4.0-rc3.5 on a system with a Microseven (or any
+   Hipcam-family) camera that's no longer in firmware lockout (verify
+   by checking RTSP works in VLC against the camera directly first).
+2. During scan, log should show the canonical port walked once, then
+   for each alt port: `RTSP fall-through skipped: 10.x.x.x:80 —
+   canonical RTSP port already established speaker status (no alt-port
+   Layer 1 walk needed)`. No further Layer 1 walks against the same IP.
+3. After cred-auth, codec correction should succeed on attempt 1 (no
+   "all 3 ffprobe attempts failed" warning) because Leak E now waits
+   the proper cooldown.
+4. Click Test Stream rapidly twice in a row — second click should log
+   `Throttle wait Xs for 10.x.x.x ... stream test ffprobe`.
+5. Optional ACD validation: run the scan against an artificially
+   misbehaving camera (or one currently in lockout) — after 2 RSTs in
+   <60s, log should warn `ACD: 10.x.x.x produced 2 RST/broken-pipe
+   events in <60s — escalating per-IP cooldown to 30s for 300s`.
+
+## 2.4.0-rc3.4
+
+**Two-fix bumpfix on 2.4.0-rc3.3.** Both surfaced from a Microseven
+focus-session test (rc3.3 install): user re-entered focus on a camera whose
+RTSP had previously failed and been flipped to UDP, expected to see the
+http_snap fallback engage as in the first session, instead saw a frozen
+frame for the entire 28-minute test across two re-focuses with no JS
+toast and no transport flip in the log. Devtools captures showed
+`X-Stream-Status: ok` on every snapshot during the freeze. Both fixes
+below are safety-net hardening — they make the freeze recoverable and
+visible — but the underlying cause (ffmpeg getting "Invalid data found
+when processing input" from the Microseven RTSP every time) is a separate
+regression scoped for the next build.
+
+### Bug fixes
+- **Bug 1 — transport flip dead-end on persisted UDP in focus mode**:
+  `preferred_transport` is stored in `CAMERAS[camera_id]` and persisted
+  to disk, so once a prior session flipped a camera to UDP the value
+  survives across focus exits, idle stops, and addon restarts. The
+  transport-flip block in `snap_loop` had two arms — `cur_transport == "tcp"`
+  (any mode) and `cur_transport == "udp" and not native_res` (thumbnail
+  mode only) — but no arm for `cur_transport == "udp" and native_res`.
+  When that case occurred, the block fell through silently:
+  `transport_flip_fired` stayed False, which gated the http_snap
+  fallback below at `state.get("transport_flip_fired")`, so the
+  fallback also never fired and ffmpeg restart-looped indefinitely.
+  Added the missing branch: revert to TCP for this focus session and
+  arm `transport_flip_fired=True` so a subsequent 3-streak triggers
+  the http_snap fallback as designed.
+
+- **Bug 2 — X-Stream-Status used lifetime frame_count instead of
+  per-run count**: `state["frame_count"]` accumulates across every
+  snap_loop call for a camera_id, including prior http_snap_loop
+  sessions and thumbnail polling. Once a camera had ever produced any
+  frame at all, the gate `not state.get("frame_count", 0)` evaluated
+  False forever, so X-Stream-Status fell through to `"ok"` even when
+  ffmpeg had been dead the entire current focus session. Result: the
+  rc3.3 Bug B fix (Connecting / Switching transport toasts) couldn't
+  fire — the JS was correctly reading the header but the server was
+  reporting healthy. Added a per-ffmpeg-launch counter
+  `state["current_run_frames"]` (reset to 0 at each `_launch_snap`,
+  incremented per parsed frame) and gated X-Stream-Status on that
+  instead. Status now correctly reflects "current ffmpeg has produced
+  zero frames AND the streak is non-zero" → connecting/switching.
+
+### Known issues carried into next build
+- Microseven RTSP returns `Invalid data found when processing input`
+  on every connect attempt across both /11 (main) and /12 (sub) profiles
+  on both TCP and UDP transports. ffmpeg has produced literally zero
+  frames for this camera in the rc3.3 test log. This is a regression
+  from earlier rc2.x builds where the Microseven was producing real frames
+  (clean 218-frame run observed earlier). Investigation scope for the
+  next build: walk CHANGELOG between last-known-good and rc3.3 for
+  RTSP-related changes, compare ffmpeg command lines, run vanilla
+  ffmpeg against the Microseven outside the pipeline as a control.
+
+## 2.4.0-rc3.3
+**Four-fix bumpfix on 2.4.0-rc3.2. (1) Bug A: stale focus_leave_kill
+flag killed snap_loop on first ffmpeg failure of a fresh focus
+session — the bug behind CrystalHeeler's "menu greyed out and clicks did
+nothing" symptom. (2) Bug B: visible Connecting / Switching transport
+toasts during the retry-cycle window so the focus view no longer
+appears mysteriously frozen. (3) Camera Cards Fixed Position: cards
+no longer swap on login. (4) Dead JS Cleanup: removed three
+confirmed-unused functions.**
+
+### Issues fixed
+
+**1. Bug A — stale `focus_leave_kill` flag killed snap_loop on
+focus re-entry after an HTTP-snap fallback session.**
+
+`handle_focus_clear` (line 7643) sets `state["focus_leave_kill"] = True`
+when the user leaves enhanced view. The flag is meant to be consumed
+by `snap_loop`'s main RTSP path at line 6817 — when ffmpeg's read
+loop hits EOF after a focus-leave, the restart logic checks this
+flag and bails out of restarting (returning to thumbnail polling).
+
+The `state` dict lives in `_SNAP[camera_id]` and **persists across
+snap_loop instances**. The flag is set per-camera, so when the user
+leaves a focus session that ended in HTTP-snap fallback, the flag
+gets set but never consumed — because `snap_loop` is no longer in
+its main RTSP loop, it's awaiting `http_snap_loop` at line 6966.
+Neither `http_snap_loop` nor task cancellation pops the flag.
+
+Result: `focus_leave_kill` stays `True` in `_SNAP[camera_id]` after
+any session that ended in HTTP-snap fallback. On the **next** focus
+entry on that camera, the first ffmpeg failure (very common with the
+Microseven /11 RTSP regression we're investigating separately as
+task `c`) hits the EOF branch at line 6713, sees the still-stale
+flag, logs `"ffmpeg killed by focus-leave"` (wrong — the user just
+entered, didn't leave), and the restart-skip at line 6817 returns
+from snap_loop entirely. Result: snap_loop is dead, the dropdown
+greys out (or worse, doesn't), and dropdown clicks become no-ops
+because there's no live loop to receive them.
+
+This matches CrystalHeeler's log timeline at 15:07:11 → 15:08:43 in his
+2.4.0-rc3.2 test exactly:
+- Previous session ended in http_snap fallback at 14:00:50
+- CrystalHeeler left at 14:01:54 (flag set, never consumed)
+- Next focus at 15:08:43 saw the stale flag and committed suicide
+  on the first ffmpeg failure
+- 15:08:59, 15:09:09 manual tier dropdown clicks went nowhere
+
+**Fix:** `handle_focus_enter` (line 7549) now clears any stale
+`focus_leave_kill` flag on entry. Belt-and-suspenders: the
+HTTP-snap fallback site at line 6966 also clears the flag
+immediately after `http_snap_loop` returns, so even if the user
+exits/re-enters in a tight window, the flag won't leak forward.
+With both clears in place, the flag is guaranteed to be consumed
+exactly once per `handle_focus_clear` call, which is its design.
+
+**2. Bug B — frozen focus view during the retry-cycle window
+before fallback engages.**
+
+When ffmpeg keeps crashing with 0 frames (e.g. the Microseven
+"Invalid data found" symptom), the focus view shows the last
+cached frame for 15-30s before either RTSP recovers or the
+HTTP-snap fallback engages. There was no visible status during
+this window — no spinner, no "connecting…" message, nothing.
+CrystalHeeler's exact observation from the 2.4.0-rc3.2 test: "completely
+frozen the entire time I was in the view, regardless of what
+I changed in the dropdown."
+
+**Fix:** new `X-Stream-Status` response header from `handle_snapshot`
+exposes the retry phase to JS. Possible values:
+  - `ok` — normal (frames flowing or fresh start, no toast)
+  - `connecting` — ffmpeg has crashed at least once, still trying TCP
+  - `switching_transport` — TCP failed 3×, now trying UDP transport
+  - `http_fallback` — HTTP-snap mode (handled separately by the
+    existing httpFallback toast from 2.4.0-rc3.2)
+
+JS reads the header, tracks transitions in new state var
+`_lastStreamStatus`, and surfaces messages via the existing
+`focus-warning` toast element (the same one used by the
+4K-too-demanding case in 2.4.0-rc2 and the HTTP-snap toast in
+2.4.0-rc3.2). The toast text is "Connecting to RTSP stream…" or
+"Switching transport (TCP → UDP) — camera does not support TCP
+RTSP" depending on whether the transport flip has fired.
+
+The toast logic carefully avoids stomping on higher-priority
+messages — if the 4K-too-demanding or HTTP-snap toast is already
+displayed, the connecting-status toast doesn't override it. When
+the stream recovers (`streamStatus === 'ok'`), our toast hides
+itself but leaves other toasts alone.
+
+**3. Camera Cards Fixed Position — cards no longer swap on
+login.**
+
+Root cause: when a user logs into a camera, the camera's `id`
+changes (e.g. `10.0.0.22_onvif` → `10.0.0.22_onvif_MainStreamProfileToken`
+because the ONVIF profile token gets appended after auth). The
+prior `renderGrid` logic matched cards by ID alone — the old ID
+disappeared from the cameras array, the corresponding DOM card
+was removed, and the new ID's card was appended at the end of
+the grid. Visible to users as a "swap" since the old card vanished
+and the new one appeared in a different slot.
+
+**Fix:** match cards by a stable `_stableCardKey(cam)` derived from
+the camera's `ip:port` instead of just `id`. This survives the
+login-induced ID change because IP and port don't change. When an
+existing card's ID has changed (because the same IP:port now
+carries a profile-tokened ID), `renderGrid` updates the card's
+`dataset.id` in place and re-renders its content — DOM position
+is naturally preserved because we never remove-and-re-append.
+
+Each card now also has a `dataset.stableKey` attribute set on
+creation in `buildCard`, used as the primary lookup index in
+`renderGrid`'s map. The fallback to `dataset.id`-based matching
+covers the legacy edge where an old card was rendered before the
+attribute was introduced (first render after upgrade).
+
+A future feature for user-driven card reordering (drag-to-reorder)
+will be straightforward to add on top of this: capture the DOM
+order of `[data-stable-key]` values, persist in `localStorage`,
+and replay as a sort comparator at the top of `renderGrid`. The
+inline comment in the rewrite calls this out for future reference.
+
+**4. Dead JS Cleanup — three confirmed-unused functions removed.**
+
+A two-pass scan (word-boundary regex for definitions, full-substring
+grep for any reference including HTML attribute strings like
+`onerror="..."`) identified three JS functions that appear only
+at their definition site:
+
+  - `imgError(img)` — labeled "onerror helper — avoids embedding
+    quotes in the generated HTML string" but the string-literal
+    callers had been refactored away in some earlier release
+    without removing the helper. Truly orphaned.
+  - `stopAllSnaps()` — wrapper around `Object.keys(_snapTimers).forEach(stopSnap)`.
+    Never called.
+  - `storNavForward()` — storage-browser forward-history navigator.
+    Apparently the storage-browser UI never grew a forward button
+    (only back/up/up).
+
+The substring scan matters because the regex-only scan wouldn't
+catch HTML-attribute references like `<img onerror="imgError(this)">`
+embedded in template literals — both passes must come up empty
+before deletion is safe. All three did.
+
+Functions called exactly once (56 of them per the same scan) were
+NOT touched — those would be inlining candidates, which is a
+refactoring decision separate from dead-code removal.
+
+### Files changed
+
+- `camera_discovery.py`:
+  - line 7549 area: `handle_focus_enter` clears stale
+    `focus_leave_kill` (Bug A primary fix)
+  - line 6966 area: belt-and-suspenders clear after `http_snap_loop`
+    returns (Bug A defensive fix)
+  - line 7436 area: `handle_snapshot` emits new `X-Stream-Status`
+    header (Bug B server-side)
+  - line 10366 area: new JS state `_lastStreamStatus` + transition
+    handler in the focus poll (Bug B JS-side)
+  - line 10808 area: `renderGrid` rewritten with `_stableCardKey`
+    for position preservation (Camera Cards)
+  - 3 unused JS functions deleted (Dead JS Cleanup)
+- `config.yaml`: version bump
+- `CHANGELOG.md`: this entry
+
+### Live-test plan
+
+1. **Bug A repro path.** Log into Microseven, enter focus
+   view, wait for HTTP-snap fallback to engage (~15-30s), exit
+   focus, immediately re-enter focus. Pre-fix behavior: snap_loop
+   committed suicide on first ffmpeg failure, dropdown clicks were
+   no-ops. Post-fix: focus session runs normally, transport flip
+   may fire again (still going through the TCP→UDP cycle since
+   that's separate work `c`), but dropdown stays responsive.
+2. **Bug B retry-cycle visibility.** Microseven focus entry should
+   show "Connecting to RTSP stream…" toast within 1-2s of the
+   first ffmpeg failure. After 3 TCP failures, toast updates to
+   "Switching transport (TCP → UDP) — camera does not support
+   TCP RTSP". After UDP also fails 3×, toast switches to the
+   2.4.0-rc3.2 message "Live RTSP stream unavailable — showing
+   periodic snapshots from this camera".
+3. **Camera Cards Fixed Position.** Discover cameras, note their
+   positions in the grid. Log into one of them. Card with the
+   newly-logged-in camera should NOT swap positions — should
+   stay in its original slot, just update content.
+4. **Dead JS regression check.** App should load and operate
+   normally — no `ReferenceError: imgError is not defined`,
+   `stopAllSnaps is not defined`, or `storNavForward is not
+   defined` in the browser console. Storage browser back/up
+   navigation should still work (those are separate functions
+   that were not touched).
+5. **All 2.4.0-rc3.2 fixes intact.** Transport flip still fires
+   in focus mode, HTTP-snap fallback toast still appears,
+   `adaptive_quality=true` default still applies for new installs.
+
+### Out of scope (deferred)
+
+- **Microseven /11 RTSP root-cause investigation (task `c`).**
+  The "Invalid data found when processing input" error itself
+  is a regression from 2.3.x → 2.4.x — CrystalHeeler's older-version
+  install will produce the comparison data we need. Not
+  addressed in this build.
+- **Future drag-to-reorder of cards.** Foundation is laid by
+  this build's `_stableCardKey` work; the actual UI feature
+  is a future release.
+## 2.4.0-rc3.2
+**Three-fix bumpfix on 2.4.0-rc3.1, all stemming from yesterday's
+Microseven enhanced-view investigation. (1) RTSP transport flip now
+runs in focus mode, not just thumbnail mode — fixing the canonical
+victim (Microseven and class-mates: Sricam, generic ONVIF) where
+the camera accepts TCP SETUP but replies with UDP, surfacing as
+"Invalid data found when processing input" and 3 immediate ffmpeg
+crashes per session. (2) HTTP-snap fallback in focus mode now shows
+a visible status toast explaining why the resolution dropdown just
+greyed out — the existing hover-tooltip wasn't discoverable. (3)
+adaptive_quality default flipped from false to true in config.yaml,
+matching what the translations description has always claimed
+("Default ON") and restoring the auto-step-down behavior that the
+2.4.0-rc3.1 gating fix surfaced as missing.**
+
+### Issues fixed
+
+**1. Microseven `/11` RTSP `Invalid data` crash — transport flip
+extended to focus mode.**
+
+The "Invalid data found when processing input" ffmpeg error on
+Microseven `/11` has been happening every focus session for at
+least two test cycles. It's documented in our own code comments
+(line 6894-6899): a class of cheap/generic ONVIF cameras (Sricam,
+Microseven, etc.) accept the TCP SETUP request but reply with UDP
+in the Transport header, which ffmpeg surfaces as "Nonmatching
+transport in server reply" → "Invalid data found when processing
+input". The fix is to flip `preferred_transport` to UDP after 3
+consecutive 0-frame TCP failures.
+
+That fix existed in `snap_loop`'s zero-frame handler — but it was
+gated on `not native_res`, meaning it only ran in thumbnail mode.
+For the Microseven specifically:
+  • Thumbnail mode uses `http_snap_url` (`/tmpfs/snap.jpg`) so
+    RTSP is never exercised → transport flip never fires there.
+  • Focus mode tries RTSP, fails 3 times on TCP, but the 3-strike
+    threshold immediately triggered the HTTP-snap fallback at
+    line 6929 — bypassing the transport flip entirely.
+
+Net: `preferred_transport` stayed `"tcp"` forever, every focus
+session crashed identically, and the dropdown silently disabled
+when fallback engaged. The log evidence is unambiguous — three
+focus sessions across two test runs (yesterday's 12:18 and today's
+13:05/13:11) all show:
+```
+ffmpeg starting (codec=h264, hw:h264_v4l2m2m, ...)
+ffmpeg stderr: rtsp://10.0.0.22:554/11: Invalid data found when processing input
+ffmpeg EOF after 0 frames
+[2x more identical attempts]
+3 consecutive 0-frame failures in enhanced view — RTSP non-functional, falling back to HTTP snap loop
+```
+
+The 2.4.0-rc3.2 fix:
+  • Removes the `not native_res` gate from the transport-flip block,
+    so the flip runs in BOTH thumbnail and focus modes.
+  • Keeps the `not native_res` gate on the UDP→TCP revert branch —
+    thumbnail mode still cycles TCP↔UDP for cameras that fail both,
+    while focus mode falls through to the HTTP-snap fallback after
+    UDP also fails.
+  • Adds `state.get("transport_flip_fired")` as a precondition to
+    the HTTP-snap fallback. Now the fallback only fires AFTER both
+    transports have been tried.
+  • Resets the local `streak` variable to 0 inside the flip block
+    so the HTTP-snap fallback doesn't fire on the same iteration
+    (subtle: the fallback reads `streak` (local), the flip resets
+    `state["zero_frame_streak"]` (state's copy)).
+
+For the Microseven specifically, expected behavior post-fix:
+  1. Enter focus view. ffmpeg launches with `-rtsp_transport tcp`,
+     fails with "Invalid data" — same as before.
+  2. After 3 such failures, log warns "switching to UDP transport
+     (camera may not support TCP RTSP)" and `preferred_transport`
+     persists as `"udp"`.
+  3. Next ffmpeg launch uses `-rtsp_transport udp`. If Microseven
+     speaks UDP RTSP, video starts and the focus session works
+     normally with all dropdown controls live.
+  4. Subsequent sessions on this camera start at UDP and skip the
+     TCP failure cycle entirely.
+  5. If UDP also fails 3 times (camera speaks neither correctly),
+     fall through to HTTP-snap fallback — same end state as
+     pre-2.4.0-rc3.2, but reached only after exhausting both
+     transports.
+
+This is the canonical fix for "rate_limit_per_ip_tcp" branded
+cameras (Microseven, Hipcam, Sricam, etc.) that don't fully
+implement TCP RTSP. It does NOT pre-emptively switch to UDP for
+those brands — every camera still gets TCP-first because TCP RTSP
+is the more common, more reliable transport when supported.
+Trial-and-error per camera, but only the first focus session pays
+the cost; subsequent sessions inherit the learned transport.
+
+**2. Visible toast when HTTP-snap fallback engages.**
+
+The existing `httpFallback` JS block (lines ~10371-10380) sets
+`sel.disabled = true`, `sel.title = 'Stream switching unavailable
+— RTSP not accessible on this camera'`, and `g.style.opacity =
+0.4` on the resolution/fps dropdowns. The disabled state and 0.4
+opacity ARE visible — the camera dropdown does grey out. But the
+explanation lives in a hover-tooltip on a disabled control, which
+most users never discover.
+
+CrystalHeeler's exact observation from yesterday's debugging: "the menu
+greyed out... I left enhanced view, then went back in and tried
+again... but it didn't seem to function either."
+
+The fix re-uses the existing `focus-warning` toast element (used
+by the "4K too demanding" auto-step-down case) and adds a snap-
+mode-transition detector. New JS state var `_lastSnapMode`
+tracks the last `X-Snap-Mode` header value seen. When the value
+transitions from `rtsp` to `http`, the toast shows "Live RTSP
+stream unavailable — showing periodic snapshots from this camera"
+and stays visible until either focus is exited or the snap_mode
+transitions back to RTSP.
+
+Unlike the 4K-too-demanding toast which auto-hides after 5 seconds,
+this one persists for the full HTTP-snap session — the underlying
+condition persists, so the message should too. The toast is hidden
+on transition back to RTSP (defensive — in 2.4.0-rc3.2 the focus
+session never transitions back, but a future build might enable
+RTSP retries).
+
+The `clearTimeout(_focus4kWarnTimer)` call inside the toast-show
+block prevents the 4K warning's auto-hide timer from accidentally
+hiding our HTTP-snap toast if both fired in the same session.
+
+**3. adaptive_quality default flipped from false to true.**
+
+Discovered via 2.4.0-rc3.1's investigation: the `translations/en.yaml`
+description has always said "Default ON" while config.yaml had the
+default as `false`. This was masked pre-2.4.0-rc3.1 because run.sh
+never exported the env var anyway, and a Block B gating bug in
+snap_loop happened to enable auto-step-down via the repeated-restart
+path even when CFG_ADAPTIVE_QUALITY was False. 2.4.0-rc3.1 fixed
+both bugs but as a side-effect made every install start with
+adaptive auto-stepping disabled (since `false` was the config
+default). 2.4.0-rc3.2 flips the config default to match the
+description. New installs get auto-step-down on by default; existing
+installs keep whatever value is saved in their /data/options.json.
+
+CrystalHeeler's note from session: "It [adaptive_quality] has never worked.
+I haven't brought it up because other things are more important
+but I have never seen the feed auto-step down to a lower
+resolution... This is probably because I failed to properly define
+what 'unstable' means..." That's tracked as the 2.4.0-rc7.0
+redesign work — separate from this default flip. The flip restores
+the toggle's *intended* behavior; whether the underlying detection
+actually fires usefully is the rc7.0 question.
+
+### Files changed
+
+- `camera_discovery.py`:
+  - Lines ~6894-6943: removed `not native_res` from transport-flip
+    block, kept it on the UDP→TCP revert sub-branch, added
+    `state.get("transport_flip_fired")` precondition to HTTP-snap
+    fallback, added `streak = 0` reset inside flip block
+  - Lines ~10316: new JS state var `_lastSnapMode`
+  - Lines ~10366: snap-mode transition detector that surfaces the
+    focus-warning toast on rtsp→http and clears it on http→rtsp
+- `config.yaml`: `adaptive_quality: false` → `true`; version bump
+- `CHANGELOG.md`: this entry
+
+### Live-test plan
+
+1. **Microseven focus session.** Toggle hw_decode and
+   adaptive_quality both ON. Enter enhanced view. First 3 ffmpeg
+   launches will still fail with "Invalid data" (TCP). Watch for
+   log line: `3 consecutive 0-frame failures with TCP — switching
+   to UDP transport`. Next ffmpeg launch should use
+   `-rtsp_transport udp`. If video starts: success, controls stay
+   live, no greyout, no toast.
+2. **Microseven follow-up session.** Exit enhanced view, re-enter.
+   Should start immediately with UDP (preferred_transport persisted)
+   — no TCP failure cycle this time.
+3. **Microseven HTTP-snap fallback path.** If UDP also fails (e.g.
+   camera doesn't speak UDP either), after 3 UDP failures the
+   HTTP-snap fallback should fire with the toast: "Live RTSP stream
+   unavailable — showing periodic snapshots from this camera".
+   Resolution dropdown greyed AND now has visible explanation.
+4. **Hikvision regression check.** Enter creds + enhanced view.
+   Should work as before — Hikvision speaks TCP fine, transport
+   flip never fires, no toast.
+5. **Adaptive quality default check.** New install (or wipe
+   /data/options.json): startup log should show
+   `adaptive_quality=true`. Existing installs: whatever was saved
+   stays saved.
+6. **All 2.4.0-rc3.1 fixes intact.** Three Config: log lines on
+   startup, hw_decode actually engages, accurate Pi 4 rpivid
+   diagnostic.
+## 2.4.0-rc3.1
+**Two-fix bumpfix on rc3.0 surfacing a long-latent infrastructure bug
+that has masked every config toggle since the first one was added.
+Found while investigating why hw_decode=True in the Configuration tab
+wasn't actually engaging hardware decoding even though h264_v4l2m2m
+probed as available at startup. Root cause: run.sh never read
+/data/options.json or exported any of the user-configurable options
+as environment variables, so every CFG_* in camera_discovery.py has
+been falling through to its hardcoded default since the day it was
+introduced. Fix #1 rewrites run.sh to use `bashio::config` for every
+option in config.yaml. Fix #2 corrects an unrelated CFG_ADAPTIVE_QUALITY
+gating asymmetry exposed by today's investigation.**
+
+### Issues fixed
+
+**1. run.sh never exported config options — every UI toggle was a
+no-op since the first one was introduced.**
+
+The end-to-end flow for HA addon configuration is:
+
+1. User flips a toggle in the addon's Configuration tab
+2. HA Supervisor writes the new value to /data/options.json
+3. The addon's run.sh reads /data/options.json (typically via bashio)
+4. run.sh exports the value as an environment variable
+5. The addon process (camera_discovery.py) reads the env var and
+   acts on it
+
+Step 3-4 was missing entirely. Pre-rc3.1 run.sh was 9 lines, all of
+them dealing with ingress wiring:
+
+```bash
+#!/usr/bin/with-contenv bashio
+export INGRESS_PATH=$(bashio::addon.ingress_entry)
+export INGRESS_PORT=8099
+bashio::log.info "Camera Discovery starting on port ${INGRESS_PORT}"
+bashio::log.info "Ingress path: ${INGRESS_PATH}"
+exec python3 /camera_discovery.py
+```
+
+Meanwhile camera_discovery.py lines 120-134 had been doing:
+
+```python
+CFG_HW_DECODE = os.environ.get("HW_DECODE", "false").lower() == "true"
+CFG_LOW_FPS   = os.environ.get("LOW_FPS_MODE", "false").lower() == "true"
+# ... and 12 more options
+```
+
+`os.environ.get("HW_DECODE", "false")` returned `"false"` every time
+because `HW_DECODE` was never in the environment. So `CFG_HW_DECODE`
+was always False, regardless of toggle state in the UI. Same for
+LOW_FPS_MODE, SKIP_NONREF, LIMIT_THREADS, STAGGER_POLLING,
+ADAPTIVE_QUALITY, RECORDINGS_PATH (always defaulted to /media/anycam
+even if the user changed it), MOTION_SENSITIVITY, MOTION_COOLDOWN_SECS,
+MOTION_CLIP_PADDING_SECS, UNRESTRICTED_STORAGE_BROWSER, and the four
+LOG_* toggles. **Every toggle in the addon Configuration tab was a
+no-op.**
+
+The bug stayed hidden for so long because:
+
+  • CrystalHeeler's primary HW-decode test target was the Hikvision
+    streaming HEVC, where hevc_v4l2m2m always probed unavailable on
+    Pi 4 anyway (the rpivid + stateless-API issue uncovered yesterday).
+    So even with a working toggle, ffmpeg would have stayed in
+    software for HEVC.
+
+  • The defaults are sensible — most toggles default to false, which
+    is also the "safe / don't do anything special" behavior. Users
+    who never toggled anything got default behavior either way.
+
+  • Several toggles' "off" behavior is what most users want anyway
+    (Skip Non-Ref Frames, Limit Threads, Stagger Polling all default
+    off and most setups don't need them).
+
+  • CrystalHeeler mentioned in this session that early on he had toggled
+    these on and off and "couldn't quite see a behavioral difference"
+    — that observation was correct; the differences were never
+    being applied.
+
+Today's investigation was the first real test of hw_decode on an H.264
+camera (Microseven) where h264_v4l2m2m IS available and would
+have engaged. The log showed `ffmpeg starting (codec=h264, sw, ...)`
+on every launch despite the toggle being on — which traced back to
+the run.sh export hole.
+
+The fix rewrites run.sh to read every option from /data/options.json
+via `bashio::config 'option_name'` and export it as the env var the
+Python expects. bashio returns "true"/"false" strings for bool
+options, which is what the Python's `.lower() == "true"` check
+already expects, so no Python-side changes are needed. The fix also
+adds three log lines on startup that dump the resolved config
+values, so future debugging can confirm at a glance whether the
+env-var pipeline is intact.
+
+After this fix, every existing CFG_* gate in camera_discovery.py
+starts working for the first time. Users who had toggles on but
+weren't seeing the corresponding behavior should suddenly see it.
+This means rc3.1 carries some unintentional behavior changes — not
+new code, but newly-active code. Specifically: anyone who has Low
+FPS Mode on with HEVC streams will get 2fps output (was getting full
+fps). Anyone with Limit Threads on will see ffmpeg capped at 2 threads
+(was uncapped). Anyone with Skip Non-Ref Frames on will see slight
+choppiness in HEVC streams (was decoding all frames). Anyone with
+Stagger Polling on with 4+ cameras will see staggered ffmpeg starts
+(was simultaneous). Anyone with Adaptive Quality on with focus view
+will see auto-stepping during stream instability (was manual-only).
+Anyone whose Recordings Path differs from the default will see
+recordings actually go to that path. Etc.
+
+These behavior changes are the toggles WORKING, not regressions.
+Worth being aware of post-rc3.1 to interpret any "the system is
+behaving differently than yesterday" observations.
+
+**2. CFG_ADAPTIVE_QUALITY gating asymmetry at line 7019.**
+
+Found while investigating Fix 1 — looking at why today's log showed
+adaptive focus stepping down even on what would have been a "toggle
+off" install (because of Fix 1's bug, every install was effectively
+"toggle off" for adaptive quality).
+
+The adaptive-stepping logic in snap_loop's focus mode has two paths:
+
+  • **fast-death path** (Block A, lines 6996-7007): the just-launched
+    ffmpeg crashes within _ADAPTIVE_UNSTABLE_S seconds with fewer
+    than _ADAPTIVE_UNSTABLE_FR frames. Block A correctly gates this
+    on `manual_override or not CFG_ADAPTIVE_QUALITY`.
+
+  • **repeated-restart path** (Block B, line 7019): a stream that
+    locked at a tier has restarted enough times since lock to warrant
+    stepping down. Block B was checking only `manual_override`,
+    not CFG_ADAPTIVE_QUALITY — so even with Adaptive Quality
+    disabled, the system would auto-step after repeated restarts
+    at a locked tier. Inconsistent with Block A and inconsistent
+    with the toggle's documented behavior.
+
+rc3.1 makes Block B's gate identical to Block A's:
+
+```python
+if ada.get("manual_override") or not CFG_ADAPTIVE_QUALITY:
+    restart_overflow = False
+else:
+    restart_overflow = (locked and
+                        ada.get("restarts_since_lock", 0) >= _ADAPTIVE_RESTART_LIMIT)
+```
+
+Now both paths respect the toggle uniformly.
+
+This bug was masked by Fix 1 — CFG_ADAPTIVE_QUALITY was always False
+anyway, but Block B's then-buggy gating happened to NOT bail out
+because it didn't check CFG_ADAPTIVE_QUALITY. So adaptive WOULD step
+down on repeated restarts, even though the toggle was off. With Fix 1
+landing, this asymmetry would have started actively misbehaving:
+users with Adaptive Quality OFF would see repeated-restart
+auto-stepping anyway. Fix 2 prevents that.
+
+### What's still on the deferred list (not in rc3.1)
+
+- **rc4.0**: Lorex/Dahua DVR Family Support (channel iteration
+  consuming streaming_recipe data added in rc2.0)
+- **2.5.0-rc1.0**: bundle rpi-ffmpeg so HEVC HW decode works on Pi 4
+- The Microseven enhanced-view re-entry bug observed in today's log
+  (snap_loop dying mid-session, dropdown clicks become no-ops) is a
+  separate issue that needs its own investigation; not in rc3.1.
+
+### Files changed
+
+- `run.sh`: complete rewrite — 9 lines to 52 lines. Now reads every
+  option in config.yaml from /data/options.json via bashio::config
+  and exports as env var. Logs resolved config values on startup.
+- `camera_discovery.py` (line ~7019): Block B gating now matches
+  Block A's pattern with the CFG_ADAPTIVE_QUALITY check.
+- `config.yaml`: version bump
+- `CHANGELOG.md`: this entry
+
+### Live-test plan
+
+1. AnyCam startup log should show three new "Config:" lines listing
+   the values of every toggle. The hw_decode line should specifically
+   say `hw_decode=true` matching what's in your Configuration tab.
+2. With hw_decode on AND a running snap_loop on the Microseven
+   (which streams H.264, h264_v4l2m2m available): ffmpeg launch line
+   should now say `hw:h264_v4l2m2m` instead of `sw`. CPU on the Pi
+   during streaming should drop noticeably.
+3. Toggle hw_decode OFF in the Configuration tab and restart the
+   addon. Startup log should show `hw_decode=false`. Subsequent
+   ffmpeg launches should go back to `sw`.
+4. With Adaptive Quality OFF: enter focus view on the Microseven, let the
+   stream restart 2+ times (e.g. by switching profiles or letting it
+   crash naturally). Should NOT see "stepping down to..." log lines.
+   With Adaptive Quality ON: same scenario should produce step-down.
+5. Sanity check: change Recordings Path in Configuration tab to
+   something non-default like /media/anycam-test, restart. Startup
+   log should show that value. (Don't actually need to test motion
+   recording — just confirming the env var pipeline.)
+6. All rc3.0 fixes still in place: NameError-free hw_decode toggle,
+   accurate Pi 4 rpivid diagnostic on startup.
+## 2.4.0-rc3.0
+**Two-fix follow-up to rc2.9, both targeting the hw_decode toggle path.
+(1) Hoists `_HW_DECODER_CANDIDATES` to module scope, fixing a latent
+NameError that would have triggered the moment any HW decoder probed
+as available AND a stream actually tried to use it. (2) Replaces the
+misleading "device not found" probe message with an accurate Pi 4
+rpivid diagnostic that names the real cause (ffmpeg lacks v4l2-request
+support, not a kernel device problem). The full rpivid HEVC HW decode
+fix — bundling rpi-ffmpeg in the addon Docker image — is targeted for
+2.5.0; this release just clears the diagnostic noise so future
+debugging on the rpivid front lands accurately.**
+
+### Issues fixed
+
+**1. _HW_DECODER_CANDIDATES NameError fix.**
+
+snap_loop at line ~6615 has been referencing `_HW_DECODER_CANDIDATES`
+as a module-level constant since back in the 2.2.5 timeframe, but the
+name was only ever defined as a local list inside `_probe_hw_decoders`.
+The CHANGELOG entry from that era acknowledged the bug and reverted to
+2.2.4, with a note that "SigRev-2 will be re-implemented correctly in
+a future release after Decoding-Rev is resolved." That re-implementation
+landed but the missing module-level constant was never added back.
+
+The bug stayed dormant because every Pi 4 system AnyCam ships on hits
+this code path:
+  1. `_probe_hw_decoders` runs, fails on every HEVC/VAAPI candidate,
+     succeeds only on h264_v4l2m2m.
+  2. User runs with hw_decode=False (the default), snap_loop's
+     `if CFG_HW_DECODE:` branch is never entered, NameError is never
+     reached.
+  3. User toggles hw_decode=True, but most users have HEVC streams
+     so codec_lower is "hevc" and the loop body iterates looking
+     for "hevc" in decoder names.
+
+The moment a user with hw_decode=True streamed an H264 camera, the
+NameError would have fired on first ffmpeg launch. It just never
+quite got triggered because CrystalHeeler's primary test camera (Hikvision
+the Hikvision) is HEVC and HEVC HW decode never worked anyway (see fix #2).
+
+rc3.0 hoists `_HW_DECODER_CANDIDATES` to a proper module-level
+constant near `_HW_UNAVAILABLE` (line ~470), with a long comment
+explaining the historical context, the order semantics (v4l2m2m
+preferred over vaapi), and the Pi 4 HEVC caveat. Both
+`_probe_hw_decoders` and snap_loop now reference the same list.
+
+**2. Misleading probe message replaced with accurate Pi 4 rpivid
+diagnostic.**
+
+For roughly 6 months the probe has been logging:
+  hevc_v4l2m2m: unavailable (device not found)
+on every Pi 4 startup, regardless of whether rpivid was loaded or
+not. That message is technically true (ffmpeg's stderr does say
+"Could not find a valid device") but it sent everyone — including
+this assistant when helping CrystalHeeler — down the wrong rabbit hole:
+chasing dtoverlay configurations, kernel module loading, container
+device passthrough, and other things that ARE WORKING CORRECTLY.
+
+The actual cause is much narrower. Pi 4 has TWO separate hardware
+decoder pathways:
+  • bcm2835-codec — exposes /dev/video10/11/12, implements stateful
+    V4L2 m2m API, supports H264/MPEG/VP8/VP9/VC1 but NOT HEVC.
+  • rpivid — exposes /dev/video19, implements stateless V4L2 request
+    API, supports HEVC only.
+
+ffmpeg's `hevc_v4l2m2m` decoder is a wrapper around the stateful
+m2m API. It iterates V4L2 m2m devices looking for one that exposes
+HEVC. On Pi 4 there's no such device — bcm2835-codec doesn't do
+HEVC, rpivid uses the wrong API. So `hevc_v4l2m2m` will literally
+never find a valid device on Pi 4, regardless of dtoverlay.
+
+To actually USE rpivid HEVC HW decode, ffmpeg must be built with
+`--enable-v4l2-request` and the stream must be opened with `-hwaccel
+drm` against the stateless API. The ffmpeg shipped in this addon's
+Docker image (Alpine ffmpeg) is NOT compiled with v4l2-request
+support — `ffmpeg -h decoder=hevc` lists supported HW devices as
+"cuda vaapi vdpau" only, no drm/v4l2request.
+
+rc3.0 detects rpivid presence (both `/dev/video19` and `/dev/media0`
+exist) at the start of the probe. When `hevc_v4l2m2m` then fails
+with "Could not find" stderr, the diagnostic message reads:
+
+  hevc_v4l2m2m: unavailable (rpivid present at /dev/video19 but
+  bundled ffmpeg lacks v4l2-request support — stateful m2m API
+  doesn't expose HEVC on Pi 4. Will be fixed in 2.5.0 by bundling
+  rpi-ffmpeg.)
+
+instead of the old generic "device not found." Future diagnostic
+sessions land on the actual problem instantly.
+
+The old "device not found" message is preserved for cases where
+rpivid is NOT present (Intel/AMD/x86 systems, Pi 4 without the
+dtoverlay, etc.) — those genuinely are device-not-found situations.
+
+### What's NOT in rc3.0
+
+The actual fix — bundling rpi-ffmpeg so HEVC HW decode works on Pi 4
+— is targeted for 2.5.0. That requires modifying the addon's
+Dockerfile to either compile a custom ffmpeg with --enable-v4l2-
+request --enable-libdrm or pull in jc-kynesim's rpi-ffmpeg fork.
+Both are real projects with image-size and build-time implications.
+Not appropriate for an rc bumpfix.
+
+Until 2.5.0 ships with that change, the practical workaround for
+Pi 4 users with HEVC streams is to switch the camera's encoding to
+H.264 in the camera's web UI. h264_v4l2m2m is fully functional on
+Pi 4 and will hardware-decode H.264 streams cleanly.
+
+### Files changed
+
+- `camera_discovery.py`:
+  - line ~470: new module-level `_HW_DECODER_CANDIDATES` constant
+    with historical context
+  - `_probe_hw_decoders` (line ~13507): now uses the module-level
+    constant instead of a local list; rpivid presence detection
+    via `/dev/video19` + `/dev/media0`; targeted Pi 4 diagnostic
+    message when hevc_v4l2m2m fails on a system with rpivid loaded
+- `config.yaml`: version bump
+- `CHANGELOG.md`: this entry
+
+### Live-test plan
+
+1. AnyCam startup log shows the new accurate message:
+   `hevc_v4l2m2m: unavailable (rpivid present ... will be fixed in
+   2.5.0 ...)` instead of the old `device not found`.
+2. h264_v4l2m2m still probes as available on Pi 4 (regression check).
+3. Toggle hw_decode=True, navigate to an H264 camera, focus-view
+   should NOT NameError on snap_loop launch (Fix 1 verification).
+   ffmpeg should start with `codec=h264, hw=h264_v4l2m2m`.
+4. All rc2.9 fixes still in place: dropdown dedup, sub-stream
+   labels, Lorex skip_layer2 inheritance, Stage B safety net.
+## 2.4.0-rc2.9
+**Five-fix follow-up to rc2.8. (a) Reverts rc2.8's Fix 5 — Stage B
+during Deep Re-Probe runs again on skip_layer2 brands, restoring the
+catch-everything safety net the user explicitly designed for rare
+firmware-quirk cases. (b) DB-probed sub_url's captured codec/res/fps
+now flow through to its stream_profiles entry instead of being
+hardcoded None — fixes "Stream 2" appearing in the dropdown when the
+DB probe had successfully captured "704x480 MJPEG". (c) Layer 1-
+discovered unauth streams are now probed with ffprobe so their
+stream_profiles entry shows real resolution + codec. (d) Lorex/Dahua
+DVR-NVR Family alt-port skip_layer2 inheritance — port 80 no longer
+runs Layer 2 for 45s on a host where port 554 already identified
+the brand as skip_layer2. (e) NEW: stream_profiles dedup on (codec,
+width, height) — Hikvision's three working URLs that all resolve to
+the same 2560x1440 HEVC encoder collapse to one dropdown entry; same
+for any other duplicates.**
+
+### Issues fixed
+
+**a. REVERT rc2.8's Fix 5 — Stage B during Deep Re-Probe respects
+user's catch-everything intent.**
+
+rc2.8 dropped the rc2.5 expansion that forced Stage B (Layer 2) to
+run during Deep Re-Probe on skip_layer2 brands, on the reasoning
+that skip_layer2 brands "guaranteed" Layer 2 failure. The user
+clarified that Deep Re-Probe was intentionally designed as the
+catch-everything button — overriding ALL skip flags including
+skip_layer2 — specifically to catch rare firmware-quirk cases that
+the documented brand entries can't predict:
+
+  • Sub-stream paths that only respond on a fresh socket. Some
+    cheap firmwares have buggy session state where the second
+    DESCRIBE on a single socket returns garbage instead of clean
+    200/401, but a fresh socket returns clean. Layer 1's single-
+    socket walk would skip these; Layer 2's fresh-socket-per-path
+    catches them.
+  • Servers that close the socket after first 401. Older Foscam-
+    family clones do this — Layer 1 walk prematurely ends, Layer 2
+    re-opens and continues.
+  • Token-bucket rate limits that reset between sockets. Some
+    cameras throttle requests-per-socket but not requests-per-IP —
+    single-socket walks hit the throttle, multi-socket walks (with
+    5s cooldown) don't.
+
+The 45s Layer 2 wait on Hikvision Deep Re-Probe is the accepted
+cost of this safety net. rc2.9 restores the rc2.7 trigger logic.
+
+**b. sub_url's stream_profiles entry now carries DB-probed details.**
+
+The rc2.6/rc2.7/rc2.8 stream_profiles building code hardcoded sub_
+url's entry to None across all four fields (width, height, codec,
+fps) — even though the DB probe at api_set_credentials had
+successfully captured them. That's why CrystalHeeler's Hikvision dropdown
+showed "Stream 2" instead of "704x480 MJPEG" for the
+/Streaming/Channels/102 entry: the data was being thrown away in
+the building step.
+
+rc2.9 captures sub_details = {k: v for k, v in additions[0].items()
+if k != "url"} when sub_url is picked from db_streams, then injects
+those captured fields into the stream_profiles entry for sub_url.
+
+**c. Layer 1-discovered unauth streams probe ffprobe at discovery
+time.**
+
+When a camera doesn't require credentials (e.g. CrystalHeeler's HA camera
+at 192.168.50.73:8765 serving rtsp://.../stream open), the Layer 1
+walk in find_rtsp_path returns the working URL but never probes
+its codec/resolution. The cred-accept flow (which DOES probe) never
+runs for unauth cameras. So cam.stream_width / stream_codec stayed
+None, and the dropdown synth fallback fell through to "Stream 1".
+
+rc2.9 adds an _enrich_with_details async helper inside _probe_host_
+port. After find_rtsp_path / probe_mjpeg_http / probe_hls returns a
+working URL, the helper runs probe_stream_details and merges the
+captured codec/res/fps onto the camera dict. Best-effort: if the
+probe fails (timeout, RST, weird codec), we just don't have
+enrichment and the dropdown stays at the numbered fallback. Cost:
+~3s per discovered unauth stream.
+
+**d. Lorex/Dahua alt-port skip_layer2 inheritance.**
+
+CrystalHeeler's Lorex port 554 IDs as "Lorex / Dahua DVR-NVR Family"
+(skip_layer2: True), so Layer 2 correctly skips on 554. But port
+80 IDs as plain "Lorex" (a different STREAM_DB row, no skip_
+layer2), so Layer 2 was running for ~45s on port 80 — wasting time
+on a host we'd already identified as can't-speak-Layer-2.
+
+rc2.9 introduces host_has_skip_layer2 in run_scan, parallel to the
+existing host_has_rtsp_speaker per-IP flag. When find_rtsp_path's
+skip_layer2 short-circuit fires, it sets host_meta["brand_skip_
+layer2"] = True. run_scan picks that up after the port's probe and
+sets host_has_skip_layer2 = True for the rest of this IP's port
+loop. Subsequent ports' host_meta gets host_skip_layer2 = True
+propagated, and find_rtsp_path's skip_layer2 check honors that
+flag in addition to the per-port brand match.
+
+Logged as "skip_layer2 inherited for {ip} — alt ports will also
+skip Layer 2 walks" once per IP when the inheritance kicks in, and
+"RTSP Layer 2 skipped: {ip} inherited skip_layer2 from earlier
+port on this host" on each subsequent port that benefits.
+
+**e. Stream profiles dedup on (codec, width, height).**
+
+Hikvision DS-2DE typically exposes its main 2560x1440 HEVC stream
+via THREE different URLs that all backend to the same encoder:
+
+  • /Streaming/Channels/101  (canonical Hikvision path)
+  • /h.264/ch1/main/av_stream  (legacy Hikvision/Foscam variant)
+  • /Streaming/Channels/1  (Hikvision short form)
+
+In rc2.8 with fix b+c applied, all three would have shown up in
+the dropdown labeled identically as "2560x1440 HEVC" — confusing.
+
+rc2.9 adds a dedup pass after stream_profiles is fully built. Key
+is (codec, width, height); first occurrence wins. First-discovery
+order is the existing array order: pre-auth Layer 1 main → DB-
+probed sub → validated locked candidates (in walker order). For
+Hikvision: /101 wins over /h.264/ch1/main/av_stream and
+/Streaming/Channels/1.
+
+Probe-failure entries (any of width, height, codec is None) stay
+distinct — better to keep both than risk collapsing genuinely-
+different-but-unprobed streams. Logged as "stream_profiles dedup:
+dropped N duplicate entry/entries on (codec, width, height)" when
+any drops occur.
+
+### Files changed
+
+- `camera_discovery.py`:
+  - `api_deep_reprobe` (line ~9139): Stage B trigger restored to
+    rc2.7 form
+  - `api_set_credentials` (line ~8716): sub_details captured from
+    db_streams pick + used in stream_profiles
+  - `_probe_host_port` (line ~11859): _enrich_with_details async
+    helper + applied to all unauth-discovery success paths
+  - `find_rtsp_path` (line ~4892): honors host_meta["host_skip_
+    layer2"] in addition to per-port brand match; sets host_meta
+    ["brand_skip_layer2"] when triggered
+  - `run_scan` (line ~12148): host_has_skip_layer2 tracker added,
+    propagated via host_meta["host_skip_layer2"]
+  - `api_set_credentials` (line ~8893): stream_profiles dedup pass
+- `config.yaml`: version bump
+- `CHANGELOG.md`: this entry
+
+### Live-test plan
+
+1. Hikvision (10.1.1 net) — dropdown after cred-auth shows
+   exactly 2 entries: "2560x1440 HEVC" + "704x480 MJPEG" (was 5 in
+   rc2.8 with three duplicates collapsed).
+2. Hikvision — Deep Re-Probe runs Stage A AND Stage B, taking
+   ~50s total instead of <1s. Stage B will fail but the safety net
+   is engaged.
+3. Lorex (192.168.1 net) — first scan after install: port 80
+   no longer runs Layer 2; "skip_layer2 inherited" log entry
+   appears once after port 554 finishes.
+4. HA camera 192.168.50.73:8765 — focus-view dropdown shows actual
+   resolution + codec instead of "Stream 1".
+5. Microseven cred-auth still works; dropdown shows the 2
+   ONVIF-reported profiles correctly.
+## 2.4.0-rc2.8
+**Five-fix follow-up to rc2.7 — first build with rc2.6 features
+actually exercised in production. Fixes (1) Deep Re-Probe button
+visibility (only when there are skipped paths to resume; vanishes
+after completion), (2) toast duration 2.5s → 7s so users can read
+completion messages, (3) focus-view dropdown shows ALL stream
+profiles (main + sub + every validated locked-stream candidate)
+instead of just main + sub — was the most visible regression in
+rc2.7's first live test on Hikvision, (4) Debug Log toggle
+defaults to on, and (5) Deep Re-Probe Stage B respects skip_layer2
+(saves ~45s per Hikvision Deep Re-Probe).**
+
+### Issues fixed
+
+**1. Deep Re-Probe button visibility.** The rc2.6 cardActions JS had
+three button states: in-progress (yellow + spinner), skipped-paths
+(yellow), and a subdued ghost "Deep Re-Probe" fallback for cards
+where `early_bail_reason` was empty. The third state was misleading
+for two reasons:
+
+  • After a successful Deep Re-Probe, the backend clears
+    `early_bail_reason` to indicate the deep work is done. With the
+    rc2.6 cardActions, this caused the button to revert from the
+    loud yellow "(running)" state to the subdued ghost — making it
+    look like the operation had been undone.
+  • Cards that NEVER had skipped paths (e.g. Lorex/Dahua DVR family,
+    which has `skip_layer2: True` and walks Layer 1 cleanly with no
+    early-bail) showed the subdued ghost button by default. Clicking
+    it launched a "fresh full probe" that had no extra capability
+    beyond the original scan, so the user always saw "no streams
+    found" with no actionable next step.
+
+rc2.8 changes the rule: the button is visible IFF
+`cam.early_bail_reason` is set (or `deep_reprobe_in_progress` is
+True for the running state). After Deep Re-Probe completes, the
+backend clears `early_bail_reason` and the button vanishes — clean
+indication that the work is done. Cards that never had skipped
+paths get no button at all.
+
+The in-progress state requires `early_bail_reason` to remain
+visible, so the moment Deep Re-Probe finishes and clears the flag,
+the button disappears in the same render. No flicker between
+"running" and "subdued."
+
+**2. Toast duration 2.5s → 7s.** `showToast()` had a 2500ms
+auto-dismiss. Users reported the Deep Re-Probe completion toast
+("🔒 N locked stream(s) found", "no streams found", etc.) was
+disappearing before they could read it. 7000ms gives enough time
+to read a one-line message comfortably without lingering long
+enough to feel obstructive. Affects all toast messages, not just
+Deep Re-Probe.
+
+**3. Focus-view dropdown shows ALL stream profiles.** rc2.6's Fix
+3 (post-auth validation of locked candidates → `additional_streams`)
+and Fix 4 (preserve pre-auth main URL) worked correctly at the
+backend — Hikvision's 3 validated locked candidates were stored
+on the camera record. But the focus-view dropdown showed only 2
+entries ("Stream 1", "Stream 2") instead of 5.
+
+Root cause: there are TWO synth fallbacks for `stream_profiles`
+in the codebase:
+  • Line 6312: used by snap_loop tier selection (backend). rc2.6
+    wired `additional_streams` into this one.
+  • Line 7651: used by `api_focus_get` to build the dropdown
+    (frontend). Reads only `stream_url` + `sub_stream_url`, not
+    `additional_streams`.
+
+The dropdown JS hits the line 7651 path. Since the non-ONVIF
+cred-accept path doesn't populate `cam.stream_profiles` directly,
+the dropdown synth fallback fired — and it didn't know about
+`additional_streams`.
+
+rc2.8 fixes this two ways for defense in depth:
+
+  (a) **Backend:** `api_set_credentials` non-ONVIF path now builds
+      `cam.stream_profiles` explicitly with all entries (main +
+      DB-probed sub + each validated `additional_streams` entry)
+      and persists it via `save_cameras()`. Dropdown reads the
+      canonical list directly. Includes a one-shot
+      `probe_stream_details` call per validated locked-stream so
+      they get real resolution/codec captured (not just URL).
+      Brand throttle cooldown applies between probes.
+  (b) **Frontend:** the line 7651 synth fallback also includes
+      `additional_streams` entries. Covers cameras saved by
+      earlier builds (rc2.6/rc2.7) that have `additional_streams`
+      populated without `stream_profiles` — they get the right
+      dropdown on reload without needing re-auth.
+
+Cost: on Hikvision DS-2 with 3 validated candidates, +~9s at
+cred-accept time for `probe_stream_details` calls. On rate-
+limited brands (Hipcam-family, 5s cooldown), +~24s. Acceptable
+trade for correct dropdown labels and proper snap-loop tier
+selection.
+
+**4. Debug Log toggle defaults to on.** `config.yaml`:
+`log_debug: false` → `log_debug: true`. New installs and existing
+installs that haven't customized the toggle will now log DEBUG-
+level entries by default. Useful for diagnosing edge cases without
+requiring users to opt in.
+
+**5. Deep Re-Probe Stage B respects `skip_layer2`.** The rc2.5
+build expanded the Stage B trigger to also fire when the brand
+has `skip_layer2: True` AND the bail reason was
+`layer1_consecutive_401s`. The reasoning was: "Hikvision/Lorex
+silently skipped Layer 2 during the original scan, so Deep Re-
+Probe should give it another shot." This was wrong.
+
+`skip_layer2` isn't an optimization marker — it's a documented
+brand property:
+  • Hikvision DS-2 RSTs multi-socket fanout connections; Layer 2
+    walk produces 10 consecutive failures, then bails.
+  • Lorex/Dahua DVR-NVRs use `auth_attempt_lockout` throttle —
+    every Layer 2 socket counts as a failed auth attempt
+    (max 10 before account lockout for 30 min).
+
+In neither case does Layer 2 produce useful information. The
+user's 10.1.1Hikvision Deep Re-Probe log showed exactly this:
+
+```
+09:55:30 Deep Re-Probe Stage B: running Layer 2 (skipped during
+         original scan)
+...
+09:56:15 Deep Re-Probe Layer 2 bailing after 10 consecutive
+         failures
+```
+
+45 seconds wasted for guaranteed failure. Stage A (resume Layer 1
+with `deep_reprobe_mode=True` and brand-recipe filter) is what
+actually does the work — surfacing locked candidates from the
+unwalked paths. That stage is unchanged.
+
+For brands WITHOUT `skip_layer2`, Stage B still triggers on
+`bail_reason == "layer1_then_layer2_skipped_401s"` exactly as it
+did pre-rc2.5 — that case is genuinely informative because it
+means Layer 2 was throttle-skipped, not skip_layer2-skipped.
+
+### Files changed
+
+- `camera_discovery.py`:
+  - `cardActions()` JS (line ~10632): three-state Deep Re-Probe
+    button → two-state, gated on `early_bail_reason ||
+    deep_reprobe_in_progress`
+  - `showToast()` (line ~10417): 2500ms → 7000ms
+  - `api_set_credentials` non-ONVIF (line ~8770-8895): added
+    per-candidate `probe_stream_details` after validation; explicit
+    `stream_profiles` build before `camera.update()`
+  - `api_focus_get` synth fallback (line ~7651): includes
+    `additional_streams` entries
+  - `api_deep_reprobe` (line ~9043): `run_layer2_followup` simplified
+    to drop the rc2.5 skip_layer2 expansion
+- `config.yaml`: version bump + `log_debug: true`
+- `CHANGELOG.md`: this entry
+
+### Live-test plan
+
+1. Add-on starts cleanly (no SyntaxError loop, both gates pass).
+2. Hikvision — after Deep Re-Probe completes, the yellow
+   "Deep Re-Probe (skipped paths)" button DISAPPEARS rather than
+   reverting to subdued.
+3. Hikvision — Deep Re-Probe completes faster (no 45s Layer 2
+   wait); toast readable for 7 seconds.
+4. Hikvision — after cred-auth via Locked Streams modal, the
+   focus-view resolution dropdown shows 5 entries:
+     • `/Streaming/Channels/101` (main, 4MP H.265+ — may show as
+       "Stream 1" if ffprobe can't read H.265+)
+     • `/Streaming/Channels/102` (sub)
+     • `/h.264/ch1/main/av_stream` (validated locked candidate)
+     • `/h.264/ch1/sub/av_stream` (validated locked candidate)
+     • `/Streaming/Channels/1` (validated locked candidate)
+5. Lorex — card shows NO Deep Re-Probe button (was previously
+   showing subdued ghost). Cred-auth still requires manual entry
+   via the regular cred form.
+6. Microseven — cred-auth still works (regression check).
+7. Add-on logs show DEBUG entries by default without you toggling
+   anything in the UI.
+## 2.4.0-rc2.7
+**Hotfix for rc2.6 install crash. The rc2.6 build had a fatal
+SyntaxError that prevented the add-on from starting on any HAOS
+system: `name 'PENDING_CAMERAS' is used prior to global declaration`
+inside `run_scan`. Cause was a duplicate `global PENDING_CAMERAS`
+declaration in the function's `finally` block — Python only allows
+ONE `global` declaration per name per function, and it must appear
+BEFORE the name is referenced. The first declaration at scan start
+(line ~11869) was correct; the second one in `finally` (line ~12438)
+broke the entire module's bytecode compilation. Removed the
+duplicate.**
+
+**Also upgraded the release gate. The gate's syntax check used
+`ast.parse()`, which does NOT catch this class of error — global-
+declared-after-use is detected by the bytecode compiler, not the
+parser. Added a `compile()` step alongside `ast.parse()` so the same
+crash can never slip through gate verification again.**
+
+### Why rc2.6 shipped broken
+
+The rc2.6 release passed all 5 gates locally and packaged cleanly.
+The bug only surfaces at module load time, which gate 1 (`ast.parse`)
+doesn't simulate. Gates 2-5 work on the AST tree, not the compiled
+bytecode, so they couldn't see it either. The first time the bug
+manifested was when HAOS tried to import the module on CrystalHeeler's
+system — a 5-second crash loop with the SyntaxError shown.
+
+This is a real gap in our gate. Adding `compile(src, path, 'exec')`
+catches this and other compile-time-only errors like `nonlocal`
+binding errors, duplicate kwargs in calls, and any future variant
+of "scoping declared after use." Cost: ~one extra second at gate
+time.
+
+### What changed
+
+**1. The duplicate `global PENDING_CAMERAS` removed.** Inside
+`run_scan` (line ~12438, the `finally` block). The first declaration
+at scan start (line ~11869) covers both assignments; Python's
+scoping rules mean one declaration per name per function is enough,
+and putting a second one after the name has been referenced inline
+elsewhere in the same function is a hard error.
+
+**2. `verify_release.py` gate 1 now also runs `compile()`.** Catches
+the rc2.6 bug pattern and others. Two-step: `ast.parse()` first
+(faster, gives parse-grammar errors clearly), then `compile()` (a
+bit slower, gives the real "module loadable" check). Either failing
+exits with non-zero.
+
+### Sanity check
+
+The dedup logic, pending-flush behavior, brand-recipe filter, post-
+auth validation, main-stream preservation, and Deep Re-Probe button
+styling are all the same as rc2.6 — none of those code paths ever
+ran in production because rc2.6 crashed at import. rc2.7 is rc2.6
+minus the broken `global` declaration plus the upgraded gate. All
+the rc2.6 changelog content remains accurate; this entry just
+patches the crash.
+
+### Files changed
+
+- `camera_discovery.py`: removed duplicate `global PENDING_CAMERAS`
+  in `run_scan`'s `finally` block (1-line removal)
+- `verify_release.py`: gate 1 also runs `compile()` to catch global-
+  after-use and similar compile-time errors
+- `config.yaml`: version bump
+- `CHANGELOG.md`: this entry
+
+### Live-test plan
+
+This is rc2.6's plan, since rc2.6 itself never ran:
+
+1. Install rc2.7 — add-on starts cleanly (no SyntaxError loop)
+2. Rescan 10.1.1.x — Microseven and Hikvision should NOT
+   show transient duplicate cards mid-scan (Fix 1 from rc2.6)
+3. Click Deep Re-Probe on the Hikvision: loud yellow button "⏳ Deep Re-Probe
+   (running)", no neighbor reflow (Fix 5)
+4. Toast on completion: ~6 locked candidates, not 26 (Fix 2)
+5. Locked Streams modal contents: only Hikvision-recipe paths
+6. Enter creds: validation pass runs, bogus drop, valid go to
+   `additional_streams` (Fix 3)
+7. Focus-view dropdown shows MULTIPLE resolutions including 4MP
+   H.264 main (Fix 4)
+8. Stream plays at native 4MP: snap_loop uses /Streaming/Channels/101
+9. Cred-auth on the Microseven still works (regression check)
+## 2.4.0-rc2.6
+**Live-test follow-up build addressing 5 quirks CrystalHeeler observed in
+rc2.5: (1) Pending-flush card creation. New cards discovered during
+a scan accumulate in a server-side buffer instead of rendering to
+the UI piecemeal — preventing the user from clicking on cards that
+are about to be deduped away. (2) Brand-recipe filter on locked-
+stream candidates. Hikvision used to surface 26 spurious "locked
+candidates" (every path 401s, regardless of whether it's a real
+endpoint). Now filtered to ~6 paths matching the brand's known
+recipe. (3) Post-auth validation of locked-stream candidates.
+After credentials accepted, walks each candidate to confirm it's
+real; bogus ones (404, RST, still-401) get silently dropped. (4)
+Cred-accept flow preserves the pre-auth main stream. The rc2.5 DB-
+sub-stream pickup was ranking ALL candidates by resolution and
+sometimes replacing /Streaming/Channels/101 (4MP main) with /102
+(704x480 sub) as the primary URL. Now /101 is locked as primary
+and /102+ are pure additions. (5) Loud Deep Re-Probe button styling
+with min-width to prevent button reflow.**
+
+### Issues fixed
+
+**1. Pending-flush card creation.** rc2.5 wrote new cards directly
+to CAMERAS as they were discovered. With rc2.4/2.5's faster scans,
+a multi-port host (Hipcam at the Microseven with 4 open ports, Hikvision at
+the Hikvision with 5 open ports) would render as 3-5 separate cards mid-scan
+before the dedup pass collapsed them. The user had a 40-80 second
+window where they could click "Enter creds" on a card that was
+about to disappear, breaking the cred-entry flow.
+
+rc2.6 introduces `PENDING_CAMERAS: dict | None`. During a scan, all
+new card writes route through `_publish_scan_card(cam)` which puts
+them in PENDING_CAMERAS instead of CAMERAS. The dedup pass operates
+on the union of CAMERAS (user-saved cards preserved at scan start)
+and PENDING_CAMERAS (newly-discovered). After dedup, surviving
+PENDING cards flush into CAMERAS atomically — UI sees them all
+appear in one render after dedup.
+
+User-saved cards (from previous scans) stay visible during the new
+scan unchanged. Only NEW cards from the in-progress scan are held
+back. PENDING_CAMERAS is cleared in run_scan's finally block on
+both success and error paths.
+
+**2. Brand-recipe filter on locked-stream candidates.** rc2.5's
+Deep Re-Probe Stage A surfaced 26 locked candidates on CrystalHeeler's the Hikvision
+Hikvision. The walker's collect_locked logic appends ANY path that
+returns 401 with the expected realm — but Hikvision DS-2 returns
+401 with realm `IP Camera(F0818)` for ALL paths, including ones
+that aren't real endpoints (`/cam/realmonitor` is Dahua, `/stream`
+is generic Foscam, etc.).
+
+rc2.6 adds a `brand_recipe_paths: list[str] | None` parameter to
+`_probe_rtsp_paths_single_socket`. When the caller has identified
+the brand (find_rtsp_path / api_deep_reprobe), it passes the
+brand's known RTSP path list from STREAM_DB. The walker filters
+locked candidates by path-prefix match against the recipe before
+appending. When `brand_recipe_paths` is None, no filter is applied
+(backward-compat). Logs `"DESCRIBE 401 path X not in brand recipe
+— not surfacing as locked candidate"` for filtered-out paths.
+
+Wired in two places: `find_rtsp_path` passes its already-computed
+`db_paths`; `api_deep_reprobe` Stage A re-runs `_match_stream_db`
+on host_meta and passes the resulting `rtsp` list. Hikvision's
+locked-stream count drops from 26 to ~6 (the actual STREAM_DB
+entries: `/Streaming/Channels/101..103`, `/ISAPI/Streaming/...`,
+`/h.264/ch1/main/av_stream`, `/h.264/ch1/sub/av_stream`).
+
+**3. Post-auth validation of locked-stream candidates.** Even
+after Fix 2's recipe filter, surfaced candidates may not all be
+working endpoints (e.g. firmware doesn't expose all DB paths).
+rc2.6 adds a validation pass at cred-accept time: for each entry
+in `cam.locked_streams`, build the authenticated URL and run
+`probe_rtsp` (with brand-throttle cooldown if applicable). The
+ones that return SETUP-OK get added to `cam.additional_streams`
+as a list of `{path, url, realm, scheme}` dicts. The ones that
+RST/404/still-401 get silently dropped. After validation,
+`locked_streams` is cleared (the validated subset is in
+`additional_streams`).
+
+Slow on cameras with brand throttle (e.g. Hipcam: 5s cooldown ×
+6 candidates = 30s extra at cred-accept). Hikvision DS-2 has no
+documented cooldown so the validation is fast (<10s).
+
+**4. Cred-accept preserves pre-auth main stream.** rc2.5 had a
+latent bug in the non-ONVIF cred-accept path: after the user
+entered creds, the DB-sub-stream pickup at line 8682-8696 ranked
+ALL streams (main + DB-probed) by resolution descending and picked
+`all_s[0]["url"]` as the new primary. On Hikvision DS-2, this
+went wrong because:
+  • probe_stream_details on /Streaming/Channels/101 returned bogus
+    704x480 mjpeg data (ffprobe couldn't parse the 4MP H.264
+    stream cleanly — possibly because Hikvision returned a sub-
+    stream-style profile in DESCRIBE)
+  • DB probe validated /102 with similar low-res data
+  • The sort was unstable; /102 ended up at index 0
+  • /102 (the sub) became `url`; /101 (the main) became `sub_url`
+  • snap_loop streamed /102 at 704x480 mjpeg, the focus-view
+    dropdown showed only "704x480 MJPEG" + "Stream 2"
+
+rc2.6 changes the algorithm: the pre-auth main URL `url` is LOCKED
+as primary regardless of what DB-probe returns. DB-probed streams
+are pure ADDITIONS — they can never replace primary. The lowest-
+resolution DB-probed addition becomes `sub_url` (for adaptive
+focus-view step-down). All other DB additions go into the profile
+list (they were already going there in stream_profiles synthesis).
+
+This also makes Fix 3's `additional_streams` from locked-stream
+validation behave correctly: they show up in the focus-view
+resolution dropdown alongside the main, sub, and any DB-probed
+streams, never replacing the main.
+
+**5. Deep Re-Probe button feedback.** Three sub-fixes:
+  • In-progress state was `btn-ghost btn-sm` with text "⏳
+    Probing…" — nearly invisible against the dark card. Now uses
+    the same yellow-accent styling as the skipped-paths state with
+    "⏳ Deep Re-Probe (running)" label and 0.85 opacity to
+    indicate disabled.
+  • All three button states (idle, skipped-paths, running) now
+    have `min-width: 200px; text-align: center` so the button
+    width is constant regardless of label. The neighboring buttons
+    no longer reflow when state changes.
+  • Tooltip text expanded to make the operation clearer.
+
+(CrystalHeeler explicitly opted OUT of a status line below the button — the
+loud button itself is sufficient feedback.)
+
+### Files changed
+
+- `camera_discovery.py`:
+  - `PENDING_CAMERAS: dict | None` global (line ~607)
+  - `_publish_scan_card()` helper (line ~2772)
+  - 5 scan-time card-write sites rerouted through helper
+  - `run_scan` initializes/clears PENDING_CAMERAS
+  - Dedup pass operates on combined CAMERAS+PENDING_CAMERAS, then
+    flushes survivors
+  - `_probe_rtsp_paths_single_socket`: new `brand_recipe_paths`
+    parameter, locked-stream filter at append (line ~3835, ~4150)
+  - `find_rtsp_path`: passes `db_paths` to walker (line ~4827)
+  - `api_deep_reprobe` Stage A: identifies brand, passes recipe
+    paths (line ~8956)
+  - `api_set_credentials` non-ONVIF cred-accept path: preserves
+    primary URL, validates locked candidates, populates
+    `additional_streams` (line ~8682)
+  - Stream-profiles synth fallback: includes
+    `additional_streams` entries (line ~6312)
+  - `cardActions()` JS: loud reprobe button styling + min-width
+    (line ~10630)
+- `config.yaml`: version bump
+- `CHANGELOG.md`: this entry
+
+### Live-test plan
+
+1. Rescan 10.1.1.x net. During the scan, Microseven should NOT
+   show 4 separate cards mid-scan — should appear as ONE card after
+   the dedup pass at end. Same for Hikvision (one card, not 5).
+2. Hikvision card after scan: Deep Re-Probe button visible
+   with yellow accent + "(skipped paths)" suffix.
+3. Click Deep Re-Probe on the Hikvision. Button immediately changes to "⏳
+   Deep Re-Probe (running)" — clearly visible (loud yellow), at
+   the SAME button width as before (no neighbor reflow).
+4. Toast on completion: should report ~6 locked candidates (down
+   from 26 in rc2.5) — those matching Hikvision recipe paths.
+5. Click "Locked Streams" badge on the Hikvision, enter creds. Cred-accept
+   flow should:
+   - Keep `/Streaming/Channels/101` as primary (4MP main)
+   - Validate the ~6 locked candidates; bogus ones drop, valid
+     ones go to `additional_streams`
+   - Focus-view resolution dropdown shows MULTIPLE entries (not
+     just "704x480 MJPEG" + "Stream 2")
+6. Cred-auth on Microseven still works (regression).
+## 2.4.0-rc2.5
+**Triage build on top of rc2.4 live-test findings. Four fixes addressing
+gaps the rc2.4 logs revealed: (1) Fix C trigger (alt-port RTSP skip)
+was silently broken on Hikvision DS-2 cameras because their OPTIONS
+fingerprint returns 200 OK with no Server header and no realm — the
+speaker-detect code only checked those headers. Now also accepts the
+fingerprint helper's own `looks_like_rtsp` flag. (2) Layer 1 early-
+bail log line was DEBUG-only on unlabeled walks (= every scan-time
+walk), so we couldn't verify Fix B was firing. Now logs at INFO
+unconditionally. (3) Deep Re-Probe Stage A re-bailed after 5 paths
+(same early-bail counter) AND only collected locked candidates if an
+unauth working URL had been found first. New `deep_reprobe_mode=True`
+parameter to the walker disables both. (4) Deep Re-Probe Stage B
+(full Layer 2 walk) didn't trigger when the original scan's Layer 2
+was skipped via brand `skip_layer2: True` flag (Hikvision/Lorex/
+Dahua case) — the bail reason captured was `layer1_consecutive_401s`,
+not `layer1_then_layer2_skipped_401s`. Now also triggers Stage B when
+the camera's brand has `skip_layer2: True`.**
+
+### Why rc2.5 exists
+
+CrystalHeeler's rc2.4 live test confirmed all 7 fixes worked structurally
+(false positives gone, button rendered, state-resume mechanics
+correct, the Hikvision PTZ skip_layer2 firing) but speed gain was less than
+estimated and the Deep Re-Probe button "ran almost instantly" with no
+useful output. The 116s total on the 10.1.1.x net (down from 167s)
+left ~25-40s of unexplained Hikvision multi-port walking that
+shouldn't have happened, and Stage A returned 0 locked candidates
+when 31 should have been visible.
+
+Tracing the rc2.4 log surfaced 4 distinct issues, each fixed below.
+
+### What changed
+
+**1. Fix C trigger broken on Hikvision DS-2 (alt-port RTSP skip).**
+The rc2.4 fingerprint pre-probe on the Hikvision:554 logged "status=200,
+server=None, realm=None, elapsed=3ms" — RTSP/1.0 200 OK with no
+Server header and no realm. The speaker-detect code in the per-port
+loop required `rtsp_server_header OR rtsp_auth_realm OR
+rtsp_public_methods` to set `host_has_rtsp_speaker = True`. All
+three were empty, so the optimization didn't fire. the Hikvision:80, the Hikvision:443,
+the Hikvision:8000, the Hikvision:8443 each ran the full 31-path Layer 1 walk despite
+the Hikvision:554 having already proven the host speaks RTSP.
+
+The fingerprint helper's own `looks_like_rtsp` heuristic correctly
+identifies status-200-with-RTSP-status-line as evidence the host
+speaks RTSP. rc2.5 plumbs this through as
+`host_meta["rtsp_speaker_confirmed"]` and includes it in the
+speaker-detect check. Expected gain: ~25s on the Hikvision alone, similar on
+any other Hikvision-DS-2 family camera with multiple admin ports.
+
+Also adds an INFO log line "RTSP speaker confirmed for <ip> — alt
+ports will skip Layer 1 path walk" so users can see the optimization
+firing.
+
+**2. Layer 1 early-bail logging at INFO unconditionally.** The
+`_log()` helper inside the walker logs at INFO when called with a
+non-empty `label` argument and DEBUG when label is empty. All scan-
+time walks pass empty label (because Layer 1 + Layer 2 happen
+multiple times per scan and per-walk INFO would flood the log).
+Result: the rc2.4 log showed early-bail messages ONLY for the
+deep-reprobe walk (which has label="deep-reprobe:..."), making it
+impossible to verify the optimization was firing during normal
+scans.
+
+rc2.5 routes the early-bail line directly through `log.info(pfx +
+...)` regardless of label. It's a per-camera-port event (fires at
+most once per Layer 1 walk), low-volume, and high-value for
+verifying the optimization. Other internal walker logs (per-path
+attempts, per-method responses) still respect the label-driven
+DEBUG/INFO split.
+
+**3. Deep Re-Probe Stage A: deep_reprobe_mode parameter.** Two
+issues with the rc2.4 Stage A behavior:
+
+  - The early-bail counter fired during the resume walk too. On
+    the Hikvision case the cached `early_bail_paths_remaining` had 26
+    paths; Stage A walked 5, hit the early-bail threshold, and
+    bailed. Logically correct (the remaining 21 will also 401)
+    but it makes the button feel like it did nothing.
+  - The locked-stream collection is gated by `found_working_url`
+    — only fires AFTER an unauth stream has been found. That makes
+    sense for the original scan (where surfacing locked candidates
+    only matters if there's an existing visible stream) but is
+    wrong for Deep Re-Probe on a camera like the Hikvision where every
+    stream needs auth.
+
+rc2.5 adds a `deep_reprobe_mode: bool = False` parameter to
+`_probe_rtsp_paths_single_socket`. When True, it (a) suppresses the
+early-bail counter (forces full walk) and (b) bypasses the
+`found_working_url` gate on locked-stream collection. Used only by
+the `api_deep_reprobe` Stage A call, doesn't affect any scan-time
+behavior.
+
+Expected behavior change on the Hikvision: Stage A will now walk all 26
+remaining paths (~5s wall-clock at ~200ms/path on Hikvision) and
+surface ~20-25 locked-stream candidates as the visible 🔒 badge
+on the card. User can then enter creds to unlock them.
+
+**4. Deep Re-Probe Stage B: trigger expanded for skip_layer2
+brands.** The Stage B (full Layer 2 walk) trigger only checked
+`bail_reason == "layer1_then_layer2_skipped_401s"`. But that bail
+reason is only set by the Layer 2 short-circuit code path that
+fires when Layer 1 returned only 401s. When a brand has
+`skip_layer2: True` (Hikvision, Lorex/Dahua), find_rtsp_path
+short-circuits Layer 2 BEFORE reaching the consecutive-401-skip
+code, so the bail reason captured is `layer1_consecutive_401s`
+only. Result: clicking Deep Re-Probe on a Hikvision camera ran
+Stage A but silently skipped Stage B — exactly what the user
+clicked the button to verify.
+
+rc2.5 expands the Stage B trigger: ALSO run Stage B when
+`bail_reason == "layer1_consecutive_401s"` AND the camera's brand
+has `skip_layer2: True`. Done by calling `_identify_camera_brand()`
+on the host_meta we built from the camera record, then checking
+the matched entry's `skip_layer2` field.
+
+Expected behavior change on the Hikvision: clicking Deep Re-Probe will now
+run Stage A (~5s) followed by Stage B (~50s, 10 sockets × 5s
+cooldown × 401s before bail). Total ~55s. The user gets the locked
+candidates from Stage A AND verification that Layer 2 doesn't
+reveal a firmware-quirk path.
+
+### Files changed
+
+- `camera_discovery.py`:
+  - `_probe_rtsp_paths_single_socket`: new `deep_reprobe_mode`
+    parameter, suppresses early-bail and bypasses
+    `found_working_url` gate when True (line ~3801)
+  - Layer 1 early-bail log line: now logs at INFO unconditionally
+    (line ~4143)
+  - Per-host scan loop: speaker-detect also accepts
+    `rtsp_speaker_confirmed` flag (line ~11734)
+  - Fingerprint pre-probe: persists `rtsp_speaker_confirmed` flag
+    when `looks_like_rtsp` is True (line ~11366)
+  - `api_deep_reprobe`: passes `deep_reprobe_mode=True` to Stage A,
+    expanded Stage B trigger to include skip_layer2 brands
+    (line ~8842)
+- `config.yaml`: version bump
+- `CHANGELOG.md`: this entry
+
+### Live-test plan
+
+1. 10.1.1.x net rescan: total time should drop from rc2.4's 116s.
+   New "RTSP speaker confirmed for 10.0.0.33 — alt ports will skip
+   Layer 1 path walk" log line should appear after the Hikvision:554
+   fingerprint succeeds.
+2. the Hikvision alt ports (.80, .443, .8000, .8443) should each show NO
+   "RTSP probe: Layer 1 (single-socket walk, 31 paths)" line —
+   skipped via the new flag. Each port should drop from ~5-12s to
+   <1s.
+3. Layer 1 early-bail should now log at INFO unconditionally on the
+   the Hikvision:554 walk (will see the line during the scan, not just during
+   deep-reprobe).
+4. Click Deep Re-Probe on the Hikvision needs_credentials card. Expected
+   sequence:
+   - Stage A logs walking all 26 remaining paths (no early-bail
+     this time)
+   - Stage A surfaces ~20-25 locked candidates (visible as 🔒 badge
+     on the card after refresh)
+   - Stage B kicks in and runs Layer 2 walk (~50s)
+   - Toast reports "🔒 N locked stream(s) found"
+5. Cred-auth on the Hikvision still works (regression).
+
+## 2.4.0-rc2.4
+**Performance and false-positive build on top of rc2.3. Seven fixes
+plus the new Deep Re-Probe button. (1) Tightens the verdict gate so
+brand-id from MAC OUI alone no longer creates a card without a
+service-level corroborating signal — kills the rc2.3 .12/.13/.14
+false positives (TP-Link switch + UniFi APs). (2) Wires up the
+FEEDBACK store consumer at scan time — clicking "Not a Camera" now
+suppresses pattern-similar devices on other IPs, not just the exact
+IP+port. (3) Adds `skip_layer2: True` to the single-camera Hikvision
+entry, eliminating the 45s Layer 2 grind on CrystalHeeler's the Hikvision PTZ. (4)
+Layer 1 early-bails after 5 consecutive same-realm 401s and saves
+state for resume. (5) Layer 2 short-circuits when Layer 1 early-
+bailed (fresh sockets won't change auth result per RFC 7235 §2.2).
+(6) Per-host port reordering: canonical RTSP ports (554/8554/10554)
+probed first; once RTSP-speaker confirmed, alt-ports skip RTSP
+probing. (7) Deep Re-Probe button — escape hatch for the aggressive
+Layer 1/2 skip heuristics with state-resume from where rc2.4 left
+off.**
+
+### Performance impact (estimated)
+
+- test system B: 84s → ~25-30s
+- test system A: 167s → ~30-40s
+
+The rc2.4 perf wins come from killing Layer 2 grinding on auth-
+required cameras (the Hikvision PTZ alone burned 45s in rc2.3),
+early-bailing Layer 1 after we've established the camera needs auth,
+and avoiding redundant RTSP probing on alt ports of an IP whose
+canonical RTSP port we've already confirmed. The trade-off is small:
+a ~5% chance Layer 2's multi-socket walk would have revealed a
+firmware-quirk path that single-socket Layer 1 missed. The Deep Re-
+Probe button is the user-controlled escape hatch for that case.
+
+### What changed
+
+**1. Verdict gate corroboration (Issue from rc2.3 live test).**
+rc2.3's `verdict=="uncertain" + has_brand` accepted any brand-id
+match including OUI-only matches. Surfaced 3 false positives on
+CrystalHeeler's test system A: TP-Link Tapo / Kasa OUI matched a TP-Link switch
+on .12; Ubiquiti UniFi OUI matched two UniFi APs on .13/.14. The
+problem is that camera-vendor OUIs are shared across the same
+vendor's networking gear (switches, routers, APs).
+
+rc2.4 requires brand-id to be CORROBORATED by at least one service-
+level signal beyond OUI:
+  • ONVIF scope present (only cameras speak ONVIF)
+  • RTSP fingerprint captured (host speaks RTSP)
+  • Brand keyword in page_title (camera UI, not switch admin)
+  • Brand keyword in server_header (HTTP server identifies as camera)
+  • Brand keyword in nmap_product banner
+
+OUI-only matches with NONE of the above no longer create cards.
+Logged at INFO level: "Card suppressed: <ip>:<port> brand=<name>
+from OUI alone, no service-level corroboration".
+
+**2. FEEDBACK store consumer (Issue from rc2.3 live test).** The
+"Not a Camera" button has stored rich fingerprints to
+`/data/not_camera_feedback.json` since rc2.0, but no scan-time
+consumer was wired up. Per-IP suppression worked via BLACKLIST; the
+fingerprint data sat unused.
+
+rc2.4 adds `_matches_feedback_fingerprint(host, port)` checked at
+the start of every per-port scan iteration (main + broad-sweep
+loops). Conservative match rule:
+  • Same OUI (first 3 MAC octets) AND
+  • (Same nmap_product OR same port) AND
+  • reason_type is set to a specific value (router/printer/nas/
+    switch/etc.) — not blank or "unknown"
+
+Same OUI alone is NOT enough — preserves cases like "TP-Link switch
+on .12 + Tapo camera on .15" where both share OUI but only the
+switch was rejected. ONVIF-discovered hosts are NEVER suppressed
+via this check (only cameras speak ONVIF; ONVIF response trumps any
+past Not-a-Camera click).
+
+Logged on match: "FEEDBACK fingerprint match: skipping <ip>:<port>
+— OUI <oui> + product/port match; reason=<type>".
+
+**3. `skip_layer2: True` on single-camera Hikvision entry.** The
+`the Hikvision` Hikvision DS-2DE4A425IW PTZ requires auth — Layer 1 returned
+401-with-same-realm on every attempted path, then Layer 2 ran and
+also got 401 on every fresh socket before bail-after-10 fired (45s
+wasted). With this flag, Layer 2 short-circuits immediately. The
+NVR variants of Hikvision already had this flag for the same reason.
+
+**4. Layer 1 early-bail on consecutive same-realm 401s.** Per RFC
+7235 §2.2, auth realm is server-scoped, not URL-scoped. After 5
+consecutive same-realm 401s on a single socket walk, all remaining
+paths will also 401 with the same realm. rc2.4 detects this streak,
+bails out, and saves state to `host_meta`:
+  • `early_bail_reason = "layer1_consecutive_401s"`
+  • `early_bail_realm = "<the realm>"`
+  • `early_bail_paths_tried = [first 5 paths]`
+  • `early_bail_paths_remaining = [unwalked paths from index 5+]`
+  • `early_bail_at = ISO timestamp`
+
+Saves ~4-5s per camera-port (avoids walking ~25 more paths × ~200ms
+each). State is later read by the Deep Re-Probe handler for resume.
+
+**5. Layer 2 short-circuit on Layer 1 early-bail.** When Layer 1
+bailed early on consecutive same-realm 401s, Layer 2's multi-socket
+walk will produce the same 401s on the same realm — fresh sockets
+don't change a server-side auth check. rc2.4 skips Layer 2 in this
+case and updates the bail reason to `layer1_then_layer2_skipped_401s`
+so the Deep Re-Probe handler knows to also run Layer 2 if the user
+opts in. Saves ~50s per such camera (the bail-after-10 grind).
+
+**6. Per-host port reordering + alt-port RTSP skip.** Previously the
+per-port scan loop iterated `host.open_ports` in nmap order — often
+80, 443 first, then 554. For hosts with admin pages on 80/443/8080
+AND RTSP on 554, that meant burning ~5-15s per HTTP-only port
+walking RTSP paths against a port that doesn't speak RTSP, BEFORE
+ever getting to 554.
+
+rc2.4 sorts open ports so canonical RTSP ports (554, 8554, 10554)
+go first. Once a canonical port confirms RTSP-speaker status (via
+rtsp_server_header / rtsp_auth_realm / rtsp_public_methods), the
+loop downgrades RTSP-marked initial-protocol on subsequent non-
+canonical ports to "HTTP", causing those ports to skip the full
+Layer 1 path walk and use HTTP/MJPEG/HLS probing only.
+
+**7. Deep Re-Probe button (per-card escape hatch).** Available on
+every needs_credentials and not_camera-pending card. Highlighted
+with yellow accent + "(skipped paths)" suffix when the card has
+`early_bail_reason` set, indicating rc2.4 fast-skipped some paths
+during the original scan and the user can recover them on demand.
+
+Backend: new `api_deep_reprobe` endpoint at
+`POST /api/cameras/{cid}/deep_reprobe`. State machine driven by
+`cam.early_bail_reason`:
+  • `layer1_consecutive_401s` → resume Layer 1 on
+    `cam.early_bail_paths_remaining`
+  • `layer1_then_layer2_skipped_401s` → resume Layer 1, then run
+    full Layer 2 multi-socket walk (5s cooldown, bail-after-10)
+  • unset/missing → run a fresh full Layer 1 + Layer 2
+
+Stage A (resume Layer 1) runs with `collect_locked=True` so 401s on
+remaining paths surface as locked-stream candidates the user can
+unlock by entering credentials (existing rc2.0 Layered Stream
+Discovery pathway). Stage B inlines the Layer 2 walk pattern (5s
+cooldown, bail-after-10) over the FULL canonical path list.
+
+Staleness check: if `cam.early_bail_at` is older than 30 minutes,
+the saved state is discarded and a fresh full probe runs instead.
+Concurrency: `cam.deep_reprobe_in_progress` flag suppresses
+overlapping invocations; frontend disables the button while the
+handler is in flight.
+
+Outcome stats persisted on the camera record:
+  • `deep_reprobe_attempts` — count
+  • `deep_reprobe_last_at` — ISO timestamp
+  • `deep_reprobe_last_outcome` — "ready" / "locked_streams:N" /
+    "no_streams" / "error:<msg>"
+
+Frontend: button rendered in `cardActions()` between Clear Creds
+and Not a Camera buttons. Click handler `deepReprobe()` posts to
+the endpoint, shows a toast with the outcome ("✅ working stream
+found", "🔒 N locked stream(s) found", "no streams found"), then
+reloads the camera list so the new state renders.
+
+### Files changed
+
+- `camera_discovery.py`:
+  - Single-camera Hikvision CAMERA_DB entry: +`skip_layer2: True`
+    (line ~713)
+  - `_probe_rtsp_paths_single_socket`: early-bail counter + state
+    save (line ~3801)
+  - `find_rtsp_path`: Layer 2 short-circuit on Layer 1 early-bail
+    (line ~4793)
+  - `_probe_host_port::base()`: persist early_bail_* fields onto
+    cam record (line ~11071)
+  - Stage 3 main scan loop: port reordering, alt-port RTSP skip,
+    FEEDBACK fingerprint check (line ~11338)
+  - Stage 4 broad-sweep loop: FEEDBACK fingerprint check
+  - Verdict gate: corroboration check (line ~11150)
+  - `_matches_feedback_fingerprint()`: new helper (line ~2809)
+  - `api_deep_reprobe`: new handler (line ~8713)
+  - JS `cardActions()`: Deep Re-Probe button
+  - JS `deepReprobe()`: click handler
+- `config.yaml`: version bump
+- `CHANGELOG.md`: this entry
+
+### Live-test plan
+
+- test system B rescan: total time should drop noticeably from 84s.
+  Lorex still skipped Layer 2 via brand flag.
+- test system A rescan:
+  - Total time should drop substantially from 167s
+  - Hikvision PTZ: Layer 2 skipped via new `skip_layer2: True`
+    flag; total the Hikvision time drops from ~76s to ~10-15s
+  - .12 TP-Link switch / .13 .14 UniFi APs: NO cards (verdict gate
+    now requires service-level corroboration beyond OUI)
+- Deep Re-Probe button visible on the Hikvision card (after rc2.4 rescan,
+  early_bail_reason will be set since Layer 1 will fast-bail then
+  Layer 2 will skip). Click button → spinner → expected outcome:
+  Stage A finds locked candidates on remaining ~25 paths, Stage B
+  runs Layer 2 walk and bails at 10 failures, card updates with
+  locked-stream badge showing the candidates.
+- Cred-auth on the Microseven / the Hikvision still works (regression check)
+- "Not a Camera" → rescan: clicking "Not a Camera" on a host then
+  rescanning should produce the FEEDBACK match log line and not
+  re-create a card for the same OUI+product on a different IP.
+
+## 2.4.0-rc2.3
+**Bug-fix release on top of rc2.2 addressing four issues from rc2.2
+live testing on CrystalHeeler's two networks. (1) `_isGenericCamName` extended
+to recognize auto-discovered hostnames (IPs, reverse-DNS suffixes,
+MAC-/serial-derived strings, mDNS local-domain names) as generic so
+the identified manufacturer wins display. (2) Per-IP card dedup —
+multi-port hosts now produce ONE card per device for non-streaming
+HTTP admin pages, while preserving multi-stream camera setups. (3)
+WS-RTSP probe tightened to require RFC 6455 subprotocol echo,
+eliminating the Microseven false-positive. (4) Stricter HTTP-only
+fall-through — suppresses cred-prompt cards for hosts with no
+camera-positive signals (no brand match, no RTSP fingerprint),
+keeping the scan output clean while preserving the existing "Add
+Camera Manually" path for exotic devices.**
+
+### Why rc2.3 exists
+
+rc2.2 shipped four targeted fixes from rc2.1 live testing. rc2.2 live
+testing on both networks produced clean perf and correct brand-id
+(Lorex no longer grinds Layer 2; Hikvision PTZ now correctly
+identifies as "Hikvision" not "Hikvision NVR"; focused scan completes
+in ~4-12s vs ~73s) BUT surfaced four UX issues from the now-faster /
+broader scan output:
+
+  • Card titles displaying hostnames instead of identified manufacturers
+    (e.g. "D861A8.lan" instead of "Lorex / Dahua DVR-NVR Family")
+  • Multiple cards per device when a host has multiple open ports
+    (e.g. HP printer with 80/443/8080 → 3 "Credentials required" cards)
+  • False-positive WS-RTSP card on a Microseven Hipcam (the camera has
+    a WebSocket endpoint for its web UI MJPEG feed, not RTSP-over-WS)
+  • Generic web-admin devices (printers without IPP exposed, IoT hubs,
+    NAS appliances) creating cred-prompt cards even when the verdict
+    pipeline had no positive camera signals
+
+These are all consequences of rc2.2 actually finding everything that
+was open on each host (where rc2.1's `-sV` timeout was masking most of
+it). rc2.3 surfaces the right cards with the right titles and keeps
+the false-positive count near zero.
+
+### What changed
+
+**1. `_isGenericCamName` JS regex extended (Issue 1).** The
+hostname-as-name fallback at line ~10758 (`prev_name = prev.get("name",
+hostname)`) returns the hostname for fresh discoveries. Frontend
+displayName logic was correctly trying to swap to manufacturer when
+name looked generic, but the existing regex only matched fixed strings
+like "ip camera"/"network camera"/"general"/etc. — it did NOT
+recognize auto-discovered hostname patterns as generic. rc2.3 adds
+matchers for:
+  • Bare IPv4 ("10.0.0.13" → generic)
+  • All-hex MAC-derived hostnames ("D861A8.lan" → generic
+    because "D861A8" is the leftmost label)
+  • Serial-derived all-uppercase identifiers ("SN0123456789-
+    ABCDEF012345" → generic)
+  • Common reverse-DNS suffixes (".attlocal.net", ".local", ".lan",
+    ".home", ".localdomain", ".hsd1.*.comcast.net", ".fios-router.home")
+  • mDNS-style 3+-label FQDNs with short lowercase first label
+    ("tplink.my.house" → generic)
+
+User-given names like "Front Door Camera" or "Driveway" don't match
+any of these and remain user-displayed.
+
+**2. Per-IP card dedup at scan completion (Issue 2).** New post-scan
+pass before `save_cameras()` groups cards by IP and resolves duplicates
+using a conservative rule:
+  • Always keep "ready" cards (working streams)
+  • Always keep "user_saved" cards (user has interacted with them)
+  • Always keep cards with `stream_url` populated
+  • If best card on an IP is streaming, suppress all
+    needs-credentials and info cards on that IP (we already have a
+    working stream)
+  • Otherwise keep the highest-priority-protocol card per IP, suppress
+    weaker-protocol HTTP siblings
+
+Protocol priority: RTSP > ONVIF > DVR > MJPEG > HLS > RTMP > WS-RTSP >
+WebRTC > HTTP. Multi-stream cameras with legitimate multi-port stream
+endpoints (e.g. RTSP main on 554 + RTSP sub on a different path) are
+preserved because the rule only suppresses HTTP siblings of stream
+protocols, never stream-protocol siblings of stream protocols.
+
+Logs the suppressed-card count and IDs (truncated to first 6) so the
+behavior is observable.
+
+**3. WS-RTSP probe RFC 6455 verification (Issue 3).** Previously the
+probe sent a WebSocket Upgrade with `Sec-WebSocket-Protocol: rtsp` and
+checked the response only for "101" status and "websocket" in the
+body. Per RFC 6455 §4.1 the server MUST echo the selected subprotocol
+in `Sec-WebSocket-Protocol: <token>` if it accepted that subprotocol.
+A server returning 101 + "websocket" but NOT echoing `rtsp` speaks
+WebSocket but NOT RTSP-over-WebSocket — exactly the Microseven Hipcam
+case (its port-80 WebSocket endpoint is for the live web UI MJPEG
+feed). rc2.3 parses the response headers, looks for the
+`Sec-WebSocket-Protocol` line, splits on comma per RFC, and only
+returns a positive match if `rtsp` is in the accepted-subprotocol list
+as an exact token (case-insensitive).
+
+**4. Stricter HTTP-only fall-through (Issue 4).** Previously
+`_probe_host_port` created a "needs_credentials" HTTP card for any
+host with `verdict in ("camera", "uncertain")` after all stream
+probes failed. After rc2.2's faster scan that flooded the UI with
+cards for printers/NAS/IoT hubs whose web admin pages happened to be
+on probe-list ports. rc2.3 keeps `verdict=="camera"` (high-confidence
+keyword positive) creating cards as before, but for `verdict==
+"uncertain"` ALSO requires at least one of:
+  • Brand identified from MAC OUI / ONVIF scope / page title / server
+    header (set in host_meta.manufacturer by the upstream pre-probe)
+  • RTSP fingerprint pre-probe captured a server header / auth realm /
+    public methods (host speaks RTSP even if path-walk failed)
+
+If neither holds, the card is suppressed. Users with truly exotic
+cameras Claude doesn't have a brand entry for can still reach them
+via the existing "Add Camera Manually" entry point (api_add_camera
++ pscan-ip input field) or via the broad-sweep option.
+
+### Files changed
+
+- `camera_discovery.py`:
+  - `_isGenericCamName` JS function: 5 new pattern matchers for
+    hostname-derived names (line ~9920)
+  - `probe_ws_rtsp`: RFC 6455 subprotocol-echo verification
+    (line ~4762)
+  - `_probe_host_port`: stricter `verdict=="uncertain"` gate
+    (line ~10983)
+  - `run_scan`: per-IP card dedup pass before save_cameras
+    (line ~11409)
+- `config.yaml`: version bump
+- `CHANGELOG.md`: this entry
+
+### Live-test target
+
+Re-run scan on:
+- test system B (Lorex DVR + an HP printer + OAK-D HAOS feed +
+  .235 unknown device): expect ONE card per IP for non-streaming
+  hosts (printer collapses from 3 cards → 1 or 0); Lorex card title
+  reads "Lorex / Dahua DVR-NVR Family" not the hostname; HAOS RTSP
+  feed at the Oak-D camera:8765 still works.
+- test system A (Microseven + Hikvision PTZ + .12/.13/.14 unifi/tplink):
+  expect Microseven shown as 1-2 cards (not 4) with manufacturer name
+  not hostname; no WS-RTSP card on the Microseven; Hikvision shows brand
+  name; UniFi Protect cards have manufacturer name displayed.
+
+## 2.4.0-rc2.2
+**Bug-fix release on top of rc2.1 addressing four issues from rc2.1
+live testing on CrystalHeeler's two networks. (1) Drops `-sV` from the focused
+nmap scan and lowers `--host-timeout` from 30s to 15s — empirically
+measured ~24× faster on CrystalHeeler's test system B AND fixes a regression
+where `-sV`'s per-port latency was timing out slow devices entirely
+(the Lorex DVR was being dropped from scan output). (2) Adds
+classifier-only ports 22 (SSH), 631 (IPP), 9100 (raw print) so the
+verdict logic can reject printers and SSH-only devices that rc2.1's
+narrow port list lost the ability to filter — fixes the another device HP
+printer false-positive. (3) Sets `skip_layer2: True` on the
+Lorex/Dahua DVR-NVR Family CAMERA_DB entry — wires up the rc2.1
+short-circuit code that was already merged but had no data-side
+companion, so the Lorex DVR Lorex was still grinding 50s through Layer 2.
+(4) Refactors `_DB_ENTRIES_BY_KEY` from `dict[str, dict]` to
+`dict[str, list[dict]]` and adds an NVR-family tie-breaker so single
+cameras with shared brand keywords no longer get misclassified as
+NVRs — fixes CrystalHeeler's Hikvision DS-2DE4A425IW-DE PTZ being tagged
+as "Hikvision NVR".**
+
+### What changed
+
+**1. `focused_nmap_scan` — drop `-sV`, lower `--host-timeout` to 15s
+(Issue A from rc2.1 live test).** Live measurement on CrystalHeeler's 192
+network with the rc2.1 51-port list:
+
+```
+V1: -sV --host-timeout 30s (rc2.1 setting):  36.2s for 3 hosts
+                                              Lorex DVR TIMED OUT
+                                              (dropped from output entirely)
+V3: -sV --version-light --host-timeout 30s:  34.6s, Lorex still dropped
+V5: NO -sV (pure SYN) --host-timeout 15s:    1.5s, Lorex found cleanly
+                                              (80, 554, 35000)
+```
+
+Why `-sV` was hurting: nmap runs sequential service-banner probes
+per open port. On slow/throttled devices (Lorex DVR with auth-attempt
+lockout, Microseven Hipcam with rate_limit_per_ip_tcp) the per-port
+probe latency stacks up past `--host-timeout`'s 30s budget. When the
+budget expires nmap drops the ENTIRE host including already-confirmed
+open ports — they never reach our parser. This was the root cause of
+the rc2.1 "Focused scan: 0 host(s) responded" regression on the 172
+network and the partial-host-coverage on the test system B.
+
+What rc2.2 keeps without `-sV`:
+  • Open-port list (the actual goal)
+  • `mac_vendor` from ARP — strongest classifier (HP printer correctly
+    tagged via OUI; Lorex Technology correctly tagged via OUI)
+  • `service` field from `/etc/services` lookup ("http", "rtsp",
+    "https") — sufficient for `_initial_protocol()` routing
+
+What we lose: `nmap_product` field (e.g., "gSOAP 2.7"). It was one of
+~10 haystack signals in `_identify_camera_brand`; mac_vendor + ONVIF
+discovery + HTTP page-title probe + RTSP fingerprint downstream more
+than compensate. Lost coverage on real-world devices tested: zero.
+
+**2. Add classifier-only ports 22, 631, 9100 (Issue C).** These ports
+are NOT camera ports — they're scanned so the verdict logic has
+signals to REJECT non-camera devices that happen to expose a web UI
+on 80/443/8080. rc1.0's top-1000 scan caught these incidentally; the
+rc2.1 narrow port list lost them, surfacing a regression where the
+an HP printer (gSOAP 2.7 web admin on 80/443/8080) re-appeared as
+a camera. With rc2.2:
+
+  • Port 631 (IPP) or 9100 (raw print) → unconditional `not_camera`
+    verdict regardless of HTTP signals
+  • Port 22 (SSH) → `not_camera` verdict only when no camera-typical
+    HTTP ports are also open (cameras occasionally have SSH for
+    service mode; IoT device / NAS / managed switches typically
+    only have SSH + a non-camera HTTP UI)
+
+`classify_device()` updated with port-based fallback after the existing
+keyword-based check. `NON_CAMERA_KEYWORDS` updated to include "ipp"
+for cases where service text already identifies the protocol. Cost in
+scan time: ~50ms total at 14 hosts (3 extra ports × SYN probe each).
+
+**3. `skip_layer2: True` on Lorex/Dahua DVR-NVR Family entry (Issue B).**
+rc2.1 added the *consumer* code (the short-circuit at line 4500-4510
+in `find_rtsp_path`) but no CAMERA_DB entry was actually flagged with
+`skip_layer2: True`, so the check evaluated False on every brand
+including Lorex/Dahua. Added the flag with HIGH confidence — the
+Lorex/Dahua entry already has all the metadata that says "this is a
+multi-channel DVR, do not grind Layer 2": `streaming_recipe` with
+channel iteration, `throttle_type: auth_attempt_lockout`, and
+`rtsp_realm_regex` matching the Dahua-family realm. With rc2.2, the
+the Lorex DVR Lorex Layer 2 short-circuits in <100ms instead of grinding 50s.
+
+**4. `_DB_ENTRIES_BY_KEY` dict→list refactor + NVR tie-breaker
+(Issue D).** Two compounding bugs caused CrystalHeeler's Hikvision
+DS-2DE4A425IW-DE PTZ to misclassify as "Hikvision NVR":
+
+  • **Architecture bug:** `_DB_ENTRIES_BY_KEY: dict[str, dict]` —
+    when a keyword appeared in MULTIPLE entries, the dict overwrote
+    and only the LAST entry written got credit. The Hikvision
+    (single) entry at line 713 and the Hikvision NVR entry at line
+    2046 both list "hikvision" as a keyword. List-order processing
+    meant `_DB_ENTRIES_BY_KEY["hikvision"]` ended up pointing to
+    Hikvision NVR. Single Hikvision cameras lost every haystack hit
+    on the bare word "hikvision" to the NVR entry.
+
+  • **Data bug:** Hikvision NVR's `onvif_scopes` field included
+    `"onvif://www.onvif.org/Profile/Streaming"` — the standard ONVIF
+    Profile S spec identifier returned by EVERY Profile-S-compliant
+    ONVIF device on the planet. Per ONVIF Core Spec it carries zero
+    brand-specific signal. Including it scored Hikvision NVR +1 for
+    any ONVIF haystack (which is most haystacks).
+
+Combined effect for the Hikvision PTZ: scored "Hikvision NVR=2, Hikvision=1"
+→ NVR wrongly won. With rc2.2 fixes: "Hikvision=4, Hikvision NVR=0"
+→ correctly identified as single Hikvision camera.
+
+The refactor changes the lookup type to `dict[str, list[dict]]` so
+keywords can score all entries that legitimately claim them (e.g.,
+both Hikvision and Hikvision NVR get +1 from "hikvision"). Two
+additional safeguards:
+
+  • Per-keyword entry deduplication: a keyword that appears in
+    MULTIPLE fields of the same entry (e.g., "hikvision" in 6 fields
+    of the Hikvision entry) counts as ONE keyword match for that
+    entry, not six. Otherwise scoring would skew massively toward
+    entries that repeat keywords across fields.
+
+  • NVR-family tie-breaker: when top score is shared by entries that
+    include and exclude NVR-family designation, prefer non-NVR. The
+    NVR entries are the SUPERSET case (they need extra signals like
+    series-specific keywords — DS-77xxx, Turbo HD, app-webs/, RLN8 —
+    to win). A bare brand name like just "hikvision" or "reolink"
+    should default to the single-camera entry, not the NVR.
+
+Audit completed across all 76 CAMERA_DB entries: only ONE truly
+generic onvif_scope was found and removed (Hikvision NVR's
+Profile/Streaming). Other shared keywords across entries
+(hikvision/hikvision, reolink/reolink, swann/swann, etc.) are all
+legitimate brand signals, properly handled by the dict→list refactor.
+
+**5. Yellow dot for `authenticating_throttled` UI state (small
+follow-up).** `authenticating_throttled` is a transient state during
+the rate-limited auth window (~30s on `rate_limit_per_ip_tcp` brands
+like Microseven). Previously rendered as 'dot-error' (red) which
+suggested failure even though authentication was still in progress.
+Now renders as 'dot-warning' (yellow) like other transient states.
+CrystalHeeler observed this during rc2.1 testing: "saw the same failure for
+about 3-5 seconds and then it corrected, the indicator dot went from
+red to green."
+
+### Files changed
+
+- `camera_discovery.py`:
+  - `CAMERA_RELEVANT_PORTS` +3 classifier ports (22, 631, 9100)
+  - `focused_nmap_scan` rewritten without `-sV`, `--host-timeout` 30s→15s
+  - `NON_CAMERA_KEYWORDS` +1 entry ("ipp")
+  - `classify_device` port-based not_camera fallback added
+  - `_DB_ENTRIES_BY_KEY` type refactor + dedup
+  - `identify_manufacturer` rewritten with NVR tie-breaker
+  - Lorex/Dahua DVR-NVR Family CAMERA_DB entry +`skip_layer2: True`
+  - Hikvision NVR CAMERA_DB entry: removed generic ONVIF Profile/Streaming
+  - `dotClass` JS function: yellow for `authenticating_throttled`
+- `config.yaml`: version bump
+- `CHANGELOG.md`: this entry
+
+### Live-test target
+
+Re-run scan on:
+- test system B (Lorex DVR + an HP printer + an IoT device):
+  expect Lorex Layer 2 to skip <100ms; the printer rejected as
+  not_camera (port 631 or 9100 detected); focused scan completes in
+  ~3-5s instead of ~73s.
+- test system A (Microseven + Hikvision PTZ): focused scan now
+  returns hosts (was 0 in rc2.1); the Hikvision card title shows "Hikvision"
+  not "Hikvision NVR"; cred-auth on the Microseven still works; dot color during
+  the rate-limited auth window is yellow not red.
+
+## 2.4.0-rc2.1
+**Bug-fix release on top of rc2.0. (1) Fixes a regression in the rc2.0
+focused nmap scan where the brand-port augmentation silently shrunk the
+scan to ~4 ports because nmap's `-p` and `--top-ports` flags intersect
+rather than union. (2) Replaces the entire approach with an explicit
+camera-relevant port list of 51 ports, ~19× faster than `--top-ports
+1000` while catching every brand documented in CAMERA_DB plus generic
+alt-HTTP/HTTPS ports used as common practice across manufacturers. (3)
+Fixes 3 UI/state bugs from rc2.0 live testing: Lorex DVRs displaying as
+"General" on the card, cred-auth failure collapsing the card with no
+login form on rate-limited brands, and Lorex grinding 50s through Layer
+2 instead of short-circuiting on `skip_layer2`.**
+
+### What changed
+
+**1. `focused_nmap_scan` redesign — explicit camera port list (Issue 2,
+regression from rc2.0).** Replaces `--top-ports 1000 -p <6 brand ports>`
+with `-p <51 explicit camera-relevant ports>`. rc2.0's approach silently
+shrunk the scan because nmap intersects `-p` with `--top-ports`: of the
+6 augmented ports, only 4 happened to be in the top-1000 list, so the
+final scan probed 4 ports per host instead of the intended 1006. The
+An IoT device (test system B) was discovered in rc1.0 baseline
+on ports 80/443/8080/8291 plus 80/443/8888, but disappeared entirely in
+rc2.0 because none of the 4 actually-scanned ports happened to be open
+on those hosts. Empirically confirmed on CrystalHeeler's HAOS via direct nmap
+invocation: `nmap --top-ports 1000 -p <list>` returns 4 ports;
+`nmap --top-ports 1000` alone returns 1000; `nmap -p <list>` alone
+returns the full list. nmap GitHub issue #447 documents this since 2016.
+
+The new list (`CAMERA_RELEVANT_PORTS`, defined directly above
+`focused_nmap_scan`) is the union of (a) CAMERA_DB `default_ports`
+across all 78 entries (22 ports), and (b) ports documented by
+manufacturer/VMS-vendor/industry sources NOT yet represented in
+CAMERA_DB (29 ports). Research foundation: 80+ authoritative sources
+including Hikvision-official Network Port List PDF (10554 alt-RTSP,
+9010/9020 Ezviz), Bosch knowledge-base (1756/1757/1758 RCP+),
+Hanwha Vision America KB (4520-4524 SUNAPI), Reolink official KB
+(1935 RTMP, 9000 basic service), Pelco Developer Network
+(49152-49156 Endura svc-tcp), help.ui.com Required Ports Reference
+(7442/7443/7444/7446/7550 UniFi Protect), support.networkoptix.com
+(7001 Nx Witness), Blue Iris HouseLogic docs (81 default web), plus
+generic alt-HTTP/HTTPS ports (8081, 8082, 8443, etc.) confirmed across
+multiple manufacturers as common-practice deployment.
+
+Trade-off: an exotic camera on a truly weird port (e.g., 12345) will
+be missed by the focused scan. In practice this is vanishingly rare —
+camera firmware almost always picks ports in HTTP-adjacent or
+RTSP-adjacent ranges. Devices on weird ports that ARE on the network
+still appear in the ARP-discovered live-hosts list; they just have no
+service info attached. For users with confirmed-exotic cameras, the
+broad scan (0-10000) remains available.
+
+Speedup: typical ~5-10s for 14 hosts vs ~80s in rc2.0/rc1.0 — a real
+UX improvement on every scan.
+
+**2. UI fix — generic ONVIF Name="General" (Issue 1).** The Lorex DVR
+on the Lorex DVR (test system B) was displaying the card title as "General" — the
+literal Name field returned by the device's ONVIF GetDeviceInformation
+SOAP call. Backend brand-id correctly identified it as Lorex/Dahua
+DVR-NVR Family (via mac_vendor or page-title signals), but the
+`_isGenericCamName` regex didn't recognize "General" as a generic name
+worth swapping out for the brand-identified manufacturer. Added
+"general" and "generic" to the regex anchor list so the card now
+displays "Lorex / Dahua DVR-NVR Family" instead. Anchored regex still
+preserves user-given names that happen to contain "general" (e.g.
+"General Office Camera").
+
+**3. UI fix — cred-auth failure collapse on rate-limited brands (Issue
+4).** When the user submitted wrong credentials for the Microseven
+(rate_limit_per_ip_tcp throttle_type), the card collapsed to a no-form
+state showing only a Remove button — leaving the user no path to
+re-enter credentials without first deleting and re-discovering the
+camera. Root cause: `api_set_credentials` mutates `camera["status"]` to
+`"authenticating_throttled"` on entry (to surface the rate-limit
+warning text in the UI during the ~30s auth window), but the failure
+return path didn't restore the status. Next /api/cameras poll returned
+`status="authenticating_throttled"`, `credFormHTML`'s `cam.status !==
+'needs_credentials'` check fired false, and the form rendered empty.
+Fixed by restoring `status="needs_credentials"` and clearing
+`status_text` in the failure-return path. Only affected
+rate_limit_per_ip_tcp brands (Microseven Hipcam, Sricam, Vstarcam,
+Wansview, Tenvis families) since non-throttled brands never had the
+status mutation applied — explaining why the Hikvision didn't show
+the same symptom.
+
+**4. Performance fix — Layer 2 short-circuit on `skip_layer2` brands
+(bonus).** Brands marked `skip_layer2: True` in CAMERA_DB (currently
+the Lorex/Dahua DVR-NVR Family) had Layer 2 grinding 50+ seconds
+through 10 sockets × 5s sleep before bail-after-10 fired — the wrong
+behavior for multi-channel DVRs where the right answer is "use the
+streaming_recipe with channel iteration" (consumed in rc3.x). Added
+a Layer 2 short-circuit alongside the existing
+`rate_limit_per_ip_tcp` short-circuit, with log line distinguishing
+the two skip reasons. Lorex DVR live-tested: Layer 2 now skipped
+in <100ms instead of 50s+.
+
+### Research foundation (rc2.1 port list)
+
+80+ authoritative sources spanning manufacturer-official
+documentation, support knowledge bases, VMS vendor docs, and industry
+deployment guides. Source quality bar: only manufacturer
+documentation, VMS vendor official KBs, industry standards bodies,
+and trade publications — explicitly excluded individual forum posts
+of the "I always use port X because reasons" variety. Full
+bibliography in `/home/claude/research_2_4_0_rc2_1/findings_so_far.md`
+and the rc2.1 audit report.
+
+### Files changed
+
+- `camera_discovery.py`: +1 constant (`CAMERA_RELEVANT_PORTS`), 4 fixes
+  (focused_nmap_scan body, _isGenericCamName regex, api_set_credentials
+  failure path, find_rtsp_path Layer 2 short-circuit)
+- `config.yaml`: version bump
+- `CHANGELOG.md`: this entry
+
+### Live-test target
+
+Re-run scan on:
+- test system B (Lorex DVR + an IoT device):
+  expect Lorex card to show as "Lorex / Dahua DVR-NVR Family", Litter
+  Robot to reappear in scan results, Lorex Layer 2 to skip <100ms.
+- test system A (Microseven + Hikvision): submit wrong creds to
+  the Microseven, confirm form remains visible with error text instead of
+  collapsing.
+
 ## 2.4.0-rc2.0
 **Adds Layered Stream Discovery (continue path-walker after first success
 to surface 401-locked stream candidates), syncs spreadsheet v9 →

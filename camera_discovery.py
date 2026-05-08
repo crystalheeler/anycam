@@ -28,7 +28,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 from aiohttp import web
 import aiohttp
@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.4.0-rc2.0"  # must match config.yaml
+CURRENT_VERSION = "2.5.0-rc1.8"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -469,6 +469,33 @@ _FOCUSED_CAMERA: str | None = None
 # is added here so future stream requests skip hw decode immediately.
 _HW_UNAVAILABLE: set = set()
 
+# 2.4.0-rc3.0: ordered list of (decoder_name, codec) candidates that
+# _probe_hw_decoders tries at startup, and that snap_loop iterates when
+# selecting a hardware decoder for a given stream. Module-level so both
+# the probe and snap_loop see the same identifiers — previously the
+# probe defined this as a local list and snap_loop referenced
+# _HW_DECODER_CANDIDATES expecting it to be a global, causing NameError
+# the first time a stream tried to launch with hw_decode toggled on.
+# The bug had been latent since 2.2.5 because the probe always added
+# every candidate to _HW_UNAVAILABLE on systems without HW decode, so
+# the for loop in snap_loop iterated over an empty list (which would
+# itself NameError in CPython but apparently never fired in practice
+# until rc3.0). Order = preference: v4l2m2m (Pi/embedded) first, then
+# vaapi (Intel/AMD GPU). Note that hevc_v4l2m2m is included for
+# completeness but Pi 4 specifically does NOT expose stateful HEVC
+# m2m — only stateless via rpivid (/dev/video19), which requires an
+# ffmpeg build with --enable-v4l2-request that this addon doesn't
+# currently bundle. See _probe_hw_decoders for rpivid detection
+# and the more accurate "rpivid present but ffmpeg lacks v4l2-request"
+# diagnostic message. Planned for 2.6.0: bundle a custom ffmpeg with
+# rpivid support so HEVC HW decode actually works on Pi 4.
+_HW_DECODER_CANDIDATES: list[tuple[str, str]] = [
+    ("hevc_v4l2m2m", "hevc"),
+    ("h264_v4l2m2m", "h264"),
+    ("hevc_vaapi",   "hevc"),
+    ("h264_vaapi",   "h264"),
+]
+
 # ── Shared thread pool for all run_in_executor calls ─────────────────────────
 # Using a named, bounded pool instead of None (default) gives us:
 #   1. Explicit max_workers cap — prevents unbounded thread creation on scan
@@ -532,6 +559,166 @@ _snap_last_access: dict = {}
 # remains as a runtime safety net.
 _THROTTLE_TRACK: dict = {}   # ip → last RTSP TCP-open timestamp
 
+# 2.4.0-rc3.5 Aggressive Cooldown Detection (ACD).
+# Defense-in-depth on top of brand-static throttle data: when a TCP
+# probe to an IP fails with a RST or broken pipe, record the timestamp.
+# If 2+ such failures land in a 60-second window, we infer the camera's
+# real-world cooldown is stricter than what CAMERA_DB documents (or the
+# camera is in an escalated firmware lockout from prior pressure), and
+# we escalate the per-IP cooldown to a fixed 30s for the next 5 minutes.
+# This is the safety net the original Throttle-Aware Probe Pacing Plan
+# suggested but didn't ship — added here because the rc3.4 Microseven
+# field test surfaced a leak (alt-port Layer 1 walks) that the static
+# pacing didn't catch in time.
+#
+# Records are pruned on every observation so this dict stays tiny in
+# practice (typically empty; one entry per actively-misbehaving IP for
+# the duration of the cooldown).
+_RST_OBSERVED:  dict = {}    # ip → list[timestamp] of recent RSTs/RST-likes
+_ACD_ESCALATED: dict = {}    # ip → timestamp until which 30s cooldown applies
+
+ACD_RST_WINDOW_S       = 60.0    # observation window
+ACD_RST_THRESHOLD      = 2       # RSTs within window to trigger escalation
+ACD_ESCALATED_COOLDOWN = 30.0    # cooldown applied while escalated
+ACD_ESCALATION_TTL_S   = 300.0   # how long an escalation lasts
+
+
+def _record_rst_observation(ip: str) -> None:
+    """Record a RST/broken-pipe observation for `ip`. Prunes entries
+    older than ACD_RST_WINDOW_S. If the remaining count meets the
+    threshold, sets _ACD_ESCALATED[ip] for ACD_ESCALATION_TTL_S so
+    subsequent _throttle_wait_if_needed calls apply the escalated
+    cooldown. Idempotent and cheap; safe to call from sync or async
+    code paths."""
+    if not ip:
+        return
+    now = time.monotonic()
+    obs = _RST_OBSERVED.get(ip, [])
+    # prune
+    obs = [t for t in obs if (now - t) < ACD_RST_WINDOW_S]
+    obs.append(now)
+    _RST_OBSERVED[ip] = obs
+    if len(obs) >= ACD_RST_THRESHOLD:
+        already = _ACD_ESCALATED.get(ip, 0.0) > now
+        _ACD_ESCALATED[ip] = now + ACD_ESCALATION_TTL_S
+        if not already:
+            log.warning(
+                f"  ACD: {ip} produced {len(obs)} RST/broken-pipe "
+                f"events in <{ACD_RST_WINDOW_S:.0f}s — escalating per-IP "
+                f"cooldown to {ACD_ESCALATED_COOLDOWN:.0f}s for "
+                f"{ACD_ESCALATION_TTL_S:.0f}s")
+
+
+# ── 2.5.0-rc1.0: streaming_recipe consumer infrastructure ────────────
+# Two helpers used by find_rtsp_path's path-list builder and by the
+# single-socket walker's SDP-parsing branch when a brand entry's
+# streaming_recipe directs us to walk DVR/NVR channels rather than
+# the universal RTSP_PATHS list.
+
+# Codec match for the "sdp_has_video_track" populated-channel test.
+# Pattern intentionally matches both H264 and H.264 etc. by treating
+# the dot as an optional character via the regex below.
+_SDP_VIDEO_CODEC_RE = re.compile(
+    r"a=rtpmap:\d+\s+(H\.?264|H\.?265|HEVC|MPEG[- ]?4)",
+    re.IGNORECASE,
+)
+
+
+def _sdp_has_video_track(sdp_body: str) -> bool:
+    """2.5.0-rc1.0: stricter populated-channel heuristic for DVR/NVR
+    devices that allocate virtual stream slots regardless of whether a
+    physical camera is connected to that channel.
+
+    Field-tested case (Lorex D861A8B-Z): an 8-channel DVR with 5
+    cameras connected returned RTSP/1.0 200 OK on ALL 8 channel-
+    iterated DESCRIBE requests. Without a populated-channel filter, we
+    would surface the first 200-OK channel as the working stream — and
+    that channel might be one of the empty 3.
+
+    Returns True when SDP contains an `m=video` line AND at least one
+    `a=rtpmap` mapping to a real video codec (H.264 / H.265 / HEVC /
+    MPEG4). Returns False when SDP is empty, lacks `m=video`, or has
+    `m=video` but no recognised codec rtpmap.
+
+    The plan flagged this heuristic as "needs empirical confirmation
+    against a known-empty channel before finalising"; user opted to
+    ship blind on the rationale that we will always be guessing for
+    untested hardware. If field test on the Lorex D861A8B-Z surfaces
+    phantom or missing cards, the fix lands as a 2.5.0-rc1.1 bumpfix
+    refining either this regex or the `m=video` substring check."""
+    if not sdp_body or "m=video" not in sdp_body.lower():
+        return False
+    return bool(_SDP_VIDEO_CODEC_RE.search(sdp_body))
+
+
+def _expand_channel_iterate_paths(recipe: dict,
+                                   channel_cap: int = 16) -> list[str]:
+    """2.5.0-rc1.0: expand a `streaming_recipe` of type
+    `channel_iterate` into an ordered RTSP path list.
+
+    Per-channel ordering is `(channel, subtype)` lexicographic:
+    channel 1 main, channel 1 sub, channel 2 main, channel 2 sub, ...
+    Main-before-sub within a channel is intentional — when a camera
+    sits on channel 3 the user wants `channel=3&subtype=0` (main)
+    discovered before `channel=3&subtype=1` (sub) so the main stream
+    becomes the primary stream URL.
+
+    `channel_cap` defaults to 16 (4ch / 8ch / 16ch DVRs and most
+    consumer NVRs). NVRs with >16 physical channels would need a
+    per-entry override (deferred to a later release; tracked in the
+    Lorex/Dahua DVR Family Support Plan). Caps the recipe's `channels`
+    list at the cap value, then appends `fallback_paths` verbatim.
+
+    Returns [] for unrecognised recipe shape (wrong `type`, missing
+    `path_template`) so callers can fall through to the universal path
+    list without special-casing."""
+    if recipe.get("type") != "channel_iterate":
+        return []
+    template = recipe.get("path_template", "")
+    if not template:
+        return []
+    raw_channels = recipe.get("channels", list(range(1, 17)))
+    channels    = [c for c in raw_channels if c <= channel_cap]
+    subtypes    = recipe.get("subtypes", [0, 1])
+    paths: list[str] = []
+    for ch in channels:
+        for st in subtypes:
+            try:
+                paths.append(template.format(ch=ch, st=st))
+            except (KeyError, IndexError):
+                # Malformed template — skip rather than raise; the
+                # walker can still try fallback_paths below.
+                continue
+    paths.extend(recipe.get("fallback_paths", []))
+    # 2.5.0-rc1.1: filter out paths that still contain unexpanded
+    # `{...}` placeholders (e.g. recipe fallback_paths declared as
+    # `/h264/ch{ch}/main/av_stream` for legacy Dahua firmware — these
+    # were intended to iterate channels but the helper currently emits
+    # them verbatim; without the filter the walker probes the literal
+    # string and the camera responds 401 to a path that can never
+    # match). Future improvement: expand placeholders in fallback_paths
+    # the same way as path_template above; tracked separately. For now
+    # this filter prevents noise probing without losing real-channel
+    # coverage (which path_template-based paths above already provide).
+    paths = [p for p in paths if "{" not in p and "}" not in p]
+    return paths
+
+
+def _extract_channel_from_rtsp_url(url: str) -> str:
+    """2.5.0-rc1.2: pull the `channel=N` value out of a Dahua-format
+    RTSP URL like `rtsp://.../cam/realmonitor?channel=3&subtype=0`.
+    Returns the channel string (e.g. "3") or "" if not found.
+
+    Used by the post-cred-auth channel enumeration helper to know
+    which channel the cred-auth flow already established working,
+    so we don't re-walk it during enumeration of the other channels.
+    Tolerant of URL form: query may use `&` or `?` separator,
+    case-insensitive on the param name."""
+    if not url:
+        return ""
+    m = re.search(r"[?&]channel=(\d+)", url, re.IGNORECASE)
+    return m.group(1) if m else ""
+
 
 def _parse_throttle_seconds(amount_str: str) -> float:
     """Extract seconds from a CAMERA_DB throttle_amount string. Returns
@@ -566,11 +753,26 @@ async def _throttle_wait_if_needed(ip: str, throttle_s: float,
                                     log_label: str = "") -> None:
     """If the IP is in cooldown, sleep until it clears. Updates the
     last-open timestamp before returning so the NEXT caller waits from
-    THIS call's TCP-open moment. Cheap no-op when throttle_s <= 0 or
-    when no recent open is recorded."""
+    THIS call's TCP-open moment. Cheap no-op when throttle_s <= 0 AND
+    no ACD escalation is active.
+
+    2.4.0-rc3.5: also honors _ACD_ESCALATED — if an IP has produced
+    enough RSTs to trip Aggressive Cooldown Detection, we use the
+    escalated cooldown (max of brand-static and ACD value) regardless
+    of what throttle_s the caller passed. This means even brands with
+    no documented throttle get protection if the camera is observed
+    to be misbehaving."""
+    now = time.monotonic()
+    # ACD: if escalated, override caller-supplied throttle_s with the
+    # max of (caller value, escalated value) for the duration of the
+    # escalation. Once the TTL elapses, _ACD_ESCALATED entry is stale
+    # and ignored (we don't actively prune; next call past the TTL
+    # simply sees the escalation_until timestamp in the past).
+    if ip and _ACD_ESCALATED.get(ip, 0.0) > now:
+        if throttle_s < ACD_ESCALATED_COOLDOWN:
+            throttle_s = ACD_ESCALATED_COOLDOWN
     if throttle_s <= 0:
         return
-    now  = time.monotonic()
     last = _THROTTLE_TRACK.get(ip, 0.0)
     elapsed = now - last
     if last and elapsed < throttle_s:
@@ -593,6 +795,12 @@ def _snap_state(camera_id: str) -> dict:
             "frame":             None,
             "frame_time":        0.0,
             "frame_count":       0,
+            # 2.4.0-rc3.4 Bug 2 fix: per-ffmpeg-run counter (resets on each
+            # subprocess launch in snap_loop). Used by handle_snapshot's
+            # X-Stream-Status logic; init here so any read before the first
+            # ffmpeg launch sees 0 (interpreted correctly as "no frames yet
+            # this run").
+            "current_run_frames": 0,
             "proc":              None,
             "task":              None,
             "restart_count":     0,
@@ -605,6 +813,13 @@ def _snap_state(camera_id: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 CAMERAS    = {}
+# 2.4.0-rc2.6: Pending-flush card creation buffer. During a scan, new
+# cards discovered are routed here instead of CAMERAS so they don't
+# render to the UI mid-scan. After dedup runs at end of scan, survivors
+# flush into CAMERAS in one batch. None when no scan is in progress;
+# scan-time card writers should call _publish_scan_card(cam) which
+# handles the routing.
+PENDING_CAMERAS: dict | None = None
 BLACKLIST  = set()
 _SCAN_CANCELLED = False   # set to True to request graceful scan abort
 SCAN_STATE = {"running": False, "progress": 0, "message": "Idle. Click Scan to begin.",
@@ -678,7 +893,7 @@ WS_RTSP_PATHS = [
 
 NON_CAMERA_KEYWORDS = [
     "router", "gateway", "firewall", "switch", "access point",
-    "printer", "print server", "jetdirect", "brother", "epson", "canon printer",
+    "printer", "print server", "jetdirect", "ipp", "brother", "epson", "canon printer",
     "nas", "synology", "qnap", "drobo", "buffalo",
     "smart tv", "television", "blu-ray", "media player",
     "ups", "power management", "voip", "pbx", "phone",
@@ -737,6 +952,21 @@ CAMERA_DB: list[dict] = [
         "request_behaviors": ("Standard RFC 2326. Digest auth "
                               "(realm typically \"IP Camera(<chipset>)\")."),
         "request_behaviors_confidence":"HIGH",
+        # 2.4.0-rc2.4: skip_layer2: True. Hikvision single-camera units
+        # (e.g. CrystalHeeler's Hikvision DS-2DE4A425IW PTZ) require auth — observed
+        # consistently across all Layer 1 paths returning 401 with the
+        # same realm. Layer 2's multi-socket walk produces the same
+        # 401s on the same paths because realm/scheme are server-side,
+        # not socket-side, per RFC 7235 §2.2. Live-tested: the Hikvision burned
+        # ~45s through Layer 2 bail-after-10 before giving up. Setting
+        # this flag short-circuits Layer 2 immediately when the camera
+        # is in pre-creds discovery state. Users who want to verify
+        # Layer 2 didn't miss a firmware-quirk path can click the
+        # per-card "Deep Re-Probe" button (rc2.4) which runs Layer 2
+        # on demand. NVR variants of Hikvision (Hikvision NVR entry)
+        # already have this flag for the same reason.
+        "skip_layer2":            True,
+        "skip_layer2_confidence": "HIGH",
     },
     {
         "name": "Dahua",
@@ -1980,8 +2210,27 @@ CAMERA_DB: list[dict] = [
             "subtype_sub": 1,
             "fallback_paths": ["/h264/ch{ch}/main/av_stream", "/live/ch{ch}/main"],
             "populated_channel_test": "sdp_has_video_track",
+            # 2.5.0-rc1.2: per-channel HTTP snapshot URL template. The
+            # Dahua snapshot.cgi endpoint accepts ?channel=N to return
+            # that specific physical channel's still image; without the
+            # query param the DVR returns either the default channel
+            # or a generic placeholder (~3.5 KB). Used by the channel
+            # enumeration helper to build per-card snap URLs so each
+            # channel's card thumbnail polls its own snapshot.
+            "snap_url_template": "http://{ip}/cgi-bin/snapshot.cgi?channel={ch}",
         },
         "streaming_recipe_confidence": "HIGH",
+        # 2.4.0-rc2.2 — skip_layer2: True. Multi-channel DVR/NVRs do
+        # not benefit from Layer 2 fallback (multi-socket fanout) on a
+        # single-IP target — the right path requires channel iteration
+        # via streaming_recipe (consumed in rc3.x), not more retries on
+        # a single-channel guess. Without this flag rc2.1's Layer 2
+        # consumer falls through and grinds 50s on the Lorex DVR
+        # before bail-after-10 fires; with the flag set, Layer 2 is
+        # skipped immediately with a one-line log entry. Companion to
+        # the rc2.1 code-side short-circuit at find_rtsp_path.
+        "skip_layer2": True,
+        "skip_layer2_confidence": "HIGH",
         "notes": ("Multi-channel DVR/NVR family — Lorex (post-Dahua-"
                   "acquisition), Dahua direct, Amcrest (rebrand). "
                   "Series: D861/862/863/871/841/881, N841/844/846/861/"
@@ -2041,7 +2290,17 @@ CAMERA_DB: list[dict] = [
         "http_body":   [],
         "http_headers":["app-webs/"],
         "nmap_products":[],
-        "onvif_scopes": ["onvif://www.onvif.org/Profile/Streaming"],
+        # 2.4.0-rc2.2 — onvif_scopes emptied. Previously contained
+        # "onvif://www.onvif.org/Profile/Streaming" which is the
+        # standard ONVIF Profile S spec identifier returned by EVERY
+        # Profile-S-compliant ONVIF device on the planet (IP cameras,
+        # NVRs, encoders, all of them). Per ONVIF Core Spec it carries
+        # zero brand-specific signal — it identifies the protocol, not
+        # the manufacturer. Including it here was scoring +1 to
+        # Hikvision NVR for any ONVIF haystack and contributed to
+        # CrystalHeeler's Hikvision DS-2DE4A425IW-DE single PTZ camera
+        # being misclassified as a Hikvision NVR.
+        "onvif_scopes": [],
         "default_ports": [554, 80, 8000, 443],
         "notes": ("Hikvision multi-channel NVR/DVR. DS-7xxx series NVRs and "
                   "DS-77xxx HUHI/HQHI/HGHI Turbo HD DVRs. HiLook is a "
@@ -2255,7 +2514,18 @@ CAMERA_DB: list[dict] = [
 
 # Build fast lookup structures from the DB
 _DB_MANUFACTURERS: set[str] = set()   # all lowercase match strings for is_camera_positive
-_DB_ENTRIES_BY_KEY: dict[str, dict] = {}  # pattern → db_entry for identify_manufacturer
+# 2.4.0-rc2.2 — multi-entry support per keyword. Previously this was
+# `dict[str, dict]` which silently dropped all-but-the-last entry that
+# claimed a given keyword. List-order processing meant later entries
+# (e.g., Hikvision NVR at line 2046) clobbered earlier ones (Hikvision
+# single camera at line 713) for shared keywords like "hikvision". A
+# single Hikvision PTZ camera then lost every haystack hit on the bare
+# word "hikvision" to the NVR entry, contributing to misclassification
+# of CrystalHeeler's Hikvision DS-2DE4A425IW-DE PTZ as a Hikvision NVR. Storing all
+# matching entries per keyword lets identify_manufacturer credit each
+# legitimately-claiming entry, and the entry with the most distinct
+# keyword hits across the haystack wins.
+_DB_ENTRIES_BY_KEY: dict[str, list[dict]] = {}
 
 for _entry in CAMERA_DB:
     for _field in ("http_titles", "http_body", "http_headers",
@@ -2263,7 +2533,17 @@ for _entry in CAMERA_DB:
         for _kw in _entry.get(_field, []):
             _k = _kw.lower()
             _DB_MANUFACTURERS.add(_k)
-            _DB_ENTRIES_BY_KEY[_k] = _entry
+            # Each entry appears at most once per keyword bucket — a
+            # keyword that occurs in MULTIPLE fields of the same entry
+            # (e.g., "hikvision" in aliases, http_titles, http_body,
+            # http_headers, nmap_products, AND onvif_scopes of the
+            # Hikvision entry) counts as ONE keyword match for that
+            # entry, not six. Otherwise scoring would be massively
+            # skewed in favor of entries that repeat the same keyword
+            # across many fields.
+            _bucket = _DB_ENTRIES_BY_KEY.setdefault(_k, [])
+            if _entry not in _bucket:
+                _bucket.append(_entry)
 
 
 import re as _re_mod
@@ -2286,21 +2566,62 @@ def identify_manufacturer(text: str) -> dict | None:
     """
     Given a blob of text (HTTP body, nmap banner, etc.), return the best-matching
     CAMERA_DB entry, or None if no match found.
-    Best match = entry with the most keyword hits.
+
+    2.4.0-rc2.2 — scoring rewritten to credit ALL entries that claim a
+    matched keyword (previously only the last-written entry got credit
+    due to dict overwrite). Tie-breaker: when the top score is shared
+    by multiple entries, prefer non-NVR/DVR entries — multi-channel
+    NVR entries are the SUPERSET case (need extra signals like
+    series-specific keywords to win), and a single camera with only
+    the bare brand name should default to the single-camera entry,
+    not the NVR.
+
     Short keywords (< 6 chars) require word-boundary matching to avoid false
     positives (e.g. 'acti' matching 'interactive' on HP printer pages).
     """
     text_l = text.lower()
+    # name -> count of distinct keywords that matched
     scores: dict[str, int] = {}
-    for kw, entry in _DB_ENTRIES_BY_KEY.items():
-        if _kw_matches(kw, text_l):
+    # name -> the entry object (cached to avoid re-iterating CAMERA_DB)
+    name_to_entry: dict[str, dict] = {}
+    for kw, entries in _DB_ENTRIES_BY_KEY.items():
+        if not _kw_matches(kw, text_l):
+            continue
+        for entry in entries:
             name = entry["name"]
             scores[name] = scores.get(name, 0) + 1
+            name_to_entry[name] = entry
     if not scores:
         return None
-    best_name = max(scores, key=lambda n: scores[n])
+
+    top_score = max(scores.values())
+    tied = [n for n, s in scores.items() if s == top_score]
+    if len(tied) == 1:
+        return name_to_entry[tied[0]]
+
+    # Tie-breaker: prefer entries that are NOT marked as multi-channel
+    # NVR/DVR families. Without this, a haystack containing only the
+    # bare brand name (e.g. just "hikvision" with no series identifier)
+    # would tie 1-1 between Hikvision and Hikvision NVR, and CAMERA_DB
+    # ordering alone would decide. NVR entries should win only when
+    # they accumulate MORE distinct hits via series-specific keywords
+    # (DS-77xxx, Turbo HD, app-webs/, etc.) — that's the right signal
+    # for "this is actually an NVR, not just a camera of this brand."
+    def _is_nvr_family(entry: dict) -> bool:
+        n = entry.get("name", "").lower()
+        return ("nvr" in n or "dvr" in n
+                or "family" in n
+                or entry.get("streaming_recipe", {}).get("type") == "channel_iterate")
+    non_nvr_tied = [n for n in tied if not _is_nvr_family(name_to_entry[n])]
+    if non_nvr_tied:
+        # Among non-NVR tied entries, prefer earliest in CAMERA_DB list
+        # order (which is the canonical/most-common entry for that brand).
+        for entry in CAMERA_DB:
+            if entry["name"] in non_nvr_tied:
+                return entry
+    # All tied entries are NVR-family — fall back to CAMERA_DB order
     for entry in CAMERA_DB:
-        if entry["name"] == best_name:
+        if entry["name"] in tied:
             return entry
     return None
 
@@ -2675,6 +2996,33 @@ def save_cameras() -> None:
         safe.append(s)
     CAMS_FILE.write_text(json.dumps(safe, indent=2))
 
+
+def _publish_scan_card(cam: dict) -> None:
+    """2.4.0-rc2.6: Route a scan-time-discovered card through the
+    pending buffer if a scan is in progress, otherwise into CAMERAS
+    directly.
+
+    During run_scan, PENDING_CAMERAS is set to a fresh dict at scan
+    start. Newly-discovered cards accumulate there during the scan
+    and only get flushed to CAMERAS after the dedup pass — preventing
+    the UI from rendering transient duplicate cards (Microseven-as-
+    4-cards, Hikvision-as-5-cards) that would later be collapsed by
+    dedup. The user previously had a 40-80s window where they could
+    click on cards that were about to disappear, which broke
+    cred-entry flows mid-attempt.
+
+    Outside of a scan (PENDING_CAMERAS is None), this is a no-op
+    pass-through: cards go into CAMERAS as before. Callers that
+    aren't in run_scan (manual-add, cred-attempt, etc.) still write
+    directly to CAMERAS — only the scan-time discovery sites should
+    use this helper.
+    """
+    if PENDING_CAMERAS is not None:
+        PENDING_CAMERAS[cam["id"]] = cam
+    else:
+        CAMERAS[cam["id"]] = cam
+
+
 def load_blacklist() -> None:
 
     if not BLACKLIST_FILE.exists():
@@ -2706,6 +3054,70 @@ def save_feedback() -> None:
 
     DATA_DIR.mkdir(exist_ok=True)
     FEEDBACK_FILE.write_text(json.dumps(FEEDBACK, indent=2))
+
+
+def _matches_feedback_fingerprint(host: dict, port: int) -> tuple[bool, str]:
+    """2.4.0-rc2.4: Check whether a candidate scan host matches any
+    "Not a Camera" feedback record from past scans, conservatively.
+
+    Returns (skip, reason). skip=True means the host should be excluded
+    from the current scan because we have a high-confidence fingerprint
+    match indicating the user previously rejected this device pattern.
+
+    `host` should be a focused-scan result dict with mac_addr/mac_vendor/
+    nmap_product fields populated. `port` is the open port being checked.
+
+    Conservative match rule: skip ONLY when a stored record has
+        same OUI (first 3 MAC octets) AND
+        (same nmap_product OR same port) AND
+        the user marked share=True OR set a specific reason_type
+            (router/printer/nas/etc. — not "unknown")
+    Same OUI alone is NOT enough — preserves the "TP-Link switch on .12
+    + Tapo camera on .15" case (both share OUI but only the switch was
+    rejected). Same OUI + same product/port indicates very likely the
+    same model device on a different IP, which is the case where we
+    want to suppress.
+
+    On match, returns the reason from the stored record so the scan log
+    can surface why the host was skipped — observable, not silent.
+    """
+    if not FEEDBACK:
+        return (False, "")
+
+    mac_addr = (host.get("mac_addr") or "").upper()
+    if not mac_addr or len(mac_addr) < 8:
+        return (False, "")
+    candidate_oui = mac_addr[:8]  # "XX:XX:XX"
+    candidate_product = (host.get("nmap_product") or "").lower()
+
+    for cid, record in FEEDBACK.items():
+        fp = record.get("fingerprint", {})
+        rec_oui = (fp.get("oui") or "").upper()
+        if not rec_oui or rec_oui != candidate_oui:
+            continue
+        rec_product = (fp.get("nmap_product") or "").lower()
+        rec_port = fp.get("port")
+        rec_reason = record.get("reason_type", "")
+
+        # Reject "unknown" reason — too weak; user might have clicked
+        # Not-a-Camera before knowing what it was.
+        if rec_reason in ("", "unknown"):
+            continue
+
+        # Conservative match: same OUI + (same product OR same port)
+        product_matches = bool(
+            candidate_product and rec_product
+            and candidate_product == rec_product)
+        port_matches = bool(rec_port and rec_port == port)
+
+        if product_matches or port_matches:
+            why = (f"OUI {candidate_oui} + "
+                   + ("product match" if product_matches
+                      else f"port {port} match")
+                   + f"; reason={rec_reason}")
+            return (True, why)
+
+    return (False, "")
 
 def build_fingerprint(cam: dict) -> dict:
     """
@@ -2837,7 +3249,23 @@ def classify_device(nmap_info: dict) -> tuple[str, str]:
     if non_hits:
         return "not_camera", f"Detected as: {', '.join(non_hits)}"
 
+    # rc2.2 — Port-based not_camera classification.
+    # Without -sV (rc2.2), nmap doesn't always tag print/SSH services in
+    # the `service` text reliably across firmware variants. Fall back to
+    # port presence: if a host exposes a print or SSH port AND no camera
+    # keywords or RTSP ports were matched, it's not a camera. Cameras
+    # virtually never expose 631 (IPP) or 9100 (raw print). SSH (22) is
+    # weaker — some IP cameras have it open for service mode — so we
+    # only fire the SSH-based reject when the host has NO HTTP-adjacent
+    # ports that cameras typically expose.
     ports = [p["port"] for p in nmap_info.get("open_ports", [])]
+    if any(p in (631, 9100) for p in ports):
+        return "not_camera", "Print port detected (631/IPP or 9100/raw)"
+    camera_http_ports = {80, 81, 88, 443, 554, 8000, 8080, 8081,
+                         8082, 8443, 8554, 8765, 8888}
+    if 22 in ports and not any(p in camera_http_ports for p in ports):
+        return "not_camera", "SSH-only host (no camera ports)"
+
     if any(p in (554, 8554, 10554, 2020, 8765) for p in ports):
         return "camera", "RTSP port found"
 
@@ -3099,37 +3527,142 @@ def onvif_discover(timeout: int = 5) -> list[dict]:
 # Stage 2 — nmap scans
 # ─────────────────────────────────────────────────────────────────────────────
 
+# 2.4.0-rc2.1 — Camera-relevant TCP ports for focused_nmap_scan.
+# Replaces the rc2.0 approach of "--top-ports 1000 + small augmentation"
+# (which had a regression: nmap intersects -p with --top-ports rather
+# than unioning, silently shrinking the scan to ~4 ports). Using -p
+# with this explicit list scans ONLY camera-relevant ports — vastly
+# faster than top-1000 (which wastes 95%+ of probes on non-camera
+# services like SMTP, NFS, MySQL, X11) and catches every brand we know
+# about plus generic alt-HTTP/HTTPS ports used as common practice.
+#
+# This list is the union of:
+#   (a) CAMERA_DB default_ports across all 78 entries (22 ports), and
+#   (b) ports documented by manufacturer/VMS-vendor/industry sources
+#       NOT yet represented in CAMERA_DB default_ports (30 ports).
+#
+# Research foundation: 80+ authoritative sources (manufacturer-official
+# documentation, support knowledge bases, VMS vendor docs). Full
+# bibliography in the rc2.1 audit report.
+#
+# Trade-off: an "exotic camera on a truly weird port" (e.g., 12345)
+# will be missed. In practice this is vanishingly rare — camera firmware
+# almost always picks ports in HTTP-adjacent or RTSP-adjacent ranges.
+# Devices on weird ports that ARE on the network still appear in the
+# ARP-discovered live-hosts list; they just have no service info.
+CAMERA_RELEVANT_PORTS: list[int] = [
+    # ── Classifier-only ports (rc2.2) ────────────────────────────────
+    # These ports are NOT camera ports — they're scanned so the verdict
+    # logic has signals to REJECT non-camera devices that happen to
+    # expose a web UI on 80/443/8080. Without these, an HP printer or
+    # NAS with only a web admin page falls through as a "camera
+    # candidate" and gets RTSP-probed unnecessarily. rc1.0's top-1000
+    # scan caught these incidentally; rc2.1's narrow port list lost
+    # them, surfacing a regression where the an HP printer (gSOAP
+    # 2.7 web admin) re-appeared as a camera. Cost: 3 extra ports per
+    # host = ~50ms total in our SYN-only scan.
+    22,     # SSH — IoT device, NAS, embedded Linux non-cameras
+    631,    # IPP printing — every modern network printer
+    9100,   # Raw print (HP JetDirect) — virtually all network printers
+    # ── Standard camera ports (in CAMERA_DB) ──────────────────────────
+    80,     # HTTP — universal
+    81,     # Blue Iris default web; common alt-HTTP for cameras
+    86,     # Pelco RTP/RTSP-over-HTTP tunnel
+    88,     # Foscam alt-HTTP
+    443,    # HTTPS — universal
+    554,    # RTSP — universal
+    558,    # Hanwha NVR (newer)
+    1085,   # Swann (legacy)
+    1756,   # Bosch RCP+ (proprietary)
+    1757,   # Bosch RCP+ (proprietary)
+    1758,   # Bosch RCP+ (proprietary)
+    1935,   # RTMP — Reolink, generic camera streaming
+    2020,   # ACTi
+    2543,   # Pelco/3xLogic
+    4520,   # Hanwha SUNAPI device port range
+    4521,   # Hanwha SUNAPI device port range
+    4522,   # Hanwha SUNAPI device port range
+    4523,   # Hanwha SUNAPI device port range
+    4524,   # Hanwha SUNAPI device port range (final = RTSP for some NVRs)
+    4550,   # GeoVision command port
+    7001,   # Network Optix Nx Witness mediaserver
+    7441,   # Ubiquiti UniFi Protect RTSP
+    7442,   # Ubiquiti UniFi Protect NVR communications
+    7443,   # Ubiquiti UniFi Protect HTTPS UI
+    7444,   # Ubiquiti UniFi Protect camera firmware
+    7446,   # Ubiquiti UniFi Protect web-media
+    7447,   # Ubiquiti UniFi Protect SRTSP
+    7550,   # Ubiquiti UniFi Protect streaming
+    8000,   # Hikvision SDK; alt-HTTP for some
+    8001,   # alt-HTTP range
+    8080,   # Mobotix/Vivotek/generic alt-HTTP
+    8081,   # Vivotek secondary HTTP; common alt
+    8082,   # alt-HTTP range
+    8443,   # alt-HTTPS — universal practice (was missing from CAMERA_DB)
+    8554,   # Vivotek/GeoVision alt-RTSP
+    8765,   # GeoVision alt
+    8888,   # Foscam streaming
+    8899,   # Foscam ONVIF
+    9000,   # Reolink basic service port
+    9010,   # Hikvision Ezviz command
+    9020,   # Hikvision Ezviz live view
+    9090,   # Uniview admin
+    10554,  # Hikvision alt-RTSP
+    34567,  # Dahua-variant admin (XMeye/H264DVR firmware)
+    35000,  # Dahua-variant admin
+    37777,  # Dahua TCP admin
+    49152,  # Pelco Endura/non-Sarix; Axis UPnP
+    49153,  # Pelco Endura svc-tcp range
+    49154,  # Pelco Endura svc-tcp range
+    49155,  # Pelco Endura svc-tcp range
+    49156,  # Pelco Endura svc-tcp range
+]
+
+
 def focused_nmap_scan(host_list: list[str]) -> list[dict]:
     """
-    Scan only known-live hosts on the top 1000 most common ports plus a
-    small set of camera-specific ports that aren't in nmap's top-1000.
-    Using nmap --top-ports 1000 covers all standard camera ports plus
-    thousands of other well-known ports, catching cameras on non-standard
-    ports and identifying devices by service banner even without a camera
-    protocol.  Because hosts are pre-confirmed alive via ARP, no timeout
-    waste on dead IPs.
+    Scan only known-live hosts on the camera-relevant TCP port set
+    (CAMERA_RELEVANT_PORTS, currently 54 ports — see definition above
+    for derivation, classifier-port rationale, and source bibliography).
 
-    2.4.0-rc2.0: augmented with 6 camera-specific ports likely missing
-    from nmap top-1000:
-      - 4550, 8765    : GeoVision admin / streaming
-      - 7441, 7447    : Ubiquiti UniFi Protect HTTPS / RTSP
-      - 34567, 35000  : Dahua admin (newer firmware variants)
-    These come from the union of CAMERA_DB default_ports for brands that
-    expose RTSP/HTTP services on non-standard ports. Adding them via
-    nmap's `-p` flag in addition to `--top-ports 1000` ensures we find
-    UniFi Protect, GeoVision, and non-default-port Dahua installations
-    that the standard scan would miss entirely.
+    rc2.2 redesign — drops `-sV` (version detection) entirely and
+    lowers `--host-timeout` from 30s to 15s. Empirically measured on
+    CrystalHeeler's test system B: rc2.1's `-sV --host-timeout 30s` took 36s
+    for 3 hosts AND timed out the Lorex DVR (dropped from output
+    entirely). Pure SYN scan with `--host-timeout 15s` took 1.5s for
+    the same 3 hosts AND found the Lorex's 80/554/35000 cleanly. ~24×
+    faster, and more reliable on slower devices.
 
-    Typical time: 30-90 seconds for 20 hosts.
+    Why `-sV` was hurting:
+      • -sV runs sequential service-banner probes per open port. On
+        slow/throttled devices (Lorex DVR, Microseven Hipcam) the per-
+        port probe latency stacks up past --host-timeout's 30s budget.
+        When the budget expires nmap DROPS THE ENTIRE HOST including
+        already-confirmed open ports — they never reach our parser.
+      • The `product` field that -sV adds (e.g., "gSOAP 2.7") is one
+        of ~10 haystack signals in identify_manufacturer; mac_vendor
+        + ONVIF + HTTP probe + RTSP probe downstream more than
+        compensate. Lost coverage: zero on real-world devices tested.
+
+    What we keep without -sV:
+      • Open-port list (the actual goal of the scan)
+      • mac_vendor (strongest classifier — HP, Lorex Technology, etc.)
+      • service field from /etc/services lookup ("http", "rtsp",
+        "https") — sufficient for _initial_protocol() routing
+
+    Because hosts are pre-confirmed alive via ARP, no timeout waste on
+    dead IPs. Typical time: 1-3 seconds for 14 hosts (rc1.0/rc2.0
+    baseline was ~80s; rc2.1 was still ~75s due to -sV).
     """
     if not host_list:
         return []
-    log.info(f"Focused scan: {len(host_list)} host(s), top 1000 ports + 6 brand-specific")
+    port_list = ",".join(str(p) for p in CAMERA_RELEVANT_PORTS)
+    log.info(f"Focused scan: {len(host_list)} host(s), "
+             f"{len(CAMERA_RELEVANT_PORTS)} camera-relevant ports")
     try:
         r = subprocess.run(
-            ["nmap", "-sV", "--open", "--top-ports", "1000",
-             "-p", "4550,7441,7447,8765,34567,35000",
-             "--host-timeout", "30s", "-T4", "-oX", "-"] + host_list,
+            ["nmap", "--open", "-p", port_list,
+             "--host-timeout", "15s", "-T4", "-oX", "-"] + host_list,
             capture_output=True, text=True, timeout=360,
         )
         hosts = _parse_nmap_xml(r.stdout)
@@ -3527,6 +4060,8 @@ def _probe_rtsp_paths_single_socket(
     host_meta: dict | None = None,
     collect_locked: bool = False,
     expected_realm: str = "",
+    deep_reprobe_mode: bool = False,
+    brand_recipe_paths: list[str] | None = None,
 ) -> tuple[str | None, bool]:
     """rc2 Layer 1: Walk multiple RTSP paths through OPTIONS+DESCRIBE+
     SETUP+TEARDOWN on a SINGLE TCP socket. Returns a tuple
@@ -3677,6 +4212,21 @@ def _probe_rtsp_paths_single_socket(
     # the response digest for each method+uri pair.
     auth_val: str | None = None
 
+    # 2.4.0-rc2.4: early-bail counter for consecutive same-realm 401s.
+    # When auth is required at the server level (RFC 7235 §2.2 — realm
+    # is server-scoped, not URL-scoped), every path on the same socket
+    # will get the same 401 with the same realm. Walking 25-31 paths
+    # to confirm what we already know wastes ~5s per port. After 5
+    # consecutive same-realm 401s we bail and save state for the
+    # Deep Re-Probe button. The counter resets on any non-401 response
+    # OR a 401 with a DIFFERENT realm (rare but possible — some
+    # firmwares scope auth per-resource).
+    consecutive_same_realm_401s: int = 0
+    early_bail_realm: str = ""
+    EARLY_BAIL_THRESHOLD: int = 5
+    bailed_early: bool = False
+    paths_tried_count: int = 0
+
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
         sock.settimeout(timeout)
@@ -3732,6 +4282,11 @@ def _probe_rtsp_paths_single_socket(
                 next_cseq += 1
             except Exception as e:
                 _log(f"OPTIONS exception → bailing single-socket walk: {e}")
+                # 2.4.0-rc3.5 ACD: a mid-walk OPTIONS exception means the
+                # camera RST/closed the socket before we got a response.
+                # Record so that if it happens again on this IP within the
+                # ACD window, the per-IP cooldown escalates.
+                _record_rst_observation(host)
                 return (None, looks_like_rtsp)  # socket dead
             # rc2.1: detect RTSP-server-ness. ANY response starting with
             # "RTSP/" — even 4xx/5xx — confirms the server speaks RTSP.
@@ -3752,9 +4307,48 @@ def _probe_rtsp_paths_single_socket(
                             _log(f"captured Server: {captured_server!r}")
                             break
             if "RTSP/1.0 2" not in resp:
-                _log(f"OPTIONS → {resp.split(CRLF)[0].strip()!r} — skipping path")
-                # Path-level rejection: try next path, socket likely still alive
-                continue
+                # 2.5.0-rc1.1: when OPTIONS returns 401 with WWW-
+                # Authenticate AND we have credentials, don't skip the
+                # path — capture the auth challenge into auth_val and
+                # fall through to DESCRIBE so the existing DESCRIBE-401
+                # retry-with-Digest path can authenticate. Without this
+                # fall-through, DVRs/NVRs that enforce auth on OPTIONS
+                # itself (Lorex/Dahua DVR-NVR family confirmed; some
+                # Dahua IPC variants likely too) silently skip every
+                # path during cred-auth because the walker treated
+                # 401-on-OPTIONS as "path not present." Hikvision-
+                # style firmware avoids the bug by allowing OPTIONS
+                # without auth and only enforcing auth on DESCRIBE.
+                _is_opts_401 = "RTSP/1.0 401" in resp
+                _has_creds   = bool(username or password)
+                if _is_opts_401 and _has_creds:
+                    if not auth_val:
+                        _opts_auth_line = next(
+                            (l for l in resp.splitlines()
+                             if l.lower().startswith("www-authenticate:")),
+                            "")
+                        auth_val = (
+                            _opts_auth_line.split(":", 1)[-1].strip()
+                            if _opts_auth_line else "")
+                    if auth_val:
+                        _log(f"OPTIONS → 401 with auth challenge captured "
+                             f"— falling through to DESCRIBE for {path}")
+                        # Don't `continue` — fall through to DESCRIBE.
+                        # DESCRIBE will also 401, then auth-retry uses
+                        # the auth_val we just captured.
+                    else:
+                        _log(f"OPTIONS → 401 with no WWW-Authenticate "
+                             f"— skipping path")
+                        consecutive_same_realm_401s = 0
+                        continue
+                else:
+                    _log(f"OPTIONS → {resp.split(CRLF)[0].strip()!r} "
+                         f"— skipping path")
+                    # 2.4.0-rc2.4: reset early-bail counter — non-401
+                    # response means this isn't a same-realm-401 streak.
+                    consecutive_same_realm_401s = 0
+                    # Path-level rejection: try next path, socket likely still alive
+                    continue
 
             # ── DESCRIBE (with optional 401-retry) ───────────────────
             try:
@@ -3766,8 +4360,24 @@ def _probe_rtsp_paths_single_socket(
                 _log(f"DESCRIBE exception → bailing: {e}")
                 return (None, looks_like_rtsp)
             if "RTSP/1.0 200" in resp:
+                # 2.4.0-rc2.4: reset early-bail counter — got a 200,
+                # streak of consecutive same-realm 401s is broken.
+                consecutive_same_realm_401s = 0
                 pass  # continue to SDP parse
             elif "401" in resp:
+                # 2.4.0-rc2.4: extract realm for the early-bail
+                # counter. Need to do this regardless of whether
+                # collect_locked is enabled, because the counter
+                # decision is independent.
+                _401_realm = ""
+                _auth_line_global = next(
+                    (l for l in resp.splitlines()
+                     if l.lower().startswith("www-authenticate:")), "")
+                if _auth_line_global:
+                    _auth_v_global = _auth_line_global.split(":", 1)[-1].strip()
+                    _realm_m = re.search(r'realm="([^"]*)"', _auth_v_global)
+                    _401_realm = _realm_m.group(1) if _realm_m else ""
+
                 # 2.4.0-rc2.0: when collect_locked=True AND we already
                 # found a working unauth URL, treat this 401 as a
                 # locked-stream candidate. Filter by expected_realm so
@@ -3776,7 +4386,22 @@ def _probe_rtsp_paths_single_socket(
                 # won't work). Captures realm from the WWW-Authenticate
                 # header before falling through to the existing skip-
                 # without-creds path.
-                if collect_locked and found_working_url and not username:
+                # 2.4.0-rc2.5: in deep_reprobe_mode, eagerly collect
+                # locked candidates regardless of whether an unauth
+                # working_url was found first. The original rc2.0
+                # gating (`collect_locked and found_working_url`)
+                # was designed for the discovery scan where surfacing
+                # locked candidates only makes sense IF the user can
+                # already see ONE stream and is being told there are
+                # MORE that need creds. But Deep Re-Probe is an
+                # explicit user-driven enumeration on a camera that
+                # may have NO unauth streams (e.g. Hikvision);
+                # in that case the user wants to see the locked
+                # candidates anyway so they can enter creds and
+                # unlock them.
+                want_collect = collect_locked and not username and (
+                    found_working_url or deep_reprobe_mode)
+                if want_collect:
                     auth_line = next(
                         (l for l in resp.splitlines()
                          if l.lower().startswith("www-authenticate:")), "")
@@ -3791,19 +4416,93 @@ def _probe_rtsp_paths_single_socket(
                         # one), accept all realms — but the orchestrator
                         # only enables collect_locked when a realm WAS
                         # captured upstream, so this fallback is rare.
-                        if not expected_realm or realm == expected_realm:
+                        # 2.4.0-rc2.6: brand-recipe filter. When the
+                        # caller has identified the camera's brand and
+                        # supplied the brand's known RTSP path list
+                        # (brand_recipe_paths), only surface 401s whose
+                        # path matches the recipe. Without this filter,
+                        # cameras like Hikvision that 401 ALL paths
+                        # (including paths that aren't valid streams on
+                        # the actual camera, e.g. /cam/realmonitor on a
+                        # Hikvision DS-2DE) produce dozens of bogus
+                        # locked candidates. With it, the count drops
+                        # to the brand's actual stream paths (~6 for
+                        # Hikvision DS-2). When brand_recipe_paths is
+                        # None, no filter is applied (backward-compat
+                        # for callers that don't know the brand).
+                        path_matches_recipe = True
+                        if brand_recipe_paths:
+                            # Match by path-prefix to allow variations
+                            # like /Streaming/Channels/101 vs /102/103
+                            # all matching /Streaming/Channels/.
+                            path_matches_recipe = any(
+                                path.startswith(rp.rsplit("/", 1)[0]
+                                               + "/")
+                                or path == rp
+                                or path.split("?")[0] == rp.split("?")[0]
+                                for rp in brand_recipe_paths)
+                        if (not expected_realm or realm == expected_realm) \
+                                and path_matches_recipe:
                             locked_streams.append({
                                 "path": path,
                                 "realm": realm,
                                 "scheme": scheme,
                             })
                             _log(f"LOCKED candidate: {path} (realm={realm!r})")
+                        elif not path_matches_recipe:
+                            _log(f"DESCRIBE 401 path {path!r} not in "
+                                 f"brand recipe — not surfacing as "
+                                 f"locked candidate")
                         else:
                             _log(f"DESCRIBE 401 different realm "
                                  f"(got {realm!r}, expected "
                                  f"{expected_realm!r}) — not surfacing")
                 if not username:
                     _log(f"DESCRIBE → 401 (no creds) — skipping {path}")
+                    # 2.4.0-rc2.4: early-bail counter. Track consecutive
+                    # 401s that share the same realm. After N hits, we
+                    # have high confidence that all remaining paths will
+                    # also 401 with the same realm (auth is enforced at
+                    # the server level per RFC 7235 §2.2). Bail out and
+                    # save state so the Deep Re-Probe button can resume
+                    # the walk on demand.
+                    if early_bail_realm == "" and _401_realm:
+                        early_bail_realm = _401_realm
+                    if _401_realm and _401_realm == early_bail_realm:
+                        consecutive_same_realm_401s += 1
+                    else:
+                        # Different realm OR no realm — reset counter
+                        consecutive_same_realm_401s = 0
+                        if _401_realm:
+                            early_bail_realm = _401_realm
+                            consecutive_same_realm_401s = 1
+                    paths_tried_count = path_idx + 1
+                    if consecutive_same_realm_401s >= EARLY_BAIL_THRESHOLD:
+                        # 2.4.0-rc2.5: in deep_reprobe_mode the user
+                        # explicitly wants to walk every path —
+                        # don't bail out, just keep going so all
+                        # remaining 401s get surfaced as locked
+                        # candidates. The original rc2.4 bail logic
+                        # is the right default for discovery scans
+                        # (saves ~5s/camera) but wrong here.
+                        if deep_reprobe_mode:
+                            _log(f"early-bail threshold reached but "
+                                 f"deep_reprobe_mode=True — continuing "
+                                 f"to enumerate all locked candidates")
+                            continue
+                        # 2.4.0-rc2.5: log at INFO unconditionally
+                        # (was using _log which downgrades to DEBUG
+                        # for unlabeled walks — i.e. all scan-time
+                        # walks, hiding evidence that the optimization
+                        # was firing during normal scans).
+                        log.info(pfx + f" Layer 1 early-bail: "
+                                 f"{EARLY_BAIL_THRESHOLD} consecutive "
+                                 f"401s with realm={early_bail_realm!r} "
+                                 f"— remaining {len(paths) - paths_tried_count} "
+                                 f"path(s) will likely also 401; saving "
+                                 f"state for Deep Re-Probe")
+                        bailed_early = True
+                        break
                     continue
                 # Capture auth_val from this 401 if we haven't already
                 if not auth_val:
@@ -3829,9 +4528,37 @@ def _probe_rtsp_paths_single_socket(
                     return (None, looks_like_rtsp)
                 if "RTSP/1.0 200" not in resp:
                     _log(f"DESCRIBE-auth → {resp.split(CRLF)[0].strip()!r}")
+                    # 2.5.0-rc1.0: auth_attempt_lockout policy. For
+                    # brands whose throttle is a per-IP failed-auth
+                    # counter (Lorex/Dahua DVR-NVR family: 10 failed
+                    # attempts then ~30 min lockout or until power-
+                    # cycle), continuing the walk after a Digest-auth-
+                    # rejected response burns additional attempts on
+                    # credentials we already know are wrong. Stop the
+                    # entire walk after the first auth rejection so
+                    # the user surfaces a clean "credentials wrong"
+                    # failure with one used attempt. Only fires when
+                    # host_meta plumbed the throttle type through
+                    # (find_rtsp_path does this when the brand entry
+                    # is matched). Sets a flag on host_meta so caller
+                    # (cred-auth) can surface a counter-aware message.
+                    _walker_throttle = ""
+                    if host_meta:
+                        _walker_throttle = str(host_meta.get(
+                            "walker_throttle_type", "") or "")
+                    if _walker_throttle == "auth_attempt_lockout":
+                        _log(f"auth_attempt_lockout brand — bailing walk "
+                             f"after first auth rejection (preserves "
+                             f"remaining attempts before camera lockout)")
+                        if host_meta is not None:
+                            host_meta["walker_auth_lockout_bailed"] = True
+                        return (None, looks_like_rtsp)
                     continue
             else:
                 _log(f"DESCRIBE → {resp.split(CRLF)[0].strip()!r} — skipping")
+                # 2.4.0-rc2.4: reset early-bail counter — non-401
+                # response means this isn't a same-realm-401 streak.
+                consecutive_same_realm_401s = 0
                 continue
 
             # ── Parse SDP for first m=video track URL ───────────────
@@ -3841,6 +4568,27 @@ def _probe_rtsp_paths_single_socket(
             if not track_url:
                 _log(f"DESCRIBE 200 but SDP has no m=video — skipping {path}")
                 continue
+
+            # 2.5.0-rc1.0: stricter populated-channel test when the brand
+            # entry's streaming_recipe directs us to use it. DVR/NVR
+            # devices commonly return 200 OK with valid-looking SDP on
+            # channels that have NO physical camera connected — the
+            # `m=video` line is present but no `a=rtpmap` codec mapping
+            # follows, indicating a virtual/empty stream slot. Without
+            # this filter, the walker would surface the first 200-OK
+            # channel as the working stream and the user would see a
+            # blank or frozen card. host_meta-driven so unaffected
+            # (single-camera, IP-camera) probes get the original behavior.
+            _populated_test = ""
+            if host_meta:
+                _populated_test = str(host_meta.get(
+                    "walker_populated_channel_test", "") or "")
+            if _populated_test == "sdp_has_video_track":
+                if not _sdp_has_video_track(sdp_text):
+                    _log(f"DESCRIBE 200 but SDP failed populated-channel "
+                         f"test (no real video codec rtpmap) — likely "
+                         f"empty channel; skipping {path}")
+                    continue
 
             # ── SETUP: TCP-interleaved first, UDP fallback ──────────
             transports = [
@@ -3939,6 +4687,19 @@ def _probe_rtsp_paths_single_socket(
         # has no saved creds.
         if host_meta is not None and collect_locked:
             host_meta["locked_streams"] = locked_streams
+        # 2.4.0-rc2.4: persist early-bail state. When Layer 1 bailed
+        # after EARLY_BAIL_THRESHOLD consecutive same-realm 401s, save
+        # what we tried + what's remaining onto host_meta so the
+        # Deep Re-Probe button can resume the walk on demand without
+        # re-walking what we already know will 401.
+        if host_meta is not None and bailed_early:
+            host_meta["early_bail_reason"] = "layer1_consecutive_401s"
+            host_meta["early_bail_realm"] = early_bail_realm
+            host_meta["early_bail_paths_tried"] = list(
+                paths[:paths_tried_count])
+            host_meta["early_bail_paths_remaining"] = list(
+                paths[paths_tried_count:])
+            host_meta["early_bail_at"] = datetime.datetime.utcnow().isoformat()
         if sock:
             try:
                 sock.close()
@@ -4135,6 +4896,22 @@ def _validate_rtsp_urls_single_socket(
                 next_cseq += 1
             except Exception as e:
                 _log(f"OPTIONS exception → bailing remaining: {e}")
+                # 2.4.0-rc3.5 ACD: see _probe_rtsp_paths_single_socket.
+                # 2.5.0-rc1.4: callers can suppress ACD recording via
+                # `walker_skip_acd` on host_meta. Used by the channel
+                # enumeration helper, which loops over URLs one socket
+                # at a time on the Lorex/Dahua family — a firmware
+                # quirk where the DVR closes the socket after each
+                # full authenticated transaction. Without the suppress
+                # flag, every per-URL walk that completes successfully
+                # but hits a server-side close on the next OPTIONS
+                # would record an RST event, and 2 events in <60s
+                # trigger ACD escalation. That's spurious for the
+                # known socket-close-per-URL behavior of this brand.
+                _skip_acd = bool(host_meta and host_meta.get(
+                    "walker_skip_acd"))
+                if not _skip_acd:
+                    _record_rst_observation(host)
                 return results  # remaining urls stay False
             if resp.startswith("RTSP/") and not captured_server:
                 for _line in resp.split(CRLF):
@@ -4143,8 +4920,44 @@ def _validate_rtsp_urls_single_socket(
                         _log(f"captured Server: {captured_server!r}")
                         break
             if "RTSP/1.0 2" not in resp:
-                _log(f"OPTIONS → {resp.split(CRLF)[0].strip()!r} — skipping URL")
-                continue
+                # 2.5.0-rc1.2: same OPTIONS-401-fall-through fix that
+                # _probe_rtsp_paths_single_socket got in 2.5.0-rc1.1.
+                # When OPTIONS returns 401 with WWW-Authenticate AND we
+                # have credentials, capture the auth challenge into
+                # auth_val and DON'T skip — fall through to DESCRIBE
+                # so the existing DESCRIBE-401-retry-with-Digest path
+                # can authenticate. The discovery walker had this fix
+                # in rc1.1 but the validate walker (used to confirm
+                # sub-stream URLs after the discovery walker found a
+                # working main stream) was missed. Symptom on the Lorex DVR
+                # rc1.1 field log: db_probe walked sub-stream URLs,
+                # OPTIONS-401'd on each, skipped — `stream_profiles
+                # built 1 entry/entries (1 main + 0 sub + 0 validated
+                # locked)` even though the sub-stream URLs were valid.
+                _is_opts_401 = "RTSP/1.0 401" in resp
+                _has_creds   = bool(username or password)
+                if _is_opts_401 and _has_creds:
+                    if not auth_val:
+                        _opts_auth_line = next(
+                            (l for l in resp.splitlines()
+                             if l.lower().startswith("www-authenticate:")),
+                            "")
+                        auth_val = (
+                            _opts_auth_line.split(":", 1)[-1].strip()
+                            if _opts_auth_line else "")
+                    if auth_val:
+                        _log(f"OPTIONS → 401 with auth challenge captured "
+                             f"— falling through to DESCRIBE for {rtsp_url}")
+                        # Fall through to DESCRIBE; auth retry uses
+                        # the captured auth_val.
+                    else:
+                        _log(f"OPTIONS → 401 with no WWW-Authenticate "
+                             f"— skipping URL")
+                        continue
+                else:
+                    _log(f"OPTIONS → {resp.split(CRLF)[0].strip()!r} "
+                         f"— skipping URL")
+                    continue
 
             # ── DESCRIBE (with optional 401 retry) ───────────────────
             try:
@@ -4202,6 +5015,27 @@ def _validate_rtsp_urls_single_socket(
             if not track_url:
                 _log(f"DESCRIBE 200 but SDP has no m=video — skipping {rtsp_url}")
                 continue
+
+            # 2.5.0-rc1.2: stricter populated-channel test, used by the
+            # post-cred-auth channel-enumeration helper to filter out
+            # virtual/empty DVR channel slots that return SDP with
+            # `m=video` but no real codec rtpmap. Same heuristic the
+            # discovery walker has had since 2.5.0-rc1.0; ported here
+            # so post-auth multi-card surfacing on channel_iterate
+            # brands skips empty channels rather than registering
+            # cards for them. host_meta-driven so probes that don't
+            # opt in (single-camera ONVIF profile validation) get the
+            # original behaviour.
+            _populated_test = ""
+            if host_meta:
+                _populated_test = str(host_meta.get(
+                    "walker_populated_channel_test", "") or "")
+            if _populated_test == "sdp_has_video_track":
+                if not _sdp_has_video_track(sdp_text):
+                    _log(f"DESCRIBE 200 but SDP failed populated-channel "
+                         f"test (no real video codec rtpmap) — likely "
+                         f"empty channel; skipping {rtsp_url}")
+                    continue
 
             # ── SETUP: TCP-interleaved first, UDP fallback ──────────
             transports = [
@@ -4327,9 +5161,36 @@ def find_rtsp_path(ip: str, port: int,
         if sdb:
             db_paths = list(sdb.get("rtsp", []))
 
+    # 2.5.0-rc1.0: streaming_recipe consumer. Brands with
+    # `streaming_recipe.type == "channel_iterate"` (Lorex/Dahua DVR-NVR
+    # family, Hikvision NVR, Uniview NVR, Dahua direct, Amcrest, etc.)
+    # need DVR-channel-specific paths, not the universal single-camera
+    # paths. Expand the recipe and prepend it so channel iteration
+    # happens BEFORE generic fallbacks. The fallback paths from the
+    # recipe (legacy firmware URLs) come last in the recipe list itself,
+    # see _expand_channel_iterate_paths.
+    recipe_paths: list[str] = []
+    recipe = (brand_entry or {}).get("streaming_recipe") or {}
+    if recipe.get("type") == "channel_iterate":
+        recipe_paths = _expand_channel_iterate_paths(recipe, channel_cap=16)
+        if recipe_paths:
+            log.info(f"  RTSP path list: brand={brand_name} streaming_recipe "
+                     f"channel_iterate expanded to {len(recipe_paths)} paths "
+                     f"(channels capped at 16)")
+            # Tell the walker this is a channel-iteration walk so it can
+            # apply the populated-channel SDP heuristic and the
+            # auth_attempt_lockout bail-on-first-failure policy if either
+            # is configured on the brand entry.
+            if host_meta is not None:
+                host_meta["walker_streaming_recipe_active"] = True
+                host_meta["walker_populated_channel_test"] = (
+                    recipe.get("populated_channel_test", "")
+                )
+                host_meta["walker_throttle_type"] = throttle_type
+
     seen: set[str]   = set()
     ordered: list[str] = []
-    for p in db_paths + RTSP_PATHS:
+    for p in recipe_paths + db_paths + RTSP_PATHS:
         if p not in seen:
             seen.add(p)
             ordered.append(p)
@@ -4371,6 +5232,11 @@ def find_rtsp_path(ip: str, port: int,
         timeout=sock_timeout, label="", host_meta=host_meta,
         collect_locked=enable_locked_collect,
         expected_realm=captured_realm,
+        # 2.4.0-rc2.6: when we have a brand recipe, pass its paths so
+        # the walker can filter locked candidates to paths the brand
+        # actually serves. db_paths was already computed above from
+        # _match_stream_db. Empty list → no filter (backward-compat).
+        brand_recipe_paths=db_paths,
     )
     # rc2.1.1: re-run brand identification after the walk. The walker
     # captured the RTSP Server: header into host_meta["server_header"],
@@ -4416,6 +5282,58 @@ def find_rtsp_path(ip: str, port: int,
     if throttle_type == "rate_limit_per_ip_tcp":
         log.info(f"  RTSP Layer 2 skipped: {brand_name} has per-IP TCP "
                  f"rate-limit (multi-socket would be RST'd)")
+        return None
+
+    # ── 2.4.0-rc2.1: Layer 2 short-circuit on skip_layer2 brands ─────
+    # Brands with skip_layer2=True are documented as having fragile
+    # multi-attempt behavior — typically lockout counters or per-stream
+    # session caps that punish repeated DESCRIBE attempts. Lorex/Dahua
+    # DVR-NVR family is the canonical example: Layer 2 grinds 50+ seconds
+    # through 10 sockets × 5s sleep on a multi-channel DVR where the
+    # right answer is "use the streaming_recipe with channel iteration"
+    # (consumed in rc3.x), not "try more single-channel paths."
+    # 2.4.0-rc2.9: also honor host_meta["host_skip_layer2"], propagated
+    # by run_scan when an EARLIER port on this IP triggered the skip.
+    # Lorex/Dahua case: port 554 IDs as "Lorex / Dahua DVR-NVR Family"
+    # (skip_layer2: True), but port 80 IDs as plain "Lorex" (no
+    # skip_layer2). Without inheritance, port 80 would run Layer 2
+    # for ~45s wastefully on an IP we already know can't speak it.
+    inherited_skip_layer2 = bool(
+        host_meta and host_meta.get("host_skip_layer2"))
+    if skip_layer2_brand or inherited_skip_layer2:
+        if skip_layer2_brand:
+            log.info(f"  RTSP Layer 2 skipped: {brand_name} marked "
+                     f"skip_layer2 (use streaming_recipe / channel iteration)")
+            # Mark host_meta so run_scan can propagate to alt ports
+            if host_meta is not None:
+                host_meta["brand_skip_layer2"] = True
+        else:
+            log.info(f"  RTSP Layer 2 skipped: {ip} inherited "
+                     f"skip_layer2 from earlier port on this host")
+        return None
+
+    # ── 2.4.0-rc2.4: Layer 2 short-circuit on Layer 1 early-bail ────
+    # If Layer 1 hit EARLY_BAIL_THRESHOLD consecutive 401s with the
+    # same realm and bailed out (state was written to host_meta in
+    # _probe_rtsp_paths_single_socket's finally block), Layer 2's
+    # multi-socket walk will get the same 401 with the same realm on
+    # every fresh socket — auth is enforced server-side, not socket-
+    # side, per RFC 7235 §2.2. Skip Layer 2 immediately and let the
+    # camera surface as needs_credentials. Users who want to verify
+    # against firmware-quirk cases (5% chance Layer 2 reveals
+    # something Layer 1 missed) can hit the per-card "Deep Re-Probe"
+    # button which re-runs Layer 2 on demand AND resumes the Layer 1
+    # walk on the unwalked remaining paths.
+    if (host_meta is not None
+            and host_meta.get("early_bail_reason") == "layer1_consecutive_401s"):
+        realm = host_meta.get("early_bail_realm", "")
+        log.info(f"  RTSP Layer 2 skipped: Layer 1 early-bailed after "
+                 f"5 consecutive 401s with realm={realm!r} — fresh sockets "
+                 f"won't change auth result. Use Deep Re-Probe button to "
+                 f"override.")
+        # Mark that we ALSO skipped Layer 2 so the Deep Re-Probe button
+        # knows to run Layer 2 in addition to resuming Layer 1.
+        host_meta["early_bail_reason"] = "layer1_then_layer2_skipped_401s"
         return None
 
     # ── rc2.1: Layer 2 fast-bail — host doesn't speak RTSP at all ───
@@ -4562,9 +5480,43 @@ def probe_ws_rtsp(ip: str, port: int, timeout: int = 4) -> str | None:
                     if not chunk:
                         break
                     buf += chunk
-                if "101" in buf.decode("utf-8", errors="replace") and \
-                        b"websocket" in buf.lower():
-                    return f"{scheme_ws}://{ip}:{port}{path}"
+                # 2.4.0-rc2.3: tightened verification. Per RFC 6455 §4.1,
+                # the server MUST include the selected subprotocol in
+                # `Sec-WebSocket-Protocol: <protocol>` in its 101
+                # response if it accepted that subprotocol. A server
+                # that returns 101 + "websocket" but does NOT echo
+                # `rtsp` as its subprotocol speaks WebSocket but NOT
+                # RTSP-over-WebSocket — common false positive case is
+                # the Microseven Hipcam family which has a WebSocket
+                # endpoint on port 80 for its live web UI MJPEG feed
+                # but doesn't tunnel RTSP through it.
+                resp = buf.decode("utf-8", errors="replace")
+                # Status line check
+                first_line = resp.split("\r\n", 1)[0] if resp else ""
+                if "101" not in first_line:
+                    continue
+                # Header parse — case-insensitive lookup
+                headers_lower = resp.lower()
+                if "upgrade: websocket" not in headers_lower:
+                    continue
+                # MUST echo our requested rtsp subprotocol — anchored to
+                # the actual header so we don't false-positive on the
+                # word "rtsp" appearing elsewhere in body/comments.
+                # Match: "sec-websocket-protocol: ..." line containing rtsp
+                import re as _re_ws
+                m = _re_ws.search(
+                    r'(?im)^\s*sec-websocket-protocol\s*:\s*([^\r\n]+)',
+                    resp,
+                )
+                if not m:
+                    continue
+                accepted = m.group(1).lower()
+                # Subprotocol value can be a comma list per RFC; tokens
+                # are case-insensitive identifiers. Match exact token.
+                tokens = [t.strip() for t in accepted.split(",")]
+                if "rtsp" not in tokens:
+                    continue
+                return f"{scheme_ws}://{ip}:{port}{path}"
         except Exception:
             pass
     return None
@@ -5788,6 +6740,26 @@ def _build_focus_ladder(camera: dict) -> list:
                               "stream_width":  camera.get("sub_stream_width"),
                               "stream_height": camera.get("sub_stream_height"),
                               "stream_codec":  camera.get("sub_stream_codec")})
+        # 2.4.0-rc2.6: include validated locked-stream candidates as
+        # additional profile entries. These were enumerated by Deep
+        # Re-Probe and validated post-cred-auth (see api_set_credentials
+        # in rc2.6). Each one is a real working stream on this camera —
+        # the user can pick them as alternative resolutions in the
+        # focus-view dropdown. Skip entries that duplicate the main
+        # or sub URL.
+        _seen_urls = {camera.get("stream_url", ""),
+                      camera.get("sub_stream_url", "")}
+        for add in (camera.get("additional_streams") or []):
+            au = add.get("url", "")
+            if au and au not in _seen_urls:
+                profiles.append({
+                    "url": au,
+                    "stream_width":  None,
+                    "stream_height": None,
+                    "stream_codec":  None,
+                    "_locked_origin": True,  # diagnostic flag
+                })
+                _seen_urls.add(au)
 
     # Always build the full ladder so manual Resolution/FPS controls have rungs
     # to snap to. CFG_ADAPTIVE_QUALITY only controls whether the system AUTO-STEPS
@@ -6062,6 +7034,15 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             stderr_t = asyncio.create_task(_drain_stderr(proc, f"SNAP:{camera_id}"))
             buf      = b""
             frames   = 0
+            # 2.4.0-rc3.4 Bug 2 fix: per-ffmpeg-run frame counter, reset on
+            # every subprocess launch. Used by handle_snapshot to decide
+            # X-Stream-Status — we need "has the CURRENT ffmpeg produced any
+            # frame yet?", not the lifetime `state["frame_count"]` which
+            # accumulates across all sessions (including prior http_snap_loop
+            # successes) and so was always non-zero by the time a focus
+            # re-entry retry happened, masking the true "ffmpeg dead, retrying"
+            # state behind a misleading X-Stream-Status: ok.
+            state["current_run_frames"] = 0
             hw_tried = bool(hw_dec)
 
             try:
@@ -6152,6 +7133,8 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         state["frame"]       = frame
                         state["frame_time"]  = time.monotonic()
                         state["frame_count"] += 1
+                        # 2.4.0-rc3.4 Bug 2 fix: per-run counter, see launch site.
+                        state["current_run_frames"] = state.get("current_run_frames", 0) + 1
 
                         # Native-res focus task: exit the inner loop the moment
                         # focus is cleared so the task terminates quickly without
@@ -6301,13 +7284,27 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 # ffmpeg calls this "Nonmatching transport in server reply"
                 # which surfaces as "Invalid data found when processing input".
                 # Flipping to UDP fixes this class of camera entirely.
-                # We try TCP→UDP first; if UDP also fails 3 more times we
-                # flip back to TCP (so the backoff loop still applies).
                 #
                 # rc2.6: Use >= with fired-flag pattern so the trigger fires
                 # at most once per session even if streak skips past 3.
-                if (streak >= 3 and not native_res
-                        and not state.get("transport_flip_fired")):
+                #
+                # 2.4.0-rc3.2: removed the `not native_res` gate. Previously
+                # the flip ran only in thumbnail mode, which meant focus
+                # mode never benefited — and for the canonical victim
+                # (Microseven), thumbnail mode uses http_snap_url and
+                # never exercises RTSP at all, so the flip never fired
+                # anywhere. Result: preferred_transport stayed "tcp"
+                # forever even on cameras that only speak UDP RTSP, and
+                # every focus session crashed 3 times before the
+                # http_snap fallback below kicked in. Now the flip runs
+                # in both modes; the http_snap fallback in focus mode
+                # is gated on transport_flip_fired so we only give up
+                # on RTSP after BOTH transports have failed.
+                # The UDP→TCP revert branch keeps the `not native_res`
+                # gate so thumbnail mode still cycles TCP↔UDP on
+                # cameras that fail both, while focus mode falls
+                # through to the http_snap fallback below.
+                if (streak >= 3 and not state.get("transport_flip_fired")):
                     cam_now = CAMERAS.get(camera_id, {})
                     cur_transport = cam_now.get("preferred_transport", "tcp")
                     if cur_transport == "tcp":
@@ -6317,12 +7314,39 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         CAMERAS[camera_id]["preferred_transport"] = "udp"
                         state["zero_frame_streak"] = 0   # fresh count for UDP
                         state["transport_flip_fired"] = True
-                    elif cur_transport == "udp":
+                        # Reset local streak too so the http_snap fallback
+                        # block below doesn't fire on the same iteration —
+                        # it reads `streak` (local) not state's copy.
+                        streak = 0
+                    elif cur_transport == "udp" and not native_res:
                         log.warning(f"SNAP [{camera_id}]: 3 consecutive 0-frame failures "
                                     f"with UDP also — reverting to TCP")
                         CAMERAS[camera_id]["preferred_transport"] = "tcp"
                         state["zero_frame_streak"] = 0
                         state["transport_flip_fired"] = True
+                        streak = 0
+                    elif cur_transport == "udp" and native_res:
+                        # 2.4.0-rc3.4 Bug 1 fix: previous version had no branch
+                        # for "currently UDP + focus mode". `preferred_transport`
+                        # is persisted to disk in CAMERAS[cid], so once a prior
+                        # session flipped it to UDP, every subsequent focus
+                        # session entered with cur_transport="udp" and fell
+                        # through both arms silently — transport_flip_fired
+                        # stayed False forever, which gated the http_snap
+                        # fallback below at `state.get("transport_flip_fired")`,
+                        # so ffmpeg restart-looped indefinitely. Microseven
+                        # users saw this as a frozen frame for the entire focus
+                        # session (observed: 28+ minutes across two re-focuses
+                        # in the 2.4.0-rc3.3 log). Now we revert to TCP and arm
+                        # the fallback gate; if TCP also fails the next 3
+                        # attempts, the http_snap fallback fires as designed.
+                        log.warning(f"SNAP [{camera_id}]: 3 consecutive 0-frame failures "
+                                    f"with UDP (persisted from earlier session) "
+                                    f"— reverting to TCP for this focus session")
+                        CAMERAS[camera_id]["preferred_transport"] = "tcp"
+                        state["zero_frame_streak"] = 0
+                        state["transport_flip_fired"] = True
+                        streak = 0
 
                 # After 3 consecutive 0-frame failures in native_res (enhanced
                 # view) mode, fall back to http_snap_loop if the camera has one.
@@ -6330,7 +7354,13 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 # stored but non-functional — ffmpeg keeps crashing, wasting CPU.
                 #
                 # rc2.6: >= with fired-flag pattern (see above).
+                #
+                # 2.4.0-rc3.2: now requires transport_flip_fired so the
+                # fallback only fires AFTER UDP has also failed. This is
+                # the second half of the Microseven fix — we want to
+                # exhaust both transports before giving up on RTSP.
                 if (streak >= 3 and native_res
+                        and state.get("transport_flip_fired")
                         and not state.get("http_snap_fired")):
                     cam_now = CAMERAS.get(camera_id, camera)
                     if cam_now.get("http_snap_url"):
@@ -6344,6 +7374,15 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         state["http_snap_fired"] = True
                         await http_snap_loop(camera_id, cam_now)
                         _snap_state(camera_id)["http_snap_active"] = False
+                        # 2.4.0-rc3.3 Bug A fix (defensive): if focus_leave_kill
+                        # was set during the http_snap_loop session (e.g. user
+                        # left focus while we were in HTTP-snap mode), clear it
+                        # here so it doesn't leak to a subsequent focus entry.
+                        # The handle_focus_enter clear is the primary fix; this
+                        # is belt-and-suspenders for the case where the state
+                        # dict gets read between handle_focus_clear setting the
+                        # flag and the next handle_focus_enter clearing it.
+                        state.pop("focus_leave_kill", None)
                         return
 
                 # rc2.6: clear stored codec on persistent failure, regardless
@@ -6417,7 +7456,14 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 # the adaptive system must not override an explicit user choice
                 # (e.g. HEVC firmware bug causes repeated crashes but user wants
                 # this tier regardless).
-                if ada.get("manual_override"):
+                # 2.4.0-rc3.1: Block B parallels Block A's gating. Previously
+                # this only checked manual_override and would set
+                # restart_overflow=True even when CFG_ADAPTIVE_QUALITY was
+                # off — meaning the system auto-stepped on repeated restarts
+                # despite the user disabling Adaptive Quality. The fast-death
+                # path in Block A correctly respected the toggle; this path
+                # didn't. Now both paths use the same gate.
+                if ada.get("manual_override") or not CFG_ADAPTIVE_QUALITY:
                     restart_overflow = False
                 else:
                     restart_overflow = (locked and
@@ -6796,6 +7842,33 @@ async def handle_snapshot(request: web.Request) -> web.Response:
             # http_snap_loop — controls are disabled in http mode since profile
             # switching is impossible via HTTP snapshot endpoints.
             snap_mode = "http" if state.get("http_snap_active") else "rtsp"
+            # 2.4.0-rc3.3 Bug B fix: X-Stream-Status surfaces the retry phase
+            # to JS so the user sees "Connecting…" / "Switching transport…"
+            # instead of a frozen frame with no explanation. Streak >= 1 means
+            # at least one ffmpeg has died with 0 frames since the last
+            # successful frame; frames > 0 in current run means we're past
+            # the connect phase. Ordering matters: if we're already in
+            # http_snap mode, snap_mode handles the messaging via the
+            # existing toast — only emit "connecting" when we're still
+            # actively retrying RTSP.
+            #
+            # 2.4.0-rc3.4 Bug 2 fix: gate on current_run_frames (per-ffmpeg-launch
+            # counter) instead of lifetime frame_count. frame_count accumulates
+            # across the camera_id's whole lifetime — including prior http_snap
+            # sessions that successfully produced frames before RTSP came back —
+            # so by the time a focus re-entry was retrying ffmpeg with 0 frames,
+            # frame_count was already large and the gate evaluated False, so
+            # status fell through to "ok" and the JS toast never showed despite
+            # ffmpeg being dead. current_run_frames resets to 0 on each ffmpeg
+            # launch so the gate now reflects the actual current run.
+            zfs = state.get("zero_frame_streak", 0)
+            tff = state.get("transport_flip_fired", False)
+            if snap_mode == "http":
+                stream_status = "http_fallback"
+            elif zfs >= 1 and not state.get("current_run_frames", 0):
+                stream_status = "switching_transport" if tff else "connecting"
+            else:
+                stream_status = "ok"
             ada = _FOCUS_ADAPTIVE.get(camera_id)
             if ada and ada.get("ladder"):
                 ladder   = ada["ladder"]
@@ -6811,10 +7884,11 @@ async def handle_snapshot(request: web.Request) -> web.Response:
             return web.Response(body=frame, content_type="image/jpeg",
                                 headers={"Cache-Control": "no-cache",
                                          "X-Frame-Source": "focus",
-                                         "X-Snap-Mode":   snap_mode,
-                                         "X-Frame-Count": str(state.get("frame_count", 0)),
-                                         "X-Step-Res":    step_res,
-                                         "X-Step-FPS":    step_fps})
+                                         "X-Snap-Mode":     snap_mode,
+                                         "X-Stream-Status": stream_status,
+                                         "X-Frame-Count":   str(state.get("frame_count", 0)),
+                                         "X-Step-Res":      step_res,
+                                         "X-Step-FPS":      step_fps})
         return web.Response(status=204)  # no frame yet — JS will retry
 
     # Card view always uses the main stream_url for thumbnail polling.
@@ -6919,6 +7993,25 @@ async def handle_focus_set(request: web.Request) -> web.Response:
         return web.json_response({"error": "Camera not found"}, status=404)
     _FOCUSED_CAMERA = camera_id
     log.info(f"Focus: entering enhanced view for {camera_id}")
+    # 2.4.0-rc3.3 Bug A fix: clear any stale focus_leave_kill flag from a
+    # previous focus session. The flag is set by handle_focus_clear and
+    # consumed by snap_loop's main RTSP path at line ~6817, but if the
+    # previous session ended via http_snap fallback (where snap_loop is
+    # awaiting http_snap_loop, not in its main read loop), the flag never
+    # gets consumed and lingers in _SNAP[camera_id]. Then on the NEXT
+    # focus entry, the first ffmpeg failure (e.g. on the Microseven's
+    # initial TCP attempt) hits the EOF branch at line 6713, sees the
+    # still-True flag, logs "killed by focus-leave" (wrong — the user
+    # just entered, didn't leave), and the restart-skip at line 6817
+    # returns from snap_loop entirely — leaving a dead loop while the
+    # user's dropdown clicks go nowhere. Clearing the flag here on
+    # every focus entry makes the next snap_loop start from a known
+    # state regardless of how the previous session ended.
+    state = _SNAP.get(camera_id)
+    if state and state.pop("focus_leave_kill", None):
+        log.debug(f"Focus: cleared stale focus_leave_kill flag for {camera_id} "
+                  f"(previous session ended without consuming it — likely "
+                  f"http_snap fallback path)")
     # Reset restarts_since_lock so a stale count from the previous focus session
     # doesn't immediately trigger a step-down on re-entry.
     ada = _FOCUS_ADAPTIVE.get(camera_id)
@@ -7110,6 +8203,27 @@ async def handle_focus_profiles(request: web.Request) -> web.Response:
                 "stream_height": camera.get("sub_stream_height"),
                 "stream_codec":  camera.get("sub_stream_codec"),
             })
+        # 2.4.0-rc2.8: include validated locked-stream candidates
+        # ("additional_streams") in the synth fallback. rc2.8's
+        # api_set_credentials builds stream_profiles directly so this
+        # fallback is rarely needed for fresh cred-accepts — but
+        # cameras saved by earlier builds (rc2.6/rc2.7) have
+        # additional_streams populated without stream_profiles. This
+        # branch covers them so the dropdown shows all entries on
+        # reload without requiring the user to re-auth.
+        _seen_urls = {camera.get("stream_url", ""),
+                      camera.get("sub_stream_url", "")}
+        for add in (camera.get("additional_streams") or []):
+            au = add.get("url", "")
+            if au and au not in _seen_urls:
+                profiles.append({
+                    "url": au,  # explicit URL — dropdown uses this
+                                # over _url_key when present
+                    "stream_width":  add.get("stream_width"),
+                    "stream_height": add.get("stream_height"),
+                    "stream_codec":  add.get("stream_codec"),
+                })
+                _seen_urls.add(au)
     result = []
     for i, p in enumerate(profiles):
         w = p.get("stream_width")  or 0
@@ -7638,6 +8752,308 @@ async def _probe_db_streams(ip: str, port: int, creds: str | None,
     return results
 
 
+# 2.5.0-rc1.2: post-cred-auth channel enumeration on channel_iterate
+# brands. Tracks which (camera_id) we've already enumerated so a
+# repeated cred-auth click doesn't re-enumerate the same DVR.
+_DVR_ENUM_DONE: set = set()
+
+
+async def _enumerate_dvr_channels_after_auth(camera_id: str) -> None:
+    """2.5.0-rc1.2: when cred-auth succeeds on a `channel_iterate`
+    brand (Lorex/Dahua DVR-NVR Family etc.), walk the remaining
+    channels in a background task and register each populated channel
+    as its own camera card.
+
+    Architectural rationale: a DVR exposes 1..N virtual stream slots,
+    and a populated slot maps to a physical camera channel. Surfacing
+    each populated channel as a separate card was the original 2026-
+    05-02 plan's acceptance criterion #1 (`returns N populated
+    channels (N = number of cameras physically connected, ≥5)`). 2.5.0-
+    rc1.0 deferred this; 2.5.0-rc1.2 lands it.
+
+    Throttle safety: brand has `auth_attempt_lockout` semantics — but
+    SUCCESSFUL auth doesn't burn counter attempts, only failed auth
+    does. The credentials we use here have already been validated by
+    the cred-auth flow that called us, so walking remaining channels
+    is unconstrained by the lockout counter. The validate walker
+    captures the auth challenge from the first 401 and reuses the
+    nonce for subsequent URLs (RFC 2617).
+
+    Empty-channel filtering: the validate walker now (rc1.2) honors
+    `walker_populated_channel_test` on host_meta. We pass
+    `sdp_has_video_track` so virtual slots that return SDP without a
+    real video codec rtpmap get skipped instead of registered as
+    cards.
+
+    Idempotency: tracked via `_DVR_ENUM_DONE`. Re-clicking save
+    credentials on an already-enumerated DVR is a no-op (the existing
+    cards remain).
+
+    Per-card snap URL: built from the streaming_recipe's
+    `snap_url_template` (added 2.5.0-rc1.2) so each channel card's
+    thumbnail polls the channel-specific snapshot endpoint
+    (`http://IP/cgi-bin/snapshot.cgi?channel=N` for Dahua-family).
+    Without per-channel URLs, all cards would poll the same default
+    snapshot and show the same image.
+    """
+    if camera_id in _DVR_ENUM_DONE:
+        return
+
+    cam = CAMERAS.get(camera_id)
+    if not cam:
+        # 2.5.0-rc1.8: signal done so the new JS poll loop in submitCreds()
+        # exits cleanly when the camera was deleted between cred-auth and
+        # task scheduling. Without this, /api/dvr_enum/status/{id} would
+        # return done=False forever (camera_id never enters the set), and
+        # the poll would only exit on its 12s hard cap.
+        _DVR_ENUM_DONE.add(camera_id)
+        return
+
+    brand_entry = _identify_camera_brand(cam)
+    if not brand_entry:
+        _DVR_ENUM_DONE.add(camera_id)  # rc1.8: terminate poll loop
+        return
+    recipe = (brand_entry or {}).get("streaming_recipe") or {}
+    if recipe.get("type") != "channel_iterate":
+        _DVR_ENUM_DONE.add(camera_id)  # rc1.8: terminate poll loop
+        return
+
+    primary_url = cam.get("stream_url", "")
+    primary_ch  = _extract_channel_from_rtsp_url(primary_url)
+    if not primary_ch:
+        log.debug(f"  channel enumeration: could not extract primary "
+                  f"channel from {_strip_creds(primary_url)} — aborting")
+        _DVR_ENUM_DONE.add(camera_id)  # rc1.8: terminate poll loop
+        return
+
+    creds = cam.get("credentials")
+    if not creds:
+        _DVR_ENUM_DONE.add(camera_id)  # rc1.8: terminate poll loop
+        return
+    # 2.5.0-rc1.3: bug-fix on rc1.2. The cam["credentials"] field is a
+    # Fernet-encrypted JSON string, not a dict — decrypt it the same way
+    # the rest of the cred-aware codepaths do (see line ~8690 in
+    # _validate_rtsp_walk). rc1.2 assumed a dict shape and crashed:
+    # `AttributeError: 'str' object has no attribute 'get'` at the line
+    # where we tried `creds.get("username", "")`. The crash happened
+    # silently in the fire-and-forget task, so cred-auth still
+    # succeeded (single card surfaced as before) but no enumeration
+    # ever ran.
+    try:
+        username, password = decrypt_creds(creds)
+    except Exception as e:
+        log.debug(f"  channel enumeration: decrypt_creds failed: {e}")
+        _DVR_ENUM_DONE.add(camera_id)  # rc1.8: terminate poll loop
+        return
+    if not (username and password):
+        _DVR_ENUM_DONE.add(camera_id)  # rc1.8: terminate poll loop
+        return
+
+    ip   = cam.get("ip", "")
+    port = cam.get("port", 554)
+
+    # Build candidate URLs for OTHER channels. Main stream only here —
+    # we want to know "which channels have cameras," not validate every
+    # sub-stream variant. Sub-streams for each populated channel can be
+    # discovered later by the per-card cred-auth flow.
+    template = recipe.get("path_template", "")
+    raw_channels = recipe.get("channels") or list(range(1, 17))
+    main_subtype = recipe.get("subtype_main", 0)
+    channel_cap  = 16
+    candidate_paths: list[str] = []
+    for ch in raw_channels:
+        if ch > channel_cap:
+            continue
+        if str(ch) == primary_ch:
+            continue
+        try:
+            candidate_paths.append(template.format(ch=ch, st=main_subtype))
+        except (KeyError, IndexError):
+            continue
+
+    if not candidate_paths:
+        _DVR_ENUM_DONE.add(camera_id)
+        return
+
+    candidate_urls = [
+        f"rtsp://{quote(username, safe='')}:{quote(password, safe='')}"
+        f"@{ip}:{port}{p}"
+        for p in candidate_paths
+    ]
+
+    log.info(f"  Channel enumeration starting for {camera_id}: walking "
+             f"{len(candidate_urls)} other channel paths "
+             f"(brand={brand_entry.get('name', '?')})")
+
+    # 2.5.0-rc1.4: walk URLs one socket at a time. Firmware on this
+    # brand closes the TCP connection after each full authenticated
+    # transaction (OPTIONS+DESCRIBE+SETUP+TEARDOWN), so the validate
+    # walker's normal single-socket-multi-URL pattern bails out on the
+    # second URL with `OPTIONS exception → ConnectionResetError`. The
+    # 2.5.0-rc1.3 field log captured this exactly: channel=2 succeeded
+    # cleanly, channel=3 OPTIONS hit RST, walker bailed remaining 13
+    # URLs. Per-URL invocation gives each URL a fresh socket. ~300ms
+    # per URL × 15 URLs ≈ 5s total wallclock — acceptable for a
+    # background task. Each call sets walker_skip_acd so the closed-
+    # socket-after-success isn't logged as an ACD-relevant RST event.
+    enum_meta = {
+        "walker_throttle_type":           "auth_attempt_lockout",
+        "walker_populated_channel_test":  recipe.get(
+            "populated_channel_test", "sdp_has_video_track"),
+        "walker_skip_acd":                True,
+    }
+    loop = asyncio.get_event_loop()
+    walk_result: dict[str, bool] = {}
+    for i, url in enumerate(candidate_urls, 1):
+        try:
+            one_result = await loop.run_in_executor(
+                _THREAD_POOL,
+                _validate_rtsp_urls_single_socket,
+                ip, port, [url], username, password, 6.0,
+                enum_meta,
+                f"channel-enum:{camera_id}({i}/{len(candidate_urls)})",
+            )
+        except Exception as e:
+            log.debug(f"  channel enum walker URL {i} raised: {e}")
+            one_result = {url: False}
+        if isinstance(one_result, dict):
+            walk_result.update(one_result)
+        # Tiny breath between URLs to be polite to the DVR's RTSP
+        # subsystem and let any lingering server-side socket cleanup
+        # finish before the next OPTIONS opens a new connection.
+        await asyncio.sleep(0.1)
+
+    snap_template = recipe.get("snap_url_template", "")
+    populated_channels: list[str] = []
+    new_cards: list[str] = []
+
+    for url, probe_ok in walk_result.items():
+        if not probe_ok:
+            continue
+        ch = _extract_channel_from_rtsp_url(url)
+        if not ch:
+            continue
+        populated_channels.append(ch)
+        new_id = f"{ip}_{port}_ch{ch}"
+        if new_id in CAMERAS:
+            continue
+        # Build per-channel snap URL from template if available
+        per_channel_snap = ""
+        if snap_template:
+            try:
+                per_channel_snap = snap_template.format(ip=ip, ch=ch)
+            except (KeyError, IndexError):
+                per_channel_snap = ""
+        # Clone the parent card structure, override channel-specific
+        # fields. Strip credentials from the visible URL — the real
+        # creds live in cam["credentials"] and get re-attached at
+        # stream-fetch time by the snap_loop.
+        new_cam = dict(cam)
+        new_cam.update({
+            "id":             new_id,
+            "stream_url":     _strip_creds(url),
+            "channel":        ch,
+            "name":           f"{brand_entry.get('name', 'DVR')} ch{ch}",
+            "status":         "ready",
+            "user_saved":     True,
+            "requires_credentials": False,
+            "http_snap_url":  per_channel_snap or cam.get("http_snap_url", ""),
+            # Children inherit parent credentials
+            "credentials":    cam.get("credentials"),
+            "stream_profiles": [],   # rebuilt on first focus
+            "locked_streams":  [],
+            "additional_streams": [],
+            "_dvr_parent_id":  camera_id,
+        })
+        CAMERAS[new_id] = new_cam
+        new_cards.append(new_id)
+
+        # 2.5.0-rc1.5: explicitly start the snap_loop for each new card.
+        # Without this, newly-registered cards live in the CAMERAS dict
+        # and surface in /api/cameras but never get a thumbnail polled
+        # because the snap_loop kickoff path normally runs from
+        # handle_snapshot (UI requests thumbnail → snap_loop starts).
+        # Symptom on rc1.4: enumeration registered 7 channels but the
+        # UI showed nothing — saw it in the field log as zero `SNAP
+        # [192.168.50.217_554_chN]: starting background process` lines
+        # firing after `Channel enumeration complete`. Mirroring the
+        # post-restart-load behaviour where each saved card kicks off
+        # its own snap_loop on startup.
+        try:
+            authed_url = build_authenticated_url(new_cam)
+            if authed_url:
+                _snap_last_access[new_id] = time.monotonic()
+                state = _snap_state(new_id)
+                if state.get("task") is None or state["task"].done():
+                    log.info(f"  SNAP [{new_id}]: kicking off initial "
+                             f"thumbnail loop after channel enumeration")
+                    state["task"] = asyncio.create_task(
+                        snap_loop(new_id, authed_url, new_cam))
+        except Exception as _snap_e:
+            log.debug(f"  channel-enum: snap kickoff for {new_id} "
+                      f"raised: {_snap_e}")
+
+    # Update the parent card's name to reflect the primary channel
+    # (e.g. "Lorex / Dahua DVR-NVR Family ch1") so all DVR cards share
+    # the same naming convention.
+    if cam.get("name", "").lower() in (
+            "general", "ip camera", "network camera", brand_entry.get(
+                "name", "").lower()):
+        cam["name"] = f"{brand_entry.get('name', 'DVR')} ch{primary_ch}"
+    cam["channel"] = primary_ch
+    cam["_dvr_parent_id"] = camera_id   # parent is its own parent
+    cam["_dvr_populated_channels"] = sorted(
+        set(populated_channels + [primary_ch]),
+        key=lambda c: int(c) if c.isdigit() else 999)
+
+    _DVR_ENUM_DONE.add(camera_id)
+    save_cameras()
+    log.info(f"  Channel enumeration complete for {camera_id}: "
+             f"{len(new_cards)} new card(s) registered "
+             f"(populated channels: {cam['_dvr_populated_channels']})")
+
+
+async def api_dvr_enum_status(request) -> web.Response:
+    """2.5.0-rc1.8: lightweight polling endpoint that lets the post-cred-
+    auth UI flow detect channel-enumeration completion deterministically
+    instead of waiting a fixed wallclock budget.
+
+    Replaces the 2.5.0-rc1.6 fixed +8s setTimeout(loadCameras) reload
+    with a poll-until-done pattern. On CrystalHeeler's 7-channel Lorex the
+    enumeration completed in ~3s (rc1.7 test log 10:51:16 → 10:51:19),
+    so the old fixed budget cost ~5s of dead time before cards
+    appeared. This endpoint shaves that by letting the UI react to
+    actual completion.
+
+    Returns:
+      done                  — bool. True iff camera_id is in
+                              _DVR_ENUM_DONE. The set is now populated
+                              on every exit path of
+                              _enumerate_dvr_channels_after_auth (rc1.8
+                              backend hardening), so this flag flips
+                              true within bounded time regardless of
+                              outcome.
+      populated_channels    — list[str]. Channels with real cameras
+                              attached, populated from the parent cam's
+                              _dvr_populated_channels field after a
+                              successful run. Empty for non-success
+                              exits (camera deleted, decrypt fail, etc.)
+                              and during the in-progress window.
+
+    Pattern matches /api/scan/status, /api/pscan/status, /snap/status:
+    a tiny GET with a JSON body that the JS polls on a setInterval.
+    """
+    cid = request.match_info.get("camera_id", "")
+    cam = CAMERAS.get(cid)
+    populated: list = []
+    if cam:
+        populated = list(cam.get("_dvr_populated_channels") or [])
+    return web.json_response({
+        "done": cid in _DVR_ENUM_DONE,
+        "populated_channels": populated,
+    })
+
+
 async def api_set_credentials(request) -> web.Response:
 
     try:
@@ -8004,7 +9420,8 @@ async def api_set_credentials(request) -> web.Response:
                     # Run ffprobe to detect the real codec — ONVIF often reports
                     # "h264" when the camera actually streams HEVC.
                     cam_url = build_authenticated_url(cam) or ""
-                    async def _fix_codec(cam_id=cid, auth_url=cam_url) -> None:
+                    async def _fix_codec(cam_id=cid, auth_url=cam_url,
+                                         cam_ip=ip, throttle_s=throttle_s) -> None:
 
                         # rc2.6: retry with backoff. The original single-shot
                         # 1s sleep + ffprobe could fail when the camera was
@@ -8023,9 +9440,29 @@ async def api_set_credentials(request) -> web.Response:
                         # is observable in logs even if the corrections never
                         # succeeds (e.g. camera firmware doesn't expose the
                         # stream to ffprobe).
+                        #
+                        # 2.4.0-rc3.5 Leak E fix: first attempt now honors the
+                        # per-IP TCP throttle. Previously hard-coded to 1s,
+                        # which for Hipcam-family cameras (5s rate_limit_per_ip_tcp)
+                        # could land inside the cooldown window from the
+                        # immediately preceding cred-auth ffprobe at line 8498
+                        # — silently failing the codec correction probe even
+                        # though all the retry-spacing pacing was correct.
+                        # Now uses _throttle_wait_if_needed so we honor the
+                        # cross-sequence tracker, not just per-iteration
+                        # spacing within this loop.
                         det = {}
                         for attempt in range(3):
-                            await asyncio.sleep(1.0 if attempt == 0 else 5.0)
+                            if attempt == 0:
+                                if throttle_s > 0:
+                                    await _throttle_wait_if_needed(
+                                        cam_ip, throttle_s,
+                                        f"ffprobe codec correction "
+                                        f"(initial)")
+                                else:
+                                    await asyncio.sleep(1.0)
+                            else:
+                                await asyncio.sleep(5.0)
                             det = await probe_stream_details(auth_url, "RTSP")
                             if det.get("stream_codec"):
                                 if attempt > 0:
@@ -8106,6 +9543,20 @@ async def api_set_credentials(request) -> web.Response:
 
     if not url:
         log.warning(f"Credential attempt FAILED for {camera_id} — no working stream found")
+        # 2.4.0-rc2.1 — Issue 4: restore needs_credentials state before
+        # returning 401. The handler entry mutated camera["status"] to
+        # "authenticating_throttled" (rate_limit_per_ip_tcp brands only)
+        # and set status_text to inform the UI. Without this restore,
+        # the next /api/cameras poll returns cam.status="authenticating_throttled",
+        # credFormHTML's `cam.status !== 'needs_credentials'` check
+        # fires false, and the card collapses with no login form —
+        # leaving the user stranded with only a Remove button. Observed
+        # on Microseven (rate_limit_per_ip_tcp) when wrong creds
+        # were tried; not observed on Hikvision because Hikvision
+        # is not throttled, so the entry status mutation never happened.
+        if camera.get("status") == "authenticating_throttled":
+            camera["status"] = "needs_credentials"
+            camera.pop("status_text", None)
         return web.json_response({"error": "Could not connect with those credentials."}, status=401)
 
     # 2.3.0: pace ffprobe on rate_limit brands (it opens its own RTSP socket)
@@ -8117,6 +9568,10 @@ async def api_set_credentials(request) -> web.Response:
 
     # ── Silent DB probe for additional streams on non-ONVIF cameras ──────────
     sub_url = None
+    sub_details: dict = {}   # 2.4.0-rc2.9: codec/res/fps for sub_url
+                             # entry in stream_profiles, populated by
+                             # the db_streams branch when a sub is
+                             # picked. Defaults empty.
     db_entry  = _match_stream_db(camera)
     db_slug   = _match_stream_db_slug(camera)
 
@@ -8134,21 +9589,242 @@ async def api_set_credentials(request) -> web.Response:
     if db_entry and proto in ("RTSP", "DVR"):
         db_streams = await _probe_db_streams(ip, port, enc_creds,
                                              db_entry, {url})
+        # 2.4.0-rc2.6: PRESERVE the main stream URL we found pre-cred-
+        # auth. Previously this code sorted ALL candidates (main + DB-
+        # probed sub-streams) by resolution and replaced `url` with
+        # whichever came out on top — which on Hikvision DS-2DE
+        # produced incorrect results: probe_stream_details on
+        # /Streaming/Channels/101 returned 704x480 (sub-stream
+        # resolution), then DB probe on /102 returned the same data,
+        # sorting was unstable, and /102 ended up as primary while
+        # /101 (the actual 4MP main stream) became the "sub". Then
+        # snap_loop streamed the wrong URL at the wrong resolution.
+        # The fix: the pre-cred main URL is locked as primary. DB-
+        # probed streams are PURE ADDITIONS to the profile list, never
+        # replacements. The picked sub_url is the lowest-resolution of
+        # the DB-probed additions only.
+        primary_url = url
+        primary_details = dict(details)
+        # 2.4.0-rc2.9: capture sub_url's probed details (codec/res/fps)
+        # so they can be carried into stream_profiles. rc2.6/rc2.7/rc2.8
+        # all hardcoded sub_url's stream_profiles entry to None across
+        # the board, which is why "Stream 2" showed in the dropdown
+        # instead of "704x480 MJPEG" — the DB probe had captured the
+        # data, but it was being thrown away at this step.
+        # (sub_details is hoisted above to function scope to handle the
+        # case where this if-block doesn't execute at all.)
         if db_streams:
-            # Rank with main stream, pick lowest-res as sub
-            all_s = [{"url": url, **details}] + db_streams
-            def _res2(c) -> int:
+            # All DB-probed candidates become alternative profiles;
+            # never replace primary. Sub-stream picked from these.
+            additions = list(db_streams)
+            # Lowest-res addition becomes sub (for adaptive snap_loop)
+            additions.sort(key=lambda c:
+                (c.get("stream_width") or 0) * (c.get("stream_height") or 0))
+            if additions:
+                _sub_pick = additions[0]
+                sub_url = _sub_pick["url"]
+                # Strip the "url" key so what remains is the pure
+                # details dict (codec/width/height/fps/profile).
+                sub_details = {k: v for k, v in _sub_pick.items()
+                               if k != "url"}
+            if sub_url and sub_url != primary_url:
+                log.info(f"  DB probe found sub stream: "
+                         f"{_strip_creds(sub_url)}")
+            elif sub_url == primary_url:
+                # Defensive: if DB probe returned the SAME URL as
+                # primary, don't double-count it as sub.
+                sub_url = None
+                sub_details = {}
+        # Restore primary
+        url = primary_url
+        details = primary_details
 
-                return (c.get("stream_width") or 0) * (c.get("stream_height") or 0)
-            all_s.sort(key=_res2, reverse=True)
-            url     = all_s[0]["url"]
-            details = {k: v for k, v in all_s[0].items() if k != "url"}
-            sub_url = all_s[-1]["url"] if len(all_s) > 1 else None
-            if sub_url:
-                log.info(f"  DB probe found sub stream: {_strip_creds(sub_url)}")
+    # 2.4.0-rc2.6: post-auth validation of locked-stream candidates
+    # (Fix 3 + Fix 4 followup). After creds accepted, walk through
+    # cam.locked_streams and validate each against the freshly-
+    # authenticated camera. Successful ones get added to a new
+    # additional_streams list on the camera record. Spurious
+    # candidates (404s, RSTs, still-401-after-auth) get silently
+    # dropped. This handles the case where the user enumerated 26
+    # locked candidates via Deep Re-Probe but only ~6 are real
+    # endpoints — the bogus ones disappear after auth.
+    locked_in = camera.get("locked_streams", []) or []
+    additional_streams: list[dict] = []
+    if locked_in and proto in ("RTSP", "DVR"):
+        log.info(f"  Validating {len(locked_in)} locked-stream "
+                 f"candidate(s) post-auth")
+        # Throttle-aware: respect brand cooldown between probes
+        for idx, lk in enumerate(locked_in):
+            lpath = lk.get("path", "")
+            if not lpath:
+                continue
+            lurl_clear = f"rtsp://{ip}:{port}{lpath}"
+            # Skip if it's already the primary or sub
+            if lurl_clear == url or (sub_url and lurl_clear == sub_url):
+                continue
+            lurl_authed = build_authenticated_url({
+                "stream_url": lurl_clear,
+                "credentials": enc_creds,
+                "ip": ip, "port": port, "protocol": "RTSP",
+            }) or lurl_clear
+            # Apply brand throttle cooldown if needed (Hikvision DS-2
+            # has no cooldown, but Hipcam etc. do)
+            if _t_s > 0:
+                await _throttle_wait_if_needed(
+                    ip, _t_s, f"locked-stream-validate {idx+1}")
+            try:
+                ok = await loop.run_in_executor(
+                    _THREAD_POOL, probe_rtsp,
+                    lurl_authed, "", "", 6.0)
+                if ok:
+                    log.info(f"  Locked-stream validated: "
+                             f"{_strip_creds(lurl_authed)}")
+                    # 2.4.0-rc2.8: capture resolution/codec for the
+                    # validated stream so the focus-view dropdown can
+                    # label it ("1920x1080 H264") instead of falling
+                    # back to "Stream N". Brand throttle cooldown
+                    # already applied above before probe_rtsp; we
+                    # re-throttle here because probe_stream_details
+                    # opens a fresh ffprobe TCP connection.
+                    add_details: dict = {}
+                    if _t_s > 0:
+                        await _throttle_wait_if_needed(
+                            ip, _t_s,
+                            f"locked-stream-details {idx+1}")
+                    try:
+                        add_details = await probe_stream_details(
+                            lurl_authed, "RTSP")
+                    except Exception as ee:
+                        log.debug(f"  probe_stream_details on "
+                                  f"locked-stream {lpath}: {ee}")
+                    additional_streams.append({
+                        "path": lpath,
+                        "url": lurl_clear,
+                        "realm": lk.get("realm", ""),
+                        "scheme": lk.get("scheme", ""),
+                        # Resolution/codec fields for dropdown labels
+                        "stream_width":  add_details.get("stream_width"),
+                        "stream_height": add_details.get("stream_height"),
+                        "stream_codec":  add_details.get("stream_codec"),
+                        "stream_fps":    add_details.get("stream_fps"),
+                    })
+                else:
+                    log.info(f"  Locked-stream NOT working "
+                             f"(probably not a real endpoint): {lpath}")
+            except Exception as e:
+                log.debug(f"  Locked-stream validate exception "
+                          f"({lpath}): {e}")
+        log.info(f"  Locked-stream validation: "
+                 f"{len(additional_streams)}/{len(locked_in)} "
+                 f"validated as working")
+
+    # 2.4.0-rc2.8: build stream_profiles explicitly. The non-ONVIF
+    # cred-accept path used to leave stream_profiles empty, relying on
+    # the dropdown's synth fallback at api_focus_get. That fallback
+    # only built [main, sub] from stream_url/sub_stream_url and never
+    # included additional_streams — so even when 3 locked candidates
+    # were validated, the dropdown showed only 2 entries. Building
+    # stream_profiles here means the canonical list is persisted on
+    # the camera record and survives reload, the focus-view dropdown
+    # gets all entries, and the snap_loop tier selection uses the
+    # same source of truth as the UI.
+    stream_profiles: list[dict] = []
+    _seen_urls: set[str] = set()
+    # Primary first
+    if url and url not in _seen_urls:
+        stream_profiles.append({
+            "url":           url,
+            "stream_width":  details.get("stream_width"),
+            "stream_height": details.get("stream_height"),
+            "stream_codec":  details.get("stream_codec"),
+            "stream_fps":    details.get("stream_fps"),
+        })
+        _seen_urls.add(url)
+    # DB-probed sub next
+    if sub_url and sub_url not in _seen_urls:
+        # 2.4.0-rc2.9: pull the captured details from sub_details
+        # (populated up at the db_streams branch) instead of writing
+        # None across the board.
+        stream_profiles.append({
+            "url":           sub_url,
+            "stream_width":  sub_details.get("stream_width"),
+            "stream_height": sub_details.get("stream_height"),
+            "stream_codec":  sub_details.get("stream_codec"),
+            "stream_fps":    sub_details.get("stream_fps"),
+        })
+        _seen_urls.add(sub_url)
+    # Each validated locked-stream addition
+    for add in additional_streams:
+        au = add.get("url", "")
+        if au and au not in _seen_urls:
+            stream_profiles.append({
+                "url":           au,
+                "stream_width":  add.get("stream_width"),
+                "stream_height": add.get("stream_height"),
+                "stream_codec":  add.get("stream_codec"),
+                "stream_fps":    add.get("stream_fps"),
+            })
+            _seen_urls.add(au)
+
+    # 2.4.0-rc2.9: dedup stream_profiles on (codec, width, height).
+    # When the same camera surfaces multiple URLs that resolve to
+    # the same encoder/resolution combination — common on Hikvision
+    # which exposes /Streaming/Channels/101 and /h.264/ch1/main/
+    # av_stream and /Streaming/Channels/1 as three separate URLs all
+    # backed by the same 2560x1440 HEVC encoder — the dropdown was
+    # showing duplicates. First-discovery wins (pre-auth main →
+    # DB-probed sub → validated locked candidates in walker order),
+    # which gives users the canonical brand-recommended URL rather
+    # than the alternate-form variant. Entries with None resolution
+    # stay distinct (probe failed for some reason — better to keep
+    # both than risk collapsing actually-different streams).
+    _deduped: list[dict] = []
+    _seen_keys: set = set()
+    _dups_dropped = 0
+    for sp in stream_profiles:
+        w = sp.get("stream_width")
+        h = sp.get("stream_height")
+        c = sp.get("stream_codec")
+        # Build dedup key. None values are preserved as-is and produce
+        # a key that won't collide with concrete (w,h,codec) triples
+        # OR with other None-bearing keys for different URLs — that
+        # latter property is achieved by mixing the URL into the key
+        # when any axis is None, ensuring "unknown" entries always
+        # stay distinct.
+        if w and h and c:
+            key = ("known", c, w, h)
+        else:
+            # Any None → make key URL-unique so it can't collapse
+            # against another unknown
+            key = ("unknown", sp.get("url", ""))
+        if key in _seen_keys:
+            _dups_dropped += 1
+            continue
+        _seen_keys.add(key)
+        _deduped.append(sp)
+    if _dups_dropped:
+        log.info(f"  stream_profiles dedup: dropped {_dups_dropped} "
+                 f"duplicate entry/entries on (codec, width, height)")
+    stream_profiles = _deduped
+    log.info(f"  stream_profiles: built {len(stream_profiles)} "
+             f"entry/entries (1 main + "
+             f"{1 if sub_url else 0} sub + "
+             f"{len(additional_streams)} validated locked)")
 
     camera.update(credentials=enc_creds,
                   stream_url=url, sub_stream_url=sub_url,
+                  # 2.4.0-rc2.6: persist the validated additional
+                  # streams. UI can offer them as alternative
+                  # resolutions in the focus-view dropdown. Always
+                  # written (may be empty list).
+                  additional_streams=additional_streams,
+                  # 2.4.0-rc2.8: persist stream_profiles built above
+                  # so the focus-view dropdown reads the canonical
+                  # list directly without needing the synth fallback.
+                  stream_profiles=stream_profiles,
+                  # Clear the unvalidated locked_streams list — the
+                  # validated subset is now in additional_streams.
+                  locked_streams=[],
                   requires_credentials=False,
                   status="ready", user_saved=True,
                   http_snap_url=http_snap_url,
@@ -8170,7 +9846,45 @@ async def api_set_credentials(request) -> web.Response:
             log.debug(f"  brand-id (post-cred-auth RTSP): {e}")
     save_cameras()
     log.info(f"Credentials accepted for {camera_id}: {_strip_creds(url)}")
-    return web.json_response({"status": "ok", "stream_url": _strip_creds(url), **details})
+    # 2.5.0-rc1.2: kick off channel enumeration as a fire-and-forget
+    # task. Channel-iterate brands (Lorex/Dahua DVR-NVR family) expose
+    # multiple physical-camera channels under a single IP:port, and
+    # the user's expectation (per the original 2026-05-02 plan) is
+    # one card per populated channel. The task walks remaining
+    # channels with the validated credentials and registers any
+    # populated ones as additional CAMERAS entries. No-op for non-
+    # channel_iterate brands. Doesn't block the cred-auth response —
+    # the user gets confirmation immediately, additional cards
+    # appear over the next few seconds as enumeration completes.
+    #
+    # 2.5.0-rc1.6: also set `dvr_enumeration_pending` on the response
+    # so the UI knows to schedule a delayed loadCameras() refetch.
+    # Without this hint, the UI's immediate post-cred-auth
+    # loadCameras() runs BEFORE the background enumeration completes,
+    # and there's no periodic /api/cameras poll, so the new cards
+    # don't surface in the grid until the next user-initiated state
+    # change. Field-confirmed in 2.5.0-rc1.5 log: cred-auth at 00:20:42,
+    # 7 cards registered at 00:20:46, but UI didn't show them until
+    # 00:22:06 when an unrelated periodic scan completed and that
+    # scan's onComplete handler triggered loadCameras() as a side-
+    # effect. Setting the flag bridges the gap deterministically.
+    enum_pending = False
+    try:
+        _post_brand = _identify_camera_brand(camera) or {}
+        _post_recipe = _post_brand.get("streaming_recipe") or {}
+        if _post_recipe.get("type") == "channel_iterate":
+            enum_pending = True
+    except Exception:
+        pass
+    try:
+        asyncio.create_task(
+            _enumerate_dvr_channels_after_auth(camera_id))
+    except Exception as e:
+        log.debug(f"  channel-enum spawn: {e}")
+    return web.json_response({"status": "ok",
+                              "stream_url": _strip_creds(url),
+                              "dvr_enumeration_pending": enum_pending,
+                              **details})
 
 
 async def api_clear_credentials(request) -> web.Response:
@@ -8265,6 +9979,313 @@ async def api_not_camera(request) -> web.Response:
         asyncio.create_task(submit_to_community(record))
 
     return web.json_response({"status": "ok"})
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 2.4.0-rc2.4: Deep Re-Probe handler
+# ─────────────────────────────────────────────────────────────────────────
+async def api_deep_reprobe(request) -> web.Response:
+    """User-invoked deep re-probe of a single camera card.
+
+    Resumes Layer 1 from where rc2.4's early-bail left off, then runs
+    the full Layer 2 multi-socket walk if it was skipped. Designed as
+    the escape hatch for the rc2.4 aggressive Layer 1/Layer 2 skip
+    heuristics: when we early-bail Layer 1 after 5 consecutive same-
+    realm 401s and skip Layer 2, the user may legitimately want to
+    verify that no firmware-quirk path exists. This handler delivers
+    that verification on demand.
+
+    State machine (driven by cam.early_bail_reason):
+      • "layer1_consecutive_401s" — Layer 1 bailed early but Layer 2
+        was still attempted and bailed normally. Resume Layer 1 on
+        cam.early_bail_paths_remaining.
+      • "layer1_then_layer2_skipped_401s" — Layer 1 bailed early AND
+        Layer 2 was skipped (rc2.4 default). Resume Layer 1 on
+        remaining paths, THEN run full Layer 2 walk.
+      • unset/missing — no early bail recorded. Run a fresh full
+        Layer 1 + Layer 2 walk.
+
+    Staleness check: if cam.early_bail_at is older than 30 minutes,
+    discard the saved state and run a fresh full probe instead. Avoids
+    resuming a walk against a host that's been rebooted, repurposed,
+    or replaced since the original scan.
+
+    Concurrency: cam.deep_reprobe_in_progress flag suppresses
+    overlapping invocations. Frontend disables the button while the
+    handler is in flight.
+    """
+    cid = request.match_info["camera_id"]
+    cam = CAMERAS.get(cid)
+    if not cam:
+        return web.json_response({"error": "Not found"}, status=404)
+
+    if cam.get("deep_reprobe_in_progress"):
+        return web.json_response(
+            {"error": "Deep re-probe already in progress for this card"},
+            status=409,
+        )
+
+    ip   = cam["ip"]
+    port = cam["port"]
+    bail_reason     = cam.get("early_bail_reason", "")
+    paths_remaining = cam.get("early_bail_paths_remaining", []) or []
+    bail_at         = cam.get("early_bail_at", "")
+
+    # Staleness — 30 minutes
+    stale = False
+    if bail_at:
+        try:
+            bail_dt = datetime.datetime.fromisoformat(bail_at)
+            age_s = (datetime.datetime.utcnow() - bail_dt).total_seconds()
+            if age_s > 1800:
+                stale = True
+                log.info(f"  Deep Re-Probe: cached bail state for {cid} "
+                         f"is stale ({age_s:.0f}s old) — running fresh "
+                         f"full probe instead of resuming")
+        except Exception:
+            stale = True
+
+    cam["deep_reprobe_in_progress"] = True
+    save_cameras()
+
+    loop = asyncio.get_event_loop()
+    log.info(f"Deep Re-Probe started: {cid} (reason={bail_reason!r}, "
+             f"remaining={len(paths_remaining)} paths, stale={stale})")
+
+    # Build host_meta from camera record so brand-aware logic still
+    # works inside the resumed walk
+    host_meta = {
+        "ip":             ip,
+        "hostname":       cam.get("hostname", ip),
+        "mac_addr":       cam.get("mac_addr", ""),
+        "mac_vendor":     cam.get("mac_vendor", ""),
+        "vendor":         cam.get("mac_vendor", ""),
+        "manufacturer":   cam.get("manufacturer", ""),
+        "page_title":     cam.get("page_title", ""),
+        "server_header":  cam.get("server_header", ""),
+        "rtsp_server_header": cam.get("rtsp_server_header", ""),
+        "rtsp_auth_realm":    cam.get("rtsp_auth_realm", ""),
+        "rtsp_auth_scheme":   cam.get("rtsp_auth_scheme", ""),
+        "rtsp_public_methods": cam.get("rtsp_public_methods", ""),
+        "onvif_scopes":   cam.get("onvif_scopes", ""),
+    }
+
+    found_url: str | None = None
+    new_locked: list[dict] = []
+
+    try:
+        # Decide: resume Layer 1, run Layer 2, or both. If the cached
+        # state is stale OR no early-bail was recorded, do a fresh full
+        # find_rtsp_path call (which itself runs Layer 1 + Layer 2).
+        run_resume_layer1 = (
+            not stale
+            and bail_reason in ("layer1_consecutive_401s",
+                                "layer1_then_layer2_skipped_401s")
+            and bool(paths_remaining)
+        )
+        # 2.4.0-rc2.9: REVERTING rc2.8's Fix 5. rc2.8 dropped the rc2.5
+        # expansion that forced Stage B (Layer 2) to run during Deep Re-
+        # Probe on skip_layer2 brands. Reasoning at the time was that
+        # skip_layer2 brands "guaranteed" failure on Layer 2. But the
+        # user explicitly wanted Deep Re-Probe to be the catch-everything
+        # safety net — overriding ALL skip flags including skip_layer2 —
+        # specifically for the rare firmware-quirk cases where Layer 2's
+        # fresh-socket-per-path semantics could reveal something Layer 1
+        # missed. Three documented scenarios:
+        #   1. Sub-stream paths that only respond on a fresh socket
+        #      (some cheap firmwares have buggy session state where
+        #      the second DESCRIBE on a single socket returns garbage,
+        #      but a fresh socket returns clean 200/401).
+        #   2. Servers that close the socket after first 401 (older
+        #      Foscam-family clones); Layer 1 walk prematurely ends,
+        #      Layer 2 re-opens and continues.
+        #   3. Token-bucket throttles that reset between sockets —
+        #      single-socket walk hits the throttle, multi-socket walk
+        #      with 5s cooldown doesn't.
+        # The 45s Layer 2 wait on Hikvision Deep Re-Probe is the
+        # accepted cost of this safety net. User-requested behavior.
+        brand_has_skip_layer2 = False
+        try:
+            _be = _identify_camera_brand(host_meta)
+            brand_has_skip_layer2 = bool(
+                _be and _be.get("skip_layer2", False))
+        except Exception:
+            pass
+        run_layer2_followup = (
+            not stale
+            and (bail_reason == "layer1_then_layer2_skipped_401s"
+                 or (bail_reason == "layer1_consecutive_401s"
+                     and brand_has_skip_layer2))
+        )
+        if not run_resume_layer1 and not run_layer2_followup:
+            # Fresh full probe — let find_rtsp_path do its thing
+            log.info(f"  Deep Re-Probe stage: full fresh probe (Layer 1 + "
+                     f"Layer 2)")
+            # Clear any stale early-bail state so the new walk doesn't
+            # re-trigger the rc2.4 short-circuits with old data.
+            for k in ("early_bail_reason", "early_bail_realm",
+                      "early_bail_paths_tried", "early_bail_paths_remaining",
+                      "early_bail_at"):
+                host_meta.pop(k, None)
+            found_url = await loop.run_in_executor(
+                _THREAD_POOL, find_rtsp_path, ip, port, "", "", host_meta)
+            new_locked = host_meta.get("locked_streams", []) or []
+        else:
+            # Stage A: resume Layer 1 walk on the unwalked paths.
+            # Run with collect_locked=True so 401s on the remaining
+            # paths surface as locked-stream candidates the user can
+            # later unlock by entering credentials.
+            if run_resume_layer1:
+                log.info(f"  Deep Re-Probe Stage A: resume Layer 1 "
+                         f"({len(paths_remaining)} paths remaining)")
+                expected_realm = host_meta.get("rtsp_auth_realm", "") or ""
+                # 2.4.0-rc2.6: identify brand recipe to filter locked
+                # candidates by paths the brand actually serves. Without
+                # this, Hikvision (and similar 401-everything cameras)
+                # produce 26+ bogus locked candidates that include
+                # paths from completely different brand recipes
+                # (Foscam, Dahua, etc.). With it, only paths matching
+                # the brand's known stream URLs surface as candidates.
+                _stage_a_brand_paths: list[str] = []
+                try:
+                    _stage_a_be = _identify_camera_brand(host_meta)
+                    if _stage_a_be:
+                        _cam_with_brand = dict(host_meta)
+                        _cam_with_brand["manufacturer"] = _stage_a_be.get(
+                            "name", "")
+                        _stage_a_sdb = _match_stream_db(_cam_with_brand)
+                        if _stage_a_sdb:
+                            _stage_a_brand_paths = list(
+                                _stage_a_sdb.get("rtsp", []))
+                except Exception:
+                    pass
+                # 2.4.0-rc2.5: deep_reprobe_mode=True disables the
+                # early-bail counter (we want a full walk) and
+                # bypasses the found_working_url gate on locked-
+                # stream collection (so 401s get surfaced as
+                # candidates even when no unauth stream exists).
+                found_a, _looks_rtsp = await loop.run_in_executor(
+                    _THREAD_POOL, _probe_rtsp_paths_single_socket,
+                    ip, port, paths_remaining, "", "",
+                    6.0, "", f"deep-reprobe:{cid}", host_meta,
+                    True, expected_realm, True,  # deep_reprobe_mode
+                    _stage_a_brand_paths,  # brand_recipe_paths
+                )
+                if found_a:
+                    found_url = found_a
+                    log.info(f"  Deep Re-Probe Stage A → "
+                             f"found working stream: {found_a}")
+                # Pick up any locked streams Stage A captured
+                stage_a_locked = host_meta.get("locked_streams", []) or []
+                # Merge with whatever was on the camera before
+                existing_locked = cam.get("locked_streams", []) or []
+                seen_paths = {l.get("path") for l in existing_locked}
+                for l in stage_a_locked:
+                    if l.get("path") not in seen_paths:
+                        existing_locked.append(l)
+                        seen_paths.add(l.get("path"))
+                new_locked = existing_locked
+                log.info(f"  Deep Re-Probe Stage A: found "
+                         f"{len(stage_a_locked)} locked candidate(s) "
+                         f"on resumed paths")
+
+            # Stage B: full Layer 2 multi-socket walk if it was
+            # skipped during the original scan. Even if Stage A
+            # already found a working stream, we still skip Stage B
+            # in that case (no need to grind).
+            if run_layer2_followup and not found_url:
+                log.info(f"  Deep Re-Probe Stage B: running Layer 2 "
+                         f"(skipped during original scan)")
+                # Build the full ordered path list the same way
+                # find_rtsp_path does, so Layer 2 walks the canonical
+                # candidate set — not just the remaining-from-Stage-A
+                # list.
+                brand_entry: dict | None = None
+                try:
+                    brand_entry = _identify_camera_brand(host_meta)
+                except Exception:
+                    pass
+                brand_name = (brand_entry or {}).get("name", "")
+                db_paths_b: list[str] = []
+                if brand_name:
+                    cam_with_brand = dict(host_meta)
+                    cam_with_brand["manufacturer"] = brand_name
+                    sdb = _match_stream_db(cam_with_brand)
+                    if sdb:
+                        db_paths_b = list(sdb.get("rtsp", []))
+                seen_b: set[str] = set()
+                ordered_b: list[str] = []
+                for p in db_paths_b + RTSP_PATHS:
+                    if p not in seen_b:
+                        seen_b.add(p)
+                        ordered_b.append(p)
+                # Inline a Layer-2-only walk (5s cooldown, bail-after-10)
+                def _layer2_only() -> str | None:
+                    consec = 0
+                    for i, path in enumerate(ordered_b):
+                        if i > 0:
+                            time.sleep(5.0)
+                        url2 = f"rtsp://{ip}:{port}{path}"
+                        if probe_rtsp(url2, "", "", timeout=6.0):
+                            log.info(f"  RTSP OK (Deep Re-Probe Layer 2): "
+                                     f"{url2}")
+                            return url2
+                        consec += 1
+                        if consec >= 10:
+                            log.info(f"  Deep Re-Probe Layer 2 bailing "
+                                     f"after {consec} consecutive failures")
+                            break
+                    return None
+                found_b = await loop.run_in_executor(
+                    _THREAD_POOL, _layer2_only)
+                if found_b:
+                    found_url = found_b
+
+        # Update the camera record with the outcome
+        if found_url:
+            cam["stream_url"] = found_url
+            cam["protocol"] = "RTSP"
+            cam["status"] = "ready"
+            cam["requires_credentials"] = False
+            log.info(f"  Deep Re-Probe SUCCESS: {cid} → "
+                     f"{_strip_creds(found_url)}")
+        else:
+            log.info(f"  Deep Re-Probe: no working stream found for "
+                     f"{cid} (locked candidates: {len(new_locked)})")
+
+        if new_locked:
+            cam["locked_streams"] = new_locked
+
+        # Clear early-bail state — we did the deep work, no more
+        # skipped paths to resume.
+        for k in ("early_bail_reason", "early_bail_realm",
+                  "early_bail_paths_tried", "early_bail_paths_remaining",
+                  "early_bail_at"):
+            cam.pop(k, None)
+
+        # Record outcome stats
+        cam["deep_reprobe_attempts"] = int(
+            cam.get("deep_reprobe_attempts", 0)) + 1
+        cam["deep_reprobe_last_at"] = datetime.datetime.utcnow().isoformat()
+        cam["deep_reprobe_last_outcome"] = (
+            "ready" if found_url
+            else (f"locked_streams:{len(new_locked)}"
+                  if new_locked else "no_streams"))
+    except Exception as e:
+        log.error(f"Deep Re-Probe error for {cid}: {e}", exc_info=True)
+        cam["deep_reprobe_last_outcome"] = f"error:{str(e)[:80]}"
+    finally:
+        cam["deep_reprobe_in_progress"] = False
+        save_cameras()
+
+    return web.json_response({
+        "status":         "ok",
+        "found_stream":   bool(found_url),
+        "stream_url":     _strip_creds(found_url) if found_url else "",
+        "locked_count":   len(new_locked),
+        "outcome":        cam.get("deep_reprobe_last_outcome", ""),
+    })
+
 
 async def api_add_camera(request) -> web.Response:
 
@@ -8597,10 +10618,6 @@ function stopSnap(camId) {
   if (_snapTimers[camId]) { clearTimeout(_snapTimers[camId]); delete _snapTimers[camId]; }
 }
 
-function stopAllSnaps() {
-  Object.keys(_snapTimers).forEach(stopSnap);
-}
-
 /* ── Scan cancel ───────────────────────────────────────────────────────────── */
 async function cancelScan() {
   await fetch(BASE + '/api/scan/cancel', {method: 'POST'}).catch(() => {});
@@ -8753,13 +10770,6 @@ function _storNavTo(folder) {
 function storNavBack() {
   if (_storHistIdx <= 0) return;
   _storHistIdx--;
-  _storCurrent = _storHistory[_storHistIdx];
-  _renderStorageView();
-}
-
-function storNavForward() {
-  if (_storHistIdx >= _storHistory.length - 1) return;
-  _storHistIdx++;
   _storCurrent = _storHistory[_storHistIdx];
   _renderStorageView();
 }
@@ -9118,6 +11128,15 @@ async function _startFocusPoll(camId, cam) {
   let _stepRes        = null;  // current ladder tier resolution from X-Step-Res header
   let _stepFps        = null;  // current ladder tier fps from X-Step-FPS header
   let _prevBlobUrl    = null;
+  // 2.4.0-rc3.2: track snap_mode so we can show a one-time toast when
+  // the server transitions RTSP → HTTP-snap fallback. Without this the
+  // dropdown silently disables (the existing tooltip is hover-gated and
+  // most users never see it). null = first response, no transition yet.
+  let _lastSnapMode   = null;
+  // 2.4.0-rc3.3 Bug B fix: track stream status so we show "Connecting…" /
+  // "Switching transport…" toasts during the retry-cycle window where
+  // ffmpeg is crashing. Without this, the focus view appears frozen.
+  let _lastStreamStatus = null;
 
   // Info bar format:
   //   Name — Actual Feed: WxH · X fps  [Adapted Quality: WxH · fps]
@@ -9157,6 +11176,18 @@ async function _startFocusPoll(camId, cam) {
         const stepRes     = resp.headers.get('X-Step-Res');
         const stepFps     = resp.headers.get('X-Step-FPS');
         const snapMode    = resp.headers.get('X-Snap-Mode') || 'rtsp';
+        // 2.4.0-rc3.3 Bug B fix: X-Stream-Status surfaces the retry phase so
+        // the user sees "Connecting…" or "Switching transport…" during the
+        // 15-30s window where ffmpeg keeps crashing on 0-frame failures
+        // before the http_snap fallback engages. Without this status, the
+        // focus view appears frozen on the last cached frame with no
+        // explanation. Possible values:
+        //   ok                  — normal (frames flowing or fresh start, no toast)
+        //   connecting          — ffmpeg has crashed at least once, still trying TCP
+        //   switching_transport — TCP failed 3×, now trying UDP transport
+        //   http_fallback       — both transports gave up, in http_snap mode
+        //                         (handled separately via the existing httpFallback path)
+        const streamStatus = resp.headers.get('X-Stream-Status') || 'ok';
         if (stepRes) {
           // Detect 4K → smaller fallback so we can surface a one-time message.
           // _stepRes is the previously seen tier resolution; if it was 4K-class
@@ -9193,6 +11224,64 @@ async function _startFocusPoll(camId, cam) {
         // Disable resolution/fps controls when in http_snap fallback —
         // profile switching is impossible via HTTP snapshot endpoints.
         const httpFallback = (snapMode === 'http');
+        // 2.4.0-rc3.2: surface the fallback transition as a visible toast
+        // so the user knows WHY the dropdown just greyed out. The
+        // existing hover-tooltip on the disabled select wasn't enough —
+        // most users don't think to hover over a disabled control. We
+        // reuse the focus-warning element that already exists for the
+        // 4K-too-demanding case. Toast stays visible the whole time
+        // we're in HTTP fallback; clears the moment RTSP comes back.
+        if (_lastSnapMode !== null && _lastSnapMode !== snapMode) {
+          const warnEl = document.getElementById('focus-warning');
+          const txt    = document.getElementById('focus-warn-text');
+          if (warnEl && txt) {
+            if (httpFallback) {
+              txt.textContent = 'Live RTSP stream unavailable — showing periodic snapshots from this camera';
+              warnEl.style.display = 'flex';
+              // Don't auto-hide; this state persists for the whole focus session
+              clearTimeout(_focus4kWarnTimer);
+            } else {
+              // Transitioned back to RTSP — clear the warning if it's ours
+              if (txt.textContent.indexOf('periodic snapshots') !== -1) {
+                warnEl.style.display = 'none';
+              }
+            }
+          }
+        }
+        _lastSnapMode = snapMode;
+        // 2.4.0-rc3.3 Bug B fix: surface stream-status transitions so the
+        // user sees what's happening during the retry phase. The
+        // "connecting" and "switching_transport" states fire during the
+        // 15-30s window between the first ffmpeg failure and either
+        // recovery or HTTP-snap fallback — without this, the focus view
+        // looks frozen on the last cached frame with no explanation.
+        // Suppress when snapMode is already 'http' since the existing
+        // httpFallback toast covers that state more specifically.
+        if (_lastStreamStatus !== streamStatus && snapMode !== 'http') {
+          const warnEl = document.getElementById('focus-warning');
+          const txt    = document.getElementById('focus-warn-text');
+          if (warnEl && txt) {
+            // Only act on this status if our current message isn't already
+            // a higher-priority one (4K-too-demanding, http_snap fallback).
+            const curText = txt.textContent || '';
+            const isOurStatus = (curText.indexOf('Connecting') !== -1 ||
+                                 curText.indexOf('Switching transport') !== -1);
+            const isFreshSlot = (warnEl.style.display !== 'flex' || isOurStatus);
+            if (streamStatus === 'connecting' && isFreshSlot) {
+              txt.textContent = 'Connecting to RTSP stream…';
+              warnEl.style.display = 'flex';
+              clearTimeout(_focus4kWarnTimer);  // we manage our own lifecycle
+            } else if (streamStatus === 'switching_transport' && isFreshSlot) {
+              txt.textContent = 'Switching transport (TCP → UDP) — camera does not support TCP RTSP';
+              warnEl.style.display = 'flex';
+              clearTimeout(_focus4kWarnTimer);
+            } else if (streamStatus === 'ok' && isOurStatus) {
+              // Clear our toast when stream recovers
+              warnEl.style.display = 'none';
+            }
+          }
+        }
+        _lastStreamStatus = streamStatus;
         const ctrlGroups = document.querySelectorAll('.focus-ctrl-group');
         const autoBtn    = document.querySelector('.focus-auto-btn');
         ctrlGroups.forEach(g => {
@@ -9474,12 +11563,60 @@ function showToast(msg, isError = false) {
   _toastTimer = setTimeout(() => {
     t.style.opacity = '0';
     setTimeout(() => { t.style.display = 'none'; }, 300);
-  }, 2500);
+  // 2.4.0-rc2.8: 2500ms → 7000ms. The Deep Re-Probe completion toast
+  // ("🔒 N locked stream(s) found", "no streams found", etc.) was
+  // disappearing before users could read it. 7s gives enough time
+  // to read a one-line message comfortably without lingering long
+  // enough to feel obstructive.
+  }, 7000);
 }
 
 
 
 /* ── Camera grid ───────────────────────────────────────────────────────────── */
+// 2.4.0-rc3.3 (Camera Cards Fixed Position): cards used to swap positions
+// when a user logged into a camera. Root cause: login changes the camera's
+// ID (e.g. "10.0.0.22_onvif" → "10.0.0.22_onvif_MainStreamProfileToken")
+// and the prior renderGrid logic matched by ID alone. The old ID disappeared
+// from the cameras array, the corresponding DOM card was removed, and the
+// new ID's card got appendChild'd at the end — visible as a "swap" since
+// the old card vanished and a new one appeared in a different slot.
+//
+// Fix: match cards by a stable key derived from the camera's IP:port,
+// which doesn't change across login. When an existing card's ID has
+// changed (because the same IP:port now has a profile-tokened ID), we
+// update its dataset.id in place and re-render its content — DOM
+// position is naturally preserved because we never remove-and-re-append.
+//
+// Future drag-to-reorder feature can persist a user-set order in
+// localStorage by capturing the DOM order of [data-stable-key] values
+// and replaying it as a sort comparator at the top of renderGrid.
+function _stableCardKey(cam) {
+  // ip:port survives login (which mutates id but not network identity).
+  // Falls back to id-as-key if a camera somehow has no ip (synthetic
+  // entries during testing / dev), preserving old behavior in that edge.
+  //
+  // 2.5.0-rc1.7: append a #chN suffix when cam.channel is set, so multi-
+  // channel DVR cards (Lorex/Dahua family) all sharing one ip:port get
+  // distinct stable_keys. Without this, all 8 channel cards collapse
+  // onto the same key — renderGrid's cardsByKey lookup returns the same
+  // DOM element on every iteration, the loop overwrites that one card's
+  // content with each iteration's HTML, and the new-card-append path is
+  // never reached. Field-confirmed in 2.5.0-rc1.6 log: cred-auth
+  // registered 7 channel cards in CAMERAS, +8s reload's renderGrid
+  // collapsed them into one DOM card showing ch8's content (last
+  // iteration wins). Only ch8 was [data-snap]'d, only ch8 was polled,
+  // ch2-ch7 + parent idled out at 30s without ever being rendered.
+  // Non-DVR cards have no `channel` field so they keep plain ip:port —
+  // the rc3.3 fixed-position-on-login behaviour is preserved.
+  if (cam.ip) {
+    let key = cam.ip + ':' + (cam.port || '');
+    if (cam.channel) key += '#ch' + cam.channel;
+    return key;
+  }
+  return 'id:' + cam.id;
+}
+
 function renderGrid() {
   const grid  = document.getElementById('cam-grid');
   const empty = document.getElementById('empty-state');
@@ -9487,14 +11624,58 @@ function renderGrid() {
   count.textContent = '';   // device count shown in scan status bar — not duplicated here
   empty.style.display = cameras.length ? 'none' : '';
 
-  const existingIds = new Set([...grid.querySelectorAll('.camera-card')].map(c => c.dataset.id));
-  const newIds      = new Set(cameras.map(c => c.id));
-  existingIds.forEach(id => { if (!newIds.has(id)) grid.querySelector('[data-id="' + id + '"]')?.remove(); });
-
-  cameras.forEach(cam => {
-    if (existingIds.has(cam.id)) updateCard(cam);
-    else                         grid.appendChild(buildCard(cam));
+  // Build maps from existing DOM cards. cardsByKey is the primary lookup
+  // (matches across login ID changes); cardsById covers the legacy edge
+  // where an old card was rendered before the dataset.stableKey attribute
+  // was introduced (first render after upgrade).
+  const cardsByKey = new Map();
+  const cardsById  = new Map();
+  [...grid.querySelectorAll('.camera-card')].forEach(c => {
+    if (c.dataset.id)        cardsById.set(c.dataset.id, c);
+    if (c.dataset.stableKey) cardsByKey.set(c.dataset.stableKey, c);
   });
+
+  const seenKeys = new Set();
+  cameras.forEach(cam => {
+    const key = _stableCardKey(cam);
+    seenKeys.add(key);
+    // Prefer key match (handles login ID change). Fall back to id match
+    // (handles first render or stable_key-less legacy cards).
+    let card = cardsByKey.get(key) || cardsById.get(cam.id);
+    if (card) {
+      // Existing card — update in place, preserving DOM position.
+      if (card.dataset.id !== cam.id) {
+        // ID changed (typical: login added a profile token). Preserve
+        // position, update DOM identity, stop the old snap loop.
+        stopSnap(card.dataset.id);
+        card.dataset.id = cam.id;
+      }
+      card.dataset.stableKey = key;
+      // Mirror updateCard's logic without re-querying — we already have
+      // the element in hand.
+      stopSnap(cam.id);
+      card.innerHTML = cardHTML(cam);
+      // uncertain class needs to be re-applied since we may have a fresh
+      // verdict from the server (e.g. brand identification just ran).
+      const isUncertain = (cam.verdict === 'uncertain' || cam.verdict === 'not_camera');
+      card.classList.toggle('uncertain', isUncertain);
+    } else {
+      // New camera — append at the end. Future cards land here too.
+      const newCard = buildCard(cam);
+      newCard.dataset.stableKey = key;
+      grid.appendChild(newCard);
+    }
+  });
+
+  // Remove DOM cards whose stable key is no longer in the cameras array
+  // (camera was deleted, marked not-camera, etc.). Using stable_key here
+  // means a login-induced ID change does NOT trigger a removal, which is
+  // the whole point of this rewrite.
+  [...grid.querySelectorAll('.camera-card')].forEach(c => {
+    const k = c.dataset.stableKey || ('id:' + c.dataset.id);
+    if (!seenKeys.has(k)) c.remove();
+  });
+
   grid.querySelectorAll('video[data-hls]').forEach(v => { if (!v._hls) initHls(v); });
   initSnaps();   // start polling for any newly added data-snap images
 }
@@ -9503,6 +11684,9 @@ function buildCard(cam) {
   const d = document.createElement('div');
   d.className = 'camera-card' + (cam.verdict === 'uncertain' || cam.verdict === 'not_camera' ? ' uncertain' : '');
   d.dataset.id = cam.id;
+  // 2.4.0-rc3.3: stable_key set on creation so the ID-change-preserving
+  // matcher in renderGrid finds this card on next update.
+  d.dataset.stableKey = _stableCardKey(cam);
   d.innerHTML = cardHTML(cam);
   return d;
 }
@@ -9522,6 +11706,12 @@ function dotClass(cam) {
   if (cam.verdict === 'uncertain' ||
       cam.verdict === 'not_camera')        return 'dot-uncertain';
   if (cam.status === 'needs_credentials')  return 'dot-warning';
+  // 2.4.0-rc2.2 — authenticating_throttled is a transient state during
+  // the rate-limited auth window (~30s on rate_limit_per_ip_tcp brands).
+  // Previously fell through to 'dot-error' (red), which was misleading
+  // since the camera is mid-authentication, not failed. Now renders as
+  // yellow (warning) like other transient/informational states.
+  if (cam.status === 'authenticating_throttled')  return 'dot-warning';
   return 'dot-error';
 }
 
@@ -9539,12 +11729,6 @@ function protoBadge(proto) {
 function cardPort(cam) {
   const m = (cam.stream_url || '').match(/:\/\/[^\/]*?:(\d+)/);
   return m ? m[1] : cam.port;
-}
-
-/* onerror helper — avoids embedding quotes in the generated HTML string */
-function imgError(img) {
-  img.style.display = 'none';
-  if (img.nextElementSibling) img.nextElementSibling.style.display = 'flex';
 }
 
 function feedHTML(cam) {
@@ -9664,8 +11848,95 @@ function cardActions(cam, clearBtn, notCamBtn) {
   const webBtn = (cam.status === 'ready' && cam.ip)
     ? '<button class="btn btn-ghost btn-sm" onclick="openCameraPage(\'' + cam.ip + '\')" title="Open camera web page">🌐</button>'
     : '';
-  return testBtn + clearBtn + notCamBtn + recBtn + webBtn
+  // 2.4.0-rc2.4: Deep Re-Probe button. Available on any card where
+  // we may have skipped paths during the original scan (Layer 1 early-
+  // bail OR Layer 2 skip via brand flag) AND on needs_credentials
+  // cards in general (user might want to re-probe after camera reboot
+  // or firmware change). Highlighted with yellow accent + extended
+  // label when early_bail_reason is set, indicating we know we
+  // skipped some scanning for this specific card.
+  // 2.4.0-rc2.6: loud in-progress styling + min-width to prevent
+  // button reflow. The rc2.5 version used `btn-ghost btn-sm` for
+  // the in-progress state, which rendered as nearly-invisible faint
+  // text against the dark card. The button label "Deep Re-Probe
+  // (skipped paths)" is also significantly wider than "Deep Re-
+  // Probe" alone, so the row reflowed when state changed. Now: all
+  // three states use the SAME button width (min-width 200px), and
+  // in-progress gets the same yellow accent + spinner emoji as the
+  // skipped-paths state for high visibility.
+  // 2.4.0-rc2.8: button is visible IFF cam.early_bail_reason is set —
+  // i.e. there are actually skipped paths to resume. After Deep Re-
+  // Probe completes the backend clears early_bail_reason (api_deep_
+  // reprobe at line ~9189), so the button vanishes once the work is
+  // done. Cards that never had skipped paths (e.g. Lorex/Dahua DVR-
+  // family which has skip_layer2: True and walks Layer 1 cleanly) get
+  // no button at all — there's nothing for it to do. The previous
+  // rc2.6 design had a "subdued ghost" state for these cards which
+  // was misleading: clicking it would launch a "fresh full probe"
+  // that had no extra capability beyond what the original scan did,
+  // so the user always got "no streams found" with no actionable
+  // next step. The in-progress state also requires early_bail_reason
+  // to remain visible — without that, the moment Deep Re-Probe
+  // completes and clears the flag, the button disappears.
+  let reprobeBtn = '';
+  const _reprobeStyle = 'min-width:200px;text-align:center;';
+  const _showReprobe = (cam.status === 'needs_credentials' || cam.verdict === 'not_camera')
+                       && (cam.deep_reprobe_in_progress || cam.early_bail_reason);
+  if (_showReprobe) {
+    if (cam.deep_reprobe_in_progress) {
+      reprobeBtn = '<button class="btn btn-sm" disabled '
+        + 'style="' + _reprobeStyle
+        + 'background:#3a2e1e;color:#f5b942;border:1px solid #f5b942;opacity:0.85" '
+        + 'title="Deep re-probe in progress — walking the unwalked paths">'
+        + '⏳ Deep Re-Probe (running)</button>';
+    } else {
+      reprobeBtn = '<button class="btn btn-sm" '
+        + 'style="' + _reprobeStyle
+        + 'background:#3a2e1e;color:#f5b942;border:1px solid #f5b942" '
+        + 'onclick="deepReprobe(\'' + cam.id + '\')" '
+        + 'title="Resume scan from where rc2.4 fast-skipped — walks the unwalked paths">'
+        + '🔍 Deep Re-Probe (skipped paths)</button>';
+    }
+  }
+  return testBtn + clearBtn + reprobeBtn + notCamBtn + recBtn + webBtn
        + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(\'' + cam.id + '\')">Remove</button>';
+}
+
+// 2.4.0-rc2.4: Deep Re-Probe handler. Posts to api_deep_reprobe and
+// progressively updates UI status. Backend handler is synchronous over
+// HTTP — total wait is whatever Layer 1 resume + Layer 2 walk take
+// (5-60s typical). We update the button to a spinner during the call,
+// then refresh the camera list so the result renders.
+async function deepReprobe(cid) {
+  const cam = (cameras || []).find(c => c.id === cid);
+  // Build a status-line message; keep the user informed about which
+  // stages are running.
+  const reasonText = cam && cam.early_bail_reason
+    ? ' (resuming from skipped paths)' : '';
+  showToast('Deep Re-Probe started' + reasonText + '…');
+  // Optimistically flip the in-progress flag so the button disables
+  if (cam) { cam.deep_reprobe_in_progress = true; renderGrid(); }
+  try {
+    const r = await fetch(BASE + '/api/cameras/' + cid + '/deep_reprobe',
+                         { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) {
+      showToast('Deep Re-Probe failed: ' + (d.error || r.statusText), true);
+      return;
+    }
+    let msg = 'Deep Re-Probe complete: ';
+    if (d.found_stream) msg += '✅ working stream found';
+    else if (d.locked_count > 0) msg += '🔒 ' + d.locked_count + ' locked stream(s) found';
+    else msg += 'no streams found';
+    showToast(msg);
+  } catch (e) {
+    showToast('Deep Re-Probe error: ' + e, true);
+  } finally {
+    // Force refresh from server so cam.* fields (early_bail_reason,
+    // locked_streams, status, deep_reprobe_attempts) reflect the new
+    // backend state.
+    try { await loadCameras(); } catch (_) {}
+  }
 }
 async function testStream(ev, cid) {
   const btn = ev.target, orig = btn.textContent;
@@ -9689,7 +11960,63 @@ async function testStream(ev, cid) {
    "Front Porch Camera") are NOT treated as generic. */
 function _isGenericCamName(s) {
   if (!s) return true;
-  return /^(ip\s*cam(era)?|network\s*camera|camera|onvif[\s_-]*(device|camera)?|webcam|video\s*server)$/i.test(s.trim());
+  // 2.4.0-rc2.1: added "general" — observed on Lorex/Dahua DVRs which
+  // report ONVIF Name="General" by default. Without this, the card
+  // displayed "General" (the generic ONVIF name) instead of the
+  // brand-identified manufacturer ("Lorex / Dahua DVR-NVR Family").
+  // "generic" included for parity (similar product lines).
+  if (/^(ip\s*cam(era)?|network\s*camera|camera|onvif[\s_-]*(device|camera)?|webcam|video\s*server|general|generic)$/i.test(s.trim()))
+    return true;
+
+  // 2.4.0-rc2.3: also treat auto-discovered hostnames as generic so
+  // displayName falls through to the identified manufacturer instead
+  // of the hostname. This fixes a long-latent bug surfaced by rc2.2's
+  // faster scan: prev_name defaults to hostname when no ONVIF name is
+  // available, and hostnames like "D861A8.lan" or
+  // "tplink.my.house" or just an IP weren't recognized as generic.
+  // Patterns covered:
+  //   • Bare IPv4 (e.g. "10.0.0.13")
+  //   • Reverse-DNS / ISP-provided FQDNs (e.g. "*.attlocal.net",
+  //     "*.lan", "*.local", "*.home", "*.localdomain", and any user-
+  //     provided local DNS suffix that the user hasn't customized
+  //     per-camera). Heuristic: anything containing a dot AND looking
+  //     like a domain — bare DNS labels with no user formatting.
+  //   • MAC-OUI / serial-derived hostnames (uppercase hex chunks like
+  //     "D861A8", "00:00:5E:00:53:09", "SN0123456789-ABCDEF012345")
+  //   • mDNS-style "*.my.house" / "*.<userdomain>" auto-publish names
+  // User-given names like "Front Door Camera" or "Driveway" still fail
+  // the regex and remain user-displayed.
+  const t = s.trim();
+  // Bare IPv4
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(t)) return true;
+  // Serial-style hostname WITHOUT a dot (e.g. "SN0123456789-ABCDEF012345"
+  // — printer/IoT devices that publish their MAC- or serial-derived
+  // hostname directly without a domain). Heuristic: 6+ uppercase
+  // alphanumerics, optionally hyphenated into multiple all-caps blocks.
+  // User-given names (mixed case "Front Door") fail this anchor.
+  if (/^[A-Z0-9]{6,}(-[A-Z0-9]+)+$/.test(t)) return true;
+  // Bare hostname-as-FQDN: contains a dot AND the leftmost label looks
+  // device-derived (all caps + hex/digits, or has multiple hex segments
+  // separated by hyphens). User-given short names rarely look like this.
+  if (t.indexOf('.') >= 0) {
+    const left = t.split('.')[0];
+    // Pure hex or alphanum-uppercase first label (e.g. "D861A8",
+    // "SN0123456789-ABCDEF012345", "tplink", "homeassistant"-NO that's
+    // mixed case - we explicitly want "device-derived" patterns)
+    if (/^[A-F0-9]{4,}$/.test(left)) return true;             // pure hex
+    if (/^[A-Z0-9]{6,}(-[A-Z0-9]+)*$/.test(left)) return true; // serial-style
+    // Common reverse-DNS suffixes — names ending in these are
+    // auto-derived, not user-named
+    if (/\.(local|lan|home|localdomain|attlocal\.net|hsd1\.[a-z]+\.comcast\.net|fios-router\.home)$/i.test(t))
+      return true;
+    // mDNS/local broadcast pattern: any FQDN with 3+ labels where the
+    // leftmost label is all-lowercase short device-name. This catches
+    // "tplink.my.house", "homeassistant.local", etc. Conservative —
+    // requires the host part to be a single short lowercase token.
+    if (/^[a-z][a-z0-9]{2,15}\.[a-z0-9]+(\.[a-z0-9]+)+$/i.test(t))
+      return true;
+  }
+  return false;
 }
 
 function displayName(cam) {
@@ -9807,7 +12134,61 @@ async function submitCreds(cid) {
       body: JSON.stringify({camera_id: cid, username: u, password: p})
     });
     const d = await r.json();
-    if (r.ok) { e.classList.remove('visible'); await loadCameras(); }
+    if (r.ok) {
+      e.classList.remove('visible');
+      await loadCameras();
+      // 2.5.0-rc1.6: channel-iterate brands (Lorex/Dahua DVR-NVR
+      // family) spawn a background channel enumeration after cred-auth
+      // returns 200. The first loadCameras() above runs before that
+      // enumeration completes and sees only the parent card.
+      //
+      // 2.5.0-rc1.8: replaces the previous fixed setTimeout(loadCameras,
+      // 8000) reload with a poll-until-done loop against the new
+      // /api/dvr_enum/status/{camera_id} endpoint. The old fixed budget
+      // had to assume worst-case wallclock (15 channels at ~300ms per
+      // walker call plus politeness sleeps and snap_loop kickoffs);
+      // the rc1.7 test log on CrystalHeeler's 7-channel Lorex showed
+      // enumeration actually completing in ~3s, so the old fixed wait
+      // cost ~5s of dead time before cards appeared. This poll wakes
+      // the moment the backend signals done.
+      //
+      // Hard-cap at 12s (24 polls @ 500ms = +50% headroom over the old
+      // fixed budget). If somehow done never flips true (backend bug
+      // or unforeseen exception that bypasses the rc1.8 hardening),
+      // the cap-fall-through calls loadCameras() anyway so the worst
+      // case matches today's behavior — no regression.
+      if (d.dvr_enumeration_pending) {
+        let polls = 0;
+        const MAX_POLLS = 24;        // 24 * 500ms = 12s hard cap
+        const POLL_INTERVAL_MS = 500;
+        const pollUrl = BASE + '/api/dvr_enum/status/' +
+                        encodeURIComponent(cid);
+        const tick = async () => {
+          polls += 1;
+          let done = false;
+          try {
+            const sr = await fetch(pollUrl);
+            if (sr.ok) {
+              const sd = await sr.json();
+              done = !!sd.done;
+            }
+          } catch { /* network blip — keep polling until cap */ }
+          if (done) {
+            await loadCameras();
+            return;
+          }
+          if (polls >= MAX_POLLS) {
+            // Fall back to behaviour matching 2.5.0-rc1.7's fixed
+            // setTimeout — refetch anyway so cards eventually surface
+            // even on backend failure.
+            await loadCameras();
+            return;
+          }
+          setTimeout(tick, POLL_INTERVAL_MS);
+        };
+        setTimeout(tick, POLL_INTERVAL_MS);
+      }
+    }
     else e.textContent = d.error || 'Connection failed.';
   } catch { e.textContent = 'Network error.'; }
 }
@@ -10544,6 +12925,21 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
                 if rtsp_fp.get("public_methods"):
                     host_meta["rtsp_public_methods"] = ",".join(
                         rtsp_fp["public_methods"])
+                # 2.4.0-rc2.5: persist looks_like_rtsp flag from the
+                # fingerprint pre-probe. Some RTSP servers (notably
+                # Hikvision DS-2DE4A425IW) reply with status=200 to
+                # OPTIONS but emit NO Server header and NO realm
+                # (auth is challenged later, on DESCRIBE). Without
+                # this flag the alt-port RTSP-skip optimization
+                # (Fix C in rc2.4) couldn't fire on those cameras —
+                # rtsp_server_header/rtsp_auth_realm/rtsp_public_methods
+                # were all empty even though the host demonstrably
+                # speaks RTSP. The fingerprint helper's own
+                # `looks_like_rtsp` heuristic correctly identifies
+                # this case (200 OK with RTSP/1.0 status line); we
+                # just need to plumb it through.
+                if rtsp_fp.get("looks_like_rtsp"):
+                    host_meta["rtsp_speaker_confirmed"] = True
                 if rtsp_fp.get("looks_like_rtsp"):
                     log.info(
                         f"  RTSP fingerprint {ip}: status="
@@ -10585,7 +12981,18 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
                       # 2.4.0-rc1.0: RTSP fingerprint fields populated by
                       # the OPTIONS pre-probe at line ~10030.
                       "rtsp_server_header", "rtsp_auth_realm",
-                      "rtsp_auth_scheme", "rtsp_public_methods"):
+                      "rtsp_auth_scheme", "rtsp_public_methods",
+                      # 2.4.0-rc2.4: early-bail state from
+                      # _probe_rtsp_paths_single_socket. Persisted onto
+                      # the camera record so the Deep Re-Probe button
+                      # (api_deep_reprobe) can resume the walk on the
+                      # remaining unwalked paths and run Layer 2 on
+                      # demand.
+                      "early_bail_reason", "early_bail_realm",
+                      "early_bail_paths_tried",
+                      "early_bail_paths_remaining",
+                      "early_bail_at",
+                      "page_title", "onvif_scopes"):
                 v = host_meta.get(k, "")
                 if v:
                     d[k] = v
@@ -10597,11 +13004,40 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
                 d["locked_streams"] = host_meta["locked_streams"]
         return d
 
+    async def _enrich_with_details(cam: dict, stream_url: str,
+                                   proto: str) -> dict:
+        """2.4.0-rc2.9: best-effort ffprobe of a discovered unauth
+        stream URL. Merges captured codec/width/height/fps onto the
+        camera dict so the focus-view dropdown can show a proper
+        resolution label ("1920x1080 H264") instead of "Stream 1".
+        Failure is harmless — without enrichment we just don't have
+        the labels, but the camera still works. Cost is one ffprobe
+        call (~3s typical, 12s max timeout) per discovered unauth
+        stream — only fires for cameras that don't require creds, so
+        most networks see this run zero or one times per scan."""
+        try:
+            d = await probe_stream_details(stream_url, proto)
+            if d:
+                cam.update(d)
+        except Exception as e:
+            log.debug(f"  probe_stream_details({stream_url!r}, "
+                      f"{proto!r}): {e}")
+        return cam
+
     if initial_protocol in ("RTSP", "DVR"):
         url = await loop.run_in_executor(
             _THREAD_POOL, find_rtsp_path, ip, port, "", "", host_meta)
         if url:
-            return base("RTSP", url, "ready")
+            # 2.4.0-rc2.9: probe stream details on the discovered URL so
+            # the focus-view dropdown can label this entry as "1920x1080
+            # H264" instead of falling back to "Stream 1". Best-effort —
+            # if the probe fails (timeout, RST, weird codec), we just
+            # don't have enrichment data and the dropdown stays at the
+            # numbered fallback. Also benefits adaptive snap_loop which
+            # uses stream_codec for decoder selection. Same treatment
+            # applies below for saved-creds RTSP, MJPEG, and HLS.
+            cam = base("RTSP", url, "ready")
+            return await _enrich_with_details(cam, url, "RTSP")
         if saved_u:
             url = await loop.run_in_executor(
                 _THREAD_POOL, find_rtsp_path, ip, port,
@@ -10609,7 +13045,7 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
             if url:
                 cam = base("RTSP", url, "ready")
                 cam["credentials"] = prev_creds
-                return cam
+                return await _enrich_with_details(cam, url, "RTSP")
         cam = base("RTSP", "", "needs_credentials")
         cam["requires_credentials"] = True
         return cam
@@ -10622,28 +13058,50 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
     if initial_protocol in ("HTTP", "ONVIF", "UNKNOWN"):
         url = await loop.run_in_executor(_THREAD_POOL, probe_mjpeg_http, ip, port, "", "")
         if url:
-            return base("MJPEG", url, "ready", "mjpeg")
+            cam = base("MJPEG", url, "ready", "mjpeg")
+            return await _enrich_with_details(cam, url, "MJPEG")
         if saved_u:
             url = await loop.run_in_executor(_THREAD_POOL, probe_mjpeg_http, ip, port, saved_u, saved_p)
             if url:
                 cam = base("MJPEG", url, "ready", "mjpeg")
                 cam["credentials"] = prev_creds
-                return cam
+                return await _enrich_with_details(cam, url, "MJPEG")
 
         url = await loop.run_in_executor(_THREAD_POOL, probe_hls, ip, port, "", "")
         if url:
-            return base("HLS", url, "ready", "hls")
+            cam = base("HLS", url, "ready", "hls")
+            return await _enrich_with_details(cam, url, "HLS")
         if saved_u:
             url = await loop.run_in_executor(_THREAD_POOL, probe_hls, ip, port, saved_u, saved_p)
             if url:
                 cam = base("HLS", url, "ready", "hls")
                 cam["credentials"] = prev_creds
-                return cam
+                return await _enrich_with_details(cam, url, "HLS")
 
-        url = await loop.run_in_executor(
-            _THREAD_POOL, find_rtsp_path, ip, port, "", "", host_meta)
-        if url:
-            return base("RTSP", url, "ready")
+        # 2.4.0-rc3.5 Leak G fix: skip the find_rtsp_path fall-through
+        # call when the canonical RTSP port already established speaker
+        # status for this host. Without this gate, an alt port whose
+        # nmap banner doesn't contain "rtsp"/"camera" (so initial="HTTP"
+        # from the start) bypasses the upstream skip-gate and ends up
+        # here, opening a fresh TCP socket per alt port to walk RTSP
+        # paths the camera already proved (on the canonical port) it
+        # doesn't expose. For the Microseven on a populated network,
+        # this added 3 unnecessary Layer 1 walks per scan against a
+        # camera with a 5-second per-IP TCP rate-limit, which was
+        # enough to push it into a firmware-level lockout. Other
+        # protocols above (MJPEG, HLS) and below (WebRTC, WS-RTSP)
+        # are unaffected — they're legitimately HTTP-port-bound and
+        # don't multiply RTSP socket opens.
+        if host_meta and host_meta.get("host_skip_layer1_alt"):
+            log.info(f"  RTSP fall-through skipped: {ip}:{port} — "
+                     f"canonical RTSP port already established speaker "
+                     f"status (no alt-port Layer 1 walk needed)")
+        else:
+            url = await loop.run_in_executor(
+                _THREAD_POOL, find_rtsp_path, ip, port, "", "", host_meta)
+            if url:
+                cam = base("RTSP", url, "ready")
+                return await _enrich_with_details(cam, url, "RTSP")
 
         wrtc = await loop.run_in_executor(_THREAD_POOL, probe_webrtc, ip, port)
         if wrtc:
@@ -10659,10 +13117,71 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
             cam["ws_url"] = ws
             return cam
 
-        if verdict in ("camera", "uncertain"):
+        # 2.4.0-rc2.3: stricter HTTP-only fall-through. Previously this
+        # 2.4.0-rc2.4: stricter verdict gate — OUI brand-id alone is
+        # NOT sufficient evidence to create a cred-prompt card. Many
+        # camera-vendor OUIs (TP-Link, Ubiquiti, Hanwha, Bosch, etc.)
+        # are shared with the same vendor's networking gear (switches,
+        # routers, access points). CrystalHeeler's test system A surfaced 3 false
+        # positives in rc2.3: TP-Link Tapo / Kasa OUI matched a
+        # TP-Link switch on .12; Ubiquiti UniFi OUI matched two UniFi
+        # APs on .13/.14. None of those devices are cameras. The fix
+        # is to require the brand match to be CORROBORATED by at
+        # least one service-level signal — something only cameras
+        # produce, not the vendor's other product lines:
+        #   • ONVIF scope present (only cameras speak ONVIF)
+        #   • RTSP fingerprint captured (host speaks RTSP)
+        #   • Page title contains brand keyword (means it's the camera
+        #     UI, not a switch/router admin page)
+        #   • Server header contains brand keyword (HTTP server
+        #     identified itself with the camera-software name)
+        #   • Nmap product banner contains brand keyword (service
+        #     fingerprint matched)
+        # OUI-only matches with NONE of the above drop to verdict
+        # suppressed → no card. Users with truly exotic cameras
+        # Claude doesn't have a brand entry for can still reach
+        # them via "Add Camera Manually" / pscan-ip input field.
+        if verdict == "camera":
             cam = base("HTTP", "", "needs_credentials")
             cam["requires_credentials"] = True
             return cam
+        if verdict == "uncertain" and host_meta:
+            has_brand = bool(host_meta.get("manufacturer"))
+            has_rtsp_speaker = bool(
+                host_meta.get("rtsp_server_header")
+                or host_meta.get("rtsp_auth_realm")
+                or host_meta.get("rtsp_public_methods"))
+            # Service-level corroboration check
+            brand = (host_meta.get("manufacturer") or "").lower()
+            page_title = (host_meta.get("page_title") or "").lower()
+            srv_hdr = (host_meta.get("server_header") or "").lower()
+            nmap_p = (host_meta.get("nmap_product") or "").lower()
+            onvif_scopes = (host_meta.get("onvif_scopes") or "").lower()
+            # Substring match: if a non-trivial brand-name token
+            # appears in any service-level field, count as corroborated
+            brand_tokens = [t for t in re.split(r'[\s/.\-]+', brand) if len(t) >= 4]
+            has_brand_in_service = False
+            for tok in brand_tokens:
+                if (tok in page_title or tok in srv_hdr
+                        or tok in nmap_p or tok in onvif_scopes):
+                    has_brand_in_service = True
+                    break
+            has_onvif = bool(onvif_scopes)
+            has_corroboration = (has_rtsp_speaker or has_onvif
+                                 or has_brand_in_service)
+            if has_brand and has_corroboration:
+                cam = base("HTTP", "", "needs_credentials")
+                cam["requires_credentials"] = True
+                return cam
+            if has_rtsp_speaker:
+                # Speaks RTSP even without identified brand — keep card
+                cam = base("HTTP", "", "needs_credentials")
+                cam["requires_credentials"] = True
+                return cam
+            if has_brand and not has_corroboration:
+                log.info(f"  Card suppressed: {ip}:{port} "
+                         f"brand={host_meta.get('manufacturer')!r} from OUI "
+                         f"alone, no service-level corroboration")
 
     return None
 
@@ -10683,6 +13202,15 @@ async def run_scan() -> None:
                       stage_label="Stage 1/4 — Live host & multicast discovery",
                       message="Stage 1/4 — ARP scan + ONVIF/SSDP/mDNS discovery…")
     loop = asyncio.get_event_loop()
+
+    # 2.4.0-rc2.6: pending-flush card buffer. New cards discovered
+    # during this scan accumulate here instead of CAMERAS until the
+    # dedup pass runs at the end. This avoids the ~40-80s window
+    # where a multi-port host would render as 3-5 separate cards
+    # before dedup collapses them — letting the user click "Enter
+    # creds" on a card that's about to disappear.
+    global PENDING_CAMERAS
+    PENDING_CAMERAS = {}
 
     try:
         subnet  = await loop.run_in_executor(_THREAD_POOL, get_local_subnet)
@@ -10768,14 +13296,131 @@ async def run_scan() -> None:
                 message=f"Stage 3/4 — Probing {ip} ({idx+1}/{len(nmap_results)})…")
 
             verdict, reason = classify_device(host)
-            for port_info in host.get("open_ports", []):
+            # 2.4.0-rc2.4: port-ordering optimization. Probe canonical
+            # RTSP ports (554, 8554, 10554) FIRST — if any of them
+            # establishes RTSP-speaker status (returns RTSP-format
+            # response with realm/server header), subsequent HTTP-only
+            # ports of the same IP can skip their full RTSP probe and
+            # use a fast HTTP/MJPEG/HLS-only path. Saves the ~5-15s
+            # per HTTP-only port that Layer 1 currently burns walking
+            # paths against a port that won't speak RTSP.
+            CANONICAL_RTSP_PORTS = {554, 8554, 10554}
+            open_ports_sorted = sorted(
+                host.get("open_ports", []),
+                key=lambda p: (
+                    0 if p["port"] in CANONICAL_RTSP_PORTS else 1,
+                    p["port"],
+                ),
+            )
+            # Per-IP "we already established RTSP-speaker status" flag
+            # — reset per host so cross-host state doesn't leak.
+            host_has_rtsp_speaker = False
+            # 2.4.0-rc2.9: similar per-IP "we identified a brand with
+            # skip_layer2: True on an earlier port" flag. Lorex/Dahua
+            # DVR-NVR family is the canonical case: port 554 IDs as
+            # the full DVR-NVR Family entry (skip_layer2: True), but
+            # port 80 IDs as plain "Lorex" (different STREAM_DB row,
+            # no skip_layer2). Without inheritance, port 80 would run
+            # Layer 2 for ~45s wastefully on a brand we already know
+            # can't speak Layer 2. Once any port on this IP triggers
+            # the skip_layer2 short-circuit in find_rtsp_path, the
+            # flag goes True and subsequent ports propagate it via
+            # host_meta["host_skip_layer2"].
+            host_has_skip_layer2 = False
+            for port_info in open_ports_sorted:
                 port = port_info["port"]
                 cid  = f"{ip}_{port}"
                 if cid in BLACKLIST:
                     continue
+                # 2.4.0-rc2.4: FEEDBACK fingerprint check. If a past
+                # "Not a Camera" click has a high-confidence
+                # fingerprint match (same OUI + same product/port +
+                # explicit reason_type), skip this candidate without
+                # probing. Conservative — same OUI alone never skips.
+                fb_skip, fb_reason = _matches_feedback_fingerprint(host, port)
+                if fb_skip:
+                    log.info(f"  FEEDBACK fingerprint match: skipping "
+                             f"{ip}:{port} — {fb_reason}")
+                    continue
                 initial = _initial_protocol(port, port_info.get("service", ""),
                                              port_info.get("product", ""))
+                # 2.4.0-rc2.4: if we already confirmed RTSP-speaker on
+                # a canonical RTSP port for this IP, downgrade an
+                # initial="RTSP" classification on a non-canonical
+                # port to the HTTP/MJPEG/HLS path. The host won't
+                # speak RTSP on its admin/HTTP ports — burning the
+                # full 25-31 path Layer 1 walk is wasted.
+                if (host_has_rtsp_speaker
+                        and port not in CANONICAL_RTSP_PORTS
+                        and initial == "RTSP"):
+                    log.info(f"  RTSP probe skipped: {ip}:{port} — "
+                             f"canonical RTSP port already established "
+                             f"speaker status; treating as HTTP-only")
+                    initial = "HTTP"
                 prev = saved.get(cid, {})
+                # 2.4.0-rc4.0 Leak G tightening: pre-compute lockout
+                # signals so the host_skip_layer1_alt flag below can
+                # widen its skip condition. The 2.4.0-rc3.5 gate fired
+                # only when the canonical port had successfully confirmed
+                # speaker status (host_has_rtsp_speaker=True) — which
+                # works for healthy cameras but NOT for a camera already
+                # in firmware-level RTSP lockout: the canonical port
+                # RSTs on path 1, never confirms speaker status, the
+                # flag stays False, and we proceed to walk the alt ports
+                # and add insult to injury. Field log 2026-05-07 0018
+                # showed exactly this — 4 walks against a locked Microseven
+                # despite ACD escalation, because the gate didn't fire.
+                #
+                # New signal sources, all dict-key-cheap:
+                #   1. brand-id says rate_limit_per_ip_tcp (the brand
+                #      pre-probe in find_rtsp_path already populated
+                #      mac_vendor/nmap_product, so _identify_camera_brand
+                #      hits the same code path used elsewhere)
+                #   2. _RST_OBSERVED has any timestamp for this IP (means
+                #      a prior port's walker bailed on RST/broken-pipe)
+                #   3. _ACD_ESCALATED is active for this IP (the 2.4.0-
+                #      rc3.5 ACD escalation is in force)
+                #
+                # When brand-throttled AND (RST seen OR ACD active), we
+                # treat the host as suspected-locked and skip alt-port
+                # Layer 1 walks even without canonical-port confirmation.
+                # No false positives for healthy cameras: brand-throttled
+                # alone isn't enough; we need at least one RST signal.
+                # No false positives for non-throttled brands: the brand
+                # check filters them out so Hikvision/Dahua/Axis/etc.
+                # get the existing behavior unchanged.
+                _brand_entry = _identify_camera_brand({
+                    "ip":            ip,
+                    "hostname":      hostname,
+                    "vendor":        host.get("mac_vendor", ""),
+                    "mac_vendor":    host.get("mac_vendor", ""),
+                    "nmap_product":  port_info.get("product", ""),
+                    "verdict_reason": reason,
+                })
+                _brand_throttled = bool(
+                    _brand_entry
+                    and _brand_entry.get("throttle_type") == "rate_limit_per_ip_tcp"
+                )
+                _now = time.monotonic()
+                _has_rst_signal = bool(_RST_OBSERVED.get(ip)) or (
+                    _ACD_ESCALATED.get(ip, 0.0) > _now
+                )
+                _alt_skip_via_lockout = (
+                    _brand_throttled
+                    and _has_rst_signal
+                    and port not in CANONICAL_RTSP_PORTS
+                )
+                if _alt_skip_via_lockout and not host_has_rtsp_speaker:
+                    log.info(
+                        f"  Alt-port Layer 1 walk pre-skipped: {ip}:{port} "
+                        f"— brand={_brand_entry.get('name', '?')} is "
+                        f"rate_limit_per_ip_tcp AND lockout signals present "
+                        f"(RST observed={bool(_RST_OBSERVED.get(ip))}, "
+                        f"ACD active={_ACD_ESCALATED.get(ip, 0.0) > _now}) "
+                        f"— canonical port never confirmed speaker but "
+                        f"camera is misbehaving; further walks would extend "
+                        f"the lockout"
+                    )
                 # rc2: assemble a host_meta dict so brand identification
                 # can run BEFORE the RTSP probe begins (mac_vendor + nmap
                 # service banner + product feed into _identify_camera_brand)
@@ -10787,12 +13432,73 @@ async def run_scan() -> None:
                     "vendor":        host.get("mac_vendor", ""),
                     "nmap_product":  port_info.get("product", ""),
                     "verdict_reason": reason,
+                    # 2.4.0-rc2.9: propagate skip_layer2 across ports
+                    # for the same IP. False on the first port; True
+                    # on subsequent ports after a skip_layer2 brand
+                    # was identified upstream. Read by find_rtsp_path
+                    # to apply the Layer 2 short-circuit even when
+                    # the per-port brand match wouldn't fire it.
+                    "host_skip_layer2": host_has_skip_layer2,
+                    # 2.4.0-rc3.5 Leak G fix: parallel skip flag for
+                    # Layer 1. The pre-existing gate above (lines 12552-
+                    # 12558) handles the case where _initial_protocol
+                    # returned "RTSP" for a non-canonical port — but
+                    # when nmap classifies the alt port as plain HTTP
+                    # (no "rtsp"/"camera" in the banner — the common
+                    # case for Hipcam-family on port 80, where nmap
+                    # just sees the GoAhead web admin), `initial` is
+                    # already "HTTP", the gate's `initial == "RTSP"`
+                    # condition is False, no downgrade fires, and
+                    # _probe_host_port falls through into the HTTP
+                    # branch which calls find_rtsp_path anyway. This
+                    # flag lets _probe_host_port suppress that fall-
+                    # through call when the canonical port has already
+                    # established speaker status — closing the loophole
+                    # without changing the existing behavior for
+                    # initial="RTSP" alt ports.
+                    # 2.4.0-rc4.0 tightening: also fire when the brand
+                    # is throttled AND lockout signals (RST or ACD) are
+                    # present, even if speaker status was never confirmed
+                    # — see _alt_skip_via_lockout above for rationale.
+                    "host_skip_layer1_alt": (
+                        (host_has_rtsp_speaker
+                         and port not in CANONICAL_RTSP_PORTS)
+                        or _alt_skip_via_lockout
+                    ),
                 }
                 cam  = await _probe_host_port(ip, port, hostname, initial,
                                               prev, verdict, reason, loop,
                                               host_meta=host_meta)
                 if cam:
-                    CAMERAS[cam["id"]] = cam
+                    _publish_scan_card(cam)
+                # 2.4.0-rc2.4: detect RTSP-speaker status from any of the
+                # signals find_rtsp_path / fingerprint pre-probe wrote
+                # to host_meta. If the host responded RTSP/-format on
+                # this canonical port, all subsequent non-canonical
+                # ports can skip RTSP probing.
+                # 2.4.0-rc2.5: also accept rtsp_speaker_confirmed flag
+                # set by the fingerprint pre-probe — covers cameras
+                # like Hikvision DS-2DE that respond 200 OK to OPTIONS
+                # without emitting Server or realm headers (auth
+                # challenged later on DESCRIBE).
+                if not host_has_rtsp_speaker:
+                    if (host_meta.get("rtsp_server_header")
+                            or host_meta.get("rtsp_auth_realm")
+                            or host_meta.get("rtsp_public_methods")
+                            or host_meta.get("rtsp_speaker_confirmed")):
+                        host_has_rtsp_speaker = True
+                        log.info(f"  RTSP speaker confirmed for {ip} — "
+                                 f"alt ports will skip Layer 1 path walk")
+                # 2.4.0-rc2.9: update host_has_skip_layer2 after the
+                # port's probe. find_rtsp_path writes
+                # host_meta["brand_skip_layer2"]=True when its skip-
+                # layer2 short-circuit fires, so subsequent ports on
+                # this IP can inherit the decision.
+                if not host_has_skip_layer2:
+                    if host_meta.get("brand_skip_layer2"):
+                        host_has_skip_layer2 = True
+                        log.info(f"  skip_layer2 inherited for {ip} — "
+                                 f"alt ports will also skip Layer 2 walks")
 
         # Stage 4: optional broad sweep on silent live hosts
         silent = sorted(all_live - responding_ips)
@@ -10811,6 +13517,12 @@ async def run_scan() -> None:
                     cid  = f"{ip}_{port}"
                     if cid in BLACKLIST:
                         continue
+                    # 2.4.0-rc2.4: FEEDBACK fingerprint check (broad-sweep)
+                    fb_skip, fb_reason = _matches_feedback_fingerprint(host, port)
+                    if fb_skip:
+                        log.info(f"  FEEDBACK fingerprint match: skipping "
+                                 f"{ip}:{port} — {fb_reason}")
+                        continue
                     initial = _initial_protocol(port, port_info.get("service", ""),
                                                  port_info.get("product", ""))
                     prev = saved.get(cid, {})
@@ -10828,14 +13540,19 @@ async def run_scan() -> None:
                                                   prev, verdict, reason, loop,
                                                   host_meta=host_meta)
                     if cam:
-                        CAMERAS[cam["id"]] = cam
+                        _publish_scan_card(cam)
 
         # Merge multicast-only ONVIF cameras not found by nmap
         for onvif in onvif_results:
             ip = onvif["ip"]
             if ip == gateway or ip in BLACKLIST:
                 continue
-            existing = [c for c in CAMERAS.values() if c["ip"] == ip]
+            # 2.4.0-rc2.6: also check PENDING_CAMERAS — cards just
+            # discovered this scan haven't flushed to CAMERAS yet,
+            # but they DO exist for the purposes of ONVIF dup-check.
+            _all_cams = list(CAMERAS.values()) + list(
+                (PENDING_CAMERAS or {}).values())
+            existing = [c for c in _all_cams if c["ip"] == ip]
             if existing:
                 for cam in existing:
                     cam["onvif"]  = True
@@ -10971,7 +13688,7 @@ async def run_scan() -> None:
                 if unauth_url:
                     log.info(f"  ONVIF {ip}: unauthenticated RTSP works "
                              f"({_strip_creds(unauth_url)}) — skipping cred prompt")
-                    CAMERAS[cid] = {
+                    _publish_scan_card({
                         "id": cid, "ip": ip, "hostname": onvif["name"],
                         "port": 554, "protocol": "RTSP",
                         "stream_url": unauth_url,
@@ -11003,9 +13720,9 @@ async def run_scan() -> None:
                         # UI shows badge + modal when len > 0 AND no
                         # creds saved. Always written (may be empty).
                         "locked_streams":      _locked,
-                    }
+                    })
                 else:
-                    CAMERAS[cid] = {
+                    _publish_scan_card({
                         "id": cid, "ip": ip, "hostname": onvif["name"],
                         "port": 80, "protocol": "ONVIF",
                         "stream_url": prev.get("stream_url", ""),
@@ -11032,7 +13749,7 @@ async def run_scan() -> None:
                         # empty if path-walker didn't enable collection
                         # for this camera).
                         "locked_streams":      _locked,
-                    }
+                    })
 
         # Merge multicast-only SSDP cameras
         for ssdp in ssdp_results:
@@ -11041,10 +13758,15 @@ async def run_scan() -> None:
             ip = ssdp["ip"]
             if ip == gateway or ip in BLACKLIST:
                 continue
-            if not any(c["ip"] == ip for c in CAMERAS.values()):
+            # 2.4.0-rc2.6: also check PENDING_CAMERAS so we don't double-
+            # add a card that was just published this scan but hasn't
+            # flushed yet.
+            _all_cams = list(CAMERAS.values()) + list(
+                (PENDING_CAMERAS or {}).values())
+            if not any(c["ip"] == ip for c in _all_cams):
                 cid  = f"{ip}_ssdp"
                 prev = saved.get(cid, {})
-                CAMERAS[cid] = {
+                _publish_scan_card({
                     "id": cid, "ip": ip, "hostname": ssdp.get("name", ip),
                     "port": 80, "protocol": "HTTP",
                     "stream_url": "", "requires_credentials": True,
@@ -11053,7 +13775,105 @@ async def run_scan() -> None:
                     "status": "needs_credentials",
                     "user_saved": bool(prev), "display": "proxy",
                     "verdict": "camera", "verdict_reason": "SSDP/UPnP discovered",
-                }
+                })
+
+        # 2.4.0-rc2.3: per-IP card dedup. rc2.2's faster scan now finds
+        # all open ports on a host, which legitimately produces one card
+        # per (IP, port) — but for printers/IoT/web-admin devices that
+        # was creating 3+ cards per device (e.g. HP printer at 80/443/
+        # 8080 → 3 "Credentials required" cards on the same printer).
+        # Multi-stream cameras still need multiple cards (e.g. main +
+        # sub stream on different paths), so the rule is conservative:
+        #   • Keep all "ready" cards (working streams)
+        #   • Keep all user-saved cards (user has interacted with them)
+        #   • Keep all cards with stream_url populated
+        #   • Among the remaining "needs_credentials"/"info" cards on
+        #     the same IP, keep ONE — the highest-priority protocol.
+        # If a "ready" card exists on an IP, all hint/needs-creds cards
+        # on that IP are suppressed (we already have a working stream;
+        # no need to prompt for creds on the HTTP admin port).
+        _PROTO_RANK = {
+            "RTSP":    100, "ONVIF":   95, "DVR":   90,
+            "MJPEG":    80, "HLS":     75, "RTMP":  70,
+            "WS-RTSP":  50, "WebRTC":  45,
+            "HTTP":     20,
+        }
+        def _dedup_rank(c: dict) -> tuple:
+            # Higher tuple = keep. Sort descending and pick first.
+            return (
+                1 if c.get("status") == "ready" else 0,
+                1 if c.get("user_saved") else 0,
+                1 if c.get("stream_url") else 0,
+                _PROTO_RANK.get(c.get("protocol", ""), 0),
+                # Tie-breaker: prefer lower port (554 < 8080) — usually
+                # the manufacturer-default stream port is lower.
+                -int(c.get("port", 65535)),
+            )
+        # 2.4.0-rc2.6: dedup operates on the union of CAMERAS (user-
+        # saved cards preserved at scan start) and PENDING_CAMERAS
+        # (newly-discovered cards from this scan, accumulated via
+        # _publish_scan_card). After dedup, survivors are flushed
+        # into CAMERAS and PENDING_CAMERAS is cleared.
+        _all_cards: dict = {}
+        _all_cards.update(CAMERAS)
+        if PENDING_CAMERAS:
+            _all_cards.update(PENDING_CAMERAS)
+        by_ip: dict[str, list[dict]] = {}
+        for c in _all_cards.values():
+            by_ip.setdefault(c["ip"], []).append(c)
+        suppressed_cids: list[str] = []
+        for ip, group in by_ip.items():
+            if len(group) <= 1:
+                continue
+            # Sort highest-priority first
+            group_sorted = sorted(group, key=_dedup_rank, reverse=True)
+            best = group_sorted[0]
+            best_is_streaming = (best.get("status") == "ready"
+                                 or bool(best.get("stream_url")))
+            for c in group_sorted[1:]:
+                # Always retain user-saved or already-ready cards
+                if c.get("user_saved") or c.get("status") == "ready":
+                    continue
+                # If best is a working stream, suppress all
+                # needs-credentials and info cards on this IP.
+                if best_is_streaming and c.get("status") in (
+                        "needs_credentials", "info"):
+                    suppressed_cids.append(c["id"])
+                    continue
+                # Otherwise: keep best, suppress weaker-protocol HTTP
+                # siblings on the same IP. Don't suppress siblings of
+                # the same protocol family that might represent
+                # legitimate multi-stream endpoints (RTSP main + sub).
+                best_proto = best.get("protocol", "")
+                this_proto = c.get("protocol", "")
+                if (this_proto == "HTTP" and best_proto != "HTTP"
+                        and c.get("status") in ("needs_credentials", "info")):
+                    suppressed_cids.append(c["id"])
+                    continue
+                # Two HTTP needs-credentials cards on the same IP:
+                # suppress the higher-port (lower-rank) one.
+                if (this_proto == "HTTP" and best_proto == "HTTP"
+                        and c.get("status") == "needs_credentials"):
+                    suppressed_cids.append(c["id"])
+        # 2.4.0-rc2.6: flush survivors. Suppressed cards drop on the
+        # floor (they only ever existed in PENDING_CAMERAS, never
+        # made it to the UI). Non-suppressed PENDING cards merge
+        # into CAMERAS atomically — UI sees them all appear in one
+        # render.
+        if PENDING_CAMERAS:
+            for cid, cam in PENDING_CAMERAS.items():
+                if cid in suppressed_cids:
+                    continue
+                CAMERAS[cid] = cam
+        # Also remove suppressed CAMERAS entries (the user-saved-vs-
+        # newly-discovered conflict case).
+        for cid in suppressed_cids:
+            CAMERAS.pop(cid, None)
+        if suppressed_cids:
+            log.info(f"Card dedup: suppressed {len(suppressed_cids)} "
+                     f"redundant card(s): "
+                     f"{', '.join(suppressed_cids[:6])}"
+                     f"{'…' if len(suppressed_cids) > 6 else ''}")
 
         save_cameras()
         ready = sum(1 for c in CAMERAS.values() if c.get("status") == "ready")
@@ -11071,6 +13891,16 @@ async def run_scan() -> None:
     finally:
         SCAN_CANCELLED = False
         SCAN_STATE["running"] = False
+        # 2.4.0-rc2.6: clear pending buffer regardless of success/failure
+        # — if the scan errored mid-flight, any partially-discovered
+        # cards in PENDING get dropped on the floor (they wouldn't have
+        # been deduped, may be incomplete). Better to lose them than
+        # show them. (Note: the `global PENDING_CAMERAS` declaration
+        # at scan start covers this assignment too — Python only
+        # allows one `global` per name per function, and it must
+        # appear BEFORE the name is used. Re-declaring here in the
+        # finally block was the rc2.6 install crash bug.)
+        PENDING_CAMERAS = None
 
 
 
@@ -11215,6 +14045,18 @@ async def handle_stream_test(request: web.Request) -> web.Response:
 
     proto = camera.get("protocol", "RTSP")
     extra = ["-rtsp_transport", "tcp"] if proto in ("RTSP", "DVR", "ONVIF") else []
+    # 2.4.0-rc3.5 Leak F fix: handle_stream_test fires when the user clicks
+    # the Test Stream button. Single ffprobe = single TCP open. Single click
+    # is fine, but rapid double-clicks (or clicks while a scan is running on
+    # the same IP) could land inside the per-IP cooldown for throttled
+    # brands. Cross-sequence tracker handles this — if no recent activity,
+    # throttle_wait_if_needed returns immediately; if recent, it waits the
+    # right amount. User-perceptible cost: up to throttle_s (~5s for Hipcam)
+    # for the affected camera; zero impact otherwise.
+    throttle_s = _brand_throttle_seconds(camera)
+    if throttle_s > 0:
+        await _throttle_wait_if_needed(camera.get("ip", ""),
+                                       throttle_s, "stream test ffprobe")
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error", *extra,
@@ -11839,10 +14681,12 @@ def make_app() -> web.Application:
     app.router.add_post(  "/api/scan",                            api_scan)
     app.router.add_post(  "/api/scan/cancel",                     api_scan_cancel)
     app.router.add_post(  "/api/credentials",                     api_set_credentials)
+    app.router.add_get(   "/api/dvr_enum/status/{camera_id}",     api_dvr_enum_status)
     app.router.add_delete("/api/cameras/{camera_id}/credentials", api_clear_credentials)
     app.router.add_post(  "/api/cameras/{camera_id}/name",        api_rename_camera)
     app.router.add_post(  "/api/cameras/{camera_id}/confirm",     api_confirm_camera)
     app.router.add_post(  "/api/cameras/{camera_id}/not_camera",  api_not_camera)
+    app.router.add_post(  "/api/cameras/{camera_id}/deep_reprobe", api_deep_reprobe)
     app.router.add_delete("/api/cameras/{camera_id}",             api_delete_camera)
     app.router.add_post(  "/api/cameras/add",                     api_add_camera)
     app.router.add_get(   "/stream/{camera_id}",                  handle_stream)
@@ -11886,14 +14730,19 @@ async def _probe_hw_decoders() -> None:
       <decoder>: unavailable (<reason>)
     """
     log.info("Probing hardware decoder availability...")
-    decoders = [
-        ("hevc_v4l2m2m", "hevc"),
-        ("h264_v4l2m2m", "h264"),
-        ("hevc_vaapi",   "hevc"),
-        ("h264_vaapi",   "h264"),
-    ]
+    # 2.4.0-rc3.0: detect rpivid presence ahead of the loop so we can emit
+    # the accurate Pi-4-specific diagnostic when hevc_v4l2m2m fails on a
+    # system that DOES have the HEVC hardware available (just via the
+    # wrong API for our bundled ffmpeg). Two signals: /dev/video19 (the
+    # rpivid stateless decoder device created by dtoverlay=rpivid-v4l2)
+    # and /dev/media0 (rpivid's media controller). Both being present
+    # means rpivid is loaded; if hevc_v4l2m2m then fails, the cause is
+    # the ffmpeg-side missing-v4l2-request-support, not a kernel-side
+    # missing-device. Fixing this in 2.6.0 by bundling rpi-ffmpeg.
+    rpivid_present = (os.path.exists("/dev/video19")
+                      and os.path.exists("/dev/media0"))
     available = []
-    for dec, codec in decoders:
+    for dec, codec in _HW_DECODER_CANDIDATES:
         try:
             # Encode a tiny test clip, then try to decode it with the hw decoder
             enc = await asyncio.create_subprocess_exec(
@@ -11928,9 +14777,33 @@ async def _probe_hw_decoders() -> None:
                 available.append(dec)
             else:
                 _HW_UNAVAILABLE.add(dec)
-                reason = "not compiled into ffmpeg" if "not compiled" in stderr_s \
-                    else ("device not found" if "Could not find" in stderr_s
-                          else f"rc={dec_proc.returncode}")
+                # 2.4.0-rc3.0: more accurate diagnostic when hevc_v4l2m2m
+                # fails on a Pi 4 that has rpivid loaded. Previous message
+                # ("device not found") was misleading — the device IS
+                # there at /dev/video19, but ffmpeg's hevc_v4l2m2m decoder
+                # uses the stateful V4L2 m2m API, while rpivid implements
+                # the stateless V4L2 request API. Pi 4's bcm2835-codec
+                # provides stateful m2m for H264/MPEG/VP8/VP9/VC1 but
+                # NOT for HEVC — so hevc_v4l2m2m will literally never
+                # find a valid device on a Pi 4, regardless of dtoverlay
+                # config. To use rpivid HEVC decode, ffmpeg needs to be
+                # built with --enable-v4l2-request and use -hwaccel drm
+                # against the stateless API, neither of which the
+                # bundled ffmpeg in this addon's Docker image supports
+                # today. Planned for 2.6.0: bundle rpi-ffmpeg.
+                if dec == "hevc_v4l2m2m" and rpivid_present and \
+                        "Could not find" in stderr_s:
+                    reason = ("rpivid present at /dev/video19 but bundled "
+                              "ffmpeg lacks v4l2-request support — "
+                              "stateful m2m API doesn't expose HEVC on "
+                              "Pi 4. Will be fixed in 2.6.0 by bundling "
+                              "rpi-ffmpeg.")
+                else:
+                    reason = ("not compiled into ffmpeg"
+                              if "not compiled" in stderr_s
+                              else ("device not found"
+                                    if "Could not find" in stderr_s
+                                    else f"rc={dec_proc.returncode}"))
                 log.info(f"  {dec}: unavailable ({reason})")
         except asyncio.TimeoutError:
             _HW_UNAVAILABLE.add(dec)
