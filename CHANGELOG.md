@@ -1,3 +1,80 @@
+## 2.5.0-rc1.9
+
+**Security fix on 2.5.0-rc1.8.** Five log emitters in
+`_validate_rtsp_urls_single_socket` were interpolating credential-
+bearing RTSP URLs verbatim, leaking the username and password (both
+raw and URL-encoded forms) into the addon log on every cred-auth
+flow and every channel-enumeration walk. Fixed by wrapping each
+interpolation with the existing `_strip_creds()` helper.
+
+### Bug
+
+CrystalHeeler's 2.5.0-rc1.8 test log shows the leak in two places:
+
+- After credentials accepted on the Lorex, the `validate_rtsp_walk
+  db_probe` lines logged the full creds-bearing URL when validating
+  the sub-stream:
+  `validating rtsp://admin:examplepass@192.168.50.217:554/...`
+- The follow-up `validate_rtsp_walk channel-enum` walk for each of
+  the 15 other channels logged the URL-encoded form (URL constructed
+  via `quote()` for the channel-enum helper):
+  `validating rtsp://admin:examplepass@192.168.50.217:554/...`
+
+Both forms exposed creds. URL-encoding doesn't help — `%21` is just
+the `!` character percent-encoded, trivially reversible.
+
+### Fix
+
+Five `_log(f"...{rtsp_url}...")` calls in
+`_validate_rtsp_urls_single_socket` (Python lines 4891, 4950, 4981,
+5016, 5088) now interpolate `_strip_creds(rtsp_url)` instead.
+`_strip_creds` is the existing helper at line 3202:
+
+    def _strip_creds(url: str) -> str:
+        return re.sub(r"(://)[^@]+@", r"\1", url) if url else url
+
+The regex matches `://` followed by anything-but-`@` followed by `@`,
+replacing with bare `://`. Handles both raw (`admin:pass!`) and URL-
+encoded (`admin:pass%21`) credential forms because the `[^@]+` class
+doesn't care about the inner content — it just consumes everything
+between `://` and `@`.
+
+The five emitters:
+- `(N/M) validating {rtsp_url}` (line 4891)
+- `OPTIONS → 401 with auth challenge captured — falling through to
+  DESCRIBE for {rtsp_url}` (line 4950)
+- `DESCRIBE → 401 (no creds) — skipping {rtsp_url}` (line 4981)
+- `DESCRIBE 200 but SDP has no m=video — skipping {rtsp_url}` (line
+  5016)
+- `→ probe_ok=True for {rtsp_url}` (line 5088)
+
+Verification: a post-fix `grep -nE '_log\(f"[^"]*\{rtsp_url\}'`
+returns zero matches in `_validate_rtsp_urls_single_socket`. The
+sibling walker `_probe_rtsp_paths_single_socket` (line ~4335) was
+already safe — it logs only the relative `{path}`, never a full URL.
+
+### Scope
+
+This fix only touches log output. No behavioral changes to RTSP
+probing, validation, channel enumeration, or any other flow. The
+fix is in five places that all live in the same function. Search
+of the entire file confirms no other `_log` / `log.info` /
+`log.debug` / `log.warning` calls in the codebase interpolate a
+creds-bearing URL — `probe_rtsp_socket`'s `track_url` (line 3972)
+derives from a creds-free `rtsp_url = f"rtsp://{host}:{port}{path}"`
+and so doesn't need stripping.
+
+### Acceptance
+
+1. Repeat the 2.5.0-rc1.8 cred-auth flow on the Lorex.
+2. Inspect the addon log for the `validate_rtsp_walk db_probe` and
+   `validate_rtsp_walk channel-enum` lines after `Credentials accepted`.
+3. URLs in those lines should appear as
+   `rtsp://192.168.50.217:554/cam/realmonitor?channel=N&subtype=M`
+   — no `admin:...@` segment present in any form.
+4. All other 2.5.0-rc1.8 timing and behavior preserved (fast card
+   surfacing, all 8 channels rendering, no idle-out at 30s).
+
 ## 2.5.0-rc1.8
 
 **One-feature bumpfix on 2.5.0-rc1.7.** Replaces the fixed +8s
