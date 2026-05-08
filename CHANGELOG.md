@@ -1,3 +1,60 @@
+## 2.5.0
+
+**Roll-up of the 2.5.0-rc1.0 → 2.5.0-rc1.9 cycle.** No code changes
+beyond the version bump from 2.5.0-rc1.9. This entry summarizes the
+shipped feature set for the 2.5.0 minor.
+
+### Headline feature: Lorex/Dahua DVR-NVR family support
+
+Cred-auth on a `channel_iterate` brand (Lorex DVR/NVR series, Dahua
+direct, Amcrest rebrands) now spawns a background channel-enumeration
+walk that registers each populated DVR channel as its own camera card
+with its own per-channel snapshot URL
+(`http://IP/cgi-bin/snapshot.cgi?channel=N`). Empty channel slots
+(those returning 404 or 403 on DESCRIBE) are filtered out. On CrystalHeeler's
+8-channel D861A8B-Z, all 8 populated channels surface as distinct
+cards within ~6-9 seconds of clicking Connect, each with its own
+live thumbnail.
+
+### Cycle map
+
+- **2.5.0-rc1.0 → 2.5.0-rc1.5** — initial channel-enumeration backend
+  (validate-walker per-URL socket cycle, snap_url_template field on
+  CAMERA_DB streaming_recipe, idempotent _DVR_ENUM_DONE guard, parent
+  card renaming to `<brand> chN`).
+- **2.5.0-rc1.6** — +8s loadCameras() refetch after cred-auth to
+  surface enumerated cards in the UI without waiting for the next
+  user-initiated state change.
+- **2.5.0-rc1.7** — frontend `_stableCardKey` channel-suffix fix.
+  Before this, all 8 DVR channel cards on the same ip:port collided
+  on a single DOM card during in-place renderGrid updates. With this
+  fix, each channel card gets a distinct `ip:port#chN` key.
+- **2.5.0-rc1.8** — replace fixed +8s setTimeout with a poll-until-
+  done loop against new `/api/dvr_enum/status/{camera_id}` endpoint.
+  Backend hardening: every exit path of the channel-enum helper now
+  adds to `_DVR_ENUM_DONE` so the JS poll loop terminates within
+  bounded time regardless of outcome. Saved ~5 seconds of dead time.
+- **2.5.0-rc1.9** — credential leak fix in
+  `_validate_rtsp_urls_single_socket`. Five log emitters were
+  interpolating creds-bearing RTSP URLs verbatim; all now use
+  `_strip_creds()`.
+
+### Carried over from 2.4.x
+
+All 2.4.0 fixes remain in place: throttle-aware probe pacing,
+aggressive cooldown detection, single-socket cred-auth refactor,
+RST-class lockout safety nets, focus-view transport-flip + http_snap
+fallback, fixed-position cards on login, dead JS cleanup, stable
+stream profiles dedup.
+
+### Known issue carried into 2.6.0
+
+Pi 4 HEVC hardware decode is still software-only. Startup log line
+`hevc_v4l2m2m: unavailable (rpivid present at /dev/video19 but
+bundled ffmpeg lacks v4l2-request support — stateful m2m API doesn't
+expose HEVC on Pi 4. Will be fixed in 2.6.0 by bundling rpi-ffmpeg.)`
+documents the gap. 2.6.0-rc1.0 closes this.
+
 ## 2.5.0-rc1.9
 
 **Security fix on 2.5.0-rc1.8.** Five log emitters in
