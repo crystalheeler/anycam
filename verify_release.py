@@ -4,7 +4,7 @@ AnyCam release verification script.
 Run before every release: python3 verify_release.py
 
 Checks (in order):
-  1. Python syntax  (ast.parse)
+  1. Python syntax  (ast.parse + compile)
   2. Semantic contracts — key functions contain required identifiers
   3. Best-practice audit — mutable defaults, blocking I/O in async, CSS // comments
   4. Version consistency — CURRENT_VERSION matches config.yaml
@@ -38,6 +38,23 @@ try:
     ok("ast.parse() passed")
 except SyntaxError as e:
     fail(f"SyntaxError: {e}")
+    sys.exit(1)
+
+# 2.4.0-rc2.7: also run compile(). ast.parse() catches grammar errors but
+# does NOT catch a category of compile-time errors including:
+#   • `global X` declared after X is already used in the same function
+#   • `nonlocal X` with no enclosing binding
+#   • duplicate keyword args in a call
+# Live install of rc2.6 crashed with "name 'PENDING_CAMERAS' is used
+# prior to global declaration" because the gate only ran ast.parse() —
+# that error is raised by the bytecode compiler, not the parser. Adding
+# compile() means any future repro of this class lands at gate-time
+# instead of HAOS-install-time.
+try:
+    compile(src, str(src_path), "exec")
+    ok("compile() passed")
+except SyntaxError as e:
+    fail(f"compile-time SyntaxError: {e}")
     sys.exit(1)
 
 # Duplicate top-level definitions
@@ -180,7 +197,15 @@ else:
                    # generation (channel iteration, profile selection,
                    # etc.) for multi-channel NVR/DVR boxes. Populated
                    # in rc2.0 for 9 NVR/DVR families; consumed in rc3.x.
-                   "streaming_recipe")
+                   "streaming_recipe",
+                   # 2.4.0-rc2.2: skip_layer2 is a boolean flag set on
+                   # multi-channel NVR/DVR families that should NOT use
+                   # Layer 2 (multi-socket fallback) RTSP probing —
+                   # they need streaming_recipe channel iteration
+                   # instead. Consumer in find_rtsp_path was added in
+                   # rc2.1; this field is the data-side companion that
+                   # actually enables the short-circuit.
+                   "skip_layer2")
     DATA_FIELD_SET = set(DATA_FIELDS)
 
     for idx, elt in enumerate(camera_db_node.elts):
