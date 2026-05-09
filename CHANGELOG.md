@@ -1,8 +1,109 @@
-## 2.5.0
+## 2.6.0-rc1.0
 
-**Roll-up of the 2.5.0-rc1.0 → 2.5.0-rc1.9 cycle.** No code changes
-beyond the version bump from 2.5.0-rc1.9. This entry summarizes the
-shipped feature set for the 2.5.0 minor.
+**Pi 4 / Pi 5 HEVC hardware decode via bundled rpi-ffmpeg.** Closes
+the gap documented at the bottom of the 2.5.0 changelog entry. This
+is rc1.0 of a Dockerfile rewrite — multi-stage rpi-ffmpeg compile from
+source — and the build may fail on first install if any of the new
+build-toolchain steps misbehave on CrystalHeeler's host. Logs from the first
+addon update should be checked carefully.
+
+### What changed
+
+**Dockerfile.** Now conditionally compiles jc-kynesim/rpi-ffmpeg
+release/6.1 from source on aarch64 builds, installing the result at
+`/opt/rpi-ffmpeg/`. Configure flags include `--enable-v4l2-request
+--enable-libdrm --enable-libudev`, which give ffmpeg the
+v4l2-request stateless API support that rpivid (Pi 4 / Pi 5 HEVC
+silicon at `/dev/video19`) requires. Build-toolchain (build-essential,
+pkg-config, libdrm-dev, libudev-dev, nasm, yasm, git) is installed
+inside the same RUN layer as the compile, then the source tree is
+cleaned but the toolchain stays — image-size optimization deferred
+until the build proves stable. amd64 builds skip the entire compile
+block and use system /usr/bin/ffmpeg unchanged (no rpivid hardware
+on x86 to drive).
+
+**run.sh.** Prepends `/opt/rpi-ffmpeg/bin` to PATH so plain
+`ffmpeg` invocations across camera_discovery.py — _probe_hw_decoders,
+snap_loop, the live MJPEG endpoint, probe_stream_details, snap_url
+fallback paths — pick up the bundled binary automatically on aarch64.
+On amd64 the directory doesn't exist and PATH lookup falls through
+to /usr/bin/ffmpeg unchanged, so this export is a no-op on x86. No
+Python-side branching needed.
+
+**_HW_DECODER_CANDIDATES** (already added in earlier 2.6.0-rc1.0
+work, listed here for completeness). Two new candidates ahead of the
+existing v4l2m2m entries:
+
+- `hevc_v4l2request` (codec=hevc) — primary HEVC HW decode path on
+  Pi 4 / Pi 5 with rpivid loaded.
+- `h264_v4l2request` (codec=h264) — H264 alternative; less critical
+  since `h264_v4l2m2m` already works on Pi 4 via bcm2835-codec, but
+  including it lets the probe pick up systems where v4l2request is
+  the cleaner path.
+
+Order is preference: v4l2request first, then v4l2m2m, then vaapi.
+snap_loop and the live MJPEG endpoint both iterate this list and
+pick the first match for the stream codec that isn't in
+`_HW_UNAVAILABLE`.
+
+**Live MJPEG endpoint hw selection.** Was hardcoded to
+`hevc_v4l2m2m` / `h264_v4l2m2m`, which on Pi 4 always fell through
+to software for HEVC because `hevc_v4l2m2m` is permanently in
+`_HW_UNAVAILABLE` there. Now iterates `_HW_DECODER_CANDIDATES` in
+preference order (matching snap_loop's selection at line ~7028), so
+when rpivid is loaded and rpi-ffmpeg is available, HEVC live view
+uses `hevc_v4l2request`.
+
+**probe_stream_details auto-disable.** Runtime "Could not find a
+valid device" detection now covers the v4l2request decoders too,
+not just v4l2m2m and vaapi. Without this, a failed
+`hevc_v4l2request` decode would leave the decoder out of
+`_HW_UNAVAILABLE` and snap_loop would retry it on every snapshot.
+
+**_probe_hw_decoders** (already added in earlier 2.6.0-rc1.0 work,
+listed here for completeness). v4l2request decoders use a static-
+check probe path: `ffmpeg -decoders` lists the decoder name AND
+`/dev/video19` + `/dev/media0` are present (rpivid loaded). Both
+true → decoder marked available. The old synthetic-decode probe used
+for v4l2m2m / vaapi candidates would mis-fail here because v4l2-
+request decoders are picky about input format (NAL alignment,
+parameter set placement) and a libx265-encoded 16x16 test clip
+trips them in ways that don't reflect real-world stream decoding.
+
+**Pi-4 diagnostic refinement** (already added in earlier 2.6.0-rc1.0
+work). The `hevc_v4l2m2m unavailable on Pi 4` message no longer
+points at a future release ("Will be fixed in 2.6.0..."). It now
+explains whether `hevc_v4l2request` was probed available alongside,
+and if so, says HEVC HW decode is working via the v4l2request path.
+If `hevc_v4l2request` was also unavailable, the message points at
+the rpivid loading state and ffmpeg build, not at AnyCam.
+
+### Known risks (rc1.0 — first attempt at compile-from-source)
+
+- **Build time on Pi 4 host.** First `ha addon update` after this
+  release will spend ~30-45 minutes compiling rpi-ffmpeg before the
+  addon starts. Subsequent updates without Dockerfile changes will
+  use Docker's layer cache and skip the recompile.
+- **Dockerfile may fail on first build.** rpi-ffmpeg's configure
+  occasionally finds a missing-pkg-config-package on minor base-
+  image variants. If the first build fails, the addon log will
+  show the configure error from inside the compile RUN; check there
+  before assuming the issue is downstream.
+- **Image bloat.** aarch64 image gains ~50MB binary plus ~150MB of
+  build toolchain that we don't purge. amd64 image unchanged.
+- **No live test yet.** CrystalHeeler hasn't run `ha addon update` to a
+  build with this Dockerfile yet — the rpi-ffmpeg compile path is
+  exercised here for the first time. Carry expectation that the
+  next round of testing may reveal compile-side issues that take
+  one or more rc bumps to resolve.
+
+### Carried over from 2.5.0
+
+All of the 2.5.0 cycle (Lorex/Dahua DVR-NVR family support,
+poll-until-done channel-enum, credential leak fix in
+`_validate_rtsp_urls_single_socket`) ships in 2.6.0-rc1.0 unchanged.
+
+
 
 ### Headline feature: Lorex/Dahua DVR-NVR family support
 
