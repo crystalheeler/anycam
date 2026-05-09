@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.6.0-rc2.1"  # must match config.yaml
+CURRENT_VERSION = "2.6.0-rc2.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -469,10 +469,10 @@ _FOCUSED_CAMERA: str | None = None
 # is added here so future stream requests skip hw decode immediately.
 _HW_UNAVAILABLE: set = set()
 
-# 2.4.0-rc3.0: ordered list of (decoder_name, codec) candidates that
-# _probe_hw_decoders tries at startup, and that snap_loop iterates when
-# selecting a hardware decoder for a given stream. Module-level so both
-# the probe and snap_loop see the same identifiers — previously the
+# 2.4.0-rc3.0: ordered list of (label, codec, ffmpeg_args) candidates
+# that _probe_hw_decoders tries at startup, and that snap_loop iterates
+# when selecting a hardware decoder for a given stream. Module-level so
+# both the probe and snap_loop see the same identifiers — previously the
 # probe defined this as a local list and snap_loop referenced
 # _HW_DECODER_CANDIDATES expecting it to be a global, causing NameError
 # the first time a stream tried to launch with hw_decode toggled on.
@@ -482,28 +482,33 @@ _HW_UNAVAILABLE: set = set()
 # itself NameError in CPython but apparently never fired in practice
 # until rc3.0).
 #
-# 2.6.0-rc1.0: this addon now bundles a custom-compiled rpi-ffmpeg
-# (multi-stage Dockerfile, aarch64 only) built with --enable-v4l2-request
-# --enable-libdrm --enable-libudev. That gives ffmpeg access to two new
-# stateless v4l2-request decoders: hevc_v4l2request and h264_v4l2request.
-# On Pi 4 (where rpivid sits at /dev/video19 and exposes the stateless
-# API), hevc_v4l2request is the path that actually lights up HEVC HW
-# decode — the legacy hevc_v4l2m2m never worked on Pi 4 because Pi 4's
-# bcm2835-codec stateful m2m API doesn't expose HEVC at all (only
-# H264/MPEG/VP8/VP9/VC1).
+# 2.6.0-rc2.3: structure changed from (decoder_name, codec) to
+# (label, codec, ffmpeg_args). Reason: rpios's ffmpeg exposes Pi 4 / 5
+# HEVC HW decode through the v4l2-request stateless API, but does NOT
+# expose it as a standalone decoder name. There is no `hevc_v4l2request`
+# in `ffmpeg -decoders` on rpios builds. The v4l2-request HEVC path is
+# reached via `-hwaccel drm -c:v hevc` instead — i.e. as a hwaccel, not
+# a decoder. Earlier rcs added imaginary `hevc_v4l2request` /
+# `h264_v4l2request` entries based on forum posts and never verified
+# them against an actual `-decoders` listing; those entries are now gone.
 #
-# Order = preference. Within each codec, list v4l2request BEFORE
-# v4l2m2m so the probe and snap_loop both prefer rpivid HEVC where
-# available. Then v4l2m2m (Pi/embedded stateful — works for H264 on
-# Pi 4, works for both codecs on some other ARM SoCs). Then vaapi
-# (Intel/AMD GPU — relevant on amd64 builds with passthrough).
-_HW_DECODER_CANDIDATES: list[tuple[str, str]] = [
-    ("hevc_v4l2request", "hevc"),
-    ("h264_v4l2request", "h264"),
-    ("hevc_v4l2m2m",     "hevc"),
-    ("h264_v4l2m2m",     "h264"),
-    ("hevc_vaapi",       "hevc"),
-    ("h264_vaapi",       "h264"),
+# Verified live-decode of the Hikvision main stream (2560x1440 HEVC
+# Main) on CrystalHeeler's Pi 4 with rpivid loaded: ffmpeg loads
+# "Hwaccel V4L2 HEVC stateless V4; devices: /dev/media0,/dev/video19;
+# buffers: src DMABuf, dst DMABuf; swfmt=rpi4_8" and decodes 6 of 9
+# packets cleanly with no software fallback. That's the proof of the
+# `-hwaccel drm` path. h264_v4l2m2m via bcm2835-codec at /dev/video10
+# continues to handle H264 on Pi 4/5 the way it always has.
+#
+# Order = preference. Within each codec the rpi-specific path goes
+# first, then vaapi as a fallback for amd64 builds with passthrough.
+# All candidates gated on CFG_HW_DECODE — see _probe_hw_decoders for
+# the toggle-respecting guard.
+_HW_DECODER_CANDIDATES: list[tuple[str, str, list[str]]] = [
+    ("hevc_drm",     "hevc", ["-hwaccel", "drm",   "-c:v", "hevc"]),
+    ("h264_v4l2m2m", "h264", [                     "-c:v", "h264_v4l2m2m"]),
+    ("hevc_vaapi",   "hevc", ["-hwaccel", "vaapi", "-c:v", "hevc"]),
+    ("h264_vaapi",   "h264", ["-hwaccel", "vaapi", "-c:v", "h264"]),
 ]
 
 # ── Shared thread pool for all run_in_executor calls ─────────────────────────
@@ -6872,20 +6877,31 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     SOI = bytes([0xFF, 0xD8])
     EOI = bytes([0xFF, 0xD9])
 
-    async def _launch_snap(hw_dec: str = "", native_res: bool = False) -> None:
+    async def _launch_snap(
+        hw_args: list[str] | None = None,
+        hw_label: str = "",
+        native_res: bool = False,
+    ) -> None:
 
         """Launch ffmpeg for snapshot polling.
         native_res=True: use camera's native resolution/fps (for focus view).
         Respects CFG_ options: thread limiting, skip_nonref, low_fps_mode.
         In focus/native_res mode, Low FPS Mode and Limit Threads are bypassed
         so the user gets full quality regardless of config settings.
+
+        2.6.0-rc2.3: hw_args is the candidate's ffmpeg_args field copied
+        verbatim from _HW_DECODER_CANDIDATES — either a [-c:v <decoder>]
+        pair for decoder-name candidates (h264_v4l2m2m, *_vaapi if used
+        as -c:v) or a [-hwaccel <name> -c:v <codec>] quad for hwaccel
+        candidates (hevc_drm). Caller does the candidate lookup; this
+        function just splices the args in.
         """
-        hw_args     = ["-c:v", hw_dec] if hw_dec else []
+        hw_args     = list(hw_args) if hw_args else []
         # In focus mode: lift thread cap and nonref-skip for full quality,
         # even if CFG_LIMIT_THREADS / CFG_SKIP_NONREF are enabled in config.
         thread_args = [] if native_res else (["-threads", "2"] if CFG_LIMIT_THREADS else [])
         skip_args   = [] if native_res else (["-skip_frame", "nonref"] if CFG_SKIP_NONREF else [])
-        hw_label    = f"hw:{hw_dec}" if hw_dec else "sw"
+        hw_label    = f"hw:{hw_label}" if hw_label else "sw"
 
         # ffmpeg_url: which URL to actually pass to ffmpeg.
         # For native_res/focus mode this may differ from the outer url variable.
@@ -7019,27 +7035,33 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
             # Select decoder
             # Respect CFG_HW_DECODE toggle: if disabled, skip hw entirely.
-            # Otherwise pick the best available decoder for this codec from
-            # the candidates probed at startup — prefers v4l2m2m (Pi) then
-            # vaapi (Intel/AMD), skipping anything in _HW_UNAVAILABLE.
-            hw_dec = ""
+            # When enabled, walk _HW_DECODER_CANDIDATES in preference order and
+            # pick the first match for this stream's codec that isn't in
+            # _HW_UNAVAILABLE. Each candidate is (label, codec, ffmpeg_args)
+            # — see the comment block at the candidate-list definition for
+            # how 2.6.0-rc2.3 restructured this around hwaccel-style entries.
+            hw_label = ""
+            hw_args: list[str] = []
             if CFG_HW_DECODE:
                 codec_lower = (stream_codec or "").lower()
-                for decoder, _ in _HW_DECODER_CANDIDATES:
-                    if decoder in _HW_UNAVAILABLE:
-                        continue
-                    # Match decoder to stream codec
-                    if codec_lower in ("hevc", "h265") and "hevc" in decoder:
-                        hw_dec = decoder
+                target_codec = ("hevc" if codec_lower in ("hevc", "h265")
+                                else "h264" if codec_lower == "h264"
+                                else "")
+                if target_codec:
+                    for cand_label, cand_codec, cand_args in _HW_DECODER_CANDIDATES:
+                        if cand_codec != target_codec:
+                            continue
+                        if cand_label in _HW_UNAVAILABLE:
+                            continue
+                        hw_label = cand_label
+                        hw_args  = list(cand_args)
                         break
-                    if codec_lower == "h264" and "h264" in decoder:
-                        hw_dec = decoder
-                        break
-                if not hw_dec:
+                if not hw_label:
                     log.debug(f"SNAP [{camera_id}]: no hw decoder available "
                               f"for codec={stream_codec}, using software")
 
-            proc     = await _launch_snap(hw_dec, native_res=native_res)
+            proc     = await _launch_snap(hw_args=hw_args, hw_label=hw_label,
+                                          native_res=native_res)
             state["proc"] = proc
             stderr_t = asyncio.create_task(_drain_stderr(proc, f"SNAP:{camera_id}"))
             buf      = b""
@@ -7053,7 +7075,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # re-entry retry happened, masking the true "ffmpeg dead, retrying"
             # state behind a misleading X-Stream-Status: ok.
             state["current_run_frames"] = 0
-            hw_tried = bool(hw_dec)
+            hw_tried = bool(hw_label)
 
             try:
                 while True:
@@ -7075,7 +7097,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                             try: await asyncio.wait_for(proc.wait(), timeout=2)
                             except Exception: pass
                             log.info(f"SNAP [{camera_id}]: hw decode timeout → sw")
-                            _HW_UNAVAILABLE.add(hw_dec)
+                            _HW_UNAVAILABLE.add(hw_label)
                             proc     = await _launch_snap()
                             state["proc"] = proc
                             stderr_t.cancel()
@@ -7096,7 +7118,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                             try: await asyncio.wait_for(proc.wait(), timeout=2)
                             except Exception: pass
                             log.info(f"SNAP [{camera_id}]: hw EOF (rc={rc}) → sw")
-                            _HW_UNAVAILABLE.add(hw_dec)
+                            _HW_UNAVAILABLE.add(hw_label)
                             proc     = await _launch_snap()
                             state["proc"] = proc
                             stderr_t.cancel()
@@ -12785,15 +12807,15 @@ async def _drain_stderr(proc: object, label: str) -> None:
     # full authenticated URL in its error messages (SigRev-1 item 4).
     joined = _strip_creds(joined)
     log.warning(f"Stream {label} ffmpeg stderr: {joined}")
-    # 2.6.0-rc1.0: extend the auto-disable list to cover the new
-    # v4l2request decoders bundled via rpi-ffmpeg. Previously this
-    # only matched hevc_v4l2m2m / h264_v4l2m2m / *_vaapi; with
-    # rpivid-driven decoders also in play, runtime "Could not find
-    # a valid device" failures on hevc_v4l2request need the same
-    # treatment so snap_loop stops retrying.
-    for hw in ("hevc_v4l2request", "h264_v4l2request",
+    # 2.6.0-rc2.3: auto-disable list updated for the new candidate set.
+    # hevc_drm is the rpi 4/5 HEVC path (via -hwaccel drm); when ffmpeg
+    # can't init it, the stderr reads "Could not find a valid device"
+    # the same way v4l2m2m and vaapi failures do, so the same matching
+    # logic applies. v4l2request entries dropped — those decoder names
+    # never existed.
+    for hw in ("hevc_drm",
                "hevc_v4l2m2m", "h264_v4l2m2m",
-               "hevc_vaapi", "h264_vaapi"):
+               "hevc_vaapi",   "h264_vaapi"):
         if hw in joined and "Could not find a valid device" in joined:
             _HW_UNAVAILABLE.add(hw)
             log.info(f"Marked {hw} as unavailable on this system")
@@ -13955,27 +13977,25 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     stream_w     = camera.get("stream_width") or 0
     is_hevc      = stream_codec in ("hevc", "h265")
 
-    # 2.6.0-rc1.0: iterate _HW_DECODER_CANDIDATES in preference order
-    # (v4l2request first, then v4l2m2m, then vaapi) and pick the first
-    # decoder that matches the stream codec and isn't in
-    # _HW_UNAVAILABLE. Mirrors snap_loop's selection at line ~7028.
-    # Previous code hardcoded hevc_v4l2m2m / h264_v4l2m2m, which on
-    # Pi 4 always fell through to software for HEVC because
-    # hevc_v4l2m2m is permanently unavailable there (bcm2835-codec
-    # has no HEVC m2m). With v4l2request candidates ahead in the
-    # list, the iteration now picks hevc_v4l2request first when
-    # rpivid is loaded and rpi-ffmpeg is available.
-    hw_dec = ""
+    # 2.6.0-rc2.3: walk _HW_DECODER_CANDIDATES (label, codec, ffmpeg_args)
+    # in preference order — hevc_drm (Pi 4/5 rpivid via -hwaccel drm),
+    # then h264_v4l2m2m (Pi 4/5 bcm2835-codec via -c:v), then vaapi —
+    # and splice the first match's ffmpeg_args verbatim into the
+    # ffmpeg command line. Mirrors snap_loop's selection. CFG_HW_DECODE
+    # gate stays in place: when off, hw_args is empty and ffmpeg runs
+    # software-only as before.
+    hw_label = ""
+    hw_args: list[str] = []
     if CFG_HW_DECODE and stream_codec in ("hevc", "h265", "h264"):
         target_codec = "hevc" if is_hevc else "h264"
-        for cand_dec, cand_codec in _HW_DECODER_CANDIDATES:
+        for cand_label, cand_codec, cand_args in _HW_DECODER_CANDIDATES:
             if cand_codec != target_codec:
                 continue
-            if cand_dec in _HW_UNAVAILABLE:
+            if cand_label in _HW_UNAVAILABLE:
                 continue
-            hw_dec = cand_dec
+            hw_label = cand_label
+            hw_args  = list(cand_args)
             break
-    hw_args     = ["-c:v", hw_dec] if hw_dec else []
     thread_args = ["-threads", "2"] if CFG_LIMIT_THREADS else []
 
     if is_hevc and stream_w >= 3840:
@@ -14754,46 +14774,54 @@ async def _probe_hw_decoders() -> None:
     """
     Probe hardware decoder availability once at startup.
 
-    Tries to decode a 1-frame black H.264/HEVC stream with each v4l2m2m decoder.
-    If ffmpeg exits with error (device not found, not compiled in, etc.), the
-    decoder name is added to _HW_UNAVAILABLE so snap_loop never wastes 3 seconds
-    trying it.
+    2.6.0-rc2.3: structurally rewritten. The candidate list is now
+    (label, codec, ffmpeg_args) triples — see the comment block at the
+    _HW_DECODER_CANDIDATES definition. Each candidate is either:
+
+      • hwaccel-style — args contains "-hwaccel <name> -c:v <codec>"
+        (e.g. hevc_drm uses "-hwaccel drm -c:v hevc"). Probed by
+        verifying that ffmpeg's -hwaccels list contains <name> AND, for
+        the drm hwaccel specifically, that rpivid is loaded
+        (/dev/video19 + /dev/media0 both present). No synthetic decode
+        — initial proof was an end-to-end live test against the
+        Hikvision camera on CrystalHeeler's Pi 4 in 2.6.0-rc2.1's debug
+        cycle. If a real stream fails at runtime, snap_loop's existing
+        per-stream hw-fallback handler catches it and adds the label to
+        _HW_UNAVAILABLE.
+
+      • decoder-style — args contains "-c:v <name>" only (no hwaccel),
+        e.g. h264_v4l2m2m. Probed by encoding a small H264/HEVC test
+        clip and decoding it via the candidate's args. 2.6.0-rc2.3 adds
+        -pix_fmt yuv420p + -profile:v baseline to the encode step so
+        the test clip uses a profile bcm2835-codec accepts; the rc2.1
+        regression where h264_v4l2m2m showed unavailable on Pi 4 was
+        libx264 defaulting to High 4:4:4 Predictive (profile 244) which
+        the HW decoder rejects.
+
+    CFG_HW_DECODE gate: when the toggle is off, the entire probe skips.
+    No ffmpeg subprocesses launched, no candidates marked
+    available/unavailable, snap_loop and the live MJPEG endpoint both
+    fall through to software decode via their own gates. The toggle is
+    the single switch.
 
     Logs:
-      HW decoders available: hevc_v4l2m2m, h264_v4l2m2m
-      <decoder>: unavailable (<reason>)
+      Hardware decode disabled by config — skipping probe   (toggle off)
+      Probing hardware decoder availability...              (toggle on)
+        <label>: available (<how>)
+        <label>: unavailable (<reason>)
+      HW decoders available: <comma list> | No hardware decoders available
     """
-    log.info("Probing hardware decoder availability...")
-    # 2.4.0-rc3.0: detect rpivid presence ahead of the loop so we can emit
-    # the accurate Pi-4-specific diagnostic when hevc_v4l2m2m fails on a
-    # system that DOES have the HEVC hardware available (just via the
-    # wrong API). Two signals: /dev/video19 (the rpivid stateless decoder
-    # device created by dtoverlay=rpivid-v4l2) and /dev/media0 (rpivid's
-    # media controller). Both being present means rpivid is loaded.
-    #
-    # 2.6.0-rc1.0: with rpi-ffmpeg bundled, hevc_v4l2request now becomes
-    # the path that actually lights up HEVC HW decode on Pi 4 against
-    # rpivid. The legacy hevc_v4l2m2m path will still fail on Pi 4
-    # (bcm2835-codec doesn't expose HEVC m2m), but that's expected and
-    # the Pi-4-specific diagnostic now points to hevc_v4l2request as
-    # the working alternative rather than promising a future fix.
-    rpivid_present = (os.path.exists("/dev/video19")
-                      and os.path.exists("/dev/media0"))
+    if not CFG_HW_DECODE:
+        log.info("Hardware decode disabled by config — skipping probe")
+        return
 
-    # 2.6.0-rc1.0: probe the decoder list once up-front so v4l2request
-    # decoders can be checked statically (does ffmpeg list it as a
-    # known decoder?) rather than via a synthetic decode test. v4l2-
-    # request decoders are stateless and notoriously picky about input
-    # format (NAL alignment, parameter set placement, etc.); a
-    # libx265-encoded 16x16 test clip piped on stdin tends to trip
-    # them in ways that don't reflect real-world stream decoding. So
-    # for *_v4l2request, we trust two static signals together:
-    #   1. ffmpeg -decoders lists the decoder name
-    #   2. /dev/video19 + /dev/media0 are present (rpivid loaded)
-    # If both, the decoder is marked available; snap_loop will use it.
-    # If real-world decode then fails on a particular stream, snap_loop's
-    # existing per-stream hw-fallback path handles it (drops to sw).
-    ffmpeg_decoders = ""
+    log.info("Probing hardware decoder availability...")
+
+    # Static queries up-front: ffmpeg -decoders and ffmpeg -hwaccels.
+    # Each candidate is then dispatched to the right test based on
+    # whether its args use -hwaccel or only -c:v.
+    decoder_list = ""
+    hwaccel_list = ""
     try:
         ld = await asyncio.create_subprocess_exec(
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-decoders",
@@ -14801,50 +14829,100 @@ async def _probe_hw_decoders() -> None:
             stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(ld.communicate(), timeout=10)
-        ffmpeg_decoders = out.decode("utf-8", errors="replace")
+        decoder_list = out.decode("utf-8", errors="replace")
     except Exception:
-        ffmpeg_decoders = ""
+        pass
+    try:
+        lh = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-hwaccels",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(lh.communicate(), timeout=10)
+        hwaccel_list = out.decode("utf-8", errors="replace")
+    except Exception:
+        pass
 
-    available = []
-    for dec, codec in _HW_DECODER_CANDIDATES:
-        # 2.6.0-rc1.0: static-check path for v4l2request decoders.
-        if dec.endswith("_v4l2request"):
-            in_decoder_list = bool(re.search(rf"\b{re.escape(dec)}\b",
-                                              ffmpeg_decoders))
-            if in_decoder_list and rpivid_present:
-                available.append(dec)
-            else:
-                _HW_UNAVAILABLE.add(dec)
-                if not in_decoder_list:
-                    reason = ("not compiled into ffmpeg — only present "
-                              "in builds with --enable-v4l2-request")
-                else:
-                    reason = ("ffmpeg has v4l2request support but rpivid "
-                              "is not loaded (no /dev/video19 or "
-                              "/dev/media0) — needs dtoverlay=rpivid-v4l2 "
-                              "in /boot/config.txt")
-                log.info(f"  {dec}: unavailable ({reason})")
+    available: list[str] = []
+    for label, codec, args in _HW_DECODER_CANDIDATES:
+        is_hwaccel = "-hwaccel" in args
+
+        if is_hwaccel:
+            hwaccel_idx  = args.index("-hwaccel")
+            hwaccel_name = args[hwaccel_idx + 1]
+            in_hwaccels = bool(re.search(
+                rf"^\s*{re.escape(hwaccel_name)}\s*$",
+                hwaccel_list, re.MULTILINE))
+            if not in_hwaccels:
+                _HW_UNAVAILABLE.add(label)
+                reason = (f"ffmpeg does not list '{hwaccel_name}' as a "
+                          f"hwaccel — needs ffmpeg built with the "
+                          f"matching --enable-* flag (e.g. --enable-libdrm "
+                          f"for drm, --enable-vaapi for vaapi)")
+                log.info(f"  {label}: unavailable ({reason})")
+                continue
+            # drm hwaccel needs rpivid kernel module loaded on Pi 4/5.
+            # Without it, ffmpeg accepts -hwaccel drm at parse time but
+            # the actual decoder open fails at first packet — better to
+            # catch that here than waste a snap_loop launch on it.
+            if hwaccel_name == "drm":
+                rpivid_loaded = (os.path.exists("/dev/video19")
+                                 and os.path.exists("/dev/media0"))
+                if not rpivid_loaded:
+                    _HW_UNAVAILABLE.add(label)
+                    reason = ("rpivid not loaded — /dev/video19 or "
+                              "/dev/media0 missing. Add 'dtoverlay="
+                              "rpivid-v4l2' to /boot/firmware/config.txt "
+                              "and reboot the Pi.")
+                    log.info(f"  {label}: unavailable ({reason})")
+                    continue
+            available.append(label)
+            log.info(f"  {label}: available (via -hwaccel {hwaccel_name})")
+            continue
+
+        # decoder-style: -c:v <name> only.
+        try:
+            decoder_name = args[args.index("-c:v") + 1]
+        except (ValueError, IndexError):
+            _HW_UNAVAILABLE.add(label)
+            log.info(f"  {label}: unavailable (malformed candidate args)")
+            continue
+
+        in_decoders = bool(re.search(rf"\b{re.escape(decoder_name)}\b",
+                                      decoder_list))
+        if not in_decoders:
+            _HW_UNAVAILABLE.add(label)
+            log.info(f"  {label}: unavailable "
+                     f"(decoder '{decoder_name}' not in ffmpeg -decoders)")
             continue
 
         try:
-            # Encode a tiny test clip, then try to decode it with the hw decoder
+            # Encode a tiny test clip with conservative profile so common
+            # HW decoders (bcm2835-codec, generic vaapi) accept it. The
+            # rc2.1 regression that prompted this: libx264 defaulted to
+            # High 4:4:4 Predictive on the simple test pattern, which
+            # bcm2835-codec rejected with rc=1.
+            prof_args = (["-profile:v", "baseline"] if codec == "h264"
+                         else ["-profile:v", "main"])
             enc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-f", "lavfi", "-i", "color=black:s=16x16:d=0.1",
+                "-f", "lavfi", "-i", "color=black:s=64x64:d=0.2",
                 "-c:v", ("libx264" if codec == "h264" else "libx265"),
+                "-pix_fmt", "yuv420p",
+                *prof_args,
                 "-f", "matroska", "pipe:1",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             encoded, _ = await asyncio.wait_for(enc.communicate(), timeout=10)
             if not encoded:
-                _HW_UNAVAILABLE.add(dec)
-                log.info(f"  {dec}: unavailable (encode failed)")
+                _HW_UNAVAILABLE.add(label)
+                log.info(f"  {label}: unavailable (encode failed)")
                 continue
 
             dec_proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-c:v", dec,
+                *args,
                 "-i", "pipe:0",
                 "-f", "null", "-",
                 stdin=asyncio.subprocess.PIPE,
@@ -14855,49 +14933,26 @@ async def _probe_hw_decoders() -> None:
                 dec_proc.communicate(input=encoded), timeout=10)
             stderr_s = stderr.decode("utf-8", errors="replace")
 
-            if dec_proc.returncode == 0 and "not compiled" not in stderr_s and \
-                    "Could not find" not in stderr_s and "Invalid" not in stderr_s:
-                available.append(dec)
+            if (dec_proc.returncode == 0
+                    and "not compiled" not in stderr_s
+                    and "Could not find" not in stderr_s
+                    and "Invalid" not in stderr_s):
+                available.append(label)
+                log.info(f"  {label}: available (synthetic decode passed)")
             else:
-                _HW_UNAVAILABLE.add(dec)
-                # 2.6.0-rc1.0: refined diagnostic. On Pi 4 with rpivid
-                # loaded, hevc_v4l2m2m STILL fails (bcm2835-codec doesn't
-                # expose HEVC m2m — that's a kernel-side fact, not an
-                # ffmpeg-side one), but with rpi-ffmpeg now bundled, the
-                # working alternative — hevc_v4l2request — is in the
-                # candidates list above this entry and gets probed first.
-                # If hevc_v4l2request was probed available, the Pi 4 user
-                # is fine and snap_loop will pick it for HEVC streams.
-                # If hevc_v4l2request was NOT available (e.g. ffmpeg
-                # build missing the support, or rpivid not loaded), the
-                # diagnostic should help the user fix that — not point
-                # at a future release. Hence the conditional message.
-                if dec == "hevc_v4l2m2m" and rpivid_present and \
-                        "Could not find" in stderr_s:
-                    if "hevc_v4l2request" in available:
-                        reason = ("rpivid present and hevc_v4l2request "
-                                  "available — using that for HEVC HW "
-                                  "decode; hevc_v4l2m2m doesn't apply "
-                                  "on Pi 4 (bcm2835-codec stateful m2m "
-                                  "doesn't expose HEVC).")
-                    else:
-                        reason = ("rpivid present at /dev/video19 but "
-                                  "hevc_v4l2request also unavailable "
-                                  "(see line above) — HEVC HW decode "
-                                  "won't work until that's resolved.")
-                else:
-                    reason = ("not compiled into ffmpeg"
-                              if "not compiled" in stderr_s
-                              else ("device not found"
-                                    if "Could not find" in stderr_s
-                                    else f"rc={dec_proc.returncode}"))
-                log.info(f"  {dec}: unavailable ({reason})")
+                _HW_UNAVAILABLE.add(label)
+                reason = ("not compiled into ffmpeg"
+                          if "not compiled" in stderr_s
+                          else ("device not found"
+                                if "Could not find" in stderr_s
+                                else f"rc={dec_proc.returncode}"))
+                log.info(f"  {label}: unavailable ({reason})")
         except asyncio.TimeoutError:
-            _HW_UNAVAILABLE.add(dec)
-            log.info(f"  {dec}: unavailable (probe timed out)")
+            _HW_UNAVAILABLE.add(label)
+            log.info(f"  {label}: unavailable (probe timed out)")
         except Exception as e:
-            _HW_UNAVAILABLE.add(dec)
-            log.info(f"  {dec}: unavailable ({e})")
+            _HW_UNAVAILABLE.add(label)
+            log.info(f"  {label}: unavailable ({e})")
 
     if available:
         log.info(f"HW decoders available: {', '.join(available)}")
