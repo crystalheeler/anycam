@@ -68,23 +68,38 @@ RUN if [ "${BUILD_ARCH}" = "aarch64" ]; then \
 # (rpios on aarch64, Debian on amd64) so we branch the install.
 # All other packages are pinned to the same Debian-Bookworm versions
 # regardless of arch.
-RUN if [ "${BUILD_ARCH}" = "aarch64" ]; then \
-        FFMPEG_PIN="ffmpeg=8:5.1.3-1+rpt4" ; \
-    else \
-        FFMPEG_PIN="ffmpeg=7:5.1.8-0+deb12u1" ; \
-    fi \
-    && apt-get update \
+#
+# 2.6.0-rc2.1 — Option B discovery build. python3-pip and ffmpeg
+# version pins from rc2.0 were stale (E: Version not found). For
+# rc2.1 those two specific pins drop to no-version-constraint, so
+# apt picks the candidate. The four pins that worked in rc2.0
+# (python3, nmap, net-tools, iproute2) stay strict. After install,
+# a single RUN dumps dpkg-query and pip freeze versions for every
+# package we care about so the next rc can lock all 8 to confirmed
+# values from this build log.
+RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3=3.11.2-1+b1 \
-        python3-pip=23.0.1+dfsg-1+deb12u1 \
+        python3-pip \
         nmap=7.93+dfsg1-1 \
         net-tools=2.10-0.1+deb12u2 \
         iproute2=6.1.0-3 \
-        ${FFMPEG_PIN} \
+        ffmpeg \
     && pip3 install --break-system-packages \
         aiohttp==3.13.5 \
         cryptography==48.0.0 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 2.6.0-rc2.1 discovery dump. These two echo blocks are the whole
+# point of rc2.1 — they print the exact installed versions for every
+# apt + pip package the addon depends on, so rc2.2 can pin all 8 to
+# confirmed values. After rc2.2 ships with full pinning, this
+# discovery step gets removed.
+RUN echo "==> [2.6.0-rc2.1 discovery] apt-installed versions:" \
+    && dpkg-query -W -f='${Package}=${Version}\n' \
+        python3 python3-pip nmap net-tools iproute2 ffmpeg \
+    && echo "==> [2.6.0-rc2.1 discovery] pip-installed versions:" \
+    && pip3 freeze | grep -E '^(aiohttp|cryptography)=='
 
 COPY run.sh /
 COPY camera_discovery.py /
