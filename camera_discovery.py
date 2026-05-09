@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.5.0"  # must match config.yaml
+CURRENT_VERSION = "2.6.0-rc1.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -480,20 +480,30 @@ _HW_UNAVAILABLE: set = set()
 # every candidate to _HW_UNAVAILABLE on systems without HW decode, so
 # the for loop in snap_loop iterated over an empty list (which would
 # itself NameError in CPython but apparently never fired in practice
-# until rc3.0). Order = preference: v4l2m2m (Pi/embedded) first, then
-# vaapi (Intel/AMD GPU). Note that hevc_v4l2m2m is included for
-# completeness but Pi 4 specifically does NOT expose stateful HEVC
-# m2m — only stateless via rpivid (/dev/video19), which requires an
-# ffmpeg build with --enable-v4l2-request that this addon doesn't
-# currently bundle. See _probe_hw_decoders for rpivid detection
-# and the more accurate "rpivid present but ffmpeg lacks v4l2-request"
-# diagnostic message. Planned for 2.6.0: bundle a custom ffmpeg with
-# rpivid support so HEVC HW decode actually works on Pi 4.
+# until rc3.0).
+#
+# 2.6.0-rc1.0: this addon now bundles a custom-compiled rpi-ffmpeg
+# (multi-stage Dockerfile, aarch64 only) built with --enable-v4l2-request
+# --enable-libdrm --enable-libudev. That gives ffmpeg access to two new
+# stateless v4l2-request decoders: hevc_v4l2request and h264_v4l2request.
+# On Pi 4 (where rpivid sits at /dev/video19 and exposes the stateless
+# API), hevc_v4l2request is the path that actually lights up HEVC HW
+# decode — the legacy hevc_v4l2m2m never worked on Pi 4 because Pi 4's
+# bcm2835-codec stateful m2m API doesn't expose HEVC at all (only
+# H264/MPEG/VP8/VP9/VC1).
+#
+# Order = preference. Within each codec, list v4l2request BEFORE
+# v4l2m2m so the probe and snap_loop both prefer rpivid HEVC where
+# available. Then v4l2m2m (Pi/embedded stateful — works for H264 on
+# Pi 4, works for both codecs on some other ARM SoCs). Then vaapi
+# (Intel/AMD GPU — relevant on amd64 builds with passthrough).
 _HW_DECODER_CANDIDATES: list[tuple[str, str]] = [
-    ("hevc_v4l2m2m", "hevc"),
-    ("h264_v4l2m2m", "h264"),
-    ("hevc_vaapi",   "hevc"),
-    ("h264_vaapi",   "h264"),
+    ("hevc_v4l2request", "hevc"),
+    ("h264_v4l2request", "h264"),
+    ("hevc_v4l2m2m",     "hevc"),
+    ("h264_v4l2m2m",     "h264"),
+    ("hevc_vaapi",       "hevc"),
+    ("h264_vaapi",       "h264"),
 ]
 
 # ── Shared thread pool for all run_in_executor calls ─────────────────────────
@@ -12775,7 +12785,15 @@ async def _drain_stderr(proc: object, label: str) -> None:
     # full authenticated URL in its error messages (SigRev-1 item 4).
     joined = _strip_creds(joined)
     log.warning(f"Stream {label} ffmpeg stderr: {joined}")
-    for hw in ("hevc_v4l2m2m", "h264_v4l2m2m", "hevc_vaapi", "h264_vaapi"):
+    # 2.6.0-rc1.0: extend the auto-disable list to cover the new
+    # v4l2request decoders bundled via rpi-ffmpeg. Previously this
+    # only matched hevc_v4l2m2m / h264_v4l2m2m / *_vaapi; with
+    # rpivid-driven decoders also in play, runtime "Could not find
+    # a valid device" failures on hevc_v4l2request need the same
+    # treatment so snap_loop stops retrying.
+    for hw in ("hevc_v4l2request", "h264_v4l2request",
+               "hevc_v4l2m2m", "h264_v4l2m2m",
+               "hevc_vaapi", "h264_vaapi"):
         if hw in joined and "Could not find a valid device" in joined:
             _HW_UNAVAILABLE.add(hw)
             log.info(f"Marked {hw} as unavailable on this system")
@@ -13937,10 +13955,26 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     stream_w     = camera.get("stream_width") or 0
     is_hevc      = stream_codec in ("hevc", "h265")
 
-    wanted_hw = ("hevc_v4l2m2m" if is_hevc
-                 else "h264_v4l2m2m" if stream_codec == "h264" else "")
-    hw_dec    = wanted_hw if (CFG_HW_DECODE and wanted_hw
-                               and wanted_hw not in _HW_UNAVAILABLE) else ""
+    # 2.6.0-rc1.0: iterate _HW_DECODER_CANDIDATES in preference order
+    # (v4l2request first, then v4l2m2m, then vaapi) and pick the first
+    # decoder that matches the stream codec and isn't in
+    # _HW_UNAVAILABLE. Mirrors snap_loop's selection at line ~7028.
+    # Previous code hardcoded hevc_v4l2m2m / h264_v4l2m2m, which on
+    # Pi 4 always fell through to software for HEVC because
+    # hevc_v4l2m2m is permanently unavailable there (bcm2835-codec
+    # has no HEVC m2m). With v4l2request candidates ahead in the
+    # list, the iteration now picks hevc_v4l2request first when
+    # rpivid is loaded and rpi-ffmpeg is available.
+    hw_dec = ""
+    if CFG_HW_DECODE and stream_codec in ("hevc", "h265", "h264"):
+        target_codec = "hevc" if is_hevc else "h264"
+        for cand_dec, cand_codec in _HW_DECODER_CANDIDATES:
+            if cand_codec != target_codec:
+                continue
+            if cand_dec in _HW_UNAVAILABLE:
+                continue
+            hw_dec = cand_dec
+            break
     hw_args     = ["-c:v", hw_dec] if hw_dec else []
     thread_args = ["-threads", "2"] if CFG_LIMIT_THREADS else []
 
@@ -14733,16 +14767,65 @@ async def _probe_hw_decoders() -> None:
     # 2.4.0-rc3.0: detect rpivid presence ahead of the loop so we can emit
     # the accurate Pi-4-specific diagnostic when hevc_v4l2m2m fails on a
     # system that DOES have the HEVC hardware available (just via the
-    # wrong API for our bundled ffmpeg). Two signals: /dev/video19 (the
-    # rpivid stateless decoder device created by dtoverlay=rpivid-v4l2)
-    # and /dev/media0 (rpivid's media controller). Both being present
-    # means rpivid is loaded; if hevc_v4l2m2m then fails, the cause is
-    # the ffmpeg-side missing-v4l2-request-support, not a kernel-side
-    # missing-device. Fixing this in 2.6.0 by bundling rpi-ffmpeg.
+    # wrong API). Two signals: /dev/video19 (the rpivid stateless decoder
+    # device created by dtoverlay=rpivid-v4l2) and /dev/media0 (rpivid's
+    # media controller). Both being present means rpivid is loaded.
+    #
+    # 2.6.0-rc1.0: with rpi-ffmpeg bundled, hevc_v4l2request now becomes
+    # the path that actually lights up HEVC HW decode on Pi 4 against
+    # rpivid. The legacy hevc_v4l2m2m path will still fail on Pi 4
+    # (bcm2835-codec doesn't expose HEVC m2m), but that's expected and
+    # the Pi-4-specific diagnostic now points to hevc_v4l2request as
+    # the working alternative rather than promising a future fix.
     rpivid_present = (os.path.exists("/dev/video19")
                       and os.path.exists("/dev/media0"))
+
+    # 2.6.0-rc1.0: probe the decoder list once up-front so v4l2request
+    # decoders can be checked statically (does ffmpeg list it as a
+    # known decoder?) rather than via a synthetic decode test. v4l2-
+    # request decoders are stateless and notoriously picky about input
+    # format (NAL alignment, parameter set placement, etc.); a
+    # libx265-encoded 16x16 test clip piped on stdin tends to trip
+    # them in ways that don't reflect real-world stream decoding. So
+    # for *_v4l2request, we trust two static signals together:
+    #   1. ffmpeg -decoders lists the decoder name
+    #   2. /dev/video19 + /dev/media0 are present (rpivid loaded)
+    # If both, the decoder is marked available; snap_loop will use it.
+    # If real-world decode then fails on a particular stream, snap_loop's
+    # existing per-stream hw-fallback path handles it (drops to sw).
+    ffmpeg_decoders = ""
+    try:
+        ld = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-decoders",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(ld.communicate(), timeout=10)
+        ffmpeg_decoders = out.decode("utf-8", errors="replace")
+    except Exception:
+        ffmpeg_decoders = ""
+
     available = []
     for dec, codec in _HW_DECODER_CANDIDATES:
+        # 2.6.0-rc1.0: static-check path for v4l2request decoders.
+        if dec.endswith("_v4l2request"):
+            in_decoder_list = bool(re.search(rf"\b{re.escape(dec)}\b",
+                                              ffmpeg_decoders))
+            if in_decoder_list and rpivid_present:
+                available.append(dec)
+            else:
+                _HW_UNAVAILABLE.add(dec)
+                if not in_decoder_list:
+                    reason = ("not compiled into ffmpeg — only present "
+                              "in builds with --enable-v4l2-request")
+                else:
+                    reason = ("ffmpeg has v4l2request support but rpivid "
+                              "is not loaded (no /dev/video19 or "
+                              "/dev/media0) — needs dtoverlay=rpivid-v4l2 "
+                              "in /boot/config.txt")
+                log.info(f"  {dec}: unavailable ({reason})")
+            continue
+
         try:
             # Encode a tiny test clip, then try to decode it with the hw decoder
             enc = await asyncio.create_subprocess_exec(
@@ -14777,27 +14860,31 @@ async def _probe_hw_decoders() -> None:
                 available.append(dec)
             else:
                 _HW_UNAVAILABLE.add(dec)
-                # 2.4.0-rc3.0: more accurate diagnostic when hevc_v4l2m2m
-                # fails on a Pi 4 that has rpivid loaded. Previous message
-                # ("device not found") was misleading — the device IS
-                # there at /dev/video19, but ffmpeg's hevc_v4l2m2m decoder
-                # uses the stateful V4L2 m2m API, while rpivid implements
-                # the stateless V4L2 request API. Pi 4's bcm2835-codec
-                # provides stateful m2m for H264/MPEG/VP8/VP9/VC1 but
-                # NOT for HEVC — so hevc_v4l2m2m will literally never
-                # find a valid device on a Pi 4, regardless of dtoverlay
-                # config. To use rpivid HEVC decode, ffmpeg needs to be
-                # built with --enable-v4l2-request and use -hwaccel drm
-                # against the stateless API, neither of which the
-                # bundled ffmpeg in this addon's Docker image supports
-                # today. Planned for 2.6.0: bundle rpi-ffmpeg.
+                # 2.6.0-rc1.0: refined diagnostic. On Pi 4 with rpivid
+                # loaded, hevc_v4l2m2m STILL fails (bcm2835-codec doesn't
+                # expose HEVC m2m — that's a kernel-side fact, not an
+                # ffmpeg-side one), but with rpi-ffmpeg now bundled, the
+                # working alternative — hevc_v4l2request — is in the
+                # candidates list above this entry and gets probed first.
+                # If hevc_v4l2request was probed available, the Pi 4 user
+                # is fine and snap_loop will pick it for HEVC streams.
+                # If hevc_v4l2request was NOT available (e.g. ffmpeg
+                # build missing the support, or rpivid not loaded), the
+                # diagnostic should help the user fix that — not point
+                # at a future release. Hence the conditional message.
                 if dec == "hevc_v4l2m2m" and rpivid_present and \
                         "Could not find" in stderr_s:
-                    reason = ("rpivid present at /dev/video19 but bundled "
-                              "ffmpeg lacks v4l2-request support — "
-                              "stateful m2m API doesn't expose HEVC on "
-                              "Pi 4. Will be fixed in 2.6.0 by bundling "
-                              "rpi-ffmpeg.")
+                    if "hevc_v4l2request" in available:
+                        reason = ("rpivid present and hevc_v4l2request "
+                                  "available — using that for HEVC HW "
+                                  "decode; hevc_v4l2m2m doesn't apply "
+                                  "on Pi 4 (bcm2835-codec stateful m2m "
+                                  "doesn't expose HEVC).")
+                    else:
+                        reason = ("rpivid present at /dev/video19 but "
+                                  "hevc_v4l2request also unavailable "
+                                  "(see line above) — HEVC HW decode "
+                                  "won't work until that's resolved.")
                 else:
                     reason = ("not compiled into ffmpeg"
                               if "not compiled" in stderr_s

@@ -4,6 +4,23 @@
 export INGRESS_PATH=$(bashio::addon.ingress_entry)
 export INGRESS_PORT=8099
 
+# 2.6.0-rc1.0: prepend /opt/rpi-ffmpeg/bin to PATH so plain `ffmpeg`
+# resolves to the bundled rpi-ffmpeg binary on aarch64 builds, which
+# is compiled with --enable-v4l2-request and exposes the
+# hevc_v4l2request / h264_v4l2request decoders that snap_loop needs
+# to drive Pi 4 / Pi 5 rpivid HEVC hardware decode.
+#
+# On amd64 builds /opt/rpi-ffmpeg/bin doesn't exist (Dockerfile
+# skipped the compile) — PATH lookup falls through to /usr/bin/ffmpeg
+# unchanged, so this export is a no-op on x86.
+#
+# Doing the PATH wiring here rather than at the Python level means
+# every `ffmpeg` subprocess in camera_discovery.py — _probe_hw_decoders,
+# snap_loop, the live MJPEG endpoint, probe_stream_details, the snap_url
+# fallback paths — picks up the bundled binary automatically. No
+# per-call branching needed.
+export PATH="/opt/rpi-ffmpeg/bin:$PATH"
+
 # 2.4.0-rc3.1: read every user-configurable option from /data/options.json
 # (where the HA Supervisor writes the values from the addon's Configuration
 # tab) and export each as the environment variable that camera_discovery.py
