@@ -1,4 +1,76 @@
-## 2.6.0-rc2.0
+## 2.6.0-rc2.1
+
+**Discovery build to fix two stale pins from 2.6.0-rc2.0.** rc2.0
+failed at the `apt-get install` step because two pinned versions
+were not available in the configured apt sources:
+
+```
+E: Version '23.0.1+dfsg-1+deb12u1' for 'python3-pip' was not found
+E: Version '8:5.1.3-1+rpt4' for 'ffmpeg' was not found
+```
+
+The other four apt pins (python3, nmap, net-tools, iproute2) and
+both pip pins (aiohttp, cryptography) never got exercised because
+apt aborted before reaching them.
+
+### What rc2.1 does differently
+
+- **Drops version pins on python3-pip and ffmpeg only.** apt now
+  picks the candidate version for each (latest from the repo it's
+  routed to via apt-preferences). The four working apt pins from
+  rc2.0 stay strict.
+- **Adds a post-install discovery RUN step** that runs:
+  - `dpkg-query -W -f='${Package}=${Version}\n' python3 python3-pip
+    nmap net-tools iproute2 ffmpeg`
+  - `pip3 freeze | grep -E '^(aiohttp|cryptography)=='`
+  Both outputs go to the build log. After rc2.1 builds successfully
+  on CrystalHeeler's host, the build-log lines starting with `==>
+  [2.6.0-rc2.1 discovery]` give us the exact installed versions for
+  every dependency.
+- **2.6.0-rc2.2 will lock in those discovered versions.** All 8
+  pins (6 apt + 2 pip) become strict again. The discovery RUN step
+  gets removed since it has served its purpose.
+
+### Why discovery instead of better-guessing
+
+The "fail-loud-on-drift" pinning contract from rc2.0 is correct in
+principle: known versions, fail-loud on drift. But "drift" isn't
+the right word for this case — the pins were wrong on day one,
+not after time-drift. Best-effort version lookups via web search
+have proven unreliable: rpios's ffmpeg has rotated through several
++rpt suffixes since the forum posts I was reading, and Debian's
+python3-pip apparently never had a +deb12u1 point-release suffix at
+all. Trying a second round of guesses risks a third failed build
+without recovering signal. Discovery from the actual build is the
+disciplined move.
+
+### Pinning baseline that survives into rc2.2
+
+Definitely correct (held in rc2.1 unchanged):
+
+- python3=3.11.2-1+b1
+- nmap=7.93+dfsg1-1
+- net-tools=2.10-0.1+deb12u2
+- iproute2=6.1.0-3
+- aiohttp==3.13.5
+- cryptography==48.0.0
+
+To be discovered in rc2.1's build log, then locked in rc2.2:
+
+- python3-pip
+- ffmpeg (rpios on aarch64 / Debian on amd64)
+
+### Carried over
+
+Everything from rc2.0 except the two stale pins: rpios apt source
++ apt-preferences pinning, all camera_discovery.py changes (extended
+_HW_DECODER_CANDIDATES, _probe_hw_decoders static-check probe path,
+live MJPEG endpoint iteration, probe_stream_details auto-disable,
+Pi-4 diagnostic refinement), all 2.5.0 cycle work (Lorex/Dahua DVR-
+NVR family, poll-until-done channel-enum, credential leak fix), all
+2.4.x carry-over.
+
+
 
 **Pi 4 / Pi 5 HEVC hardware decode via apt-pinned rpios ffmpeg + full
 dependency version pinning across the whole image.** Supersedes
