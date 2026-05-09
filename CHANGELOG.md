@@ -1,4 +1,152 @@
-## 2.6.0-rc2.1
+## 2.6.0-rc2.2
+
+**Pi 4 / Pi 5 HEVC HW decode for real this time.** Lights up the
+HEVC hardware path that 2.6.0-rc1.0 through rc2.1 had been chasing.
+Plus locks in the rc2.1 discovery pins so all 8 dependency versions
+are now strict.
+
+### What rc2.1 told us
+
+The rc2.1 install succeeded but the addon log said
+`hevc_v4l2request: unavailable (not compiled into ffmpeg)` and
+`h264_v4l2m2m: unavailable (rc=1)`. Two separate issues, both in the
+addon's probe code rather than in the rpios ffmpeg build:
+
+1. **`hevc_v4l2request` was never a real decoder name.** Confirmed
+   by running `ffmpeg -decoders` inside the running rc2.1 container —
+   no v4l2request entries anywhere. rpios's ffmpeg DOES have v4l2-
+   request HEVC support (configure log shows
+   `--enable-v4l2-request --enable-libdrm --enable-libudev`), it just
+   exposes it as a `-hwaccel` named `drm`, not as a `-c:v` decoder.
+   The right invocation pattern is `-hwaccel drm -c:v hevc`. End-to-
+   end live-decode test against the Hikvision camera confirmed:
+   ffmpeg loads "Hwaccel V4L2 HEVC stateless V4; devices:
+   /dev/media0,/dev/video19; buffers: src DMABuf, dst DMABuf;
+   swfmt=rpi4_8" and decodes 6 of 9 packets cleanly with no software
+   fallback.
+
+2. **`h264_v4l2m2m` regression** was the synthetic probe being too
+   strict. libx264 defaulted to High 4:4:4 Predictive (profile 244)
+   on the small test pattern, which bcm2835-codec rejects. Real-world
+   H264 streams use Main/High and decode fine; the probe just needed
+   `-pix_fmt yuv420p -profile:v baseline` to force a profile the HW
+   decoder accepts.
+
+### Code changes
+
+**`_HW_DECODER_CANDIDATES` restructured** from `(decoder_name, codec)`
+tuples to `(label, codec, ffmpeg_args)` triples. The `ffmpeg_args` is
+either `["-c:v", "<decoder>"]` (decoder-style) or `["-hwaccel",
+"<name>", "-c:v", "<codec>"]` (hwaccel-style). New list, in
+preference order:
+
+```
+hevc_drm     hevc  -hwaccel drm   -c:v hevc           # Pi 4/5 rpivid
+h264_v4l2m2m h264                  -c:v h264_v4l2m2m  # Pi 4/5 bcm2835
+hevc_vaapi   hevc  -hwaccel vaapi -c:v hevc           # generic vaapi
+h264_vaapi   h264  -hwaccel vaapi -c:v h264           # generic vaapi
+```
+
+The phantom `hevc_v4l2request` and `h264_v4l2request` entries are
+gone. They were never real decoder names in any ffmpeg.
+
+**`_probe_hw_decoders` rewritten.** Dispatches each candidate to
+hwaccel-style or decoder-style probe based on whether `-hwaccel` is
+in its args. Hwaccel-style: static check that ffmpeg's `-hwaccels`
+lists the hwaccel name, plus (for `drm` specifically) that rpivid
+is loaded (`/dev/video19` + `/dev/media0` both present). Decoder-
+style: synthetic encode + decode test, with the rc2.3 fix of
+`-pix_fmt yuv420p -profile:v baseline/main` so the test clip uses a
+profile bcm2835-codec accepts.
+
+**`_launch_snap` signature changed** from `hw_dec: str` to
+`hw_args: list[str], hw_label: str`. Caller looks up the candidate's
+ffmpeg_args and label and passes them through; `_launch_snap`
+splices the args into the ffmpeg command line. Lets hwaccel-style
+invocations work alongside decoder-style ones without per-call
+branching.
+
+**snap_loop selection logic + live MJPEG endpoint** both updated to
+the new candidate structure. Both still gate on `CFG_HW_DECODE`:
+when the toggle is off, the candidate iteration is skipped entirely
+and ffmpeg launches with no HW args (software-only). Existing
+runtime fallback path also intact: if a HW decode launch produces no
+frames within 3 seconds OR the ffmpeg process EOFs immediately, the
+candidate's label gets added to `_HW_UNAVAILABLE` and the next
+launch goes to software.
+
+**`probe_stream_details` auto-disable list** updated: dropped the
+v4l2request entries, added `hevc_drm`. Stream-launch failures with
+"Could not find a valid device" still get auto-recorded.
+
+### CFG_HW_DECODE gating audit
+
+Per CrystalHeeler's directive that all HEVC HW decode work must activate
+ONLY when the Hardware Decoding toggle is ON (and be benign when
+OFF), every HW code path is gated:
+
+- `_probe_hw_decoders`: returns immediately when toggle off, logging
+  `"Hardware decode disabled by config — skipping probe"`.
+- `snap_loop` selection: `if CFG_HW_DECODE` guard before the
+  candidate iteration. When off, `hw_args` stays `[]` and ffmpeg
+  launches without HW flags.
+- Live MJPEG endpoint: same `if CFG_HW_DECODE and stream_codec in
+  (...)` guard. Same software-only result when off.
+- `probe_stream_details` auto-disable: doesn't gate on the toggle,
+  but only mutates `_HW_UNAVAILABLE` when ffmpeg's stderr says a
+  specific decoder failed — no HW decoder ever gets invoked, so
+  there's no behavior to gate.
+- `_HW_DECODER_CANDIDATES` constant: just a list, no execution.
+
+When `CFG_HW_DECODE` is off, the changes in this rc are silent: no
+ffmpeg subprocesses launched for probing, `_HW_UNAVAILABLE` stays
+empty, every camera streams via software decode the same way it
+always has.
+
+### Pin lock-in (deferred from rc2.2)
+
+All 8 dependency versions now strict in the Dockerfile. Captured
+from the rc2.1 install on CrystalHeeler's Pi 4 (the system with rpivid
+loaded) via `dpkg-query -W` and `pip3 freeze`:
+
+```
+python3=3.11.2-1+b1
+python3-pip=23.0.1+dfsg-1
+nmap=7.93+dfsg1-1
+net-tools=2.10-0.1+deb12u2
+iproute2=6.1.0-3
+ffmpeg=8:5.1.8-0+deb12u1+rpt1   (aarch64 / rpios)
+ffmpeg=7:5.1.8-0+deb12u1        (amd64 / Debian)
+aiohttp==3.13.5
+cryptography==48.0.0
+```
+
+The discovery RUN block from rc2.1 (`==> [2.6.0-rc2.1 discovery]
+...`) is removed — it has served its purpose.
+
+### Carried over from 2.6.0-rc2.1
+
+apt-pinning structure (rpios as secondary apt source via signed-by
+keyring + Pin-Priority overrides for ffmpeg + libav* only),
+all 2.5.0 cycle work, all 2.4.x carry-over.
+
+### Risks (rc2.2)
+
+- **First-stream decode of a real HEVC camera not yet tested through
+  the addon's snap_loop.** The end-to-end test we ran was a manual
+  `docker exec ... ffmpeg -hwaccel drm -c:v hevc -i rtsp://...` from
+  the terminal. snap_loop's launch path is similar but not identical
+  — it uses subprocess piping, an output filter graph (scale,
+  format), and runs in an asyncio context. If snap_loop's invocation
+  hits some quirk the manual test didn't, the failure mode is graceful
+  (3-second timeout → add `hevc_drm` to `_HW_UNAVAILABLE` → fall to
+  software for that stream).
+- **Pin drift.** The 8 strict pins reflect what's available right now
+  in Debian Bookworm and rpios. If any rotates between this rc and a
+  fresh build attempt, apt or pip fails loudly with `E: Version not
+  found` and we bump in rc2.3.
+
+
 
 **Discovery build to fix two stale pins from 2.6.0-rc2.0.** rc2.0
 failed at the `apt-get install` step because two pinned versions
