@@ -1,11 +1,121 @@
-## 2.6.0-rc1.0
+## 2.6.0-rc2.0
 
-**Pi 4 / Pi 5 HEVC hardware decode via bundled rpi-ffmpeg.** Closes
-the gap documented at the bottom of the 2.5.0 changelog entry. This
-is rc1.0 of a Dockerfile rewrite — multi-stage rpi-ffmpeg compile from
-source — and the build may fail on first install if any of the new
-build-toolchain steps misbehave on CrystalHeeler's host. Logs from the first
-addon update should be checked carefully.
+**Pi 4 / Pi 5 HEVC hardware decode via apt-pinned rpios ffmpeg + full
+dependency version pinning across the whole image.** Supersedes
+2.6.0-rc1.0 (which proposed compile-from-source). Total scope: a
+Dockerfile rewrite that adds `archive.raspberrypi.com/debian` as a
+secondary apt source for ffmpeg only, and pins every apt + pip
+package the addon installs to a specific version.
+
+### What changed since 2.6.0-rc1.0
+
+The 2.6.0-rc1.0 zip never got installed on a host — discussion
+revealed the compile-from-source approach was wrong (would have
+spent 30-45 min of Pi 4 CPU on every install) and that the rpios
+.deb-direct approach would have failed dependency resolution
+because rpios's ffmpeg has hard `=`-pinned deps on rpios's own
+patched libav* packages. The clean path is to register
+archive.raspberrypi.com as an apt source with apt-pinning that
+permits only ffmpeg and the libav* family from there, and let apt
+resolve the dep set the way it's designed to.
+
+### Dockerfile architecture
+
+aarch64 builds register `archive.raspberrypi.com/debian/ bookworm
+main` as a secondary apt source via signed-by keyring. apt-
+preferences in `/etc/apt/preferences.d/00-raspi-ffmpeg` set the
+default Pin-Priority for anything from rpios to 1 (effectively
+"never use") and override that to 990 for `ffmpeg` and the libav*
+glob. Net effect: every package on the system continues to come
+from Debian's repos by default, and only the explicit ffmpeg +
+libav* family is allowed to come from rpios.
+
+amd64 builds skip the rpios apt source entirely. There's no rpivid
+hardware on x86, so the v4l2-request patches are irrelevant. amd64
+ffmpeg stays from Debian.
+
+### Pinned versions (rc2.0 baseline)
+
+Debian Bookworm:
+- python3=3.11.2-1+b1
+- python3-pip=23.0.1+dfsg-1+deb12u1
+- nmap=7.93+dfsg1-1
+- net-tools=2.10-0.1+deb12u2
+- iproute2=6.1.0-3
+- ffmpeg=7:5.1.8-0+deb12u1 (amd64 only)
+
+Raspberry Pi OS (aarch64 only):
+- ffmpeg=8:5.1.3-1+rpt4 (transitively pins libavcodec59,
+  libavformat59, libavfilter8, libavdevice59, libavutil57,
+  libswscale6, libswresample4, libpostproc56 via the rpios
+  ffmpeg package's own =-pinned Depends declarations)
+
+PyPI:
+- aiohttp==3.13.5
+- cryptography==48.0.0
+
+If any of these versions has rotated out of its source repo by
+build time, apt or pip will fail loudly. The pinning contract is
+"known versions, fail-loud on drift" — we bump in a follow-up rc.
+
+### Base image NOT yet SHA-pinned
+
+`build.yaml` still references the HA base image by tag
+(`ghcr.io/home-assistant/aarch64-base-debian:bookworm` and the
+amd64 equivalent), not by SHA digest. SHA-pinning requires
+capturing the current digest from a build manifest, which is
+deferred to 2.6.0-rc2.1 once we have a successful first build of
+2.6.0-rc2.0 to pull the digest from. Tag-pinning still gets us
+the right OS and apt source list; it just doesn't lock the image
+identity at the registry layer.
+
+### Reverted from 2.6.0-rc1.0
+
+- Multi-stage rpi-ffmpeg compile-from-source — gone, replaced by
+  apt source.
+- run.sh PATH-shadow of `/opt/rpi-ffmpeg/bin` — gone, no longer
+  needed since rpios ffmpeg installs to /usr/bin/ffmpeg via apt
+  exactly like Debian's would.
+
+### Carried over from 2.6.0-rc1.0
+
+The camera_discovery.py code changes from 2.6.0-rc1.0 stay in
+place — they're correct and architecture-neutral:
+
+- `_HW_DECODER_CANDIDATES` list extended with `hevc_v4l2request`
+  and `h264_v4l2request` ahead of the v4l2m2m entries.
+- `_probe_hw_decoders` static-check probe path for v4l2request
+  decoders (verifies `ffmpeg -decoders` lists the name and rpivid
+  is loaded at /dev/video19 + /dev/media0).
+- Live MJPEG endpoint hw selection iterates `_HW_DECODER_CANDIDATES`
+  in preference order instead of hardcoding v4l2m2m.
+- `probe_stream_details` auto-disable list extended to cover
+  v4l2request decoders.
+- Pi-4-aware diagnostic message updated.
+
+### Carried over from 2.5.0
+
+All of the 2.5.0 cycle (Lorex/Dahua DVR-NVR family support,
+poll-until-done channel-enum, credential leak fix in
+`_validate_rtsp_urls_single_socket`) ships unchanged.
+
+### Known risks (rc2.0 — first attempt at apt-pinned multi-source build)
+
+- **Pinned versions may have rotated.** Debian point-releases bump
+  package versions; the +rpt4 suffix on rpios ffmpeg may have
+  advanced to +rpt5 or beyond. If any pin fails at build time, we
+  bump to current in 2.6.0-rc2.1. (No reproduction-log loop here —
+  the addon log will show the apt failure cleanly on first install.)
+- **archive.raspberrypi.com signing key URL.** The Dockerfile
+  fetches the key from `https://archive.raspberrypi.com/debian/
+  raspberrypi.gpg.key`. If rpios rotates the key URL, the curl step
+  fails and the build aborts before any package gets installed.
+- **First-time installation cost.** Adding rpios as an apt source
+  triggers a one-time ~15-second apt-update + signing-key download
+  on the first build of this version. Subsequent builds use Docker
+  layer cache.
+
+
 
 ### What changed
 
@@ -101,9 +211,14 @@ the rpivid loading state and ffmpeg build, not at AnyCam.
 
 All of the 2.5.0 cycle (Lorex/Dahua DVR-NVR family support,
 poll-until-done channel-enum, credential leak fix in
-`_validate_rtsp_urls_single_socket`) ships in 2.6.0-rc1.0 unchanged.
+`_validate_rtsp_urls_single_socket`) ships in 2.6.0-rc2.0 unchanged.
 
 
+## 2.5.0
+
+**Roll-up of the 2.5.0-rc1.0 → 2.5.0-rc1.9 cycle.** No code changes
+beyond the version bump from 2.5.0-rc1.9. This entry summarizes the
+shipped feature set for the 2.5.0 minor.
 
 ### Headline feature: Lorex/Dahua DVR-NVR family support
 
@@ -147,14 +262,6 @@ aggressive cooldown detection, single-socket cred-auth refactor,
 RST-class lockout safety nets, focus-view transport-flip + http_snap
 fallback, fixed-position cards on login, dead JS cleanup, stable
 stream profiles dedup.
-
-### Known issue carried into 2.6.0
-
-Pi 4 HEVC hardware decode is still software-only. Startup log line
-`hevc_v4l2m2m: unavailable (rpivid present at /dev/video19 but
-bundled ffmpeg lacks v4l2-request support — stateful m2m API doesn't
-expose HEVC on Pi 4. Will be fixed in 2.6.0 by bundling rpi-ffmpeg.)`
-documents the gap. 2.6.0-rc1.0 closes this.
 
 ## 2.5.0-rc1.9
 

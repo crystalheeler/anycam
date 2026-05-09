@@ -2,66 +2,88 @@ ARG BUILD_FROM
 FROM $BUILD_FROM
 ARG BUILD_ARCH
 
-# 2.6.0-rc1.0: bundle a custom-compiled rpi-ffmpeg on aarch64 builds so
-# Pi 4 / Pi 5 users get HEVC hardware decode via rpivid. Previously the
-# system Debian Bookworm ffmpeg only had the stateful v4l2 m2m API,
-# which on Pi 4 means HEVC hits CPU (bcm2835-codec exposes H264/MPEG/
-# VP8/VP9/VC1 via m2m but NOT HEVC). The HEVC silicon is in rpivid,
-# which speaks the v4l2-request stateless API exclusively. ffmpeg
-# needs --enable-v4l2-request to talk to it, which mainline Debian
-# Bookworm does not provide. So we compile rpi-ffmpeg from source on
-# aarch64 builds only. amd64 builds skip the entire compile and rely
-# on system /usr/bin/ffmpeg as before — no rpivid hardware on x86 to
-# light up.
+# 2.6.0-rc2.0: pinned-version build with ffmpeg sourced from
+# archive.raspberrypi.com so we get the v4l2-request HEVC patches that
+# light up Pi 4 / Pi 5 rpivid hardware decode. Everything else stays
+# from Debian Bookworm. apt-pinning enforces the split: only ffmpeg
+# and its libav siblings come from rpios; every other package
+# (including transitive deps) comes from Debian.
 #
-# rpi-ffmpeg is jc-kynesim/rpi-ffmpeg release/6.1: a fork of ffmpeg
-# 6.1 with the v4l2-request HEVC patches that Jernej Skrabec et al
-# upstream-merge incrementally. This is also what Raspberry Pi OS
-# ships as its `ffmpeg` package.
+# === Pinned versions (the contract this Dockerfile enforces) ===
 #
-# Runtime impact: aarch64 image carries an extra ~50MB plus the build
-# toolchain. We don't apt-get purge after compile because (a) it makes
-# this Dockerfile much harder to reason about with --auto-remove
-# unpredictably yanking shared libs, and (b) image size on a one-time-
-# pulled HA addon is not a meaningful constraint. amd64 image stays
-# at the previous size.
+# Debian Bookworm packages:
+#   python3=3.11.2-1+b1
+#   python3-pip=23.0.1+dfsg-1+deb12u1
+#   nmap=7.93+dfsg1-1
+#   net-tools=2.10-0.1+deb12u2
+#   iproute2=6.1.0-3
 #
-# PATH wiring: run.sh prepends /opt/rpi-ffmpeg/bin to PATH so plain
-# `ffmpeg` resolves to the bundled binary on aarch64. On amd64 the
-# directory doesn't exist (compile skipped) and PATH lookup falls
-# through to /usr/bin/ffmpeg. So no Python-side branching needed —
-# the same `ffmpeg` invocation does the right thing on each arch.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip \
-    nmap ffmpeg \
-    net-tools iproute2 \
-    && pip3 install --break-system-packages \
-    aiohttp cryptography \
-    && if [ "${BUILD_ARCH}" = "aarch64" ]; then \
-        echo "==> aarch64 build: compiling rpi-ffmpeg with --enable-v4l2-request" \
+# Raspberry Pi OS packages (aarch64 only):
+#   ffmpeg=8:5.1.3-1+rpt4
+#   (libavcodec59, libavformat59, libavfilter8, libavdevice59,
+#    libavutil57, libswscale6, libswresample4, libpostproc56 are
+#    transitively pinned by ffmpeg's own =-pinned Depends declarations)
+#
+# PyPI packages:
+#   aiohttp==3.13.5
+#   cryptography==48.0.0
+#
+# If any of these versions has rotated out of its source repo by the
+# time this Dockerfile is built, apt or pip will fail loudly and we
+# bump to the new current version in a follow-up rc. That's the
+# pinning contract: known versions, fail-loud on drift.
+#
+# === aarch64 / amd64 split ===
+#
+# aarch64 builds add archive.raspberrypi.com as a secondary apt source
+# and use apt-pinning to source ffmpeg + libav* from there. amd64
+# builds skip the rpios source entirely and use Debian's own ffmpeg —
+# there's no rpivid hardware on x86 to drive, so the v4l2-request
+# patches are irrelevant. Net effect: amd64 image stays small and
+# Debian-pure; aarch64 image gains one external source pinned to
+# specific package versions.
+
+# Step 1: on aarch64, register archive.raspberrypi.com as a secondary
+# apt source with its signing key trusted, plus apt-preferences pinning
+# that allows ONLY ffmpeg + libav* to be installed from it. Every
+# other package on the system (including any deps that happen to also
+# exist in rpios) comes from Debian via Pin-Priority.
+RUN if [ "${BUILD_ARCH}" = "aarch64" ]; then \
+        echo "==> aarch64 build: registering archive.raspberrypi.com as pinned secondary apt source for ffmpeg" \
+        && apt-get update \
         && apt-get install -y --no-install-recommends \
-            build-essential pkg-config \
-            libdrm-dev libudev-dev \
-            nasm yasm \
-            git ca-certificates \
-        && git clone --depth=1 -b release/6.1 \
-            https://github.com/jc-kynesim/rpi-ffmpeg.git /tmp/rpi-ffmpeg \
-        && cd /tmp/rpi-ffmpeg \
-        && ./configure \
-            --prefix=/opt/rpi-ffmpeg \
-            --enable-v4l2-request \
-            --enable-libdrm \
-            --enable-libudev \
-            --disable-debug --disable-doc \
-            --disable-htmlpages --disable-manpages \
-            --disable-podpages --disable-txtpages \
-            --disable-mmal \
-        && make -j$(nproc) \
-        && make install \
-        && cd / && rm -rf /tmp/rpi-ffmpeg ; \
+            ca-certificates curl gnupg \
+        && curl -fsSL https://archive.raspberrypi.com/debian/raspberrypi.gpg.key \
+            | gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg \
+        && echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] http://archive.raspberrypi.com/debian/ bookworm main" \
+            > /etc/apt/sources.list.d/raspi.list \
+        && printf 'Package: *\nPin: release o=Raspberry Pi Foundation\nPin-Priority: 1\n\nPackage: ffmpeg libavcodec* libavformat* libavfilter* libavdevice* libavutil* libswscale* libswresample* libpostproc*\nPin: release o=Raspberry Pi Foundation\nPin-Priority: 990\n' \
+            > /etc/apt/preferences.d/00-raspi-ffmpeg \
+        && apt-get update ; \
     else \
-        echo "==> ${BUILD_ARCH} build: skipping rpi-ffmpeg compile (rpivid is Pi-only)" ; \
+        echo "==> ${BUILD_ARCH} build: using Debian-only sources (no rpivid hardware on this arch)" ; \
+    fi
+
+# Step 2: install the pinned set. ffmpeg-version varies by arch
+# (rpios on aarch64, Debian on amd64) so we branch the install.
+# All other packages are pinned to the same Debian-Bookworm versions
+# regardless of arch.
+RUN if [ "${BUILD_ARCH}" = "aarch64" ]; then \
+        FFMPEG_PIN="ffmpeg=8:5.1.3-1+rpt4" ; \
+    else \
+        FFMPEG_PIN="ffmpeg=7:5.1.8-0+deb12u1" ; \
     fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3=3.11.2-1+b1 \
+        python3-pip=23.0.1+dfsg-1+deb12u1 \
+        nmap=7.93+dfsg1-1 \
+        net-tools=2.10-0.1+deb12u2 \
+        iproute2=6.1.0-3 \
+        ${FFMPEG_PIN} \
+    && pip3 install --break-system-packages \
+        aiohttp==3.13.5 \
+        cryptography==48.0.0 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY run.sh /
