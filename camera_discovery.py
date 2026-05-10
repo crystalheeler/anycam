@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.6.0-rc2.2"  # must match config.yaml
+CURRENT_VERSION = "2.6.0-rc2.3"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -7033,6 +7033,35 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 idx = list(_SNAP.keys()).index(camera_id) if camera_id in _SNAP else 0
                 await asyncio.sleep(idx * 0.04)   # 40ms offset per camera
 
+            # 2.6.0-rc2.3 — bug #1 fix: when in adaptive focus mode,
+            # re-derive stream_codec / is_hevc from the active profile.
+            # The camera-level stream_codec captured at line 6863 reflects
+            # only profile[0] (or whatever was set when the camera was
+            # first registered); focus-mode tier switching can pick
+            # profile[1] / profile[2] with a potentially different codec
+            # (a sub-stream is occasionally MJPEG even when main is HEVC,
+            # though the more common case — and the one that motivates
+            # this fix — is profile[0] having codec=None at all because
+            # of a probe_stream_details miss on the main URL during
+            # cred-auth, with profile[1] / profile[2] correctly carrying
+            # codec=hevc from the locked-stream / DB-probe path). The
+            # reassignment also feeds _launch_snap by closure, so the
+            # "ffmpeg starting (codec=...)" log line reflects what's
+            # actually being decoded.
+            if native_res:
+                ada_now = _FOCUS_ADAPTIVE.get(camera_id, {})
+                ladder_now = ada_now.get("ladder") or []
+                if ladder_now:
+                    ti_now = min(ada_now.get("tier_idx", 0), len(ladder_now) - 1)
+                    prof_idx_now, _ = ladder_now[ti_now]
+                    profs_now = camera.get("stream_profiles") or []
+                    if 0 <= prof_idx_now < len(profs_now):
+                        prof_codec = (profs_now[prof_idx_now].get("stream_codec")
+                                      or "").lower()
+                        if prof_codec:
+                            stream_codec = prof_codec
+                            is_hevc = stream_codec in ("hevc", "h265")
+
             # Select decoder
             # Respect CFG_HW_DECODE toggle: if disabled, skip hw entirely.
             # When enabled, walk _HW_DECODER_CANDIDATES in preference order and
@@ -9595,7 +9624,22 @@ async def api_set_credentials(request) -> web.Response:
     _t_s = _brand_throttle_seconds(camera)
     if _t_s > 0:
         await _throttle_wait_if_needed(ip, _t_s, "non-ONVIF ffprobe")
-    details = await probe_stream_details(url, proto)
+    # 2.6.0-rc2.3 — bug #2 fix: find_rtsp_path returns a bare URL
+    # without creds embedded. Calling probe_stream_details with a
+    # credless URL hands ffprobe a stream that responds 401 to its
+    # DESCRIBE, so ffprobe exits non-zero and probe_stream_details
+    # silently returns {}. The downstream consequence is that the
+    # main profile (stream_profiles[0]) gets stream_codec=None, which
+    # then blocks HW decoder selection in snap_loop because it has
+    # nothing to match against the candidate list. Pre-build an
+    # authenticated URL using the creds that just passed find_rtsp_path
+    # so ffprobe can actually fetch the stream. The locked-stream
+    # branch at line ~9727 has been doing this all along (using
+    # lurl_authed); this brings the main-URL probe to the same level.
+    enc_for_probe = encrypt_creds(username, password)
+    auth_probe_url = build_authenticated_url(
+        dict(camera, credentials=enc_for_probe), url=url) or url
+    details = await probe_stream_details(auth_probe_url, proto)
     enc_creds = encrypt_creds(username, password)
 
     # ── Silent DB probe for additional streams on non-ONVIF cameras ──────────

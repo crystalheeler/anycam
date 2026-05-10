@@ -1,4 +1,128 @@
-## 2.6.0-rc2.2
+## 2.6.0-rc2.3
+
+**Two bug fixes that finally let `hevc_drm` engage on the Hikvision
+in Enhanced View.** rc2.2 landed the HW decode plumbing structurally —
+probe shows `hevc_drm: available`, the candidate list is correct,
+snap_loop has the right gating — but the path from "stream is HEVC"
+to "snap_loop launches with `-hwaccel drm`" had two breaks. rc2.3 fixes
+both.
+
+### Bug 1 — snap_loop reads camera-level codec, not active profile's
+
+snap_loop captures `stream_codec` once at entry from
+`camera.get("stream_codec")`, then never re-reads it when the active
+profile changes during focus-mode tier switching. The HW selection
+block uses this stale value. Reading the rc2.2 test log:
+
+```
+SNAP [10.0.0.33_554]: adaptive focus — switching to profile[2] for tier 62
+SNAP [10.0.0.33_554]: no hw decoder available for codec=, using software
+SNAP [10.0.0.33_554]: ffmpeg starting (codec=?, sw, ... profile[2] (2560x1440), ...)
+```
+
+`profile[2]` carries `stream_codec='hevc'` from the locked-stream
+probe. snap_loop picked profile[2]'s width/height correctly
+(2560×1440) but read codec from camera-level (empty), so the HW
+candidate iteration matched nothing and fell through to software.
+
+**Fix:** in the outer snap_loop body, just before the HW selection
+block, override the local `stream_codec` and `is_hevc` based on the
+active profile when `native_res` is True. The reassignment feeds
+`_launch_snap` by closure, so the "ffmpeg starting" log line also
+reflects the right codec.
+
+### Bug 2 — probe_stream_details called with credless URL
+
+`find_rtsp_path` returns a bare URL without creds embedded.
+`probe_stream_details(url, proto)` at line 9598 hands ffprobe a
+credless URL, ffprobe gets 401 from auth-required servers and exits
+non-zero, `probe_stream_details` silently returns `{}`. The downstream
+consequence: `stream_profiles[0]` (the main profile) gets
+`stream_codec=None`, propagating to `camera['stream_codec']=None` for
+the main URL.
+
+The locked-stream branch at line ~9728 has been doing this correctly
+all along — it uses `lurl_authed` (creds embedded) and gets a
+populated codec result. That's why the rc2.2 log shows codec=hevc
+for the locked candidates but codec=? for the main `/Streaming/
+Channels/101`.
+
+**Fix:** pre-build an authenticated URL using the creds that just
+passed `find_rtsp_path`, then pass that to `probe_stream_details`.
+Same mechanism the locked-stream branch uses, applied to the main URL.
+
+### Net behavior on the Hikvision after rc2.3
+
+- Cred-auth runs `probe_stream_details` against an authed
+  `/Streaming/Channels/101` → ffprobe succeeds → `details` populated
+  with `{'stream_codec': 'hevc', 'stream_width': 2560, ...}`.
+- `stream_profiles[0]` carries `stream_codec='hevc'`.
+- `camera['stream_codec']` is set from `details.stream_codec` → 'hevc'.
+- snap_loop's outer-body capture at line 6863 reads `'hevc'`.
+- HW selection at line ~7045 picks `hevc_drm` candidate, sets
+  `hw_args = ['-hwaccel', 'drm', '-c:v', 'hevc']`.
+- `_launch_snap` splices those args into the ffmpeg command line.
+- ffmpeg stderr shows "Hwaccel V4L2 HEVC stateless V4; devices:
+  /dev/media0,/dev/video19; ..." — same line as the manual `docker
+  exec` test from the rc2.1 debug cycle.
+- Decoder keeps up at 2560×1440 30fps. No falling-behind. No POC
+  reference errors. No half-rendered frames.
+
+### Net behavior in Enhanced View when manually picking a profile
+
+- User picks profile[2] (or any HEVC profile) from the dropdown.
+- snap_loop re-enters with `native_res=True`.
+- The new code at line ~7037 inspects `_FOCUS_ADAPTIVE[camera_id].
+  ladder` for the active profile index, looks up its `stream_codec`,
+  overrides local `stream_codec` if profile-level codec is set.
+- HW selection picks `hevc_drm`. snap_loop launches with HW decode.
+
+This applies to any profile in the dropdown that carries a codec
+field — not just the Hikvision's specific main URL. So if a future camera
+has main=H264 + sub=HEVC, switching to the sub-profile in Enhanced
+View will pick `hevc_drm`.
+
+### CFG_HW_DECODE gating
+
+Both fixes preserve the toggle:
+
+- Bug #1 fix: lives inside the existing `if CFG_HW_DECODE:` block.
+  When the toggle is off, the codec re-derivation runs but doesn't
+  matter because the HW selection that consumes it is gated.
+- Bug #2 fix: not gated. Populating `stream_codec` correctly is a
+  general improvement — it also drives the `is_hevc` vf filter
+  selection in the non-focus path (line ~6870) and the resolution/
+  codec labels shown in the dropdown UI. None of those are HW-decode
+  specific.
+
+Toggle off → no probe runs → no HW decoders ever invoked → unchanged
+software-decode behavior. Same gating story as rc2.2.
+
+### Risks
+
+- **Hikvision will likely still show pixelation in extended
+  Enhanced View even with HW decode engaged**, because we haven't
+  yet untangled that camera's specific bitstream quirks from the
+  generic SW-too-slow story. If `hevc_drm` engages and the artifact
+  persists, we have direct evidence the artifact is bitstream-side
+  and rc2.4 work would target that — not HW decode. If the artifact
+  is gone, we know it was SW-too-slow. Either outcome is informative.
+- **Bug #2 fix changes the auth flow for a piece of code that runs
+  every cred-auth.** The new authed-URL construction uses the same
+  `build_authenticated_url` mechanism the locked-stream branch already
+  uses — well-tested code path — but applied earlier in the flow. If
+  any non-Hikvision brand has a quirk where ffprobe behaves
+  differently on an authed vs unauthed URL, that surfaces here. Low
+  risk — ffprobe is well-behaved on standard RTSP — but worth
+  watching the first few cred-auth runs after install.
+
+### Carried over from 2.6.0-rc2.2
+
+All HW decode plumbing (hevc_drm + h264_v4l2m2m + vaapi candidates,
+new `_launch_snap` signature, _probe_hw_decoders dispatch, all 8
+strict pins). All 2.5.0 cycle work.
+
+
 
 **Pi 4 / Pi 5 HEVC HW decode for real this time.** Lights up the
 HEVC hardware path that 2.6.0-rc1.0 through rc2.1 had been chasing.
