@@ -1,4 +1,183 @@
-## 2.6.0-rc2.3
+## 2.6.0-rc2.4
+
+**Three fixes built on the rc2.3 field test on the Hikvision.**
+The rc2.3 fixes worked — `hw:hevc_drm` engaged, decoded 91 frames
+cleanly through the rpivid path. But the test also exposed three
+follow-on issues. rc2.4 addresses them.
+
+### Fix 1 — HW decoder permanently disqualified after one transient failure
+
+The rc2.3 log on the Hikvision showed the smoking gun in 18 seconds:
+
+```
+10:16:15 SNAP: ffmpeg starting (codec=hevc, hw:hevc_drm, ...)
+10:16:24 SNAP: frame 50 — 1434889 bytes
+10:16:31 ffmpeg stderr: corrupt decoded frame in stream 0
+10:16:31 SNAP: ffmpeg EOF after 91 frames (rc=0)
+10:16:33 SNAP: ffmpeg starting (codec=hevc, hw:hevc_drm, ...)
+10:16:36 SNAP: hw decode timeout → sw
+```
+
+First HW launch produced 91 frames cleanly through hevc_drm before
+hitting one corrupt frame and exiting. The retry hit a 3-second
+0-frame timeout — and the old code at that point added `hevc_drm`
+to the global `_HW_UNAVAILABLE` set, permanently disabling it
+until addon restart. Every subsequent launch in the entire log
+(including session 2 after the user deleted + rescanned the
+camera) shows `no hw decoder available for codec=hevc, using
+software`.
+
+A one-off timeout doesn't mean the hardware doesn't work. It can
+mean the camera was between keyframes after the kill+restart, or
+a brief network hiccup, or any transient runtime issue.
+`_HW_UNAVAILABLE` should only carry init-level "this hardware
+doesn't exist" disqualifications (vaapi connection failure on a
+Pi 4, v4l2m2m synthetic decode failure, the "Could not find a
+valid device" stderr match in `_drain_stderr`).
+
+**Fix:** the timeout and EOF runtime fallback paths in snap_loop
+no longer touch `_HW_UNAVAILABLE`. Instead they increment a
+per-snap_loop-session counter (`state["hw_session_fails"]`) for
+the failing decoder. After 3 consecutive 0-frame HW failures of
+the same label in this session, the label gets added to
+`state["hw_session_skip"]` — used by the HW selection block at
+line ~7045 alongside `_HW_UNAVAILABLE` to skip candidates. Both
+sets are checked; only the global one persists across snap_loop
+sessions.
+
+This means: on the next focus enter, on the next thumbnail
+polling cycle, on a camera-delete-and-rescan, HW gets retried
+fresh. The Hikvision's transient timeout no longer cascades into
+"software-only for the rest of the addon process".
+
+### Fix 2 — HW→SW fallback dropped Enhanced View to thumbnail quality
+
+The rc2.3 log also showed the HW→SW fallback path losing
+Enhanced View's native_res setting:
+
+```
+10:17:41 SNAP: ffmpeg starting (codec=hevc, hw:hevc_vaapi, adaptive:uncapped profile[2] (2560x1440), ...)
+10:17:43 vaapi failed
+10:17:43 SNAP: hw EOF (rc=None) → sw
+10:17:43 SNAP: ffmpeg starting (codec=hevc, sw, normal, vf=fps=8,scale=640:-2,format=yuvj420p)
+```
+
+The pre-fallback launch was Enhanced View at 2560×1440 uncapped.
+The post-fallback launch dropped to thumbnail vf
+(`fps=8,scale=640:-2,...`). Both ran in the same snap_loop
+instance with `native_res=True` in scope, but the fallback called
+`_launch_snap()` with no args, so `native_res` defaulted to False
+and `_launch_snap` picked the thumbnail vf branch.
+
+That's why image 1 of the rc2.3 field-test screenshots showed
+`Actual Feed: 640x360 · 7 fps` while the dropdown said "Stream
+1": Enhanced View was actually serving thumbnail-quality output
+because of the silent fallback path losing native_res.
+
+**Fix:** both runtime fallback launches (timeout and EOF) now
+pass `native_res=native_res`, propagating Enhanced View's mode
+into the SW fallback. Mid-session HW→SW transitions preserve
+focus-mode resolution and vf settings.
+
+### Fix 3 — Manual tier selection silently launched profile[0] when prof_idx wasn't in ladder
+
+The same field-test log also showed:
+
+```
+10:18:30 Focus: manual tier [0] profile[1] fps=None
+10:18:32 SNAP: ffmpeg starting (codec=hevc, sw, adaptive:uncapped profile[0] (2560x?), ...)
+```
+
+User picked profile[1] in the dropdown. Server logged
+`manual tier [0] profile[1]`. ffmpeg launched profile[0]
+(2560x1440), not profile[1] (704x480). Manual override was a UI
+lie — dropdown showed the user's selection, server returned
+status:ok, ffmpeg ignored it.
+
+Mechanism: the handler at line ~8180 walks the ladder looking
+for a (prof_idx, fps_val) match. If no match, `best_idx` stays
+at its default (0), pointing to ladder[0] = (profile[0],
+uncapped). The handler then sets `ada["tier_idx"] = best_idx`
+and snap_loop launches whatever ladder[0] points to.
+
+In the rc2.3 field test session 1, the camera was loaded from
+cameras.json built by an earlier rc; the dropdown's source of
+truth and the ladder's source of truth had diverged. The
+dropdown showed profile[1] (704x480 HEVC), but the ladder built
+fresh in handle_focus_set_tier didn't have profile[1]. Match
+failed → silent fallback to profile[0].
+
+**Fix:** when the loop completes without finding a match,
+append a one-off `(prof_idx, fps_val)` entry to the ladder and
+use that as `best_idx`. Honors the user's explicit selection
+even when the dropdown and ladder source-of-truth diverge. Logs
+a warning so we can diagnose if/when the divergence happens
+again — it shouldn't post-rc2.3, but the defensive code stops
+the silent failure regardless.
+
+### What this means for the Hikvision
+
+The Hikvision still has whatever bitstream-side behavior makes the
+rpivid path occasionally produce a "corrupt decoded frame" on
+the first run. rc2.4 doesn't claim to fix that — that's a
+separate camera-firmware-vs-decoder question. What rc2.4
+guarantees is that one-off rpivid hiccups don't cascade into
+"SW-only for the rest of the addon process". HW gets retried.
+
+If hevc_drm fails 3 launches in a row in one snap_loop session,
+fine — that session goes SW. But re-entering Enhanced View, or
+re-authenticating the camera, gets a fresh state and another
+shot at HW. That's the intended recovery model.
+
+### CFG_HW_DECODE gating
+
+All three fixes preserve the toggle:
+
+- Fix 1: lives inside the existing HW timeout/EOF fallback paths
+  (which only fire when HW was tried), and the per-session skip
+  set is consulted in the HW selection block which is already
+  gated by `if CFG_HW_DECODE:`.
+- Fix 2: the SW fallback launch happens inside an HW path; `if
+  CFG_HW_DECODE:` is False means HW is never selected, so the
+  fallback never runs.
+- Fix 3: completely independent of HW decode. Fixes a UI-vs-
+  server contract issue in the manual tier handler.
+
+### Risks
+
+- **Per-session HW skip after 3 failures.** If HW genuinely
+  doesn't work for a particular camera (not a transient — actual
+  bitstream incompatibility with rpivid), this gates HW out for
+  the session after 3 bad launches. Same end-state as the rc2.3
+  permanent disqualification, but reaches it 3x slower. Reaches
+  it nonetheless. If a user has a camera that stresses the HW
+  path on every launch, they'll see 3 HW attempts before the
+  session settles into SW. Acceptable cost for the recovery
+  benefit.
+- **Fix 3 logs a warning.** If the divergence between dropdown
+  and ladder is a real ongoing issue we haven't fully traced
+  (rc2.3 session 1 was reproduced on a stale cameras.json from
+  rc2.2 — but there may be other paths to it), the warning will
+  appear on every manual tier change. Watch for it; if it fires
+  repeatedly outside the rc2.2-cameras.json scenario, there's a
+  deeper bug to chase.
+- **Fix 3 honors user selection unconditionally.** If the user
+  somehow selects a `prof_idx` that's truly invalid (no such
+  profile exists in stream_profiles at all), the one-off ladder
+  entry will cause _launch_snap to look up `profiles[prof_idx]`
+  and get an empty dict — same failure mode as if best_idx had
+  pointed there originally. Empty profile dict → `prof_url`
+  evaluates to falsy → `tier_url` falls back to
+  `build_authenticated_url(cam_now)` → main stream URL. Better
+  than the current silent profile[0] launch, but worth noting.
+
+### Carried over from 2.6.0-rc2.3
+
+Bug #1 (snap_loop reads camera-level codec) and bug #2
+(probe_stream_details called with credless URL) fixes from
+rc2.3. All HW decode plumbing from rc2.2. All version pins.
+
+
 
 **Two bug fixes that finally let `hevc_drm` engage on the Hikvision
 in Enhanced View.** rc2.2 landed the HW decode plumbing structurally —
