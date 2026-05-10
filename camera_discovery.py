@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.6.0-rc2.3"  # must match config.yaml
+CURRENT_VERSION = "2.6.0-rc2.4"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -7076,11 +7076,21 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 target_codec = ("hevc" if codec_lower in ("hevc", "h265")
                                 else "h264" if codec_lower == "h264"
                                 else "")
+                # 2.6.0-rc2.4 — fix #1: per-snap_loop-session HW skip set.
+                # Populated by the timeout/EOF runtime fallback paths after
+                # 3 consecutive 0-frame HW failures for the same hw_label.
+                # Only affects this snap_loop session — next focus enter or
+                # next thumbnail polling cycle gets a fresh `state` dict and
+                # retries HW. Decouples per-camera transient runtime issues
+                # from the global _HW_UNAVAILABLE init-level disqualifications.
+                hw_skip_session = state.get("hw_session_skip") or set()
                 if target_codec:
                     for cand_label, cand_codec, cand_args in _HW_DECODER_CANDIDATES:
                         if cand_codec != target_codec:
                             continue
                         if cand_label in _HW_UNAVAILABLE:
+                            continue
+                        if cand_label in hw_skip_session:
                             continue
                         hw_label = cand_label
                         hw_args  = list(cand_args)
@@ -7126,8 +7136,36 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                             try: await asyncio.wait_for(proc.wait(), timeout=2)
                             except Exception: pass
                             log.info(f"SNAP [{camera_id}]: hw decode timeout → sw")
-                            _HW_UNAVAILABLE.add(hw_label)
-                            proc     = await _launch_snap()
+                            # 2.6.0-rc2.4 — fix #1: don't permanently
+                            # disqualify this decoder. A timeout on a single
+                            # ffmpeg launch can be transient (camera between
+                            # keyframes after a kill+restart, brief network
+                            # hiccup) and doesn't mean the hardware doesn't
+                            # work. Instead, count per-snap_loop-session
+                            # 0-frame HW failures and only skip this label
+                            # for the rest of THIS session after 3 in a row.
+                            # _HW_UNAVAILABLE stays reserved for init-level
+                            # "hardware doesn't exist" failures detected in
+                            # _probe_hw_decoders or via the "Could not find
+                            # a valid device" stderr match in _drain_stderr.
+                            # 2.6.0-rc2.4 — fix #2: pass native_res to the
+                            # SW fallback launch so Enhanced View preserves
+                            # the focus vf (no scaling, full resolution)
+                            # instead of dropping to thumbnail vf
+                            # (fps=8,scale=640:-2,...). The old call passed
+                            # no args, defaulted native_res=False, and made
+                            # Enhanced View serve thumbnail-quality output
+                            # whenever HW fell back to SW mid-session.
+                            hw_fails = state.setdefault("hw_session_fails", {})
+                            hw_fails[hw_label] = hw_fails.get(hw_label, 0) + 1
+                            if hw_fails[hw_label] >= 3:
+                                state.setdefault("hw_session_skip", set()
+                                                 ).add(hw_label)
+                                log.info(f"SNAP [{camera_id}]: {hw_label} "
+                                         f"failed 3 times this session — "
+                                         f"skipping for remainder of "
+                                         f"snap_loop")
+                            proc     = await _launch_snap(native_res=native_res)
                             state["proc"] = proc
                             stderr_t.cancel()
                             stderr_t = asyncio.create_task(
@@ -7147,8 +7185,20 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                             try: await asyncio.wait_for(proc.wait(), timeout=2)
                             except Exception: pass
                             log.info(f"SNAP [{camera_id}]: hw EOF (rc={rc}) → sw")
-                            _HW_UNAVAILABLE.add(hw_label)
-                            proc     = await _launch_snap()
+                            # 2.6.0-rc2.4 — same fix as the timeout branch
+                            # above. See the comment block there for the
+                            # full rationale; mirroring the logic so EOF and
+                            # timeout paths stay parallel.
+                            hw_fails = state.setdefault("hw_session_fails", {})
+                            hw_fails[hw_label] = hw_fails.get(hw_label, 0) + 1
+                            if hw_fails[hw_label] >= 3:
+                                state.setdefault("hw_session_skip", set()
+                                                 ).add(hw_label)
+                                log.info(f"SNAP [{camera_id}]: {hw_label} "
+                                         f"failed 3 times this session — "
+                                         f"skipping for remainder of "
+                                         f"snap_loop")
+                            proc     = await _launch_snap(native_res=native_res)
                             state["proc"] = proc
                             stderr_t.cancel()
                             stderr_t = asyncio.create_task(
@@ -8178,12 +8228,41 @@ async def handle_focus_set_tier(request: web.Request) -> web.Response:
 
     # Find the best matching tier
     best_idx = 0
+    matched  = False
     for i, (p, f) in enumerate(ladder):
         if p == prof_idx and f == fps_val:
             best_idx = i
+            matched  = True
             break
         if p == prof_idx:   # right profile, any fps — keep as fallback
             best_idx = i
+            matched  = True
+
+    # 2.6.0-rc2.4 — fix #3: dropdown ↔ ladder desync defense.
+    # If the user picks a profile_idx that doesn't appear in the ladder,
+    # the old code silently fell through to best_idx=0 (= ladder's first
+    # entry, typically profile[0] uncapped). Result: dropdown shows the
+    # selection, server returns "ok", but ffmpeg launches profile[0] —
+    # the manual override becomes a UI lie.
+    #
+    # This was reproducible in the rc2.3 field test on the Hikvision: session
+    # 1 had stream_profiles loaded from cameras.json (rc2.2-era shape)
+    # where the dropdown source and the ladder source diverged.
+    # Picking "704x480 HEVC" set best_idx=0 → launched profile[0] at
+    # 2560x1440. Selecting profile[2] worked the same call, picking
+    # profile[1] silently didn't.
+    #
+    # Fix: when prof_idx is not in the ladder, honor the user's explicit
+    # selection by appending a one-off (prof_idx, fps_val) entry and
+    # targeting it. Log a warning so we can diagnose if/when the
+    # divergence happens — it shouldn't, but defensive code stops the
+    # silent failure either way.
+    if not matched:
+        log.warning(f"Focus [{camera_id}]: prof_idx={prof_idx} fps={fps_val} "
+                    f"not in ladder (len={len(ladder)}) — appending one-off "
+                    f"entry to honor manual selection")
+        ladder.append((prof_idx, fps_val))
+        best_idx = len(ladder) - 1
 
     ada = _FOCUS_ADAPTIVE.setdefault(camera_id, {
         "tier_idx": 0, "locked": False,
