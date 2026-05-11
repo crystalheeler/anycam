@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.6.0-rc3.0"  # must match config.yaml
+CURRENT_VERSION = "2.6.0-rc3.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -123,14 +123,6 @@ CFG_LIMIT_THREADS        = os.environ.get("LIMIT_THREADS",  "false").lower() == 
 CFG_STAGGER_POLL         = os.environ.get("STAGGER_POLLING","false").lower() == "true"
 CFG_HW_DECODE            = os.environ.get("HW_DECODE",      "false").lower() == "true"
 CFG_ADAPTIVE_QUALITY     = os.environ.get("ADAPTIVE_QUALITY","false").lower() == "true"
-# 2.6.0-rc3.0 Item 1 — when ON, card thumbnails use each camera's main
-# stream (downscaled in vf for display). When OFF (default), cards use
-# the sub-stream profile if one exists, otherwise main stream. Trade-off:
-# main streams give crisper thumbnails but cost much more CPU and HW
-# decoder context budget — with many cards visible at once and HEVC main
-# streams (4K Lorex/Dahua DVR channels, 4K IP cameras), enabling this
-# can saturate the Pi 4.
-CFG_MAIN_STREAM_CARDS    = os.environ.get("MAIN_STREAM_CARDS", "false").lower() == "true"
 # 2.6.0-rc3.0 Items 2+3 — when ON, snap_loop in Enhanced View (or after
 # a tier change) launches BOTH an SW ffmpeg (for fast first frame, ~1s)
 # and an HW ffmpeg (warming up in background, ~5-6s). As soon as HW
@@ -6957,48 +6949,22 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     # EXCEPTION 1: when native_res=True (enhanced view) AND RTSP is available,
     # bypass http_snap_loop so the ffmpeg pipeline runs — this makes the
     # Resolution/FPS controls work and gives real video instead of 1fps polling.
-    # EXCEPTION 2 (card view): when stream_url is populated, prefer ffmpeg
-    # over http_snap_loop. http_snap_loop produces ~1 fps cached frames
-    # (stale-feeling); ffmpeg gives second-by-second live video. http_snap_loop
-    # remains the fallback if ffmpeg fails 3× in a row (handled lower).
+    # EXCEPTION 2 (card view): when probe_rtsp confirmed the RTSP stream works
+    # at credential-set time, prefer ffmpeg over http_snap_loop. http_snap_loop
+    # produces ~1 fps cached frames (stale-feeling); ffmpeg gives second-by-second
+    # live video. http_snap_loop remains the fallback if ffmpeg fails 3× in a row
+    # (handled lower in this function).
     #
-    # 2.6.0-rc3.0 Item 1: relax the card-mode gate. Old rule required
-    # _rtsp_probe_ok=True which was not always set for channel-iterate brands
-    # (Lorex/Dahua DVR-NVR family) — channel-enum sets stream_url but the
-    # rtsp_probe_ok flag wasn't being propagated to per-channel cards. Net
-    # effect: Lorex DVR channels always routed to http_snap_loop in card view
-    # even though their RTSP URLs work fine. New rule: any populated
-    # stream_url is sufficient for card-mode RTSP. Bogus URLs fall back to
-    # http_snap_loop after the existing 3-failure streak trigger.
+    # 2.6.0-rc3.1: Item 1 reverted. rc3.0 had relaxed the card-mode gate to
+    # `_has_rtsp` alone and added sub/main-stream URL selection for cards.
+    # That change was reverted per user request (card RTSP behavior caused
+    # issues in rc3.0 field test). Restored to pre-rc3.0 behavior.
     _has_rtsp        = bool(camera.get("stream_url"))
-    _prefer_ffmpeg   = _has_rtsp  # rc3.0: both native_res and card-mode prefer ffmpeg when RTSP is available
+    _rtsp_probe_ok   = bool(camera.get("rtsp_probe_ok"))
+    _prefer_ffmpeg   = (native_res and _has_rtsp) or (_has_rtsp and _rtsp_probe_ok)
     if camera.get("http_snap_url") and not _prefer_ffmpeg:
         await http_snap_loop(camera_id, camera)
         return
-
-    # 2.6.0-rc3.0 Item 1: card-mode URL selection. For non-native_res (card
-    # thumbnail polling), pick the sub-stream URL if available unless
-    # CFG_MAIN_STREAM_CARDS is enabled. Sub-stream is typically 640x480 and
-    # decodes much cheaper than 4K HEVC main streams; running 6+ cards
-    # simultaneously on main streams can saturate the Pi 4 CPU and the
-    # rpivid HW decoder context budget. Native_res (Enhanced View) is
-    # unchanged — always uses the adaptive ladder which starts at the
-    # highest-resolution profile.
-    if not native_res and not CFG_MAIN_STREAM_CARDS:
-        # Find the lowest-resolution profile in stream_profiles. The list
-        # is sorted descending by resolution, so the last entry is the sub.
-        _profiles = camera.get("stream_profiles") or []
-        if len(_profiles) >= 2:
-            _sub_prof = _profiles[-1]
-            _sub_url  = _sub_prof.get("url") or camera.get(
-                _sub_prof.get("_url_key", "sub_stream_url"))
-            if _sub_url and _sub_url != url:
-                log.info(f"SNAP [{camera_id}]: card view — using sub-stream "
-                         f"({_sub_prof.get('stream_width','?')}x"
-                         f"{_sub_prof.get('stream_height','?')}) instead of "
-                         f"main (CFG_MAIN_STREAM_CARDS=false)")
-                url = _sub_url
-        # If no sub-stream profile exists, fall through with main stream URL.
 
     state        = _snap_state(camera_id)
 
@@ -7040,29 +7006,16 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     stream_fps   = camera.get("stream_fps")    or 0
     is_hevc      = stream_codec in ("hevc", "h265")
 
-    # 2.6.0-rc3.0 Item 1: card-mode out_vf rules updated.
-    # FPS bumped from 4/8/10 to a uniform 20 (user-facing target — cards
-    # should feel live, not stuttery). Scaling is now conditional: if
-    # we're already running a sub-stream (typically ~640x480), no scale
-    # filter is needed and the sub-stream's native resolution comes
-    # through unmodified. If main_stream_cards is on (or no sub exists),
-    # keep the scale=640:-2 downscale so 4K main streams don't crush the
-    # mjpeg encoder.
-    #
-    # Detection: we just assigned url above to point to the sub-stream
-    # if one was found. Compare against camera.stream_url to know
-    # whether url is a sub or the main. (If we fell through to main,
-    # url == camera.stream_url.)
-    _card_using_main = (url == camera.get("stream_url"))
-    if not native_res and not _card_using_main:
-        # Sub-stream mode: skip the scale filter — sub is already small.
-        out_vf = "fps=20,format=yuvj420p"
-    elif is_hevc and stream_w >= 3840:
-        out_vf = "fps=20,scale=640:-2,format=yuvj420p"
+    # Normal (card) output filters — low_fps_mode adjusts fps inside _launch_snap
+    # 2.6.0-rc3.1: Item 1 reverted to pre-rc3.0 codec-dependent rules.
+    # rc3.0 had unified to fps=20 with conditional scale based on sub vs main
+    # stream; reverted alongside the rest of Item 1.
+    if is_hevc and stream_w >= 3840:
+        out_vf = "fps=4,scale=480:-2,format=yuvj420p"
     elif is_hevc:
-        out_vf = "fps=20,scale=640:-2,format=yuvj420p"
+        out_vf = "fps=8,scale=640:-2,format=yuvj420p"
     else:
-        out_vf = "fps=20,scale=640:-2,format=yuvj420p"
+        out_vf = "fps=10,scale=640:-2,format=yuvj420p"
 
     SOI = bytes([0xFF, 0xD8])
     EOI = bytes([0xFF, 0xD9])
@@ -7145,10 +7098,8 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             ada["run_start"] = time.monotonic()
         elif CFG_LOW_FPS and is_hevc:
             # Low-fps mode for HEVC — 2fps output (decode cost unchanged,
-            # encode/pipe cost drastically reduced). 2.6.0-rc3.0 Item 1:
-            # card-mode fps baseline is now uniformly 20 (was previously
-            # 4/8/10 depending on codec+resolution); replace target updated.
-            vf_used   = out_vf.replace("fps=20", "fps=2")
+            # encode/pipe cost drastically reduced)
+            vf_used   = out_vf.replace(f"fps={8 if stream_w < 3840 else 4}", "fps=2")
             fps_label = "low-fps"
         else:
             vf_used   = out_vf
