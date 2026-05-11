@@ -1,4 +1,175 @@
-## 2.6.0-rc2.4
+## 2.6.0-rc2.5
+
+**Three fixes giving hevc_drm a fair shot at engaging.** The rc2.4
+field-test logs on two systems (Hikvision + Microseven on
+one, Lorex DVR-NVR family on the other) confirmed rc2.4's
+fixes worked structurally but exposed a second-order issue: the HW
+path almost never gets to produce a frame before being timed out.
+rc2.5 addresses that.
+
+### Fix 1 — HW first-frame timeout extended from 3s to 10s
+
+Every "hw decode timeout → sw" log line in the rc2.4 field tests
+hit at exactly the 3s mark:
+
+```
+12:55:13 ffmpeg starting (codec=hevc, hw:hevc_drm, ...)
+12:55:16 hw decode timeout → sw     (Δ=3s)
+
+12:55:45 ffmpeg starting (codec=hevc, hw:hevc_drm, ...)
+12:55:48 hw decode timeout → sw     (Δ=3s)
+
+12:55:56 ffmpeg starting (codec=hevc, hw:hevc_drm, ...)
+12:55:59 hw decode timeout → sw     (Δ=3s)
+```
+
+3s is too aggressive for rpivid's first-frame warmup at 4K HEVC,
+especially after a kill+restart. The kernel V4L2 video device needs
+to be reacquired, the decoder context rebuilt, the first keyframe
+awaited (which depends on the camera's keyframe interval, often
+1-2s on its own). 3s catches it mid-warmup, kills it, falls back
+to SW. We never find out if rpivid would have produced frames at
+5s or 8s.
+
+The one case in the rc2.4 logs where hevc_drm DID produce a frame
+was the Hikvision's first cred-auth entry — 19:48:06 launch,
+19:48:08 first frame, 2s warmup. Faster than the 3s timeout, just
+barely. Every subsequent attempt (after a kill+restart from
+manual tier change or focus re-enter) timed out at 3s. So 3s is
+right on the edge — works for cold-start, fails for kill+restart.
+
+**Fix:** raise the HW first-frame timeout from 3s to 10s. Gives
+honest HW a chance to warm up; truly broken HW still falls back,
+just 7s later. Bounded either way.
+
+### Fix 2 — Per-session HW skip counter reset on focus-enter
+
+The rc2.4 log on the Lorex DVR ch4 showed the failure counter
+leaking across focus sessions:
+
+```
+19:44:21 Focus: entering enhanced view for 192.168.50.217_554_ch4
+19:44:24 hw decode timeout → sw                       (failure 1)
+...
+19:44:43 hw decode timeout → sw                       (failure 2)
+...
+19:45:09 Focus: leaving enhanced view
+...
+19:50:07 Focus: entering enhanced view for 192.168.50.217_554_ch4
+19:50:10 hw decode timeout → sw                       (failure 3)
+19:50:10 hevc_drm failed 3 times this session — skipping
+```
+
+That's not one session — the user left at 19:45:09 and came back
+4+ minutes later at 19:50:07. The "session" log message was a lie
+because `state["hw_session_fails"]` lives in the `state` dict
+keyed by `camera_id`, which persists across snap_loop invocations.
+Once 3 failures accumulate by any combination of focus sessions,
+HW is gated out for the camera's lifetime.
+
+The user's mental model: "I'll close Enhanced View, come back,
+maybe rpivid will work this time." rc2.4's behavior: "Counter
+remembers your last attempt; one more strike and HW is dead for
+the camera's whole lifetime."
+
+**Fix:** in handle_focus_set, before starting the new snap_loop
+task, pop `state["hw_session_fails"]` and `state["hw_session_skip"]`.
+Now "this session" actually means what the log says: one focus
+entry. Every Enhanced View entry gets a fresh shot at HW.
+
+### Fix 3 — Time-to-first-frame logged for HW launches
+
+To tune the timeout intelligently going forward instead of
+guessing, rc2.5 logs the elapsed time for HW launches:
+
+- On first frame produced after a HW launch:
+  `hw first frame in X.Xs (hevc_drm)` — proves HW worked,
+  shows warmup time for this stream.
+- On HW timeout fallback:
+  `hw decode timeout (elapsed=X.Xs) → sw` — was it at the 10s
+  cap or earlier? Earlier means ffmpeg actually died (not slow
+  warmup).
+- On HW EOF fallback:
+  `hw EOF (rc=N, elapsed=X.Xs) → sw` — same context, lets us
+  distinguish "produced no output, exited fast" from "ran a
+  while then died".
+
+Diagnostic feed for future tuning decisions. If every camera
+consistently shows 4-5s, we know 10s is right; if they're all
+<2s, we could tighten back; if some need 12s+, we'd know to
+raise it.
+
+### Expected behavior on the Hikvision and Lorex DVR after rc2.5
+
+- First focus-enter: HW gets a real 10s window to produce frames.
+  If the Hikvision's actual warmup is ~5s post-kill+restart (a plausible
+  guess given the rc2.4 data point of 2s on cold start), HW now
+  engages. Log will show `hw first frame in X.Xs (hevc_drm)`.
+- Re-entering Enhanced View on the same camera: fresh HW retry
+  budget. If the previous session burned 1-2 failures, those
+  don't count against the next session.
+- Manual tier change inside Enhanced View: ffmpeg gets killed,
+  next launch retries HW (per rc2.4) with a 10s warmup window
+  (per rc2.5). The pattern that consistently failed in rc2.4
+  ("user picks 10fps → ffmpeg killed → HW retry times out at 3s
+  → SW") should now produce `hw first frame` for the new tier.
+
+### What this does NOT change
+
+- The hard ceiling of ~10-15 fps at 4K HEVC even with rpivid
+  engaged. Pi 4 rpivid + ffmpeg pipeline can sustain that range,
+  not 30 fps. If the user picks 30fps and SW can't keep up,
+  they'll still see drops — but the goal of 15-20fps stable is
+  achievable when HW is engaging properly.
+- The "every kill+restart costs a full warmup" cost. Manual tier
+  changes still kill ffmpeg and restart. The new 10s warmup
+  window means each restart costs up to 10s of "no frames" before
+  decoder reaches steady state. User-visible: a brief pause when
+  changing FPS/resolution in Enhanced View. Same UX as before
+  rc2.4, just with more headroom for HW to actually engage.
+
+### CFG_HW_DECODE gating
+
+All three fixes preserve the toggle.
+
+- Fix 1 (timeout extension): lives inside the `if hw_tried and
+  frames == 0` branches, which only fire when HW was launched.
+  Toggle off → no HW → no timeout extension matters.
+- Fix 2 (session reset): pops state keys that only exist if rc2.4
+  HW counters were populated, which requires HW to have been
+  attempted. Toggle off → keys never set → pop is no-op.
+- Fix 3 (timing logs): `hw_started_at` is None when hw_tried is
+  False, so logs gracefully fall back to the rc2.4 format with
+  no elapsed time. Toggle off → no HW → no timing log.
+
+### Risks
+
+- **10s warmup window doubles worst-case time to first frame on
+  genuine HW failures.** If the user has a camera where rpivid
+  truly doesn't work (some HEVC profile rpivid can't decode), they
+  now wait 10s instead of 3s before SW fallback. Acceptable cost
+  — better than the rc2.4 cost of "looks like HW works for some
+  streams but never gets to prove it".
+- **Per-focus-session reset of HW counters could let a genuinely
+  broken HW path retry forever** if the user keeps re-entering
+  Enhanced View. Each entry burns 3 × 10s = 30s of failed warmups
+  before settling into SW. Cost is bounded per focus session.
+  If a user reports "Enhanced View takes 30s to show first
+  frame", we'd want to know — that's the diagnostic the timing
+  logs from fix #3 give us.
+- **Timing log adds INFO-level chatter on every HW launch.** Two
+  new INFO lines per ffmpeg run (hw first frame on success, or
+  the existing-but-enriched timeout/EOF lines on fallback). Logs
+  grow slightly. Worth it for the data.
+
+### Carried over from 2.6.0-rc2.4
+
+Fix 1 (per-session HW skip after 3 consecutive 0-frame failures,
+no global _HW_UNAVAILABLE add), fix 2 (HW→SW fallback preserves
+native_res), fix 3 (manual tier honors prof_idx not in ladder).
+All rc2.3 fixes. All rc2.2 HW decode plumbing. All version pins.
+
+
 
 **Three fixes built on the rc2.3 field test on the Hikvision.**
 The rc2.3 fixes worked — `hw:hevc_drm` engaged, decoded 91 frames
