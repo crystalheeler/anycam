@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.6.0-rc2.6"  # must match config.yaml
+CURRENT_VERSION = "2.6.0-rc3.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -123,6 +123,21 @@ CFG_LIMIT_THREADS        = os.environ.get("LIMIT_THREADS",  "false").lower() == 
 CFG_STAGGER_POLL         = os.environ.get("STAGGER_POLLING","false").lower() == "true"
 CFG_HW_DECODE            = os.environ.get("HW_DECODE",      "false").lower() == "true"
 CFG_ADAPTIVE_QUALITY     = os.environ.get("ADAPTIVE_QUALITY","false").lower() == "true"
+# 2.6.0-rc3.0 Item 1 — when ON, card thumbnails use each camera's main
+# stream (downscaled in vf for display). When OFF (default), cards use
+# the sub-stream profile if one exists, otherwise main stream. Trade-off:
+# main streams give crisper thumbnails but cost much more CPU and HW
+# decoder context budget — with many cards visible at once and HEVC main
+# streams (4K Lorex/Dahua DVR channels, 4K IP cameras), enabling this
+# can saturate the Pi 4.
+CFG_MAIN_STREAM_CARDS    = os.environ.get("MAIN_STREAM_CARDS", "false").lower() == "true"
+# 2.6.0-rc3.0 Items 2+3 — when ON, snap_loop in Enhanced View (or after
+# a tier change) launches BOTH an SW ffmpeg (for fast first frame, ~1s)
+# and an HW ffmpeg (warming up in background, ~5-6s). As soon as HW
+# produces its first frame, the active proc atomically swaps from SW to
+# HW. Without this, entering Enhanced View leaves the frozen card
+# thumbnail visible for the full 5-10s of HW warmup.
+CFG_FAST_STREAM_START    = os.environ.get("FAST_STREAM_START", "false").lower() == "true"
 CFG_RECORDINGS           = os.environ.get("RECORDINGS_PATH", "/media/anycam")
 CFG_MOTION_SENS          = int(os.environ.get("MOTION_SENSITIVITY",       "15"))
 CFG_MOTION_COOL          = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
@@ -6790,6 +6805,134 @@ def _build_focus_ladder(camera: dict) -> list:
     return ladder
 
 
+async def _hw_preheater(
+    camera_id: str,
+    state: dict,
+    hw_label: str,
+    timeout_s: float = 30.0,
+) -> None:
+    """2.6.0-rc3.0 Items 2+3 — Fast Stream Start background task.
+
+    When CFG_FAST_STREAM_START is on AND a HW decoder is selected AND
+    we're in Enhanced View (native_res=True), snap_loop launches a
+    second ffmpeg (HW) in parallel with the primary (SW) one. The
+    SW proc serves frames immediately (~1s); this task watches the
+    HW proc's stdout, waits for the first complete JPEG (proves the
+    HW decoder warmed up and the camera is delivering valid data),
+    then signals the main loop to swap state["proc"] from the SW
+    to the HW proc.
+
+    State protocol (all keys read/written under state):
+      state["proc_hw"]: the HW ffmpeg proc (set by snap_loop before
+        creating this task).
+      state["hw_ready"]: set True by us when first HW JPEG seen.
+      state["hw_preheater_failed"]: set True if HW died before
+        producing a frame, or the timeout fired.
+      state["hw_swapped"]: set True by the main loop when it has
+        consumed our signal and swapped procs. We then continue
+        draining the HW proc's stdout briefly (to prevent pipe-fill
+        before the main loop takes over) and exit.
+
+    The timeout (30s) is much longer than the rc2.5 single-proc HW
+    warmup (10s). Reason: fast_stream_start is a "best effort"
+    upgrade — if HW takes longer than usual, we just stay on SW
+    for the session instead of disrupting the user's view. The
+    rc2.5 10s timeout exists to bound the "I'm watching a frozen
+    thumbnail" window; with fast_stream_start that window is gone
+    (SW serves frames during warmup), so HW slowness is invisible.
+    """
+    proc_hw = state.get("proc_hw")
+    if not proc_hw or not proc_hw.stdout:
+        log.debug(f"SNAP [{camera_id}]: hw preheater — no proc_hw, exiting")
+        state["hw_preheater_failed"] = True
+        return
+    started = time.monotonic()
+    SOI     = bytes([0xFF, 0xD8])
+    EOI     = bytes([0xFF, 0xD9])
+    buf     = b""
+    try:
+        while True:
+            elapsed = time.monotonic() - started
+            if elapsed >= timeout_s:
+                log.warning(f"SNAP [{camera_id}]: hw preheater timeout "
+                            f"({timeout_s:.0f}s) — staying SW for this session")
+                state["hw_preheater_failed"] = True
+                try: proc_hw.kill()
+                except Exception: pass
+                return
+            try:
+                chunk = await asyncio.wait_for(
+                    proc_hw.stdout.read(65536), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            if not chunk:
+                rc = proc_hw.returncode
+                log.info(f"SNAP [{camera_id}]: hw preheater EOF "
+                         f"(rc={rc}, elapsed={elapsed:.1f}s) — HW proc died "
+                         f"before producing a frame, staying SW")
+                state["hw_preheater_failed"] = True
+                return
+            buf += chunk
+            # Look for complete JPEG. Once seen, signal hw_ready and
+            # continue draining to prevent pipe-fill until main loop swaps.
+            if not state.get("hw_ready"):
+                s = buf.find(SOI)
+                e = buf.find(EOI, s + 2) if s >= 0 else -1
+                if s >= 0 and e > s:
+                    log.info(f"SNAP [{camera_id}]: hw preheater first frame "
+                             f"in {elapsed:.1f}s ({hw_label}) — ready for swap")
+                    state["hw_ready"] = True
+                    state["hw_preheat_elapsed"] = elapsed
+                    # Drain mode: keep reading & discarding until the main
+                    # loop swaps procs (consumes our signal). After swap,
+                    # main loop owns proc_hw and we exit.
+                    buf = b""  # reset to avoid unbounded growth in drain mode
+            else:
+                # We've signalled hw_ready — drain quickly until swap.
+                buf = b""
+                if state.get("hw_swapped"):
+                    log.debug(f"SNAP [{camera_id}]: hw preheater — main loop "
+                              f"swapped procs, exiting")
+                    return
+    except asyncio.CancelledError:
+        # Owner cancelled us (e.g., tier change, focus leave, snap_loop end).
+        # Don't kill proc_hw here — the caller is responsible for that since
+        # they cancelled us. (Cancellation might happen AFTER the swap, in
+        # which case main loop owns proc_hw and we shouldn't kill it.)
+        raise
+    except Exception as ex:
+        log.warning(f"SNAP [{camera_id}]: hw preheater error: {ex}")
+        state["hw_preheater_failed"] = True
+        try: proc_hw.kill()
+        except Exception: pass
+
+
+def _kill_hw_preheater(state: dict) -> None:
+    """2.6.0-rc3.0 Items 2+3 — clean up any active HW preheater state.
+
+    Called from:
+      - snap_loop outer restart loop, before launching a new proc pair
+        (clears stale state from a prior iteration that exited)
+      - handle_focus_set_tier, alongside the existing primary proc kill
+      - handle_focus_clear (focus-leave), same
+      - snap_loop end-of-function cleanup
+
+    Idempotent — safe to call when no preheater is running.
+    """
+    t = state.pop("hw_preheater_task", None)
+    if t and not t.done():
+        try: t.cancel()
+        except Exception: pass
+    proc_hw = state.pop("proc_hw", None)
+    if proc_hw is not None:
+        try: proc_hw.kill()
+        except Exception: pass
+    state.pop("hw_ready", None)
+    state.pop("hw_swapped", None)
+    state.pop("hw_preheater_failed", None)
+    state.pop("hw_preheat_elapsed", None)
+
+
 async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = False) -> None:
     """
     Background task: keeps ffmpeg running for one camera, continuously
@@ -6814,17 +6957,48 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     # EXCEPTION 1: when native_res=True (enhanced view) AND RTSP is available,
     # bypass http_snap_loop so the ffmpeg pipeline runs — this makes the
     # Resolution/FPS controls work and gives real video instead of 1fps polling.
-    # EXCEPTION 2 (card view): when probe_rtsp confirmed the RTSP stream works
-    # at credential-set time, prefer ffmpeg over http_snap_loop. http_snap_loop
-    # produces ~1 fps cached frames (stale-feeling); ffmpeg gives second-by-second
-    # live video. http_snap_loop remains the fallback if ffmpeg fails 3× in a row
-    # (handled lower in this function).
+    # EXCEPTION 2 (card view): when stream_url is populated, prefer ffmpeg
+    # over http_snap_loop. http_snap_loop produces ~1 fps cached frames
+    # (stale-feeling); ffmpeg gives second-by-second live video. http_snap_loop
+    # remains the fallback if ffmpeg fails 3× in a row (handled lower).
+    #
+    # 2.6.0-rc3.0 Item 1: relax the card-mode gate. Old rule required
+    # _rtsp_probe_ok=True which was not always set for channel-iterate brands
+    # (Lorex/Dahua DVR-NVR family) — channel-enum sets stream_url but the
+    # rtsp_probe_ok flag wasn't being propagated to per-channel cards. Net
+    # effect: Lorex DVR channels always routed to http_snap_loop in card view
+    # even though their RTSP URLs work fine. New rule: any populated
+    # stream_url is sufficient for card-mode RTSP. Bogus URLs fall back to
+    # http_snap_loop after the existing 3-failure streak trigger.
     _has_rtsp        = bool(camera.get("stream_url"))
-    _rtsp_probe_ok   = bool(camera.get("rtsp_probe_ok"))
-    _prefer_ffmpeg   = (native_res and _has_rtsp) or (_has_rtsp and _rtsp_probe_ok)
+    _prefer_ffmpeg   = _has_rtsp  # rc3.0: both native_res and card-mode prefer ffmpeg when RTSP is available
     if camera.get("http_snap_url") and not _prefer_ffmpeg:
         await http_snap_loop(camera_id, camera)
         return
+
+    # 2.6.0-rc3.0 Item 1: card-mode URL selection. For non-native_res (card
+    # thumbnail polling), pick the sub-stream URL if available unless
+    # CFG_MAIN_STREAM_CARDS is enabled. Sub-stream is typically 640x480 and
+    # decodes much cheaper than 4K HEVC main streams; running 6+ cards
+    # simultaneously on main streams can saturate the Pi 4 CPU and the
+    # rpivid HW decoder context budget. Native_res (Enhanced View) is
+    # unchanged — always uses the adaptive ladder which starts at the
+    # highest-resolution profile.
+    if not native_res and not CFG_MAIN_STREAM_CARDS:
+        # Find the lowest-resolution profile in stream_profiles. The list
+        # is sorted descending by resolution, so the last entry is the sub.
+        _profiles = camera.get("stream_profiles") or []
+        if len(_profiles) >= 2:
+            _sub_prof = _profiles[-1]
+            _sub_url  = _sub_prof.get("url") or camera.get(
+                _sub_prof.get("_url_key", "sub_stream_url"))
+            if _sub_url and _sub_url != url:
+                log.info(f"SNAP [{camera_id}]: card view — using sub-stream "
+                         f"({_sub_prof.get('stream_width','?')}x"
+                         f"{_sub_prof.get('stream_height','?')}) instead of "
+                         f"main (CFG_MAIN_STREAM_CARDS=false)")
+                url = _sub_url
+        # If no sub-stream profile exists, fall through with main stream URL.
 
     state        = _snap_state(camera_id)
 
@@ -6866,13 +7040,29 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     stream_fps   = camera.get("stream_fps")    or 0
     is_hevc      = stream_codec in ("hevc", "h265")
 
-    # Normal (card) output filters — low_fps_mode adjusts fps inside _launch_snap
-    if is_hevc and stream_w >= 3840:
-        out_vf = "fps=4,scale=480:-2,format=yuvj420p"
+    # 2.6.0-rc3.0 Item 1: card-mode out_vf rules updated.
+    # FPS bumped from 4/8/10 to a uniform 20 (user-facing target — cards
+    # should feel live, not stuttery). Scaling is now conditional: if
+    # we're already running a sub-stream (typically ~640x480), no scale
+    # filter is needed and the sub-stream's native resolution comes
+    # through unmodified. If main_stream_cards is on (or no sub exists),
+    # keep the scale=640:-2 downscale so 4K main streams don't crush the
+    # mjpeg encoder.
+    #
+    # Detection: we just assigned url above to point to the sub-stream
+    # if one was found. Compare against camera.stream_url to know
+    # whether url is a sub or the main. (If we fell through to main,
+    # url == camera.stream_url.)
+    _card_using_main = (url == camera.get("stream_url"))
+    if not native_res and not _card_using_main:
+        # Sub-stream mode: skip the scale filter — sub is already small.
+        out_vf = "fps=20,format=yuvj420p"
+    elif is_hevc and stream_w >= 3840:
+        out_vf = "fps=20,scale=640:-2,format=yuvj420p"
     elif is_hevc:
-        out_vf = "fps=8,scale=640:-2,format=yuvj420p"
+        out_vf = "fps=20,scale=640:-2,format=yuvj420p"
     else:
-        out_vf = "fps=10,scale=640:-2,format=yuvj420p"
+        out_vf = "fps=20,scale=640:-2,format=yuvj420p"
 
     SOI = bytes([0xFF, 0xD8])
     EOI = bytes([0xFF, 0xD9])
@@ -6955,8 +7145,10 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             ada["run_start"] = time.monotonic()
         elif CFG_LOW_FPS and is_hevc:
             # Low-fps mode for HEVC — 2fps output (decode cost unchanged,
-            # encode/pipe cost drastically reduced)
-            vf_used   = out_vf.replace(f"fps={8 if stream_w < 3840 else 4}", "fps=2")
+            # encode/pipe cost drastically reduced). 2.6.0-rc3.0 Item 1:
+            # card-mode fps baseline is now uniformly 20 (was previously
+            # 4/8/10 depending on codec+resolution); replace target updated.
+            vf_used   = out_vf.replace("fps=20", "fps=2")
             fps_label = "low-fps"
         else:
             vf_used   = out_vf
@@ -7099,9 +7291,47 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                     log.debug(f"SNAP [{camera_id}]: no hw decoder available "
                               f"for codec={stream_codec}, using software")
 
-            proc     = await _launch_snap(hw_args=hw_args, hw_label=hw_label,
-                                          native_res=native_res)
-            state["proc"] = proc
+            # 2.6.0-rc3.0 Items 2+3 — Fast Stream Start dual-proc path.
+            # Clean up any preheater state from a prior outer-loop iteration
+            # (e.g. previous tier change left a HW proc + task around).
+            _kill_hw_preheater(state)
+            _fast_start_active = (CFG_FAST_STREAM_START and native_res
+                                  and bool(hw_label))
+            if _fast_start_active:
+                # Launch SW first (it's the active proc; main loop reads it).
+                # Launch HW second (preheater task watches it for first frame).
+                # Both ffmpegs target the same RTSP URL — most cameras tolerate
+                # two concurrent sessions for the few seconds of HW warmup; if
+                # the camera rejects the second session, the HW preheater will
+                # see proc_hw die quickly and stay-SW gracefully.
+                log.info(f"SNAP [{camera_id}]: fast_stream_start ON — "
+                         f"launching SW for immediate frame + {hw_label} "
+                         f"preheating in background")
+                proc       = await _launch_snap(hw_args=[], hw_label="",
+                                                native_res=native_res)
+                proc_hw    = await _launch_snap(hw_args=hw_args, hw_label=hw_label,
+                                                native_res=native_res)
+                state["proc"]    = proc
+                state["proc_hw"] = proc_hw
+                state["hw_ready"]    = False
+                state["hw_swapped"]  = False
+                state["hw_preheater_failed"] = False
+                state["hw_preheater_task"] = asyncio.create_task(
+                    _hw_preheater(camera_id, state, hw_label))
+                # The main read loop reads SW frames. hw_tried=False because
+                # the active proc IS the SW proc — we're not "trying HW and
+                # waiting to see if it works" in the rc2.5 sense. HW happens
+                # in the preheater. hw_started_at also stays None to keep the
+                # rc2.5 timeout/EOF fallback diagnostics for the SW proc
+                # behaving correctly (no spurious "hw EOF" logs for SW exits).
+                hw_tried       = False
+                hw_started_at  = None
+            else:
+                proc     = await _launch_snap(hw_args=hw_args, hw_label=hw_label,
+                                              native_res=native_res)
+                state["proc"] = proc
+                hw_tried       = bool(hw_label)
+                hw_started_at  = time.monotonic() if hw_tried else None
             stderr_t = asyncio.create_task(_drain_stderr(proc, f"SNAP:{camera_id}"))
             buf      = b""
             frames   = 0
@@ -7114,14 +7344,11 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # re-entry retry happened, masking the true "ffmpeg dead, retrying"
             # state behind a misleading X-Stream-Status: ok.
             state["current_run_frames"] = 0
-            hw_tried = bool(hw_label)
-            # 2.6.0-rc2.5 — fix #3: capture HW launch timestamp for the
-            # time-to-first-frame diagnostic. Logged when the first frame
-            # arrives (proves HW worked, shows how long warmup took) and
-            # when the HW timeout/EOF fallback fires (shows what timeout
-            # would have been needed). Used to tune the HW first-frame
-            # timeout instead of guessing.
-            hw_started_at = time.monotonic() if hw_tried else None
+            # hw_tried and hw_started_at were set above conditionally based
+            # on whether fast_stream_start is active. They control the rc2.5
+            # HW-EOF-fallback logic in the read loop below. In fast_stream
+            # mode, the active proc IS SW, so hw_tried=False suppresses the
+            # spurious "hw EOF" treatment of SW exits.
 
             try:
                 while True:
@@ -7311,6 +7538,42 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         state["frame_count"] += 1
                         # 2.4.0-rc3.4 Bug 2 fix: per-run counter, see launch site.
                         state["current_run_frames"] = state.get("current_run_frames", 0) + 1
+
+                        # 2.6.0-rc3.0 Items 2+3 — Fast Stream Start swap.
+                        # If the HW preheater task signalled hw_ready (HW
+                        # produced its first JPEG, decoder is warm and the
+                        # camera is delivering valid HW-decodable data),
+                        # atomically swap state["proc"] from the SW proc to
+                        # the HW proc. The user sees no disruption — last SW
+                        # frame is followed by first HW frame, both at the
+                        # same vf output dimensions. From this point forward
+                        # the main read loop reads HW frames and SW is dead.
+                        if state.get("hw_ready") and not state.get("hw_swapped"):
+                            sw_proc = state["proc"]
+                            hw_proc = state.get("proc_hw")
+                            if hw_proc is not None:
+                                elapsed = state.get("hw_preheat_elapsed", 0.0)
+                                log.info(f"SNAP [{camera_id}]: hw upgrade "
+                                         f"complete — swapping SW→{hw_label} "
+                                         f"(preheat took {elapsed:.1f}s)")
+                                try: sw_proc.kill()
+                                except Exception: pass
+                                state["proc"]       = hw_proc
+                                state["proc_hw"]    = None
+                                state["hw_swapped"] = True
+                                # Local proc var: subsequent reads happen
+                                # against the new (HW) proc.
+                                proc = hw_proc
+                                # Reset frame buffer — old buf is SW byte
+                                # stream, possibly mid-JPEG; HW stream starts
+                                # fresh. buf.find(SOI) below will skip any
+                                # garbage to first HW frame.
+                                buf  = b""
+                                # Replace stderr drain task with one bound
+                                # to the HW proc (the old one was on SW).
+                                stderr_t.cancel()
+                                stderr_t = asyncio.create_task(
+                                    _drain_stderr(proc, f"SNAP:{camera_id}"))
 
                         # Native-res focus task: exit the inner loop the moment
                         # focus is cleared so the task terminates quickly without
@@ -8261,6 +8524,12 @@ async def handle_focus_clear(request: web.Request) -> web.Response:
                 except Exception as ex:
                     log.debug(f"Focus: ffmpeg kill for {prev} failed "
                               f"(probably already dead): {ex}")
+            # 2.6.0-rc3.0 Items 2+3 — tear down HW preheater + HW proc if
+            # fast_stream_start was active for this focus session. Without
+            # this, the HW preheater task keeps running after focus-leave
+            # and may signal hw_ready into a snap_loop that already exited,
+            # leaking the proc_hw subprocess.
+            _kill_hw_preheater(state)
             task = state.get("task")
             if task and not task.done():
                 task.cancel()
@@ -8381,11 +8650,18 @@ async def handle_focus_set_tier(request: web.Request) -> web.Response:
                 # existing focus_leave_kill flag pattern.
                 state["tier_change_kill"] = True
                 proc.kill()
+                # 2.6.0-rc3.0 Items 2+3 — if fast_stream_start has a HW
+                # preheater running for the old tier, tear it down here.
+                # Without this, the preheater might signal hw_ready mid-
+                # restart and the next iteration's swap logic could pick
+                # up a stale HW proc bound to the old tier's URL/vf.
+                _kill_hw_preheater(state)
                 log.info(f"Focus [{camera_id}]: killed ffmpeg to apply manual tier change")
             except Exception as ex:
                 # Kill failed (proc already dead). Clear the flag so it
                 # doesn't linger and consume a real EOF later.
                 state.pop("tier_change_kill", None)
+                _kill_hw_preheater(state)
                 log.debug(f"Focus [{camera_id}]: ffmpeg kill failed (probably already dead): {ex}")
 
     return web.json_response({"status": "ok", "tier_idx": best_idx,
@@ -9297,6 +9573,18 @@ async def api_set_credentials(request) -> web.Response:
         camera_id = data.get("camera_id", "")
         username  = data.get("username", "").strip()
         password  = data.get("password", "")
+        # 2.6.0-rc3.0 Item 4 — track whether this credential submission
+        # came in through the "🔒 N Locked Streams" badge modal or
+        # through a generic Login button. When True, we clear
+        # camera.locked_streams after auth (the user explicitly
+        # walked through the modal, the badge has served its purpose
+        # and the validated subset is now in additional_streams).
+        # When False, we PRESERVE the locked_streams list so the badge
+        # persists — the user logged in via some other path and may
+        # still want to review locked candidates later. Pre-rc3.0
+        # behavior was to clear unconditionally, which nuked the badge
+        # for users who logged in via the regular Login button.
+        from_locked_modal = bool(data.get("from_locked_streams_modal", False))
     except Exception:
         return web.json_response({"error": "Invalid JSON"}, status=400)
 
@@ -10073,9 +10361,16 @@ async def api_set_credentials(request) -> web.Response:
                   # so the focus-view dropdown reads the canonical
                   # list directly without needing the synth fallback.
                   stream_profiles=stream_profiles,
-                  # Clear the unvalidated locked_streams list — the
-                  # validated subset is now in additional_streams.
-                  locked_streams=[],
+                  # 2.6.0-rc3.0 Item 4: only clear locked_streams if the
+                  # user explicitly came in via the badge modal. The
+                  # validated subset is in additional_streams either way
+                  # (we always run post-auth validation above), so it's
+                  # safe to keep the unvalidated list around. Users who
+                  # logged in via the generic Login button keep the
+                  # 🔒 badge visible and can review locked candidates
+                  # later if they want.
+                  locked_streams=([] if from_locked_modal
+                                  else camera.get("locked_streams", []) or []),
                   requires_credentials=False,
                   status="ready", user_saved=True,
                   http_snap_url=http_snap_url,
@@ -12566,7 +12861,14 @@ async function submitLockedCreds() {
        remains for diagnostic display (badge hides because user_saved). */
     const r = await fetch(BASE + '/api/credentials', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({camera_id: _lockedCid, username: u, password: p})
+      /* 2.6.0-rc3.0 Item 4: tag this POST as coming from the Locked
+         Streams modal so the backend knows it's safe to clear
+         camera.locked_streams after auth (the user walked through
+         the badge flow on purpose). The regular Login button at
+         submitCreds() leaves this flag absent (defaults to false on
+         the backend), which preserves the badge. */
+      body: JSON.stringify({camera_id: _lockedCid, username: u, password: p,
+                            from_locked_streams_modal: true})
     });
     const d = await r.json();
     if (r.ok) {

@@ -1,4 +1,223 @@
-## 2.6.0-rc2.6
+## 2.6.0-rc3.0
+
+**Four items, all interrelated.** Item 1 (RTSP in cards) lays
+architectural foundation for items 2-3 (Fast Stream Start), since
+the SW-fast / HW-upgrade dual-proc path can only swap atomically
+when both procs run the same RTSP pipeline. Item 4 (Locked Streams
+badge persistence) is a small unrelated cleanup folded in to share
+the field-test cycle.
+
+### Item 1 — RTSP in card view (replaces HTTP polling)
+
+**Previous behavior:** card thumbnails used http_snap_loop, polling
+the camera's HTTP JPEG endpoint at ~1 fps. Result: cards felt stale,
+cached frames, ~1 fps refresh. When entering Enhanced View the
+frontend kept displaying the last HTTP snapshot until snap_loop's
+ffmpeg pipeline produced its first frame.
+
+**New behavior:** card thumbnails run ffmpeg against the RTSP
+stream when stream_url is populated. The `_prefer_ffmpeg` gate
+was previously `(_has_rtsp AND _rtsp_probe_ok) OR (native_res AND
+_has_rtsp)`. The `_rtsp_probe_ok` requirement was excluding
+Lorex/Dahua DVR channels — channel-enum sets stream_url for each
+populated channel but doesn't propagate rtsp_probe_ok per-channel,
+so all 7 DVR channels were routing to http_snap_loop. New gate:
+any populated stream_url is sufficient. http_snap_loop remains
+the fallback after the existing 3-failure streak trigger.
+
+**Main vs sub stream choice (new config option):**
+
+`main_stream_cards` (default OFF). When OFF, cards use each
+camera's sub-stream profile (typically ~640×480) — light on CPU,
+network, and the rpivid HW decoder context budget. When ON, cards
+use the main stream (full native resolution, downscaled to 640px
+wide for display). The toggle help text warns about Pi 4 saturation
+risk when ON with many HEVC main streams.
+
+**Video filter changes:**
+
+Old card-mode vf: `fps=4,scale=480:-2,format=yuvj420p` (4K HEVC) /
+`fps=8,scale=640:-2,format=yuvj420p` (1080p HEVC) / `fps=10,scale=
+640:-2,format=yuvj420p` (h264). Three different rates depending on
+codec and resolution.
+
+New card-mode vf: `fps=20,format=yuvj420p` (sub-stream mode — no
+scale filter, sub is already small) or `fps=20,scale=640:-2,
+format=yuvj420p` (main-stream mode or no-sub-available). Uniform
+20 fps target; cards feel live, not stuttery.
+
+low_fps_mode replace target updated from
+`fps={8 if w<3840 else 4}` to `fps=20`.
+
+### Items 2 + 3 — Fast Stream Start (Enhanced View + tier changes)
+
+**Previous behavior:** entering Enhanced View or changing the
+FPS/Resolution dropdown triggered the rc2.5/rc2.6 single-proc HW
+launch. While HW warmed up (5-6s typical for rpivid HEVC at
+1440p/4K, plus 1s outer-loop backoff), the frontend kept showing
+the previous card thumbnail frozen. Net user-visible delay:
+10-15s before the new feed appeared.
+
+**New behavior (new config option):**
+
+`fast_stream_start` (default OFF). When OFF, behavior identical
+to rc2.6 (single-proc, HW first, 5-10s frozen thumbnail while
+warming up). When ON, snap_loop launches TWO ffmpeg processes
+in parallel:
+
+  - `proc` (SW): the active proc, decoding in software. Produces
+    first frame in ~1s. Main read loop reads from this; frontend
+    sees a fresh frame immediately.
+  - `proc_hw` (HW): warming up in background. A new
+    `_hw_preheater` task reads its stdout, watches for the first
+    complete JPEG, sets `state["hw_ready"]=True`.
+
+After each successful SW frame parse in the main loop, the loop
+checks `state["hw_ready"]`. When True: atomic swap — kill SW
+proc, set `state["proc"] = proc_hw`, reset frame buffer, replace
+the stderr drain task. The user sees the last SW frame followed
+by the first HW frame at the same vf output dimensions. No visual
+disruption.
+
+The HW preheater has a 30s timeout (much longer than rc2.5's 10s
+single-proc HW timeout). Reason: fast_stream_start is a best-effort
+upgrade — if HW is slow, we stay on SW for the session instead of
+disrupting the user's view. The rc2.5 10s exists to bound the
+"frozen thumbnail" window; with fast_stream_start that window is
+gone (SW is serving frames), so HW slowness is invisible.
+
+**Edge cases handled:**
+
+- HW preheater fails before producing a frame (rpivid context
+  exhausted, decoder error, camera rejected second RTSP session):
+  preheater sets `hw_preheater_failed`, exits cleanly. Main loop
+  continues on SW for the session. Logs the failure with elapsed
+  time and rc.
+- HW preheater timeout (30s): kills proc_hw, sets the failed flag,
+  exits. Same fallthrough.
+- Tier change during HW warmup window: handle_focus_set_tier sets
+  tier_change_kill on the active SW proc AND calls
+  _kill_hw_preheater() to tear down the HW preheater + proc_hw.
+  Outer loop launches fresh SW+HW pair for new tier.
+- Focus leave during HW warmup: handle_focus_clear's existing
+  focus_leave_kill flag fires on the active SW proc; same
+  _kill_hw_preheater() cleanup added to that path.
+- Outer-loop restart for any other reason: _kill_hw_preheater()
+  called at the top of every launch iteration to clean up state
+  from a prior aborted iteration.
+
+**New helpers:**
+
+`_hw_preheater(camera_id, state, hw_label, timeout_s=30)`: async
+background task. Reads proc_hw.stdout in 1s polls, watches for
+first complete JPEG (SOI…EOI), sets hw_ready. After signal,
+drains until main loop sets hw_swapped.
+
+`_kill_hw_preheater(state)`: idempotent cleanup. Cancels task,
+kills proc_hw, pops all preheater-related state keys. Called
+from outer loop, tier change, focus leave, and snap_loop end.
+
+**State protocol additions (under `state` dict):**
+
+  state["proc_hw"]               — HW ffmpeg proc (Popen)
+  state["hw_preheater_task"]     — asyncio.Task running _hw_preheater
+  state["hw_ready"]              — bool, set True on first HW JPEG
+  state["hw_swapped"]            — bool, set True when main loop swapped
+  state["hw_preheater_failed"]   — bool, set True on failure/timeout
+  state["hw_preheat_elapsed"]    — float, time to first HW JPEG (logged)
+
+### Item 4 — Locked Streams badge persistence
+
+**Previous behavior:** any cred-POST to /api/credentials that
+succeeded cleared `camera.locked_streams=[]` at the end of
+api_set_credentials, regardless of which UI entry point invoked
+it. Users who entered creds via a card's regular Login button (not
+the 🔒 badge modal) would have the 🔒 badge disappear even
+though they never went through the badge flow.
+
+**New behavior:**
+
+Frontend tags Locked Streams modal cred POSTs with
+`from_locked_streams_modal: true` in the request body. The
+regular Login button (submitCreds at line 12383-area) leaves
+this flag absent (defaults to false server-side).
+
+Backend in api_set_credentials parses the new field. At the
+camera.update() site that previously did `locked_streams=[]`,
+the clear is now conditional: only fires when
+from_locked_streams_modal is True. Otherwise the original
+locked_streams list is preserved.
+
+Net result: user enters creds via card Login button → cred
+validates → cards stream → 🔒 badge still showing. Bonus: this
+also fixes the "wrong creds typed via Login button" case where
+the badge would be lost before the user even had a chance to
+review locked candidates.
+
+Note: additional_streams population (the validated subset of
+locked candidates) runs unchanged in both paths — the
+post-auth validation walks camera.locked_streams against the
+new creds whether or not the user came in via the badge modal.
+So entering creds via Login button still correctly populates
+additional_streams; the badge just additionally persists.
+
+### Config changes (config.yaml, run.sh, translations)
+
+Two new options added to config.yaml options + schema:
+  - main_stream_cards (bool, default false)
+  - fast_stream_start (bool, default false)
+
+run.sh exports each as the corresponding env var. The post-startup
+"Config:" log line splits onto a new third line:
+  Config: main_stream_cards=... fast_stream_start=...
+
+translations/en.yaml gets help text for both options, including
+the Pi 4 saturation warning on main_stream_cards.
+
+### Risks
+
+- **fast_stream_start runs two ffmpeg procs against the same RTSP
+  URL for the warmup window.** Most cameras tolerate it; some
+  (especially older ONVIF/hi3516 boards) may reject the second
+  session. _hw_preheater detects this via proc_hw EOF before
+  first JPEG, sets hw_preheater_failed, stays SW. No crash, but
+  user won't get HW for that session. Subsequent focus enters
+  retry fresh.
+- **main_stream_cards with many HEVC streams could exhaust rpivid
+  context budget.** rpivid concurrent decode budget is bounded
+  (~4-8 contexts on Pi 4). With 6+ 4K HEVC main streams active
+  simultaneously, expect frame drops on some cards. Toggle help
+  text warns about this.
+- **fps=20 card baseline is much higher than the previous 4-10
+  range.** mjpeg encode CPU cost scales with output frame rate.
+  On Pi 4 with many cards visible, the mjpeg encoder may not
+  keep up — would manifest as cards displaying their FPS lower
+  than 20 (which is fine; ffmpeg's vf=fps just sets the target,
+  it doesn't generate frames the source can't deliver).
+- **HW upgrade swap is mid-session, on a different ffmpeg proc.**
+  If the camera's RTSP stream has any state that's session-bound
+  (sequence numbers, PTS continuity), the swap could be visible
+  as a brief flicker or frame ordering glitch. Most cameras
+  reset cleanly on a new RTSP SETUP; if not, the swap is just
+  visually-unclean but functionally fine.
+- **Item 4 fix is conservative.** Preserving locked_streams when
+  user logs in via Login button means cameras successfully
+  streaming may still show the 🔒 badge. Acceptable — clicking
+  the badge then shows the user the locked candidates list, and
+  they can dismiss/review at their pace.
+
+### Carried over from 2.6.0-rc2.6
+
+The tier_change_kill flag (rc2.6) gates the HW EOF fallback so
+intentional tier-change kills no longer misclassify as HW
+failures. rc3.0 extends this by also tearing down the HW
+preheater on tier change.
+
+All rc2.5 fixes (10s HW timeout, per-focus-session counter reset,
+time-to-first-frame diagnostic). All rc2.4 fixes. All rc2.3 fixes.
+All rc2.2 HW decode plumbing. All version pins.
+
+
 
 **One fix: tier-change kill mid-HW-warmup no longer misclassifies
 as a HW failure.** Regression exposed by rc2.5's elapsed-time
