@@ -38,6 +38,30 @@ configuration:
       Switching to a lower camera profile reduces both network bandwidth and
       CPU decode cost. When OFF, enhanced view always uses the highest quality
       profile at uncapped fps with no adaptation.
+  main_stream_cards:
+    name: Main Stream in Card View
+    description: >-
+      Default OFF. When OFF, card thumbnails use each camera's sub-stream
+      (low-res, ~640x480 typical) — light on CPU, network, and the rpivid HW
+      decoder context budget. When ON, cards use the main stream (full
+      native resolution, downscaled to 640px wide for display). Warning:
+      with many cards visible at once and HEVC main streams (4K Lorex/Dahua
+      DVR channels, 4K IP cameras), enabling this can saturate the Pi 4's
+      CPU and HW decoder capacity. If you see card frame drops with this
+      ON, turn it back off.
+  fast_stream_start:
+    name: Fast Stream Start (Enhanced View)
+    description: >-
+      Default OFF. When OFF, entering Enhanced View or changing the FPS/
+      Resolution dropdown waits 5-10 seconds for the hardware decoder to
+      warm up before the first frame appears (during which the previous
+      card thumbnail stays frozen on screen). When ON, AnyCam launches two
+      ffmpeg processes in parallel: a software decoder that produces a
+      first frame in ~1 second, and a hardware decoder warming up in the
+      background. As soon as the HW decoder is ready (typically 5-6s), it
+      atomically swaps in. Net result: feed visible immediately, full HW
+      acceleration once warmup completes. Slight extra bandwidth/CPU for
+      the few seconds of overlap.
   recordings_path:
     name: Recordings Path
     description: >-
