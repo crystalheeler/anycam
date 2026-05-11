@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.6.0-rc2.4"  # must match config.yaml
+CURRENT_VERSION = "2.6.0-rc2.5"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -7115,6 +7115,13 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # state behind a misleading X-Stream-Status: ok.
             state["current_run_frames"] = 0
             hw_tried = bool(hw_label)
+            # 2.6.0-rc2.5 — fix #3: capture HW launch timestamp for the
+            # time-to-first-frame diagnostic. Logged when the first frame
+            # arrives (proves HW worked, shows how long warmup took) and
+            # when the HW timeout/EOF fallback fires (shows what timeout
+            # would have been needed). Used to tune the HW first-frame
+            # timeout instead of guessing.
+            hw_started_at = time.monotonic() if hw_tried else None
 
             try:
                 while True:
@@ -7125,7 +7132,18 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s — stopping")
                         return
 
-                    timeout = 3.0 if (hw_tried and frames == 0) else 30.0
+                    # 2.6.0-rc2.5 — fix #1: extend HW first-frame timeout
+                    # from 3s to 10s. rpivid takes longer than 3s to
+                    # produce its first frame at 4K HEVC, especially after
+                    # a kill+restart (kernel video device must be
+                    # reacquired, decoder context rebuilt, first keyframe
+                    # awaited). rc2.4's 3s cap was catching it mid-warmup
+                    # and falling back to SW before HW ever got a chance.
+                    # Field-test data: every "hw decode timeout → sw" in
+                    # rc2.4 logs hit at exactly the 3s mark. 10s gives
+                    # honest HW a chance; truly broken HW still falls
+                    # back, just 7s later. Bounded either way.
+                    timeout = 10.0 if (hw_tried and frames == 0) else 30.0
                     try:
                         chunk = await asyncio.wait_for(
                             proc.stdout.read(65536), timeout=timeout)
@@ -7135,7 +7153,12 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                             except Exception: pass
                             try: await asyncio.wait_for(proc.wait(), timeout=2)
                             except Exception: pass
-                            log.info(f"SNAP [{camera_id}]: hw decode timeout → sw")
+                            if hw_started_at is not None:
+                                elapsed = time.monotonic() - hw_started_at
+                                log.info(f"SNAP [{camera_id}]: hw decode "
+                                         f"timeout (elapsed={elapsed:.1f}s) → sw")
+                            else:
+                                log.info(f"SNAP [{camera_id}]: hw decode timeout → sw")
                             # 2.6.0-rc2.4 — fix #1: don't permanently
                             # disqualify this decoder. A timeout on a single
                             # ffmpeg launch can be transient (camera between
@@ -7184,7 +7207,12 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                             except Exception: pass
                             try: await asyncio.wait_for(proc.wait(), timeout=2)
                             except Exception: pass
-                            log.info(f"SNAP [{camera_id}]: hw EOF (rc={rc}) → sw")
+                            if hw_started_at is not None:
+                                elapsed = time.monotonic() - hw_started_at
+                                log.info(f"SNAP [{camera_id}]: hw EOF "
+                                         f"(rc={rc}, elapsed={elapsed:.1f}s) → sw")
+                            else:
+                                log.info(f"SNAP [{camera_id}]: hw EOF (rc={rc}) → sw")
                             # 2.6.0-rc2.4 — same fix as the timeout branch
                             # above. See the comment block there for the
                             # full rationale; mirroring the logic so EOF and
@@ -7240,6 +7268,20 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         frame    = buf[s : e + 2]
                         buf      = buf[e + 2:]
                         frames  += 1
+                        # 2.6.0-rc2.5 — fix #3: log time to first HW
+                        # frame. Proves HW worked end-to-end and shows
+                        # how long rpivid warmup took for this stream.
+                        # The diagnostic feeds future timeout tuning —
+                        # if every camera consistently shows 4-5s, we
+                        # know 10s is right; if they're all <2s, we
+                        # could tighten back; if some need 12s+, we'd
+                        # know to raise it.
+                        if hw_tried and hw_started_at is not None:
+                            hw_first_frame_s = time.monotonic() - hw_started_at
+                            log.info(f"SNAP [{camera_id}]: hw first frame "
+                                     f"in {hw_first_frame_s:.1f}s "
+                                     f"({hw_label})")
+                            hw_started_at = None
                         hw_tried = False   # got a frame → hw decode worked
                         state["frame"]       = frame
                         state["frame_time"]  = time.monotonic()
@@ -8123,6 +8165,22 @@ async def handle_focus_set(request: web.Request) -> web.Response:
         log.debug(f"Focus: cleared stale focus_leave_kill flag for {camera_id} "
                   f"(previous session ended without consuming it — likely "
                   f"http_snap fallback path)")
+    # 2.6.0-rc2.5 — fix #2: reset per-session HW failure counters on
+    # focus-enter. rc2.4's `state["hw_session_fails"]` and
+    # `state["hw_session_skip"]` are keyed by camera_id and persist
+    # across snap_loop invocations for the same camera. Without this
+    # reset, the field-test log on the Lorex DVR ch4 showed failure 1
+    # at 19:44:24 and failure 2 at 19:44:43 in one focus session, then
+    # failure 3 at 19:50:10 in a DIFFERENT focus session 5 minutes
+    # later → log printed "hevc_drm failed 3 times this session —
+    # skipping" but they were spread across two sessions. The user
+    # explicitly re-entered Enhanced View expecting a fresh shot at
+    # HW; rc2.4 was giving them a stale counter. Resetting here makes
+    # "this session" actually mean what the log says: one focus entry.
+    if state:
+        if state.pop("hw_session_fails", None) or state.pop("hw_session_skip", None):
+            log.debug(f"Focus: cleared HW session counters for {camera_id} "
+                      f"— fresh shot at hardware decode")
     # Reset restarts_since_lock so a stale count from the previous focus session
     # doesn't immediately trigger a step-down on re-entry.
     ada = _FOCUS_ADAPTIVE.get(camera_id)
