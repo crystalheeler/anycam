@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.6.0-rc2.5"  # must match config.yaml
+CURRENT_VERSION = "2.6.0-rc2.6"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -7202,6 +7202,29 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
                     if not chunk:
                         rc = proc.returncode
+                        # 2.6.0-rc2.6 — intentional-kill gate. proc.kill()
+                        # called by handle_focus_set_tier produces an EOF
+                        # on stdout that looks identical to ffmpeg dying
+                        # on its own. Without this check, the HW EOF
+                        # fallback below treated tier-change kills as HW
+                        # failures, counted them against the per-session
+                        # skip budget, and silently relaunched in SW
+                        # (preserving the new tier's fps/profile but
+                        # losing HW decode). rc2.5 elapsed-time logs
+                        # exposed it: "hw EOF (rc=None, elapsed=2.2s) →
+                        # sw" right after "killed ffmpeg to apply manual
+                        # tier change" — 2.2s is too fast to be a real
+                        # HW death, the kill came from the tier handler.
+                        # Break out of the inner read loop on an
+                        # intentional kill; the outer restart loop picks
+                        # up the new tier from _FOCUS_ADAPTIVE and
+                        # launches it with a fresh HW attempt.
+                        if state.pop("tier_change_kill", None):
+                            log.info(f"SNAP [{camera_id}]: ffmpeg killed "
+                                     f"by tier change after {frames} "
+                                     f"frames (rc={rc}) — outer loop "
+                                     f"will relaunch with new tier")
+                            break
                         if hw_tried and frames == 0:
                             try: proc.kill()
                             except Exception: pass
@@ -8345,9 +8368,24 @@ async def handle_focus_set_tier(request: web.Request) -> web.Response:
         proc   = state.get("proc")
         if proc is not None:
             try:
+                # 2.6.0-rc2.6 — mark this proc.kill() as intentional BEFORE
+                # killing so snap_loop's EOF branch can distinguish "user
+                # changed the tier" from "ffmpeg died on its own". Without
+                # this flag, an EOF arriving while hw_tried=True and
+                # frames=0 (typical during the 5-6s HW warmup window) gets
+                # misclassified as a HW failure: rc2.5 elapsed-time logs
+                # showed "hw EOF (rc=None, elapsed=2.2s) → sw" right after
+                # a tier change, the new tier launched in SW even though
+                # HW would have worked, and the spurious failure counted
+                # against the per-session HW skip budget. Mirrors the
+                # existing focus_leave_kill flag pattern.
+                state["tier_change_kill"] = True
                 proc.kill()
                 log.info(f"Focus [{camera_id}]: killed ffmpeg to apply manual tier change")
             except Exception as ex:
+                # Kill failed (proc already dead). Clear the flag so it
+                # doesn't linger and consume a real EOF later.
+                state.pop("tier_change_kill", None)
                 log.debug(f"Focus [{camera_id}]: ffmpeg kill failed (probably already dead): {ex}")
 
     return web.json_response({"status": "ok", "tier_idx": best_idx,

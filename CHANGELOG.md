@@ -1,4 +1,125 @@
-## 2.6.0-rc2.5
+## 2.6.0-rc2.6
+
+**One fix: tier-change kill mid-HW-warmup no longer misclassifies
+as a HW failure.** Regression exposed by rc2.5's elapsed-time
+diagnostics; would have shipped silent without that diagnostic.
+
+### The bug
+
+rc2.5 field-test log on the Lorex DVR ch2:
+
+```
+20:25:28 ffmpeg starting (codec=hevc, hw:hevc_drm, ...)
+20:25:30 Focus [ch2]: manual tier [21] profile[0] fps=10
+20:25:30 Focus [ch2]: killed ffmpeg to apply manual tier change
+20:25:30 hw EOF (rc=None, elapsed=2.2s) → sw    ← spurious
+20:25:30 ffmpeg starting (codec=hevc, sw, ...)  ← new tier in SW
+```
+
+The user changed the tier 2.2s after HW launched — before HW had
+finished warmup (typical warmup observed: 4.5-6.3s). The
+`proc.kill()` from `handle_focus_set_tier` produced an EOF on
+stdout that looked identical to ffmpeg dying on its own. snap_loop's
+EOF branch saw `hw_tried=True, frames=0` and entered the
+HW-EOF-fallback path: counted the failure against the per-session
+HW skip budget AND silently relaunched in SW.
+
+The new tier ended up running in SW even though HW would have
+worked. The user could not tell — the FPS/profile values were
+correct, just the decode path was wrong. Visible symptom was just
+"FPS feels low / CPU pegged" with no log line saying anything went
+wrong. rc2.5's `elapsed=X.Xs` field is what made this visible;
+real HW failures hit either the 10s timeout cap or die in under
+1s, so 2.2s right after a tier-change log line was the smoking
+gun.
+
+### The fix
+
+`handle_focus_set_tier` sets `state["tier_change_kill"] = True`
+right before `proc.kill()`. snap_loop's EOF branch checks this
+flag *first*, before the HW EOF fallback. If set:
+
+- Pop the flag (one-shot consume).
+- Log "ffmpeg killed by tier change after N frames (rc=R) —
+  outer loop will relaunch with new tier".
+- `break` out of the inner read loop.
+
+The outer restart loop then picks up the new tier from
+`_FOCUS_ADAPTIVE` and launches it through the normal `hw_label`
+selection path. HW decode gets a fresh attempt for the new tier,
+just like the first launch did.
+
+Mirrors the existing `focus_leave_kill` flag pattern — same
+mechanism, different intent: `focus_leave_kill` means "user left
+Enhanced View, snap_loop should exit entirely"; `tier_change_kill`
+means "tier changed, keep running with the new tier".
+
+### Defensive flag clearing
+
+If `proc.kill()` raises (because proc was already dead), the
+except branch pops the flag so it doesn't linger. Without that
+cleanup, a stale `tier_change_kill=True` could consume a
+later, unrelated EOF and log misleadingly.
+
+### Edge case: races
+
+If ffmpeg dies on its own at the exact same instant the user
+changes the tier, the flag is set but the EOF is from the
+natural death, not the kill. We'd log "killed by tier change"
+instead of the natural EOF warning. Slight misleading log line,
+no functional difference — outer loop relaunches either way.
+Acceptable.
+
+### What this doesn't fix
+
+The frames > 0 case of `focus_leave_kill` is handled correctly
+by the existing check below the HW EOF fallback. The frames == 0
+case of `focus_leave_kill` (focus-leave during HW warmup) is
+technically also broken — it would enter the HW EOF fallback,
+spuriously bump the session counter, then the SW relaunch's
+first-frame `_FOCUSED_CAMERA != camera_id` check would break
+out of the inner loop, and the outer focus_leave_kill consumer
+would pop the flag and return cleanly. User-visible result: a
+brief spurious SW launch attempt that immediately exits. Not
+moving this fix to rc2.6 because field-test logs don't show it
+firing in practice (users typically watch for some seconds
+before leaving, so frames > 0 by the time focus-leave kills
+ffmpeg). If a future log shows it, we'd add focus_leave_kill to
+the rc2.6 gate alongside tier_change_kill.
+
+### CFG_HW_DECODE gating
+
+Preserved. The flag-check fires before the HW EOF fallback
+regardless of HW state, so it works in both HW-on and HW-off
+modes. With HW off, the existing behavior was: tier change kill
+→ EOF → fall through to "ffmpeg EOF after N frames" log →
+break → outer relaunch with new tier. With rc2.6 + HW off, the
+tier_change_kill log fires instead of the EOF warning. Same
+net behavior, cleaner log.
+
+### Risks
+
+- **Outer-loop relaunch adds ~1s of latency** between tier
+  change and new tier launching (the zero_frame_streak backoff
+  starts at 1s). rc2.5 behavior was: in-loop SW relaunch
+  immediately. rc2.6: outer loop restart, 1s backoff, then HW
+  launch. Trade 1s of latency for HW decode on the new tier.
+  Win.
+- **If the flag set fails between flag-set and proc.kill()**
+  (unlikely — that's two adjacent statements), the flag would
+  linger and consume the next EOF. The kill exception handler
+  pops the flag defensively, but doesn't help if some other
+  exception interleaves. Worst case the next natural EOF gets
+  misattributed once. Same misleading-log situation as the
+  race case above.
+
+### Carried over from 2.6.0-rc2.5
+
+All three rc2.5 fixes (10s HW timeout, per-focus-session counter
+reset, time-to-first-frame diagnostic logging). All rc2.4 fixes.
+All rc2.3 fixes. All rc2.2 HW decode plumbing. All version pins.
+
+
 
 **Three fixes giving hevc_drm a fair shot at engaging.** The rc2.4
 field-test logs on two systems (Hikvision + Microseven on
