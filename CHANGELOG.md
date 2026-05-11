@@ -1,4 +1,73 @@
-## 2.6.0-rc3.0
+## 2.6.0-rc3.1
+
+**Item 1 (RTSP in card view) reverted per user request after rc3.0
+field test.** Items 2+3 (Fast Stream Start) and Item 4 (Locked
+Streams badge persistence) retained.
+
+### What was reverted (Item 1)
+
+- `_prefer_ffmpeg` gate restored to pre-rc3.0 rule:
+  `(native_res AND _has_rtsp) OR (_has_rtsp AND _rtsp_probe_ok)`.
+  Card view for cameras without rtsp_probe_ok (Lorex/Dahua DVR
+  channels via channel-enum, etc.) routes back to http_snap_loop.
+- Card-mode URL selection block removed — the rc3.0 logic that
+  picked sub-stream URL when CFG_MAIN_STREAM_CARDS=false is gone.
+- `out_vf` codec-dependent rules restored to pre-rc3.0 values:
+  4K HEVC → fps=4 / scale=480, 1080p HEVC → fps=8 / scale=640,
+  h264 → fps=10 / scale=640. Uniform fps=20 from rc3.0 reverted.
+- low_fps_mode replace target restored to
+  `fps={8 if w<3840 else 4}`.
+- `CFG_MAIN_STREAM_CARDS` global removed.
+- `main_stream_cards` option removed from config.yaml options +
+  schema, translations/en.yaml, run.sh export, and run.sh "Config:"
+  log line.
+
+### What was retained from rc3.0
+
+**Item 4 — Locked Streams badge persistence.**
+- Backend api_set_credentials parses `from_locked_streams_modal`
+  flag from request body; `locked_streams=[]` clear is conditional
+  on it.
+- Frontend submitLockedCreds tags the badge-modal POST with
+  `from_locked_streams_modal: true`. submitCreds (regular Login
+  button) leaves it absent.
+- Cards keep the 🔒 badge when user logs in via a non-badge entry
+  point.
+
+**Items 2+3 — Fast Stream Start.**
+- `CFG_FAST_STREAM_START` global + `fast_stream_start` config
+  option + translations + run.sh export retained.
+- `_hw_preheater` async helper retained.
+- `_kill_hw_preheater` cleanup helper retained.
+- snap_loop dual-proc launch path (SW for first frame, HW for
+  background warmup) retained.
+- Atomic swap logic in main read loop retained.
+- HW preheater teardown in tier-change and focus-leave paths
+  retained.
+
+### Rationale
+
+rc3.0 field test surfaced issues with Item 1's card-mode RTSP
+behavior. Without a log to diagnose precisely, the safe move was
+a surgical revert of just Item 1 — keep the architecturally-
+independent Items 2, 3, and 4 in place, restore card view to
+pre-rc3.0 behavior.
+
+### Carried over from 2.6.0-rc3.0
+
+Item 4 + Items 2+3 changes (see rc3.0 entry for full detail).
+
+### Carried over from 2.6.0-rc2.6
+
+The tier_change_kill flag gates the HW EOF fallback so intentional
+tier-change kills no longer misclassify as HW failures. rc3.0/rc3.1
+extends this by also tearing down the HW preheater on tier change.
+
+All rc2.5 fixes (10s HW timeout, per-focus-session counter reset,
+time-to-first-frame diagnostic). All rc2.4 fixes. All rc2.3 fixes.
+All rc2.2 HW decode plumbing. All version pins.
+
+
 
 **Four items, all interrelated.** Item 1 (RTSP in cards) lays
 architectural foundation for items 2-3 (Fast Stream Start), since
