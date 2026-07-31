@@ -1,0 +1,39 @@
+# AnyCam
+
+A Home Assistant addon (`local_camera_discovery`) that discovers cameras on a
+local network and presents them as a grid of live cards, with an Enhanced View
+for single-camera focus, hardware-accelerated decode, and PTZ control.
+
+## Repository layout
+
+```
+camera_discovery.py     Main application (single file, ~15k lines)
+config.yaml             Addon manifest and options schema
+run.sh                  Addon entrypoint; exports config as env vars
+Dockerfile              Addon image
+build.yaml              Base image selection
+translations/en.yaml    Option help text
+verify_release.py       Five-gate pre-packaging check
+CHANGELOG.md            Full release history
+
+docs/                   Plan documents, RTSP database, research
+docs/audits/            Audit report PDFs, one per release
+docs/legacy/            Pre-repository working documents
+archive/                Release zips for milestone versions
+```
+
+## Release process
+
+1. Confirm version number and scope before starting (see `CLAUDE.md`)
+2. Make changes
+3. `python verify_release.py` — all five gates must pass
+4. Stage under `camera_discovery-<version>/`, zip from the staging parent
+5. Produce an audit report PDF including a best-practices compliance section
+6. Tag, and create a Release if the version is a milestone
+
+## History note
+
+This repository was reconstructed from archived release zips in July 2026.
+Commits before that date are backdated to their original build timestamps.
+The window from 2.4.0-rc2.2 through 2.5.0-rc1.7 has no recoverable source;
+see `docs/gap-2.4.0-to-2.5.0/` for the audit reports covering it.

@@ -1,0 +1,6 @@
+Where I was right: for a camera that consistently returns 401 with the SAME realm across every Layer 1 path attempted, Layer 2 retrying the same paths via fresh sockets will get the same 401s. The realm and scheme don't change because the socket changed — auth is a server-side check on the credentials, not on the connection. This is high-confidence: I'd estimate 95%+ of cameras behave this way.
+Where I overstated "100% certain": I cannot rule out firmware quirks. Examples of edge cases where Layer 2 could hypothetically reveal something Layer 1 missed:
+
+Sub-stream paths that only respond on a fresh socket. Some cheap firmwares have buggy session state where the second DESCRIBE on a single socket returns garbage instead of 401, but a fresh socket per path returns clean 401-or-200. Layer 1's single-socket walk would skip these; Layer 2's fresh-socket-per-path would catch them.
+Servers that close the socket after first 401. A few firmwares (I've seen this on older Foscam clones) close the socket after one 401, which on Layer 1 would prematurely end the walk. Layer 2 would re-open and continue.
+Token-bucket rate limits that reset between sockets. Some cameras throttle requests-per-socket but not requests-per-IP — single-socket walks hit the throttle, multi-socket walks (with our 5s cooldown) don't.
