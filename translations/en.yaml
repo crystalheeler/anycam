@@ -51,6 +51,25 @@ configuration:
       atomically swaps in. Net result: feed visible immediately, full HW
       acceleration once warmup completes. Slight extra bandwidth/CPU for
       the few seconds of overlap.
+
+      2.6.1: this option now has no effect at 3840x2160 HEVC. Software
+      decode cannot produce a first frame before rpivid finishes warming
+      up at that resolution, so AnyCam suppresses the parallel decode and
+      logs the reason. It still applies below 4K and to h264 at any
+      resolution.
+  low_latency:
+    name: Low Latency Probe
+    description: >-
+      Default OFF. AnyCam always passes -fflags +nobuffer and -flags
+      low_delay to ffmpeg, which is safe on every camera. This option adds
+      three further flags that cut the time before the first frame:
+      -probesize 32, -analyzeduration 0 and -reorder_queue_size 1. They
+      carry real risk. A small probe size can stop ffmpeg identifying the
+      codec on cameras that describe themselves slowly, and a 1-packet
+      reorder queue removes the RTSP jitter buffer, which trades picture
+      artifacts for latency on a lossy link. Turn this ON to test, and
+      turn it OFF again if any camera fails to start or shows new
+      artifacts.
   recordings_path:
     name: Recordings Path
     description: >-

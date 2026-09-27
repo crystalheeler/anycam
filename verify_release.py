@@ -15,6 +15,18 @@ Exit 1 = one or more checks failed (details printed).
 """
 import ast, re, sys, zipfile, pathlib
 
+# 2.6.1: force UTF-8 on stdout. The check marks are U+2713 / U+2717, which a
+# Windows console cannot encode in its cp1252 default, so every ok() call
+# raised UnicodeEncodeError and the gate could not run outside Linux. The
+# source reads below pass encoding="utf-8" for the same reason — Python picks
+# the locale encoding when the argument is omitted, and camera_discovery.py
+# holds non-ASCII bytes.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):
+    pass   # pre-3.7 or a stream that does not support reconfigure
+
 FAIL = []
 
 def fail(msg: str) -> None:
@@ -28,7 +40,7 @@ src_path = pathlib.Path(__file__).parent / "camera_discovery.py"
 cfg_path = pathlib.Path(__file__).parent / "config.yaml"
 cl_path  = pathlib.Path(__file__).parent / "CHANGELOG.md"
 
-src   = src_path.read_text()
+src   = src_path.read_text(encoding="utf-8")
 lines = src.splitlines()
 
 # ── 1. Syntax ─────────────────────────────────────────────────────────────────
@@ -322,7 +334,8 @@ if audit_ok:
 # ── 4. Version consistency ────────────────────────────────────────────────────
 print("\n[4/5] Version consistency")
 cv_match = re.search(r'CURRENT_VERSION\s*=\s*"(.+?)"', src)
-cfg_match = re.search(r'^version:\s*"(.+?)"', cfg_path.read_text(), re.MULTILINE)
+_cfg_text = cfg_path.read_text(encoding="utf-8")
+cfg_match = re.search(r'^version:\s*"(.+?)"', _cfg_text, re.MULTILINE)
 if not cv_match:
     fail("CURRENT_VERSION not found in camera_discovery.py")
 elif not cfg_match:
@@ -339,7 +352,7 @@ else:
 print("\n[5/5] Changelog check")
 if cv_match:
     version = cv_match.group(1)
-    cl_text = cl_path.read_text()
+    cl_text = cl_path.read_text(encoding="utf-8")
     if cl_text.startswith(f"## {version}"):
         ok(f"CHANGELOG.md top entry matches {version}")
     else:
