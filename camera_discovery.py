@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.6.0"  # must match config.yaml
+CURRENT_VERSION = "2.6.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -130,6 +130,14 @@ CFG_ADAPTIVE_QUALITY     = os.environ.get("ADAPTIVE_QUALITY","false").lower() ==
 # HW. Without this, entering Enhanced View leaves the frozen card
 # thumbnail visible for the full 5-10s of HW warmup.
 CFG_FAST_STREAM_START    = os.environ.get("FAST_STREAM_START", "false").lower() == "true"
+# 2.6.1 — when ON, _launch_snap adds the aggressive probe-reduction flags
+# (-probesize 32, -analyzeduration 0, -reorder_queue_size 1) on top of the
+# unconditional -fflags +nobuffer and -flags low_delay. These three cut
+# connect latency but carry real risk: a tiny probesize can defeat codec
+# detection on cameras that describe themselves slowly, and a 1-packet
+# reorder queue removes the RTSP jitter buffer. Off by default until the
+# Pi 4 / HAOS target has a field test.
+CFG_LOW_LATENCY          = os.environ.get("LOW_LATENCY", "false").lower() == "true"
 CFG_RECORDINGS           = os.environ.get("RECORDINGS_PATH", "/media/anycam")
 CFG_MOTION_SENS          = int(os.environ.get("MOTION_SENSITIVITY",       "15"))
 CFG_MOTION_COOL          = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
@@ -6438,7 +6446,19 @@ async def _rerun_onvif_auth(camera_id: str, camera: dict,
     xaddrs   = camera.get("xaddrs", "")
     media_url = _onvif_media_url(ip, port, xaddrs)
 
+    # 2.6.1 — Tier 1 item 4: honour the brand cooldown on the ONVIF SOAP path.
+    # _onvif_soap is synchronous and opens up to two TCP connections per call
+    # (SOAP 1.2, then the 1.1 fallback for cameras that answer 400). It never
+    # consulted the throttle, so a re-auth against a rate-limited brand fired
+    # 1 + N calls back to back — N being the profile count — and every one of
+    # them landed inside the cooldown window. The wait belongs here, in the
+    # async caller, because _throttle_wait_if_needed cannot be awaited from
+    # inside the sync SOAP helper.
+    _onvif_throttle_s = _brand_throttle_seconds(camera)
+
     log.info(f"  [{camera_id}] ONVIF re-auth: media_url={media_url}")
+    await _throttle_wait_if_needed(ip, _onvif_throttle_s,
+                                   f"onvif re-auth GetProfiles {camera_id}")
     profiles = await loop.run_in_executor(
         _THREAD_POOL, onvif_get_profiles, media_url, username, password)
     log.info(f"  [{camera_id}] ONVIF profiles found: {len(profiles)} "
@@ -6450,6 +6470,9 @@ async def _rerun_onvif_auth(camera_id: str, camera: dict,
     enc_creds = encrypt_creds(username, password)
     stream_candidates = []
     for prof in profiles:
+        # One GetStreamUri per profile — each one needs its own cooldown wait.
+        await _throttle_wait_if_needed(ip, _onvif_throttle_s,
+                                       f"onvif re-auth GetStreamUri {camera_id}")
         stream_url = await loop.run_in_executor(
             _THREAD_POOL, onvif_get_stream_uri, media_url, prof["token"], username, password)
         if not stream_url:
@@ -7127,14 +7150,33 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         # packets instead of failing the entire decode pipeline. Cleared
         # automatically after 10 consecutive ≥50-frame runs (see below).
         # MUST come before -i (it's an input option).
-        fflags_args = (["-fflags", "+discardcorrupt"]
-                       if cam_for_transport.get("needs_fflags_discardcorrupt")
-                       else [])
+        # 2.6.1 — Tier 1 item 1: low-latency demuxer and decoder flags.
+        # +nobuffer stops the demuxer buffering the input before it emits
+        # packets. low_delay tells the decoder not to hold frames for
+        # reordering. Both are standard for live RTSP and neither affects
+        # stream detection, so both are unconditional. They merge with the
+        # existing +discardcorrupt rather than replacing it — ffmpeg takes one
+        # -fflags value, so a second flag must be appended to the same string.
+        _fflags = "+nobuffer"
+        if cam_for_transport.get("needs_fflags_discardcorrupt"):
+            _fflags += "+discardcorrupt"
+        fflags_args = ["-fflags", _fflags]
+
+        # The probe-reduction flags stay behind CFG_LOW_LATENCY. -probesize 32
+        # and -analyzeduration 0 can make ffmpeg give up before it identifies
+        # the codec, and -reorder_queue_size 1 drops the RTSP jitter buffer to
+        # a single packet, which trades artifacts for latency on a lossy path.
+        lowlat_args = ["-flags", "low_delay"]
+        if CFG_LOW_LATENCY:
+            lowlat_args += ["-probesize", "32",
+                            "-analyzeduration", "0",
+                            "-reorder_queue_size", "1"]
 
         return await asyncio.create_subprocess_exec(
             "ffmpeg", "-nostdin", "-loglevel", "warning",
             *transport_args,
             *fflags_args,
+            *lowlat_args,
             "-err_detect", "ignore_err",   # tolerate partial HEVC decode errors
             *skip_args,
             *hw_args,
@@ -7246,8 +7288,34 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # Clean up any preheater state from a prior outer-loop iteration
             # (e.g. previous tier change left a HW proc + task around).
             _kill_hw_preheater(state)
+            # 2.6.1 — Tier 1 item 3: gate Fast Stream Start by resolution and
+            # codec. At 3840x2160 HEVC the SW proc cannot produce a first frame
+            # before rpivid finishes warming up (2.5-7s), so the parallel
+            # decode spends CPU on frames that never render, and the second
+            # RTSP session draws `RTP bad cseq` warnings. Below 4K, and for
+            # h264 at any resolution, the dual-proc path still wins.
+            # Width comes from the ladder's active profile, not from the camera
+            # record, because a step-down may already have moved off 4K.
+            _fs_w = stream_w
+            if native_res:
+                _fs_ada    = _FOCUS_ADAPTIVE.get(camera_id, {})
+                _fs_ladder = _fs_ada.get("ladder") or []
+                if _fs_ladder:
+                    _fs_ti = min(_fs_ada.get("tier_idx", 0),
+                                 len(_fs_ladder) - 1)
+                    _fs_pi, _ = _fs_ladder[_fs_ti]
+                    _fs_profs = camera.get("stream_profiles") or []
+                    if 0 <= _fs_pi < len(_fs_profs):
+                        _fs_prof = _fs_profs[_fs_pi]
+                        _fs_w = _fs_prof.get("stream_width") or stream_w
+            _fs_blocked = bool(is_hevc and (_fs_w or 0) >= 3840)
             _fast_start_active = (CFG_FAST_STREAM_START and native_res
-                                  and bool(hw_label))
+                                  and bool(hw_label)
+                                  and not _fs_blocked)
+            if _fs_blocked and CFG_FAST_STREAM_START and native_res and hw_label:
+                log.info(f"SNAP [{camera_id}]: fast_stream_start suppressed — "
+                         f"width={_fs_w} HEVC is at or above the 4K gate; "
+                         f"software decode cannot beat rpivid warmup here")
             if _fast_start_active:
                 # Launch SW first (it's the active proc; main loop reads it).
                 # Launch HW second (preheater task watches it for first frame).

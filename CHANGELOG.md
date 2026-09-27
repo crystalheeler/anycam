@@ -1,3 +1,93 @@
+## 2.6.1
+
+Tier 1 of the live-feed quality work. Three of the four planned items
+landed. One item is deferred with cause. This release also repairs the
+release gate, which could not run on Windows.
+
+### Item 1 — low-latency ffmpeg flags
+
+`_launch_snap` now always passes `-fflags +nobuffer` and `-flags
+low_delay`. Both are standard for live RTSP. Neither affects stream
+detection.
+
+`+nobuffer` merges with the existing `+discardcorrupt` instead of
+replacing it. ffmpeg accepts one `-fflags` value, so the second flag must
+join the same string. A separate `-fflags` argument would have silently
+dropped `+discardcorrupt` on every camera that needs it.
+
+The aggressive flags sit behind a new `low_latency` option, default OFF:
+`-probesize 32`, `-analyzeduration 0`, `-reorder_queue_size 1`. A small
+probe size can stop ffmpeg identifying the codec. A 1-packet reorder queue
+removes the RTSP jitter buffer. Both need a field test on the Pi 4 target
+before they become default.
+
+### Item 3 — Fast Stream Start now gated by resolution and codec
+
+`fast_stream_start` no longer applies at 3840x2160 HEVC. Software decode
+cannot produce a first frame before rpivid finishes warming up at that
+resolution, so the parallel decode spent CPU on frames that never rendered
+and opened a second RTSP session. AnyCam now suppresses the dual-proc path
+and logs the reason.
+
+The gate reads width from the adaptive ladder's active profile, not from
+the camera record. A step-down may already have moved the session off 4K,
+in which case the dual-proc path is still correct.
+
+The option still applies below 4K and to h264 at any resolution.
+
+### Item 4 — ONVIF SOAP calls honour the brand cooldown
+
+`_rerun_onvif_auth` now awaits `_throttle_wait_if_needed` before
+`GetProfiles` and before each per-profile `GetStreamUri`.
+
+`_onvif_soap` is synchronous and opens up to two TCP connections per call,
+because cameras that answer HTTP 400 to SOAP 1.2 get a SOAP 1.1 retry. The
+function never consulted the throttle. A re-auth against a rate-limited
+brand fired 1 + N calls back to back, and every one landed inside the
+cooldown window. The wait goes in the async caller, because the sync helper
+cannot await.
+
+This closes the latent issue recorded in CLAUDE.md.
+
+### Release gate — Windows portability
+
+`verify_release.py` could not run on Windows. Two separate faults:
+
+- Three `read_text()` calls omitted `encoding`, so Python used the cp1252
+  locale default and raised `UnicodeDecodeError` on `camera_discovery.py`.
+- `ok()` and `fail()` print U+2713 and U+2717, which cp1252 cannot encode,
+  so stdout raised `UnicodeEncodeError`.
+
+Both are fixed. The gate now runs on Windows and Linux with no environment
+override.
+
+### Item 2 — deferred, not implemented
+
+The plan called for replacing per-frame HTTP polling with one persistent
+`multipart/x-mixed-replace` response. This is deferred.
+
+`handle_snapshot` documents that per-frame polling was a deliberate choice,
+because Home Assistant ingress nginx terminates long-lived multipart
+streams early. The plan contradicted a recorded prior result. Shipping it
+would have risked a regression on the exact path that works today.
+
+`ingress_stream: true` is set, and Home Assistant documents ingress support
+for streaming and WebSockets, so the earlier failure may predate that flag.
+The next step is a throwaway test against ingress, not a rewrite of the
+working path.
+
+### Not changed
+
+- Card view still polls. See Item 2.
+- Enhanced View still starts at the highest profile. Defaulting it to the
+  sub-stream would cut the quality this work exists to raise. The adaptive
+  ladder already steps down when a stream proves unstable.
+- `skip_nonref` is unchanged and still defaults to OFF. ffmpeg still
+  rejects `nonref` as a `skip_frame` value.
+- JPEG quality is unchanged at `q:v 2` in focus mode. Raising the number
+  would cut bytes per frame, but it lowers picture quality, so it needs a
+  decision first.
+
 ## 2.6.0
 
 First stable release of the 2.6.0 line. This release promotes

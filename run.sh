@@ -26,6 +26,7 @@ export STAGGER_POLLING=$(bashio::config 'stagger_polling')
 export HW_DECODE=$(bashio::config 'hw_decode')
 export ADAPTIVE_QUALITY=$(bashio::config 'adaptive_quality')
 export FAST_STREAM_START=$(bashio::config 'fast_stream_start')
+export LOW_LATENCY=$(bashio::config 'low_latency')
 export UNRESTRICTED_STORAGE_BROWSER=$(bashio::config 'unrestricted_storage_browser')
 
 # Log-level toggles
@@ -47,7 +48,7 @@ bashio::log.info "Ingress path: ${INGRESS_PATH}"
 # in the addon Configuration tab differs from what shows up here, the
 # pipeline is broken — investigate run.sh first.
 bashio::log.info "Config: hw_decode=${HW_DECODE} low_fps_mode=${LOW_FPS_MODE} skip_nonref=${SKIP_NONREF} limit_threads=${LIMIT_THREADS} stagger_polling=${STAGGER_POLLING} adaptive_quality=${ADAPTIVE_QUALITY}"
-bashio::log.info "Config: fast_stream_start=${FAST_STREAM_START}"
+bashio::log.info "Config: fast_stream_start=${FAST_STREAM_START} low_latency=${LOW_LATENCY}"
 bashio::log.info "Config: recordings_path=${RECORDINGS_PATH} motion_sensitivity=${MOTION_SENSITIVITY} motion_cooldown=${MOTION_COOLDOWN_SECS}s motion_padding=${MOTION_CLIP_PADDING_SECS}s"
 bashio::log.info "Config: log_debug=${LOG_DEBUG} log_info=${LOG_INFO} log_warning=${LOG_WARNING} log_error=${LOG_ERROR} unrestricted_storage_browser=${UNRESTRICTED_STORAGE_BROWSER}"
 
