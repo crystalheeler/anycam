@@ -1,3 +1,71 @@
+## 2.6.2
+
+Build fix. 2.6.1 could not be installed at all. No functional change to
+AnyCam itself: the only edited files are the Dockerfile and the two
+version strings.
+
+### What failed
+
+The Docker image build stopped at Dockerfile step 3 with:
+
+```
+E: Version '8:5.1.8-0+deb12u1+rpt1' for 'ffmpeg' was not found
+```
+
+The pin did not rot. The archive moved. Debian and the Raspberry Pi
+archive each keep only the current version of a package, so the 5.1.9
+security update deleted the 5.1.8 version this Dockerfile pinned to.
+
+Both branches were stale by the same point release:
+
+| Branch | Pinned | Archive holds now |
+|---|---|---|
+| aarch64 (rpios) | `8:5.1.8-0+deb12u1+rpt1` | `8:5.1.9-0+deb12u1+rpt1` |
+| amd64 (Debian) | `7:5.1.8-0+deb12u1` | `7:5.1.9-0+deb12u1` |
+
+The amd64 pin would have failed on its next build for the same reason.
+
+### Fix
+
+ffmpeg is now installed with no version constraint. It is the single
+exception to the pin-everything rule set in 2.6.0-rc2.3. Do not restore
+an exact ffmpeg pin: an exact pin against these archives has a shelf
+life measured in months, and the failure lands on the user at install
+time, not on us at build time.
+
+ffmpeg is still constrained by source. The apt preferences file written
+in Dockerfile step 1 gives ffmpeg and every `libav*`, `libsw*` and
+`libpostproc*` sibling Pin-Priority 990 against
+`o=Raspberry Pi Foundation`, and everything else from that origin
+Pin-Priority 1. On aarch64 that forces the rpios build, because 990
+beats Debian's default of 500, and the rpios build carries the Pi
+patches needed for rpivid. On amd64 the rpios source is never
+registered, so ffmpeg resolves to Debian. The version now floats inside
+the bookworm suite, which bounds it to the 5.1.x series.
+
+Every other package keeps its exact pin. Those come from Debian
+bookworm, which is frozen at oldstable, so they do not rotate the same
+way.
+
+### Build logs now record the ffmpeg version
+
+Because the version floats, the Dockerfile echoes what apt actually
+resolved:
+
+```
+==> ffmpeg resolved to: <version>
+```
+
+Check that line first when diagnosing any decode behaviour that differs
+between builds.
+
+### Known gap, not fixed here
+
+No release gate inspects the Dockerfile. `verify_release.py` checks
+syntax, contracts, the best-practice audit, version consistency and the
+changelog. None of them would have caught a stale apt pin, which is why
+2.6.1 passed all five gates and still could not build.
+
 ## 2.6.1
 
 Tier 1 of the live-feed quality work. Three of the four planned items
