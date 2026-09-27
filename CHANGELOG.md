@@ -1,3 +1,36 @@
+## 2.6.0
+
+First stable release of the 2.6.0 line. This release promotes
+`2.6.0-rc3.1` to final. The source is identical to rc3.1 except for the
+version strings in `camera_discovery.py` and `config.yaml`.
+
+### Why this build
+
+rc3.1 completed field testing on the Raspberry Pi 4 / HAOS target.
+Items 2 and 3 (Fast Stream Start) and Item 4 (Locked Streams badge
+persistence) stayed in. Item 1 (RTSP in card view) was reverted after
+the rc3.0 field test.
+
+### Carried forward without change
+
+Two options remain opt-in. Both default to `false`, so this release does
+not enable either one.
+
+- `skip_nonref` — ffmpeg rejects `nonref` as a `skip_frame` value.
+  Enabling this option stops every h264 launch.
+- `fast_stream_start` — at 3840x2160 HEVC, software decode cannot beat
+  rpivid hardware warmup. The option spends CPU on a decode that never
+  renders. It also opens a second RTSP session.
+
+Both options are scheduled for 2.6.1.
+
+### Known limitation
+
+Live feed quality at 3840x2160 HEVC is limited by the pipeline, not by
+the network. The pipeline decodes each stream on the Pi, re-encodes it to
+MJPEG, then sends one JPEG per HTTP request. 2.6.1 addresses the low-risk
+part of this. A remux-only media path is the full fix.
+
 ## 2.6.0-rc3.1
 
 **Item 1 (RTSP in card view) reverted per user request after rc3.0
