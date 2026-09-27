@@ -4480,8 +4480,8 @@ lockout, Microseven Hipcam with rate_limit_per_ip_tcp) the per-port
 probe latency stacks up past `--host-timeout`'s 30s budget. When the
 budget expires nmap drops the ENTIRE host including already-confirmed
 open ports — they never reach our parser. This was the root cause of
-the rc2.1 "Focused scan: 0 host(s) responded" regression on the 172
-network and the partial-host-coverage on the test system B.
+the rc2.1 "Focused scan: 0 host(s) responded" regression on test system A
+ and the partial-host-coverage on the test system B.
 
 What rc2.2 keeps without `-sV`:
   • Open-port list (the actual goal)
@@ -4730,8 +4730,8 @@ and the rc2.1 audit report.
 
 Re-run scan on:
 - test system B (Lorex DVR + an IoT device):
-  expect Lorex card to show as "Lorex / Dahua DVR-NVR Family", Litter
-  Robot to reappear in scan results, Lorex Layer 2 to skip <100ms.
+  expect Lorex card to show as "Lorex / Dahua DVR-NVR Family", the
+  IoT device to reappear in scan results, Lorex Layer 2 to skip <100ms.
 - test system A (Microseven + Hikvision): submit wrong creds to
   the Microseven, confirm form remains visible with error text instead of
   collapsing.
