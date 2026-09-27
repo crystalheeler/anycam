@@ -1,0 +1,36 @@
+# Line-ending and binary policy.
+#
+# Why this file exists: this repo is edited on Windows, where git is
+# configured with core.autocrlf=true, but every file ships to a Linux
+# container. Without the rules below, a fresh clone or any `git checkout`
+# on Windows rewrites run.sh with CRLF line endings. The release zip is
+# built from the working tree, so that CRLF would reach HAOS, and a
+# `#!/usr/bin/with-contenv bashio` shebang followed by CR does not execute.
+# Nothing was corrupted when this file was added; the trap had simply not
+# been triggered yet.
+
+# Default: let git detect, and normalise text to LF in the repository.
+*               text=auto eol=lf
+
+# Everything that runs inside the container must keep LF on checkout.
+*.sh            text eol=lf
+*.py            text eol=lf
+*.yaml          text eol=lf
+*.yml           text eol=lf
+Dockerfile      text eol=lf
+
+# Documentation. LF keeps diffs clean across platforms.
+*.md            text eol=lf
+
+# Binary artifacts. Never apply line-ending conversion or text diffing to
+# these. The audit reports and the archived release zips are the records
+# CLAUDE.md rule 1 and the repository notes depend on.
+*.pdf           binary
+*.zip           binary
+*.docx          binary
+*.xlsx          binary
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
