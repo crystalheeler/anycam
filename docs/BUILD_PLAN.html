@@ -156,7 +156,7 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <p class="eyebrow">AnyCam · Home Assistant add-on</p>
 <h1>AnyCam Build Plan</h1>
 <p class="meta">the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.</p>
-<p class="meta"><span class="mono">28 September 2026; updated 29 September 2026. Current release: 2.6.3, published. · 43 open · 26 done</span></p>
+<p class="meta"><span class="mono">28 September 2026; updated 29 September 2026. Current release: 2.6.4, published. · 44 open · 27 done</span></p>
 </header>
 <nav class="bars" aria-label="Open items per group">
 <a class="bar g-a" style="--n:1" href="#group-a" title="Field tests: 1 open"><b>A · 1</b><span>Field tests</span></a>
@@ -164,19 +164,20 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <a class="bar g-c" style="--n:12" href="#group-c" title="Video and recording: 12 open"><b>C · 12</b><span>Video and recording</span></a>
 <a class="bar g-d" style="--n:3" href="#group-d" title="Discovery and device support: 3 open"><b>D · 3</b><span>Discovery and device support</span></a>
 <a class="bar g-e" style="--n:7" href="#group-e" title="Code health: 7 open"><b>E · 7</b><span>Code health</span></a>
-<a class="bar g-f" style="--n:6" href="#group-f" title="Release engineering: 6 open"><b>F · 6</b><span>Release engineering</span></a>
+<a class="bar g-f" style="--n:7" href="#group-f" title="Release engineering: 7 open"><b>F · 7</b><span>Release engineering</span></a>
 </nav><p class="bars-cap">Each bar is one group; its width is the number of open items.</p>
 <div class="filters" role="group" aria-label="Filter by status">
-<button type="button" class="chip" data-filter="all" aria-pressed="true">All <span class="n">43</span></button>
-<button type="button" class="chip st-You" data-filter="You" aria-pressed="false"><span class="dot"></span>Waiting on you <span class="n">2</span></button>
+<button type="button" class="chip" data-filter="all" aria-pressed="true">All <span class="n">44</span></button>
+<button type="button" class="chip st-You" data-filter="You" aria-pressed="false"><span class="dot"></span>Waiting on you <span class="n">3</span></button>
 <button type="button" class="chip st-Logs" data-filter="Logs" aria-pressed="false"><span class="dot"></span>Logs first <span class="n">3</span></button>
 <button type="button" class="chip st-Discuss" data-filter="Discuss" aria-pressed="false"><span class="dot"></span>Discuss first <span class="n">4</span></button>
-<button type="button" class="chip st-Ready" data-filter="Ready" aria-pressed="false"><span class="dot"></span>Ready to build <span class="n">19</span></button>
-<button type="button" class="chip st-Blocked" data-filter="Blocked" aria-pressed="false"><span class="dot"></span>Blocked <span class="n">4</span></button>
+<button type="button" class="chip st-Ready" data-filter="Ready" aria-pressed="false"><span class="dot"></span>Ready to build <span class="n">20</span></button>
+<button type="button" class="chip st-Blocked" data-filter="Blocked" aria-pressed="false"><span class="dot"></span>Blocked <span class="n">3</span></button>
 <button type="button" class="chip st-Later" data-filter="Later" aria-pressed="false"><span class="dot"></span>Later <span class="n">11</span></button>
 </div>
 <div class="top" data-all-only>
 <div class="panel you"><h2>Waiting on you</h2><ul class="you-list">
+<li class="g-a"><span class="id">A12</span><span class="t"><a href="#A12">Install 2.6.4 on both systems</a></span><span class="x">Check that Live View is gone from the Configuration tab and Enhanced View still opens live in Chrome. Expect at most one harmless Supervisor warning: Option 'go2rtc_live_view' does not exist in the schema</span></li>
 <li class="g-b"><span class="id">B6</span><span class="t"><a href="#B6">The Microseven is stuck in its rate-limit lockout</a></span><span class="x">Power-cycle the camera. If RTSP comes back and stays, check the log for connection resets while re-entering its credentials. If it locks up again, something is still hitting it too often: send the log from the test system A (rule 2)</span></li>
 <li class="g-f"><span class="id">F6</span><span class="t"><a href="#F6">CLAUDE.md is out of date</a></span><span class="x">CrystalHeeler to say whether Part 6 was lost or never written; then refresh both lists</span></li>
 </ul></div>
@@ -184,15 +185,15 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <li><span><strong>The slow-starting H.264 camera</strong> (B13) and <strong>the motion recording that never stops</strong> (B1). Logs first for both.</span></li>
 <li><span><strong>Missing cameras</strong> (B2). Logs first.</span></li>
 <li><span><strong>The Microseven lockout</strong> (B6): power-cycle it, then logs if it locks up again.</span></li>
-<li><span><strong>The small correctness bugs</strong>: B3, B4, B5, B12, B14.</span></li>
-<li><span><strong>Live View on by default</strong> (A3), once B13 and C10 are fixed. Then <strong>the automatic-behaviour discussion</strong> (C11, C3) and <strong>live cards</strong> (C1).</span></li>
+<li><span><strong>The small correctness bugs</strong>: B3, B4, B5, B12, B14, and C10's plain message for Firefox, which matters more now that live view cannot be switched off.</span></li>
+<li><span><strong>The automatic-behaviour discussion</strong> (C11, C3), then <strong>live cards</strong> (C1).</span></li>
 <li><span><strong>Tests into the repo</strong> (E7), then <strong>the module split</strong> (E1). The tests are the safety net the split needs.</span></li>
 </ol>
 <p class="order-note">Hardware decode (B11) is parked for later, at CrystalHeeler's request.</p>
 </div></div>
 <section class="group g-a" id="group-a">
 <div class="ghead"><span class="gl">A</span><h2>Field tests</h2><span class="gcount">1 open</span></div><div class="cards">
-<article class="card" id="A3" data-status="Blocked"><div class="ctop"><span class="id">A3</span><span class="pill st-Blocked">Blocked</span></div><h3>Turn Live View on by default</h3><dl><dt>Why</dt><dd>Proven in the field on 2026-09-29: both systems, 10+ minutes through Home Assistant, no freezes. Two things would still make default-on worse for some cameras: a slow-starting stream gives up after 12 s with a red error (B13), and Firefox shows a red error on every H.265 camera (C10)</dd><dt>Next step</dt><dd>Blocked on B13 and C10</dd></dl></article>
+<article class="card" id="A12" data-status="You"><div class="ctop"><span class="id">A12</span><span class="pill st-You">Waiting on you</span></div><h3>Install 2.6.4 on both systems</h3><dl><dt>Why</dt><dd>2.6.4 removes the Live View option and makes live view always on</dd><dt>Next step</dt><dd>Check that Live View is gone from the Configuration tab and Enhanced View still opens live in Chrome. Expect at most one harmless Supervisor warning: Option 'go2rtc_live_view' does not exist in the schema</dd></dl></article>
 </div></section>
 <section class="group g-b" id="group-b">
 <div class="ghead"><span class="gl">B</span><h2>Bugs</h2><span class="gcount">14 open</span></div><div class="cards">
@@ -213,7 +214,7 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 </div></section>
 <section class="group g-c" id="group-c">
 <div class="ghead"><span class="gl">C</span><h2>Video and recording</h2><span class="gcount">12 open</span></div><div class="cards">
-<article class="card" id="C11" data-status="Discuss"><div class="ctop"><span class="id">C11</span><span class="pill st-Discuss">Discuss first</span><span class="prio">Priority</span></div><h3>Replace most or all of the option toggles with automatic behaviour</h3><dl><dt>Why</dt><dd>CrystalHeeler, 2026-09-28. Nine toggles today, several broken or no longer relevant: Skip Non-Reference Frames never worked (B3), Fast Stream Start does nothing at 4K, and Live View makes several decode options irrelevant for the camera being watched. Low Latency Probe is the counter-example: it measurably helps the slow-starting H.264 camera (B13), so CrystalHeeler is keeping it for now. It is a candidate to switch on automatically for streams that start slowly</dd><dt>Next step</dt><dd>Separate discussion. For each toggle: remove it, make it automatic, or keep it. Pairs with C3</dd></dl></article>
+<article class="card" id="C11" data-status="Discuss"><div class="ctop"><span class="id">C11</span><span class="pill st-Discuss">Discuss first</span><span class="prio">Priority</span></div><h3>Replace most or all of the option toggles with automatic behaviour</h3><dl><dt>Why</dt><dd>CrystalHeeler, 2026-09-28. Eight toggles since 2.6.4 removed Live View, several broken or no longer relevant: Skip Non-Reference Frames never worked (B3), Fast Stream Start does nothing at 4K, and Live View makes several decode options irrelevant for the camera being watched. Low Latency Probe is the counter-example: it measurably helps the slow-starting H.264 camera (B13), so CrystalHeeler is keeping it for now. It is a candidate to switch on automatically for streams that start slowly</dd><dt>Next step</dt><dd>Separate discussion. For each toggle: remove it, make it automatic, or keep it. Pairs with C3</dd></dl></article>
 <article class="card" id="C3" data-status="Discuss"><div class="ctop"><span class="id">C3</span><span class="pill st-Discuss">Discuss first</span></div><h3>Automatic quality, and retiring the FPS control</h3><dl><dt>Why</dt><dd>CLAUDE.md: the Enhanced View step-down redesign "requires full discussion before any coding." Correction to the 2026-09-26 research: WebRTC congestion control cannot adjust a stream that go2rtc passes through unchanged</dd><dt>Next step</dt><dd>In live view, automatic quality means switching between the camera's own streams (main to sub) when playback stalls. Discuss before coding</dd></dl></article>
 <article class="card" id="C1" data-status="Blocked"><div class="ctop"><span class="id">C1</span><span class="pill st-Blocked">Blocked</span></div><h3>Live video in the camera cards</h3><dl><dt>Why</dt><dd>CrystalHeeler approved 2026-09-28. Motion detection works, so it no longer blocks this</dd><dt>Next step</dt><dd>Blocked on C2. Use each camera's sub-stream: many live 4K H.265 streams would overload the viewing device. The Hikvision sub-stream is MJPEG, so that card stays on snapshots</dd></dl></article>
 <article class="card" id="C2" data-status="Ready"><div class="ctop"><span class="id">C2</span><span class="pill st-Ready">Ready to build</span></div><h3>Motion detection that does not depend on snapshot polling</h3><dl><dt>Why</dt><dd>Motion detection runs inside the thumbnail loop, which stops 30 s after the last snapshot request. Live cards would stop those requests. Related to B1, where the same loop stops recordings</dd><dt>Next step</dt><dd>Keep an armed camera's loop running whether or not anyone is watching</dd></dl></article>
@@ -243,16 +244,18 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <article class="card" id="E5" data-status="Later"><div class="ctop"><span class="id">E5</span><span class="pill st-Later">Later</span></div><h3>Complete type hints</h3><dl><dt>Why</dt><dd>2.0.7 list</dd><dt>Next step</dt><dd>Do it alongside E1</dd></dl></article>
 </div></section>
 <section class="group g-f" id="group-f">
-<div class="ghead"><span class="gl">F</span><h2>Release engineering</h2><span class="gcount">6 open</span></div><div class="cards">
+<div class="ghead"><span class="gl">F</span><h2>Release engineering</h2><span class="gcount">7 open</span></div><div class="cards">
 <article class="card" id="F6" data-status="You"><div class="ctop"><span class="id">F6</span><span class="pill st-You">Waiting on you</span></div><h3>CLAUDE.md is out of date</h3><dl><dt>Why</dt><dd>Its queued-work and open-issue lists include items that have shipped (see Done). It describes a Part 6 of the best-practices document that does not exist</dd><dt>Next step</dt><dd>CrystalHeeler to say whether Part 6 was lost or never written; then refresh both lists</dd></dl></article>
+<article class="card" id="F7" data-status="Ready"><div class="ctop"><span class="id">F7</span><span class="pill st-Ready">Ready to build</span></div><h3>A release check that run.sh and config.yaml agree</h3><dl><dt>Why</dt><dd>2.6.4 audit. run.sh passes each setting to the program; for a setting missing from config.yaml, bashio returns the text null, which the code reads as off. Removing the Live View option nearly shipped exactly that. Checked by hand in 2.6.4</dd><dt>Next step</dt><dd>Fail the release gate when run.sh reads a setting config.yaml does not define, or config.yaml defines one run.sh never reads</dd></dl></article>
 <article class="card" id="F1" data-status="Ready"><div class="ctop"><span class="id">F1</span><span class="pill st-Ready">Ready to build</span></div><h3>A release check for the Dockerfile</h3><dl><dt>Why</dt><dd>2.6.1 passed every check and still could not build</dd><dt>Next step</dt><dd>Check each pinned package version against its archive at release time</dd></dl></article>
 <article class="card" id="F2" data-status="Ready"><div class="ctop"><span class="id">F2</span><span class="pill st-Ready">Ready to build</span></div><h3>The blocking-I/O check misses some calls</h3><dl><dt>Why</dt><dd>Found by hand in 2.6.3</dd><dt>Next step</dt><dd>Extend it beyond <code>open()</code> to <code>read_bytes</code>, <code>read_text</code> and the write equivalents</dd></dl></article>
 <article class="card" id="F3" data-status="Ready"><div class="ctop"><span class="id">F3</span><span class="pill st-Ready">Ready to build</span></div><h3><code>build.yaml</code> is deprecated</h3><dl><dt>Why</dt><dd>The Supervisor warns on every build</dd><dt>Next step</dt><dd>Move the build settings into the Dockerfile</dd></dl></article>
 <article class="card" id="F4" data-status="Ready"><div class="ctop"><span class="id">F4</span><span class="pill st-Ready">Ready to build</span></div><h3>Docker warning about the base-image argument</h3><dl><dt>Why</dt><dd>The argument has no default value</dd><dt>Next step</dt><dd>Give it a default</dd></dl></article>
 <article class="card" id="F5" data-status="Ready"><div class="ctop"><span class="id">F5</span><span class="pill st-Ready">Ready to build</span></div><h3>20 of 25 older audit "PDFs" are ZIP bundles</h3><dl><dt>Why</dt><dd>Found 2026-09-27; their content is intact</dd><dt>Next step</dt><dd>Convert them to real PDFs</dd></dl></article>
 </div></section>
-<section data-all-only id="done"><div class="ghead" style="--g:var(--st-ready-fg)"><h2>Done</h2><span class="gcount">26 items off the older lists</span></div>
+<section data-all-only id="done"><div class="ghead" style="--g:var(--st-ready-fg)"><h2>Done</h2><span class="gcount">27 items off the older lists</span></div>
 <div class="done-wrap"><table><thead><tr><th>Item</th><th>Where it was listed</th><th>Evidence</th></tr></thead><tbody>
+<tr><td><span class="tick">✓</span>Live View on by default</td><td>This plan, A3</td><td>2.6.4, 2026-09-29: the option is removed and live view is always on; each camera still falls back to the classic view on its own</td></tr>
 <tr><td><span class="tick">✓</span>Live view on the Hikvision system</td><td>This plan, A9</td><td>CrystalHeeler, 2026-09-29: 2.6.3 installed on the test system A; the Hikvision plays live and looks good</td></tr>
 <tr><td><span class="tick">✓</span>Was the browser the problem all along? No</td><td>This plan, A10</td><td>CrystalHeeler, 2026-09-29: in Chrome, Classic bogs down and is not smooth while Live is smooth, on the same camera. The Pi's decode-and-JPEG pipeline was the cause, as predicted</td></tr>
 <tr><td><span class="tick">✓</span>Live view stays up through Home Assistant</td><td>This plan, A2</td><td>CrystalHeeler, 2026-09-29: a live feed stayed up for 10+ minutes</td></tr>
