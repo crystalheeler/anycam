@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.3, published.
+**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.4, published.
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -29,8 +29,8 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 1. **The slow-starting H.264 camera** (B13) and **the motion recording that never stops** (B1). Logs first for both.
 2. **Missing cameras** (B2). Logs first.
 3. **The Microseven lockout** (B6): power-cycle it, then logs if it locks up again.
-4. **The small correctness bugs**: B3, B4, B5, B12, B14.
-5. **Live View on by default** (A3), once B13 and C10 are fixed. Then **the automatic-behaviour discussion** (C11, C3) and **live cards** (C1).
+4. **The small correctness bugs**: B3, B4, B5, B12, B14, and C10's plain message for Firefox, which matters more now that live view cannot be switched off.
+5. **The automatic-behaviour discussion** (C11, C3), then **live cards** (C1).
 6. **Tests into the repo** (E7), then **the module split** (E1). The tests are the safety net the split needs.
 
 Hardware decode (B11) is parked for later, at CrystalHeeler's request.
@@ -41,7 +41,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| A3 | Blocked | Turn Live View on by default | Proven in the field on 2026-09-29: both systems, 10+ minutes through Home Assistant, no freezes. Two things would still make default-on worse for some cameras: a slow-starting stream gives up after 12 s with a red error (B13), and Firefox shows a red error on every H.265 camera (C10) | Blocked on B13 and C10 |
+| A12 | You | Install 2.6.4 on both systems | 2.6.4 removes the Live View option and makes live view always on | Check that Live View is gone from the Configuration tab and Enhanced View still opens live in Chrome. Expect at most one harmless Supervisor warning: Option 'go2rtc_live_view' does not exist in the schema |
 
 ## B. Bugs
 
@@ -66,7 +66,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| C11 | Discuss | **Replace most or all of the option toggles with automatic behaviour** | CrystalHeeler, 2026-09-28. Nine toggles today, several broken or no longer relevant: Skip Non-Reference Frames never worked (B3), Fast Stream Start does nothing at 4K, and Live View makes several decode options irrelevant for the camera being watched. Low Latency Probe is the counter-example: it measurably helps the slow-starting H.264 camera (B13), so CrystalHeeler is keeping it for now. It is a candidate to switch on automatically for streams that start slowly | Separate discussion. For each toggle: remove it, make it automatic, or keep it. Pairs with C3 |
+| C11 | Discuss | **Replace most or all of the option toggles with automatic behaviour** | CrystalHeeler, 2026-09-28. Eight toggles since 2.6.4 removed Live View, several broken or no longer relevant: Skip Non-Reference Frames never worked (B3), Fast Stream Start does nothing at 4K, and Live View makes several decode options irrelevant for the camera being watched. Low Latency Probe is the counter-example: it measurably helps the slow-starting H.264 camera (B13), so CrystalHeeler is keeping it for now. It is a candidate to switch on automatically for streams that start slowly | Separate discussion. For each toggle: remove it, make it automatic, or keep it. Pairs with C3 |
 | C3 | Discuss | Automatic quality, and retiring the FPS control | CLAUDE.md: the Enhanced View step-down redesign "requires full discussion before any coding." Correction to the 2026-09-26 research: WebRTC congestion control cannot adjust a stream that go2rtc passes through unchanged | In live view, automatic quality means switching between the camera's own streams (main to sub) when playback stalls. Discuss before coding |
 | C1 | Blocked | Live video in the camera cards | CrystalHeeler approved 2026-09-28. Motion detection works, so it no longer blocks this | Blocked on C2. Use each camera's sub-stream: many live 4K H.265 streams would overload the viewing device. The Hikvision sub-stream is MJPEG, so that card stays on snapshots |
 | C2 | Ready | Motion detection that does not depend on snapshot polling | Motion detection runs inside the thumbnail loop, which stops 30 s after the last snapshot request. Live cards would stop those requests. Related to B1, where the same loop stops recordings | Keep an armed camera's loop running whether or not anyone is watching |
@@ -104,6 +104,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
 | F6 | You | CLAUDE.md is out of date | Its queued-work and open-issue lists include items that have shipped (see Done). It describes a Part 6 of the best-practices document that does not exist | CrystalHeeler to say whether Part 6 was lost or never written; then refresh both lists |
+| F7 | Ready | A release check that run.sh and config.yaml agree | 2.6.4 audit. run.sh passes each setting to the program; for a setting missing from config.yaml, bashio returns the text null, which the code reads as off. Removing the Live View option nearly shipped exactly that. Checked by hand in 2.6.4 | Fail the release gate when run.sh reads a setting config.yaml does not define, or config.yaml defines one run.sh never reads |
 | F1 | Ready | A release check for the Dockerfile | 2.6.1 passed every check and still could not build | Check each pinned package version against its archive at release time |
 | F2 | Ready | The blocking-I/O check misses some calls | Found by hand in 2.6.3 | Extend it beyond `open()` to `read_bytes`, `read_text` and the write equivalents |
 | F3 | Ready | `build.yaml` is deprecated | The Supervisor warns on every build | Move the build settings into the Dockerfile |
@@ -116,6 +117,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
+| Live View on by default | This plan, A3 | 2.6.4, 2026-09-29: the option is removed and live view is always on; each camera still falls back to the classic view on its own |
 | Live view on the Hikvision system | This plan, A9 | CrystalHeeler, 2026-09-29: 2.6.3 installed on the test system A; the Hikvision plays live and looks good |
 | Was the browser the problem all along? No | This plan, A10 | CrystalHeeler, 2026-09-29: in Chrome, Classic bogs down and is not smooth while Live is smooth, on the same camera. The Pi's decode-and-JPEG pipeline was the cause, as predicted |
 | Live view stays up through Home Assistant | This plan, A2 | CrystalHeeler, 2026-09-29: a live feed stayed up for 10+ minutes |
