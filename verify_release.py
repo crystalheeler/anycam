@@ -134,18 +134,57 @@ CONTRACTS = {
     # 2.3.0 — _probe_db_streams refactored to use single-socket walker
     "_probe_db_streams":     ["_validate_rtsp_urls_single_socket",
                               "_throttle_wait_if_needed"],
+    # 2.6.3 — go2rtc security controls. go2rtc's API can add an `exec:`
+    # source and run commands on the host, and this addon has full_access,
+    # so each control below is pinned to fail the release if it is removed.
+    # Exact module allowlist: adding exec, echo, expr or ffmpeg fails here.
+    "_go2rtc_config":        ['{"modules": ["api", "ws", "rtsp", "webrtc", "mp4"]}',
+                              '"rtsp":   {"listen": ""}',
+                              "GO2RTC_API_HOST"],
+    # Inline config: a file path would let go2rtc write camera passwords to disk.
+    "_go2rtc_supervisor":    ['"-config", _go2rtc_config()'],
+    # Proxy forwards /api/ws only, only for names AnyCam registered, and
+    # honours the brand cooldown before go2rtc dials the camera.
+    "handle_go2rtc_ws":      ["name in _GO2RTC_STREAMS", "/api/ws?src=",
+                              "_throttle_wait_if_needed"],
+    # Treats the no-config-file 400 as success; encodes the password-bearing
+    # source so '&' and '+' survive Go's query parser.
+    "_go2rtc_register":      ['"config file disabled"', "quote(src, safe='')"],
+    # Motion detection runs inside the thumbnail snap_loop: keep it alive when
+    # armed, and stop it through the flag path only when a live ffmpeg exists.
+    "_focus_set_go2rtc":     ["_MOTION.get(camera_id)", 'ms.get("enabled")',
+                              'state["focus_leave_kill"] = True'],
+    # The go2rtc exit must drop an unconsumed flag (2.4.0-rc3.3 Bug A shape).
+    "handle_focus_clear":    ["_FOCUS_ENGINE",
+                              'state.pop("focus_leave_kill", None)'],
 }
 all_ok = True
+found_contracts = set()
 for node in ast.walk(tree):
     if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
         if node.name in CONTRACTS:
+            found_contracts.add(node.name)
             segment = ast.get_source_segment(src, node) or ""
             for req in CONTRACTS[node.name]:
                 if req not in segment:
                     fail(f"{node.name}() missing required content: '{req}'")
                     all_ok = False
+# 2.6.3: a contracted function that no longer exists is a failure. Before
+# this, deleting a function outright skipped its contract and passed.
+for name in sorted(set(CONTRACTS) - found_contracts):
+    fail(f"{name}() is under contract but was not found")
+    all_ok = False
 if all_ok:
     ok(f"All {len(CONTRACTS)} function contracts satisfied")
+
+# 2.6.3: go2rtc's API address is a module constant, not inside a function,
+# so the contract mechanism cannot see it. Check it directly.
+_host = re.search(r'^GO2RTC_API_HOST\s*=\s*"([^"]+)"', src, re.MULTILINE)
+if _host and _host.group(1) == "127.0.0.1":
+    ok("go2rtc API bound to 127.0.0.1")
+else:
+    fail('GO2RTC_API_HOST must be "127.0.0.1" — anyone who reaches '
+         "go2rtc's API can run commands on the host")
 
 # ── 2b. rc2 CAMERA_DB structure contracts ─────────────────────────────────────
 # These checks pull CAMERA_DB out of the AST (not by importing) so they don't

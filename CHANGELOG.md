@@ -1,40 +1,123 @@
 ## 2.6.3
 
-Startup logging for the installed ffmpeg version. No change to camera
-discovery, streaming, or the Dockerfile.
+Two changes. Enhanced View can now play a camera live through a bundled
+go2rtc, with no decode on the Pi (Tier 2). The addon also logs its
+installed ffmpeg version at every start.
 
-### Why
+### Live view through go2rtc — option `go2rtc_live_view`, default OFF
 
-Since 2.6.2 the Dockerfile installs ffmpeg with no exact version. apt
-picks the current build from the Raspberry Pi archive, held there by the
-origin pin. The version therefore changes over time.
+**Why.** The classic Enhanced View decodes each stream on the Pi,
+re-encodes it to MJPEG, and serves one JPEG per HTTP request. A Pi 4
+cannot sustain that at 3840x2160 HEVC. go2rtc passes the camera's H.264
+or H.265 through unchanged, over WebRTC or MSE, and the viewing device
+decodes it with its own hardware. The Pi only moves bytes.
 
-The Dockerfile echoes the resolved version during the build, but the
-Supervisor shows build output only when a build fails. After a successful
-install the version was visible only by running `dpkg-query` inside the
-container by hand.
+**What changes when the option is ON.**
 
-### Change
+- go2rtc v1.9.14 is bundled in the image and supervised by AnyCam. If it
+  exits, AnyCam restarts it with backoff from 2 s to 60 s.
+- Opening Enhanced View tries live view first. The player runs MSE and
+  WebRTC in parallel, plays MSE first, and switches to WebRTC when WebRTC
+  wins go2rtc's codec comparison.
+- The browser falls back to the classic view on its own when, before the
+  first frame: 12 s pass with no video; the socket closes unexpectedly
+  twice; or every attempted mode reports an error. A camera that falls
+  back uses the classic view until the page is reloaded. After the first
+  frame there is no automatic fallback, because the transport is proven.
+- A new **Classic** button switches to the classic view for comparison.
+  Reopening the camera returns to live view.
+- **Resolution** switches the camera profile go2rtc relays. **Frame Rate**
+  and **Auto** are disabled in live view: a passed-through stream runs at
+  the camera's own settings.
+- The info bar shows the live mode (MSE or WebRTC), the resolution, and
+  the frame rate decoded on the viewing device.
 
-`run.sh` now logs the ffmpeg version on every start:
+**What plays live.** H.264 in every current browser. H.265 in Chrome or
+Edge 136 and later, and Safari. Firefox cannot play H.265 this way and
+falls back to classic. MJPEG profiles, such as the Hikvision sub-stream,
+always use classic.
 
-```
-ffmpeg: 8:5.1.9-0+deb12u1+rpt1
-```
+**Motion detection.** Motion detection runs inside the thumbnail
+`snap_loop`, and that loop exits 30 s after the last snapshot poll. On
+entering live view:
 
-On aarch64 it also checks for the `+rpt` suffix, which marks the
-Raspberry Pi Foundation build carrying the patches rpivid needs. If the
-suffix is missing, it logs a warning:
+- Motion armed: the thumbnail loop keeps running, and AnyCam starts it if
+  it was stopped, the same way `handle_snapshot` does. This costs a second
+  RTSP session, but motion recording keeps working.
+- Motion off: the thumbnail loop stops, so go2rtc holds the only RTSP
+  session and the Pi decodes nothing for that camera.
 
-```
-ffmpeg 7:5.1.9-0+deb12u1 is not the Raspberry Pi build (no +rpt suffix).
-The Dockerfile origin pin did not hold, and rpivid hardware decode will
-not engage.
-```
+**Security.** go2rtc's documentation warns that anyone who reaches its API
+can add an `exec:` source and run commands on the host. This addon runs
+with `host_network` and `full_access`, so a default go2rtc would expose
+that API to the LAN and to ZeroTier. Four independent controls:
 
-This matters because the failure is silent. With `hw_decode` off, which is
-the default, the addon behaves the same on either build, so a wrong ffmpeg
-would go unnoticed until someone turned hardware decode on.
+1. go2rtc's API listens on `127.0.0.1:28984` only.
+2. Only the `api`, `ws`, `rtsp`, `webrtc` and `mp4` modules load. `exec`,
+   `echo`, `expr` and `ffmpeg` never start, so no command-running source
+   exists. Leaving out `ffmpeg` also enforces zero transcode.
+3. go2rtc's RTSP server is off. Its RTSP client, which reads the cameras,
+   still works.
+4. Browsers reach go2rtc only through AnyCam's `/go2rtc/ws` proxy, which
+   forwards `/api/ws` and only for stream names AnyCam registered.
+
+Camera passwords stay off disk. Config is passed inline, so go2rtc has no
+config file to write stream URLs into. The proxy also waits out each
+brand's connection cooldown before go2rtc dials the camera.
+
+**Network.** WebRTC video uses port 28555, TCP and UDP, on the host.
+Non-default ports avoid a clash with Frigate or the go2rtc add-on.
+
+**Build.** The Dockerfile downloads the pinned go2rtc binary, verifies it
+against the SHA-256 digest GitHub publishes for the v1.9.14 release, and
+runs `go2rtc -version`, so a corrupt or wrong-architecture binary fails
+the build. The browser player, `www/video-rtc.js`, is vendored unmodified
+from the same go2rtc tag under its MIT licence.
+
+**With the option OFF**, Enhanced View behaves exactly as in 2.6.2. Cards
+are unchanged in both cases and still use snapshots. Live cards are
+deferred until motion detection is fixed, because live cards would stop
+the snapshot polling that keeps motion detection alive.
+
+### Release gate
+
+`verify_release.py` now pins each go2rtc security control. Six new
+function contracts cover the module allowlist, the disabled RTSP server,
+inline config, the proxy allowlist, credential handling, and the motion
+guard. A separate check requires `GO2RTC_API_HOST` to be `127.0.0.1`.
+Each was tested by breaking it on purpose: adding `exec` to the modules,
+binding the API to `0.0.0.0`, and removing the proxy allowlist each fail
+the gate.
+
+A contracted function that no longer exists now fails the gate. Before,
+deleting a function outright skipped its contract and passed.
+
+### ffmpeg version logging
+
+`run.sh` logs the installed ffmpeg version on every start. Since 2.6.2 the
+version floats, and the Supervisor shows build output only when a build
+fails. On aarch64 it also warns when the version lacks the `+rpt` suffix,
+because rpivid hardware decode needs the Raspberry Pi build and the
+failure is otherwise silent while `hw_decode` is off.
+
+### Tested before release, and what was not
+
+Run locally against the release source:
+
+- 79 Python checks. The real AnyCam handlers ran against a fake go2rtc
+  that reproduces go2rtc v1.9.14's behaviour, each behaviour confirmed in
+  go2rtc's source. The supervisor ran a real subprocess. Covered:
+  registration, the password encoding, the proxy both ways including a
+  5 MiB frame, the allowlist, the go2rtc-down path, the focus engine with
+  motion on and off, restart, and shutdown.
+- 46 JavaScript checks. The fallback logic ran against the real vendored
+  go2rtc player class with a fake clock.
+
+Not tested: the real go2rtc binary, a real camera, a real browser, or a
+long-lived WebSocket through Home Assistant ingress. The install on the
+Pi is the first real test. Ingress killed multipart streams after 10 to
+24 frames in 1.6.0; if it treats WebSockets the same way, the player falls
+back to classic after two closes.
 
 ### Field results carried from 2.6.2
 
