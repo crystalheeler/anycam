@@ -33,7 +33,7 @@ confirmed with CrystalHeeler at build time.
 
 | # | Item | Why / source | Next step |
 |---|---|---|---|
-| A1 | Field-test live view | 2.6.3 audit: the real go2rtc binary, a real browser and HA ingress were never tested | Install; work the acceptance list in `docs/audits/anycam_2_6_3_audit_report.pdf`. Start with the H.264 camera at 192.168.50.73:8765 |
+| A1 | Field-test live view | 2.6.3 audit: the real go2rtc binary, a real browser and HA ingress were never tested | **First result, 2026-09-28 (Log1):** go2rtc starts and reports ready; the proxy and fallback both worked. Lorex ch7 and ch4 (H.265) fell back within 1 s: the browser offered no H.265 over WebRTC, and MSE failed too. See C10. Still to do: the H.264 camera at 192.168.50.73:8765, which needs B3 off first |
 | A2 | Ingress WebSocket longevity | Largest single unknown. Ingress cut multipart after 10-24 frames in 1.6.0 | Leave one camera live for 10+ minutes. Stays live = MSE through ingress is viable |
 | A3 | Promote `go2rtc_live_view` to default ON | Off by default until A1 and A2 pass | Flip the default in the release after a clean field test |
 | A4 | Tier 1 checks never exercised | 2.6.1 audit | Look for the `fast_stream_start suppressed` line on the 4K Hikvision; a Microseven re-auth with no RST; then try `low_latency` ON |
@@ -48,7 +48,9 @@ confirmed with CrystalHeeler at build time.
 |---|---|---|---|
 | B1 | **Motion detection does not record** | Reported 2026-09-28: either not detecting or not storing | Logs first (rule 2). Note: detection runs inside the thumbnail `snap_loop`, which exits 30 s after the last snapshot poll |
 | B2 | **One or two cameras not discovered** | Reported 2026-09-28 | Logs first: scan log, plus IP and brand of each missing camera |
-| B3 | `skip_nonref=true` breaks every h264 launch | CLAUDE.md open issue. ffmpeg rejects `nonref` as a `skip_frame` value. Still wired at `camera_discovery.py` line ~7080 | Remove the option, or change the value (`noref` / `bidir`) and field-test |
+| B3 | `skip_nonref=true` breaks every h264 launch | CLAUDE.md open issue. ffmpeg rejects `nonref` as a `skip_frame` value. Still wired at `camera_discovery.py` line ~7080. **Confirmed in Log1 (2026-09-28):** every thumbnail launch for 192.168.50.73:8765 failed with "Unable to parse option value nonref", 0 frames | ffmpeg's valid value is `noref`. Fix the value and field-test, or remove the option. Its description ("reducing CPU ~40%") has never been true, because the flag never applied |
+| B11 | **Hardware HEVC decode silently falls back to software** | Log1 (2026-09-28): ffmpeg cannot open `/dev/media0`–`3` ("Operation not permitted"), then "Failed to find a V4L2 device for H265". AnyCam still logs "hw first frame (hevc_drm)". Classic 4K runs at 8 fps; 2.6.0-rc2.5 measured 22 fps with rpivid engaged. A regression, cause unknown | Logs first: find what changed since rc2.5 (HAOS or Supervisor update, the ffmpeg 5.1.8 to 5.1.9 move, device permissions). Separately, detect the fallback in ffmpeg's stderr so the log stops reporting hardware decode that is not happening |
+| B12 | VAAPI reported available on a Pi 4 | Log1 startup: "hevc_vaapi: available", "h264_vaapi: available". The Pi has no VAAPI device; the probe checks only that ffmpeg was built with it | Probe for a render node before declaring VAAPI available. The H.264 camera currently gets `-hwaccel vaapi` and relies on ffmpeg's silent fallback |
 | B4 | Camera names written unescaped into HTML | Found in 2.6.3: the classic Enhanced View info bar puts `displayName(cam)` into `innerHTML`. Names are editable through the rename API | Escape it, then audit every `innerHTML` write that carries camera data |
 | B5 | "Share with community" checkbox is ticked and does nothing | Found in 2.6.3: `build_html` never replaces `___COMMUNITY___`, so the browser sees a truthy string while the server has no endpoint | Add the replacement in `build_html` |
 | B6 | Microseven RTSP "Invalid data found" | Regression from 2.3.x to 2.4.x, deferred since 2.4.0-rc3.3. Status today unknown | Confirm whether it still happens. If so: control run with plain ffmpeg, then bisect |
@@ -70,12 +72,13 @@ confirmed with CrystalHeeler at build time.
 | C7 | Classic view JPEG quality `q:v 2` | Very large frames at 4K. Bytes against picture quality | Moot if live view becomes the default (A3) |
 | C8 | ZeroTier tuning | Deferred by CrystalHeeler 2026-09-26 | Run `zerotier-cli peers` and look for `RELAY`; review the 2800-byte MTU |
 | C9 | Pi 4 `dtoverlay=rpivid-v4l2` check or toggle | Deferred since 2.2.8 | Lower priority now: live view does no decode on the Pi |
+| C10 | **H.265 live view depends on the viewing browser** | Log1 (2026-09-28): CrystalHeeler's browser offered go2rtc `VP8, VP9, H264, AV1` and no H.265 over WebRTC, and MSE failed too, so every H.265 camera falls back. Most of CrystalHeeler's cameras are H.265 | Three changes, none built yet. (1) Check the browser's codec support before trying live view, and skip straight to classic with a plain message, not a red error. (2) Translate go2rtc's "codecs not matched" text into something actionable. (3) When the main stream is H.265 and the browser cannot play it, offer an H.264 sub-stream in live view. This trades resolution, so it is CrystalHeeler's decision. Transcoding H.265 to H.264 on the Pi is ruled out: that is the decode bottleneck live view exists to avoid |
 
 ## D. Discovery and device support
 
 | # | Item | Why / source | Next step |
 |---|---|---|---|
-| D1 | Lorex / Dahua family: remaining pieces | Channel enumeration, per-channel cards and realm handling shipped in 2.5.0. Still open: no empirical SDP from a known-empty channel, and a hard-coded 16-channel cap | Watch for phantom or missing channel cards; make the cap a per-entry setting |
+| D1 | Lorex / Dahua family: remaining pieces | Channel enumeration, per-channel cards and realm handling shipped in 2.5.0. Still open: no empirical SDP from a known-empty channel, and a hard-coded 16-channel cap. **Possible field evidence, Log1:** ch7 produced 400 byte-identical frames (50,951 bytes each) and ch4 20 identical frames. A live sensor never does that, so either the channel is sending a static image (a video-loss screen?) or something upstream is repeating one frame | Ask CrystalHeeler whether ch4 and ch7 show a real scene in the Lorex app. If not, they are the phantom cards this item predicted. Make the cap a per-entry setting |
 | D2 | `STREAM_DB` to `CAMERA_DB` consolidation, and runtime use of `default_ports` | CLAUDE.md queued work | Scope a plan document first |
 | D3 | Drag-to-reorder cards | Changelog 2.4.0-rc3.3: foundation laid by `_stableCardKey` | Feature; schedule when wanted |
 
