@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.6.3"  # must match config.yaml
+CURRENT_VERSION = "2.6.4"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -138,12 +138,6 @@ CFG_FAST_STREAM_START    = os.environ.get("FAST_STREAM_START", "false").lower() 
 # reorder queue removes the RTSP jitter buffer. Off by default until the
 # Pi 4 / HAOS target has a field test.
 CFG_LOW_LATENCY          = os.environ.get("LOW_LATENCY", "false").lower() == "true"
-# 2.6.3 — Tier 2. When ON, Enhanced View plays through a bundled go2rtc
-# (WebRTC or MSE, passed through with no decode on the Pi) instead of the
-# decode -> MJPEG -> JPEG-per-request path. The browser falls back to that
-# path per camera when it cannot play the stream. Off by default until the
-# Pi 4 / HAOS target has a field test. See the "go2rtc live view" block.
-CFG_GO2RTC               = os.environ.get("GO2RTC_LIVE_VIEW", "false").lower() == "true"
 CFG_RECORDINGS           = os.environ.get("RECORDINGS_PATH", "/media/anycam")
 CFG_MOTION_SENS          = int(os.environ.get("MOTION_SENSITIVITY",       "15"))
 CFG_MOTION_COOL          = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
@@ -8748,9 +8742,6 @@ async def api_go2rtc_focus(request: web.Request) -> web.Response:
     WebSocket arrives through handle_go2rtc_ws.
     """
     camera_id = request.match_info["camera_id"]
-    if not CFG_GO2RTC:
-        return web.json_response(
-            {"ok": False, "reason": "live view is off in the addon options"})
     if not _GO2RTC_READY:
         return web.json_response({"ok": False, "reason": "go2rtc is not running"})
     camera = CAMERAS.get(camera_id)
@@ -8783,8 +8774,7 @@ async def handle_go2rtc_ws(request: web.Request) -> web.StreamResponse:
     """
     name = request.query.get("src", "")
     camera_id = _GO2RTC_STREAM_CAM.get(name)
-    if not (CFG_GO2RTC and _GO2RTC_READY and camera_id
-            and name in _GO2RTC_STREAMS):
+    if not (_GO2RTC_READY and camera_id and name in _GO2RTC_STREAMS):
         return web.Response(status=404, text="Unknown live stream")
     camera = CAMERAS.get(camera_id) or {}
     from yarl import URL
@@ -11529,7 +11519,6 @@ _JS = r"""
 const BASE = '___BASE___';
 const CFG_UNRESTRICTED_BROWSER = ___UNRESTRICTED___;
 const CFG_ADAPTIVE_QUALITY     = ___ADAPTIVE_QUALITY___;
-const CFG_GO2RTC               = ___GO2RTC___;
 const STORAGE_UNRESTRICTED = ___UNRESTRICTED___;
 const PROTO_ICONS = {RTSP:'📹',ONVIF:'🔭',MJPEG:'🖼️',HLS:'📡',RTMP:'📺',WebRTC:'🔗','WS-RTSP':'🔌',HTTP:'🌐',DVR:'💾'};
 const PROTO_CLR   = {
@@ -12161,7 +12150,7 @@ function pollMotion() {
 setInterval(pollMotion, 3000);
 
 /* ── go2rtc live view (2.6.3, Tier 2) ──────────────────────────────────────
- * When the addon option is on, Enhanced View plays through the bundled
+ * Enhanced View plays through the bundled
  * go2rtc: WebRTC or MSE, passed through with no decode on the Pi. The
  * classic JPEG path (_startFocusPoll) is untouched and is the fallback.
  *
@@ -12193,7 +12182,7 @@ const _go2rtcDeclined = {};
 
 function _go2rtcLoadPlayer() {
   if (_go2rtcPlayer) return _go2rtcPlayer;
-  if (!CFG_GO2RTC || !('customElements' in window) || !('WebSocket' in window)) {
+  if (!('customElements' in window) || !('WebSocket' in window)) {
     _go2rtcPlayer = Promise.resolve(false);
     return _go2rtcPlayer;
   }
@@ -12255,7 +12244,7 @@ async function _go2rtcStreamInfo(camId, profIdx) {
 // the session (playing, or the session was closed meanwhile); false means
 // the caller should use the classic view.
 async function _go2rtcTryFocus(camId, cam, session) {
-  if (!CFG_GO2RTC || _go2rtcDeclined[camId]) return false;
+  if (_go2rtcDeclined[camId]) return false;
   if (!(await _go2rtcLoadPlayer())) return false;
   if (session !== _focusSession) return true;
   const info = await _go2rtcStreamInfo(camId, 0);
@@ -15526,8 +15515,6 @@ def build_html() -> str:
                                'true' if CFG_UNRESTRICTED_BROWSER else 'false')
     js_code = js_code.replace('___ADAPTIVE_QUALITY___',
                                'true' if CFG_ADAPTIVE_QUALITY else 'false')
-    js_code = js_code.replace('___GO2RTC___',
-                               'true' if CFG_GO2RTC else 'false')
     # CSS uses {{ }} for literal braces in Python f-string
     css = f"""\
 *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
@@ -16143,8 +16130,8 @@ def make_app() -> web.Application:
     app.router.add_get(   "/stream/{camera_id}/test",             handle_stream_test)
     app.router.add_get(   "/snapshot/{camera_id}",                handle_snapshot)
     app.router.add_get(   "/snap/status",                         handle_snap_status)
-    # 2.6.3 — Tier 2 go2rtc live view. Registered whether or not the option
-    # is on: each handler answers "not available" itself when it is off.
+    # 2.6.3 — Tier 2 go2rtc live view. Each handler answers "not available"
+    # itself when go2rtc is not running.
     app.router.add_get(   "/api/go2rtc/focus/{camera_id}",        api_go2rtc_focus)
     app.router.add_get(   "/go2rtc/ws",                           handle_go2rtc_ws)
     app.router.add_get(   "/go2rtc/video-rtc.js",                 handle_go2rtc_player_js)
@@ -16517,14 +16504,14 @@ async def main() -> None:
     # Populates _HW_UNAVAILABLE so snap_loop never tries an unavailable decoder.
     await _probe_hw_decoders()
 
-    # ── go2rtc live view (2.6.3, Tier 2) ──────────────────────────────────────
+    # ── go2rtc live view (2.6.3, Tier 2; always on since 2.6.4) ───────────────
     # Supervised for the life of the addon; see _go2rtc_supervisor. Started
     # before the web server so it is usually ready by the first page load.
-    if CFG_GO2RTC:
-        _GO2RTC_TASK = asyncio.create_task(_go2rtc_supervisor())
-    else:
-        log.info("go2rtc live view is off — Enhanced View uses the classic "
-                 "JPEG path")
+    # There is no option to turn it off: when go2rtc is missing or not
+    # running, or a browser cannot play a stream, Enhanced View falls back to
+    # the classic JPEG path per camera, which is the same result the option
+    # used to give.
+    _GO2RTC_TASK = asyncio.create_task(_go2rtc_supervisor())
 
     # ── Graceful shutdown plumbing ────────────────────────────────────────────
     # _STOP_EVENT is set by SIGTERM/SIGINT handlers below. main() blocks on it,

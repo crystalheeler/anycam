@@ -70,22 +70,6 @@ configuration:
       artifacts for latency on a lossy link. Turn this ON to test, and
       turn it OFF again if any camera fails to start or shows new
       artifacts.
-  go2rtc_live_view:
-    name: Live View (Enhanced View)
-    description: >-
-      Default OFF. When ON, Enhanced View plays the camera through the
-      bundled go2rtc over WebRTC or MSE. The video passes through unchanged
-      and your phone or computer decodes it, so the Pi decodes nothing for
-      the camera you are watching. When OFF, or when a camera cannot play
-      this way, Enhanced View uses the classic path: the Pi decodes the
-      stream and sends JPEG frames. Works for H.264 and H.265 streams.
-      H.265 needs Chrome or Edge 136+, or Safari; Firefox cannot play it
-      and falls back to classic. MJPEG streams always use classic. In live
-      view the Frame Rate and Auto controls are disabled, because the
-      stream runs at the camera's own settings; Resolution switches between
-      the camera's streams. A Classic button lets you compare the two views.
-      go2rtc's control port listens on this machine only; WebRTC video uses
-      port 28555.
   recordings_path:
     name: Recordings Path
     description: >-
