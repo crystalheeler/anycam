@@ -138,6 +138,12 @@ CFG_FAST_STREAM_START    = os.environ.get("FAST_STREAM_START", "false").lower() 
 # reorder queue removes the RTSP jitter buffer. Off by default until the
 # Pi 4 / HAOS target has a field test.
 CFG_LOW_LATENCY          = os.environ.get("LOW_LATENCY", "false").lower() == "true"
+# 2.6.3 — Tier 2. When ON, Enhanced View plays through a bundled go2rtc
+# (WebRTC or MSE, passed through with no decode on the Pi) instead of the
+# decode -> MJPEG -> JPEG-per-request path. The browser falls back to that
+# path per camera when it cannot play the stream. Off by default until the
+# Pi 4 / HAOS target has a field test. See the "go2rtc live view" block.
+CFG_GO2RTC               = os.environ.get("GO2RTC_LIVE_VIEW", "false").lower() == "true"
 CFG_RECORDINGS           = os.environ.get("RECORDINGS_PATH", "/media/anycam")
 CFG_MOTION_SENS          = int(os.environ.get("MOTION_SENSITIVITY",       "15"))
 CFG_MOTION_COOL          = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
@@ -478,6 +484,11 @@ STREAM_DB: dict = {
 # Currently focused camera for full-screen enhanced view.
 # When set, all other snap_loops throttle to 1fps; focused loop runs native res.
 _FOCUSED_CAMERA: str | None = None
+# 2.6.3 — which engine serves the current focus session: "legacy" (the
+# native-res ffmpeg snap_loop) or "go2rtc" (passthrough, no snap_loop for
+# the focused camera). None when no camera is focused. handle_focus_clear
+# reads it, because the two engines leave different state to tear down.
+_FOCUS_ENGINE: str | None = None
 
 # Hardware decoder names unavailable on this system (detected at runtime).
 # When v4l2m2m reports "Could not find a valid device", the decoder name
@@ -8443,13 +8454,494 @@ async def handle_snap_status(request: web.Request) -> web.Response:
 # Focus view endpoints
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# go2rtc live view (2.6.3, Tier 2)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Why this exists. The classic Enhanced View decodes the stream on the Pi,
+# re-encodes it to MJPEG, and serves one JPEG per HTTP request. A Pi 4 cannot
+# do that at 3840x2160 HEVC. go2rtc instead passes the camera's H.264 or
+# H.265 through untouched, over WebRTC or MSE, and the viewing device decodes
+# it with its own hardware. The Pi only moves bytes.
+#
+# SECURITY MODEL — read before changing anything in this block.
+# go2rtc's own documentation warns that anyone who reaches its API can add an
+# `exec:` source and run commands on the host. This addon runs with
+# host_network and full_access, so a default go2rtc would expose that API to
+# the LAN and to the ZeroTier network. Four independent controls:
+#   1. The API listens on 127.0.0.1 only. Browsers never reach it directly.
+#   2. Only the api, ws, rtsp, webrtc and mp4 modules load (see go2rtc
+#      main.go: every named module is skipped unless listed). exec, echo,
+#      expr and ffmpeg never initialise, so no command-running source exists
+#      even for a local caller. Leaving out ffmpeg also enforces zero
+#      transcode: a codec the browser cannot play produces an error and the
+#      browser falls back, instead of go2rtc quietly burning Pi CPU.
+#   3. go2rtc's RTSP server is off (listen ""). go2rtc registers its RTSP
+#      *client* before it checks that value, so reading cameras still works.
+#   4. The browser reaches go2rtc only through handle_go2rtc_ws, which
+#      forwards /api/ws for stream names AnyCam registered itself.
+# verify_release.py carries contracts on _go2rtc_config and
+# handle_go2rtc_ws so that none of these controls can be dropped silently.
+#
+# CREDENTIALS. Config is passed inline (`-config {json}`), so go2rtc has no
+# config file. Otherwise PUT /api/streams writes each stream's source URL —
+# camera password included — into that file in plaintext. With no file,
+# go2rtc creates the stream in memory and then answers HTTP 400 "config file
+# disabled" for the persist step. _go2rtc_register treats that exact answer
+# as success and confirms the stream exists with a GET.
+#
+# Only the WebRTC media port is reachable from the network. go2rtc's docs
+# note it carries only encrypted media for sessions negotiated through the
+# API, and that API is local-only here.
+
+GO2RTC_BIN             = Path("/usr/local/bin/go2rtc")
+GO2RTC_API_HOST        = "127.0.0.1"
+# Non-default ports. 1984 and 8555 are go2rtc's defaults, and another add-on
+# on a host-networked HAOS box (Frigate, the go2rtc add-on) may hold them.
+GO2RTC_API_PORT        = 28984
+GO2RTC_WEBRTC_PORT     = 28555
+GO2RTC_PLAYER_JS       = Path("/www/video-rtc.js")
+GO2RTC_READY_TIMEOUT_S = 10.0
+
+_GO2RTC_PROC: asyncio.subprocess.Process | None = None
+_GO2RTC_TASK: asyncio.Task | None = None
+_GO2RTC_READY = False
+# Streams registered in the CURRENT go2rtc process, name -> source URL.
+# Cleared whenever go2rtc restarts, because its streams live in memory only.
+# Also the proxy allowlist: handle_go2rtc_ws forwards only these names.
+_GO2RTC_STREAMS: dict[str, str] = {}
+_GO2RTC_STREAM_CAM: dict[str, str] = {}   # stream name -> camera_id
+_GO2RTC_PLAYER_BYTES: bytes | None = None
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _go2rtc_config() -> str:
+    """Return go2rtc's config as inline JSON. JSON is valid YAML.
+
+    The leading "{" makes go2rtc parse this as raw config, not a file path,
+    which is what keeps camera passwords off disk. Every key is
+    load-bearing; see the security model above.
+    """
+    return json.dumps({
+        "app":    {"modules": ["api", "ws", "rtsp", "webrtc", "mp4"]},
+        "api":    {"listen": f"{GO2RTC_API_HOST}:{GO2RTC_API_PORT}"},
+        "rtsp":   {"listen": ""},
+        "webrtc": {"listen": f":{GO2RTC_WEBRTC_PORT}"},
+        # warn keeps routine per-request lines out of the addon log. Source
+        # URLs can still appear in a warning; _go2rtc_log_pump strips creds.
+        "log":    {"level": "warn"},
+    }, separators=(",", ":"))
+
+
+def _go2rtc_api_url(path: str) -> str:
+    return f"http://{GO2RTC_API_HOST}:{GO2RTC_API_PORT}{path}"
+
+
+async def _go2rtc_log_pump(proc: asyncio.subprocess.Process) -> None:
+    """Forward go2rtc output into the addon log, credentials stripped."""
+    if proc.stdout is None:
+        return
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            return
+        text = _ANSI_ESCAPE_RE.sub("", line.decode("utf-8", "replace")).strip()
+        if text:
+            log.warning(f"go2rtc: {_strip_creds(text)}")
+
+
+async def _go2rtc_wait_ready(proc: asyncio.subprocess.Process) -> bool:
+    """Poll go2rtc's API until it answers, the process exits, or time runs out."""
+    deadline = time.monotonic() + GO2RTC_READY_TIMEOUT_S
+    timeout = aiohttp.ClientTimeout(total=2)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        while time.monotonic() < deadline:
+            if proc.returncode is not None:
+                return False
+            try:
+                async with session.get(_go2rtc_api_url("/api")) as resp:
+                    if resp.status == 200:
+                        return True
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+            await asyncio.sleep(0.25)
+    return False
+
+
+async def _go2rtc_terminate(proc: asyncio.subprocess.Process) -> None:
+    """SIGTERM go2rtc, then SIGKILL it if it has not exited within 3 s."""
+    if proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+        await asyncio.wait_for(proc.wait(), timeout=3)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return
+        await proc.wait()
+    except ProcessLookupError:
+        pass
+
+
+async def _go2rtc_supervisor() -> None:
+    """Run go2rtc for the life of the addon and restart it when it exits.
+
+    Backoff doubles from 2 s to a 60 s ceiling while go2rtc keeps dying
+    early, and resets after any run longer than a minute. go2rtc exits at
+    once when it cannot bind a port, so a clash with another add-on shows up
+    here as a restart loop, with go2rtc's own bind error logged above it.
+    """
+    global _GO2RTC_PROC, _GO2RTC_READY
+    if not GO2RTC_BIN.exists():
+        log.warning(f"go2rtc: binary missing at {GO2RTC_BIN} — "
+                    f"Enhanced View will use the classic JPEG path")
+        return
+    backoff = 2.0
+    while True:
+        _GO2RTC_STREAMS.clear()
+        _GO2RTC_STREAM_CAM.clear()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(GO2RTC_BIN), "-config", _go2rtc_config(),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except OSError as ex:
+            log.error(f"go2rtc: could not start ({ex}) — "
+                      f"Enhanced View will use the classic JPEG path")
+            return
+        _GO2RTC_PROC = proc
+        started = time.monotonic()
+        pump = asyncio.create_task(_go2rtc_log_pump(proc))
+        rc: int | None = None
+        try:
+            if await _go2rtc_wait_ready(proc):
+                _GO2RTC_READY = True
+                log.info(f"go2rtc: ready — API {GO2RTC_API_HOST}:"
+                         f"{GO2RTC_API_PORT}, WebRTC :{GO2RTC_WEBRTC_PORT}")
+            elif proc.returncode is None:
+                log.warning(f"go2rtc: API did not answer within "
+                            f"{GO2RTC_READY_TIMEOUT_S:.0f}s")
+            rc = await proc.wait()
+        except asyncio.CancelledError:
+            await _go2rtc_terminate(proc)
+            raise
+        finally:
+            _GO2RTC_READY = False
+            _GO2RTC_PROC = None
+            _GO2RTC_STREAMS.clear()
+            _GO2RTC_STREAM_CAM.clear()
+            pump.cancel()
+            await asyncio.gather(pump, return_exceptions=True)
+        ran = time.monotonic() - started
+        if ran > 60:
+            backoff = 2.0
+        log.warning(f"go2rtc: exited (rc={rc}) after {ran:.0f}s — "
+                    f"restarting in {backoff:.0f}s")
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, 60.0)
+
+
+def _go2rtc_stream_name(camera_id: str, prof_idx: int) -> str:
+    """Stable, URL-safe go2rtc stream name for one camera profile.
+
+    The hash keeps two camera_ids that differ only in punctuation from
+    collapsing onto the same name once the punctuation is replaced.
+    """
+    tag = re.sub(r"[^A-Za-z0-9]", "_", camera_id)[:40]
+    digest = hashlib.sha1(camera_id.encode("utf-8")).hexdigest()[:8]
+    return f"anycam_{tag}_{digest}_p{prof_idx}"
+
+
+def _go2rtc_profile_source(camera: dict,
+                           prof_idx: int) -> tuple[str | None, str, str]:
+    """Resolve one camera profile to an authenticated RTSP URL for go2rtc.
+
+    Returns (url, codec, reason). url is None when go2rtc cannot relay the
+    profile, and reason says why, for the browser's toast.
+
+    Profile lookup mirrors snap_loop's native_res branch and
+    _build_focus_ladder, so both engines open the same stream for the same
+    profile index and the Resolution dropdown means one thing.
+    """
+    if camera.get("display") in ("webrtc", "wsrtsp", "info"):
+        return None, "", "this camera is not an RTSP stream"
+    profiles = camera.get("stream_profiles") or []
+    if not profiles:
+        # Cameras discovered before stream_profiles existed.
+        profiles = [{"url": camera.get("stream_url", ""),
+                     "stream_codec": camera.get("stream_codec")}]
+        if camera.get("sub_stream_url"):
+            profiles.append({"url": camera.get("sub_stream_url", ""),
+                             "stream_codec": camera.get("sub_stream_codec")})
+    if not 0 <= prof_idx < len(profiles):
+        return None, "", f"profile {prof_idx} does not exist"
+    prof = profiles[prof_idx]
+    raw = prof.get("url") or camera.get(prof.get("_url_key", "stream_url"))
+    codec = (prof.get("stream_codec") or "").lower()
+    if not raw:
+        return None, codec, "no stream URL for this profile"
+    if not raw.lower().startswith(("rtsp://", "rtsps://")):
+        return None, codec, "this profile is not RTSP"
+    # Passthrough only. Browsers play H.264 and H.265 over WebRTC or MSE;
+    # nothing plays MJPEG or MPEG-4 Part 2 that way, and ffmpeg is not
+    # loaded in go2rtc to transcode them. Unknown codecs are let through:
+    # the browser negotiates, and falls back if negotiation fails.
+    if codec in ("mjpeg", "jpeg", "mpeg4", "mp4v"):
+        return None, codec, f"{codec.upper()} cannot play as live video"
+    url = build_authenticated_url(camera, url=raw)
+    if not url:
+        return None, codec, "no stream URL for this profile"
+    return url, codec, "ok"
+
+
+async def _go2rtc_register(name: str, src: str, camera_id: str) -> bool:
+    """Create or update one go2rtc stream. No-op if the source is unchanged."""
+    if _GO2RTC_STREAMS.get(name) == src:
+        return True
+    from yarl import URL
+    method = "PATCH" if name in _GO2RTC_STREAMS else "PUT"
+    # Encode with safe="" so every reserved character is escaped.
+    # build_authenticated_url leaves '&' and '+' raw in the password, since
+    # both are legal in RTSP userinfo. Raw in a query string, Go's parser
+    # would split the value at '&' and read '+' as a space, and go2rtc
+    # would dial the camera with the wrong password.
+    query = f"name={quote(name, safe='')}&src={quote(src, safe='')}"
+    put_url = URL(_go2rtc_api_url(f"/api/streams?{query}"), encoded=True)
+    get_url = URL(_go2rtc_api_url(f"/api/streams?src={quote(name, safe='')}"),
+                  encoded=True)
+    timeout = aiohttp.ClientTimeout(total=5)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.request(method, put_url) as resp:
+                body = (await resp.text()).strip()
+                # See CREDENTIALS above: with no config file, go2rtc has
+                # already created the stream when it returns this 400.
+                if resp.status != 200 and "config file disabled" not in body:
+                    log.warning(f"go2rtc: {method} {name} failed — HTTP "
+                                f"{resp.status}: {_strip_creds(body)[:160]}")
+                    return False
+            # A GET naming only the stream does not dial the camera; go2rtc
+            # probes the source only when media parameters are present.
+            async with session.get(get_url) as resp:
+                if resp.status != 200:
+                    log.warning(f"go2rtc: {name} missing after {method} "
+                                f"(HTTP {resp.status})")
+                    return False
+    except (aiohttp.ClientError, asyncio.TimeoutError) as ex:
+        log.warning(f"go2rtc: {method} {name} failed: {ex}")
+        return False
+    _GO2RTC_STREAMS[name] = src
+    _GO2RTC_STREAM_CAM[name] = camera_id
+    return True
+
+
+async def api_go2rtc_focus(request: web.Request) -> web.Response:
+    """GET /api/go2rtc/focus/{camera_id}?profile=N — prepare live view.
+
+    Registers the profile's stream with go2rtc and returns its name, or
+    {"ok": false, "reason": ...} so the browser takes the classic path.
+    Never dials the camera: go2rtc connects only when the player's
+    WebSocket arrives through handle_go2rtc_ws.
+    """
+    camera_id = request.match_info["camera_id"]
+    if not CFG_GO2RTC:
+        return web.json_response(
+            {"ok": False, "reason": "live view is off in the addon options"})
+    if not _GO2RTC_READY:
+        return web.json_response({"ok": False, "reason": "go2rtc is not running"})
+    camera = CAMERAS.get(camera_id)
+    if not camera:
+        return web.json_response({"ok": False, "reason": "camera not found"},
+                                 status=404)
+    try:
+        prof_idx = int(request.query.get("profile", "0"))
+    except ValueError:
+        return web.json_response({"ok": False, "reason": "bad profile index"},
+                                 status=400)
+    src, codec, reason = _go2rtc_profile_source(camera, prof_idx)
+    if not src:
+        return web.json_response({"ok": False, "reason": reason, "codec": codec})
+    name = _go2rtc_stream_name(camera_id, prof_idx)
+    if not await _go2rtc_register(name, src, camera_id):
+        return web.json_response({"ok": False,
+                                  "reason": "go2rtc rejected the stream"})
+    return web.json_response({"ok": True, "stream": name,
+                              "profile": prof_idx, "codec": codec})
+
+
+async def handle_go2rtc_ws(request: web.Request) -> web.StreamResponse:
+    """GET /go2rtc/ws?src=<name> — relay the player's WebSocket to go2rtc.
+
+    The only way into go2rtc from a browser: its API listens on 127.0.0.1,
+    and HA ingress proxies only to this addon's port. Forwards /api/ws, and
+    only for names in _GO2RTC_STREAMS. MSE video and WebRTC signalling both
+    ride this one socket; WebRTC media itself goes direct to the WebRTC port.
+    """
+    name = request.query.get("src", "")
+    camera_id = _GO2RTC_STREAM_CAM.get(name)
+    if not (CFG_GO2RTC and _GO2RTC_READY and camera_id
+            and name in _GO2RTC_STREAMS):
+        return web.Response(status=404, text="Unknown live stream")
+    camera = CAMERAS.get(camera_id) or {}
+    from yarl import URL
+
+    client_ws = web.WebSocketResponse(heartbeat=30.0)
+    await client_ws.prepare(request)
+
+    # go2rtc dials the camera when this consumer connects upstream, so wait
+    # out the brand cooldown first. The Microseven draws an RST for two opens
+    # inside 5 s; without this wait, the thumbnail ffmpeg's last open and
+    # go2rtc's first could land inside one window.
+    throttle_s = _brand_throttle_seconds(camera) if camera else 0.0
+    if throttle_s > 0:
+        await _throttle_wait_if_needed(camera.get("ip", ""), throttle_s,
+                                       f"go2rtc live view {camera_id}")
+
+    upstream = URL(_go2rtc_api_url(f"/api/ws?src={quote(name, safe='')}"),
+                   encoded=True)
+    session = aiohttp.ClientSession()
+    try:
+        try:
+            # max_msg_size=0: one MSE fragment carrying a 4K HEVC keyframe can
+            # exceed aiohttp's 4 MiB default, which would drop the socket.
+            upstream_ws = await session.ws_connect(upstream, max_msg_size=0,
+                                                   heartbeat=30.0)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as ex:
+            log.warning(f"go2rtc: live view for {camera_id} could not reach "
+                        f"go2rtc: {ex}")
+            # The browser treats an error that names no mode as fatal before
+            # the first frame, and falls back to the classic view at once.
+            await client_ws.send_json({"type": "error",
+                                       "value": "anycam: go2rtc unreachable"})
+            await client_ws.close()
+            return client_ws
+
+        async def _relay(reader, writer) -> None:
+            async for msg in reader:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    await writer.send_str(msg.data)
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    await writer.send_bytes(msg.data)
+                else:   # CLOSE, CLOSING, CLOSED, ERROR
+                    break
+
+        log.info(f"go2rtc: live view opened for {camera_id} ({name})")
+        up = asyncio.create_task(_relay(upstream_ws, client_ws))
+        down = asyncio.create_task(_relay(client_ws, upstream_ws))
+        try:
+            await asyncio.wait({up, down}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (up, down):
+                task.cancel()
+            await asyncio.gather(up, down, return_exceptions=True)
+            await upstream_ws.close()
+        log.info(f"go2rtc: live view closed for {camera_id}")
+    finally:
+        await session.close()
+        if not client_ws.closed:
+            await client_ws.close()
+    return client_ws
+
+
+async def handle_go2rtc_player_js(request: web.Request) -> web.Response:
+    """GET /go2rtc/video-rtc.js — the vendored go2rtc player module.
+
+    Served from memory with an explicit JavaScript type: the browser loads it
+    with import(), and ES modules refuse any other MIME type.
+    """
+    global _GO2RTC_PLAYER_BYTES
+    if _GO2RTC_PLAYER_BYTES is None:
+        # Read in the thread pool: file I/O would otherwise block the event
+        # loop (best practices §1.4). Once per process, then served from memory.
+        loop = asyncio.get_running_loop()
+        try:
+            _GO2RTC_PLAYER_BYTES = await loop.run_in_executor(
+                _THREAD_POOL, GO2RTC_PLAYER_JS.read_bytes)
+        except OSError:
+            return web.Response(status=404, text="go2rtc player not installed")
+    return web.Response(body=_GO2RTC_PLAYER_BYTES,
+                        content_type="text/javascript",
+                        headers={"Cache-Control": "no-cache"})
+
+
+async def _focus_set_go2rtc(camera_id: str) -> web.Response:
+    """Enter Enhanced View on the go2rtc engine.
+
+    Records focus, so the card's polls for this camera stop spawning work and
+    other cameras throttle as usual. Starts no native-res snap_loop: go2rtc
+    serves the video, decoded by the viewing device.
+
+    The thumbnail snap_loop is the one thing that must be decided here,
+    because motion detection runs inside it (it compares consecutive JPEG
+    frames) and it exits 30 s after the last poll:
+      * Motion armed: keep it running, and start it if it is not. Motion
+        recording keeps working, at the cost of a second RTSP session and
+        the thumbnail decode the grid view runs anyway.
+      * Motion off: stop it, so go2rtc holds the only RTSP session and the
+        Pi decodes nothing for this camera.
+    """
+    global _FOCUSED_CAMERA, _FOCUS_ENGINE
+    _FOCUSED_CAMERA = camera_id
+    _FOCUS_ENGINE = "go2rtc"
+    camera = CAMERAS[camera_id]
+    state = _SNAP.get(camera_id)
+    ms = _MOTION.get(camera_id)
+    if ms and ms.get("enabled"):
+        running = bool(state and state.get("task") and not state["task"].done())
+        if not running:
+            url = build_authenticated_url(camera)
+            if url:
+                _snap_last_access[camera_id] = time.monotonic()
+                _snap_state(camera_id)["task"] = asyncio.create_task(
+                    snap_loop(camera_id, url, camera))
+        log.info(f"Focus: entering enhanced view for {camera_id} (engine: "
+                 f"go2rtc) — motion detection is armed, so the thumbnail "
+                 f"loop keeps running beside go2rtc")
+    else:
+        log.info(f"Focus: entering enhanced view for {camera_id} "
+                 f"(engine: go2rtc)")
+        task = state.get("task") if state else None
+        if task and not task.done():
+            proc = state.get("proc")
+            if proc is not None and proc.returncode is None:
+                # The documented clean exit: snap_loop's EOF branch sees the
+                # flag, pops it, and returns without restarting.
+                state["focus_leave_kill"] = True
+                try:
+                    proc.kill()
+                    log.info(f"Focus: stopped thumbnail ffmpeg for "
+                             f"{camera_id} — go2rtc holds the stream")
+                except ProcessLookupError:
+                    state.pop("focus_leave_kill", None)
+            else:
+                # No live ffmpeg to consume the flag (between restarts, or on
+                # the HTTP snapshot path), so cancel and set no flag. An
+                # unconsumed flag makes the NEXT thumbnail loop skip its first
+                # restart: the 2.4.0-rc3.3 Bug A shape.
+                task.cancel()
+    return web.json_response({"status": "ok", "focused": camera_id,
+                              "engine": "go2rtc"})
+
+
 async def handle_focus_set(request: web.Request) -> web.Response:
-    """POST /snap/focus/{camera_id} — enter full-screen focus mode."""
-    global _FOCUSED_CAMERA
+    """POST /snap/focus/{camera_id} — enter full-screen focus mode.
+
+    2.6.3: `?engine=go2rtc` enters focus on the go2rtc engine instead (see
+    _focus_set_go2rtc). Without that parameter this path is unchanged from
+    2.6.2 apart from recording its engine.
+    """
+    global _FOCUSED_CAMERA, _FOCUS_ENGINE
     camera_id = request.match_info["camera_id"]
     if camera_id not in CAMERAS:
         return web.json_response({"error": "Camera not found"}, status=404)
+    if request.query.get("engine") == "go2rtc":
+        return await _focus_set_go2rtc(camera_id)
     _FOCUSED_CAMERA = camera_id
+    _FOCUS_ENGINE = "legacy"
     log.info(f"Focus: entering enhanced view for {camera_id}")
     # 2.4.0-rc3.3 Bug A fix: clear any stale focus_leave_kill flag from a
     # previous focus session. The flag is set by handle_focus_clear and
@@ -8511,8 +9003,23 @@ async def handle_focus_set(request: web.Request) -> web.Response:
 
 async def handle_focus_clear(request: web.Request) -> web.Response:
     """DELETE /snap/focus — exit full-screen focus mode."""
-    global _FOCUSED_CAMERA
+    global _FOCUSED_CAMERA, _FOCUS_ENGINE
     prev = _FOCUSED_CAMERA
+    engine = _FOCUS_ENGINE
+    _FOCUS_ENGINE = None
+    if engine == "go2rtc":
+        log.info(f"Focus: leaving enhanced view (was: {prev}, engine: go2rtc)")
+        _FOCUSED_CAMERA = None
+        # Nothing to kill: this engine started no native-res loop, and the
+        # browser has already closed its WebSocket. Drop any focus_leave_kill
+        # flag the stopped thumbnail loop has not consumed yet, so the next
+        # thumbnail loop restarts normally instead of hitting the
+        # 2.4.0-rc3.3 Bug A shape. The legacy branch below must not run
+        # here: it SETS that flag, and nothing would be left to consume it.
+        state = _SNAP.get(prev) if prev else None
+        if state:
+            state.pop("focus_leave_kill", None)
+        return web.json_response({"status": "ok"})
     log.info(f"Focus: leaving enhanced view (was: {prev})")
     _FOCUSED_CAMERA = None
     # Cancel the native-res snap_loop task so the next thumbnail poll
@@ -11022,6 +11529,7 @@ _JS = r"""
 const BASE = '___BASE___';
 const CFG_UNRESTRICTED_BROWSER = ___UNRESTRICTED___;
 const CFG_ADAPTIVE_QUALITY     = ___ADAPTIVE_QUALITY___;
+const CFG_GO2RTC               = ___GO2RTC___;
 const STORAGE_UNRESTRICTED = ___UNRESTRICTED___;
 const PROTO_ICONS = {RTSP:'📹',ONVIF:'🔭',MJPEG:'🖼️',HLS:'📡',RTMP:'📺',WebRTC:'🔗','WS-RTSP':'🔌',HTTP:'🌐',DVR:'💾'};
 const PROTO_CLR   = {
@@ -11652,6 +12160,329 @@ function pollMotion() {
 }
 setInterval(pollMotion, 3000);
 
+/* ── go2rtc live view (2.6.3, Tier 2) ──────────────────────────────────────
+ * When the addon option is on, Enhanced View plays through the bundled
+ * go2rtc: WebRTC or MSE, passed through with no decode on the Pi. The
+ * classic JPEG path (_startFocusPoll) is untouched and is the fallback.
+ *
+ * AnyCamVideo subclasses go2rtc's VideoRTC, the extension pattern go2rtc
+ * documents in www/video-stream.js; www/video-rtc.js itself is vendored
+ * unmodified. VideoRTC runs MSE and WebRTC in parallel, plays MSE first,
+ * and switches to WebRTC only when WebRTC wins its codec comparison.
+ *
+ * VideoRTC never gives up: on a dead socket it reconnects every 15 s,
+ * forever. That is right once a stream has played. Before that it is
+ * wrong — an unplayable codec, or a proxy that kills the socket, would
+ * look exactly like the freeze-and-resume symptom this work exists to
+ * remove. So until the first frame this code decides, and falls back to
+ * the classic view after GO2RTC_FIRST_FRAME_MS with no video, after two
+ * unexpected socket closes, or once every attempted mode has errored.
+ * After the first frame it never falls back on its own.
+ */
+const GO2RTC_FIRST_FRAME_MS = 12000;
+let _go2rtc          = null;   // live session state; see _go2rtcMount
+let _go2rtcWatchdog  = null;
+let _go2rtcStatsTid  = null;
+let _go2rtcPlayer    = null;   // Promise<boolean>: player module loaded
+let _focusEngine     = null;   // 'go2rtc' | 'legacy' | null
+let _focusSession    = 0;      // bumped on every open and close
+// Cameras whose live view failed during this page load, camId -> reason.
+// A retry costs up to GO2RTC_FIRST_FRAME_MS of black screen per open, so
+// they use the classic view until the page is reloaded.
+const _go2rtcDeclined = {};
+
+function _go2rtcLoadPlayer() {
+  if (_go2rtcPlayer) return _go2rtcPlayer;
+  if (!CFG_GO2RTC || !('customElements' in window) || !('WebSocket' in window)) {
+    _go2rtcPlayer = Promise.resolve(false);
+    return _go2rtcPlayer;
+  }
+  _go2rtcPlayer = import(BASE + '/go2rtc/video-rtc.js').then(mod => {
+    if (!customElements.get('anycam-video')) {
+      class AnyCamVideo extends mod.VideoRTC {
+        oninit() {
+          super.oninit();
+          // Surveillance view: no scrub bar, and muted so autoplay is never blocked.
+          this.video.controls = false;
+          this.video.muted    = true;
+          this.video.addEventListener('playing', () => this._emit('playing'));
+        }
+        onopen() {
+          const modes = super.onopen();
+          this.onmessage['anycam'] = msg => {
+            if (msg.type === 'error') this._emit('error', String(msg.value || ''));
+            else if (msg.type === 'mse') this._emit('mode', 'MSE');
+          };
+          this._emit('open', modes);
+          return modes;
+        }
+        onclose() {
+          // VideoRTC closes the socket on purpose after a WebRTC handoff, and
+          // marks wsState CLOSED first. Report only closes it did not intend.
+          if (this.wsState !== WebSocket.CLOSED) this._emit('close');
+          return super.onclose();
+        }
+        onpcvideo(video2) {
+          super.onpcvideo(video2);
+          if (this.pcState !== WebSocket.CLOSED) this._emit('mode', 'WebRTC');
+        }
+        _emit(kind, value) {
+          if (typeof this.onanycam === 'function') this.onanycam(kind, value);
+        }
+      }
+      customElements.define('anycam-video', AnyCamVideo);
+    }
+    return true;
+  }).catch(err => {
+    console.warn('[AnyCam] live view player did not load — classic view only:', err);
+    return false;
+  });
+  return _go2rtcPlayer;
+}
+
+// Ask the server for a go2rtc stream for one camera profile.
+async function _go2rtcStreamInfo(camId, profIdx) {
+  try {
+    const r = await fetch(BASE + '/api/go2rtc/focus/' + encodeURIComponent(camId)
+                          + '?profile=' + profIdx);
+    return await r.json();
+  } catch (e) {
+    return {ok: false, reason: 'no answer from the addon'};
+  }
+}
+
+// Try to open Enhanced View on go2rtc. Returns true when this call handled
+// the session (playing, or the session was closed meanwhile); false means
+// the caller should use the classic view.
+async function _go2rtcTryFocus(camId, cam, session) {
+  if (!CFG_GO2RTC || _go2rtcDeclined[camId]) return false;
+  if (!(await _go2rtcLoadPlayer())) return false;
+  if (session !== _focusSession) return true;
+  const info = await _go2rtcStreamInfo(camId, 0);
+  if (session !== _focusSession) return true;
+  if (!info || !info.ok) {
+    console.info('[AnyCam] live view not used for ' + camId + ': '
+                 + ((info && info.reason) || 'no answer'));
+    return false;
+  }
+  _focusCamId       = camId;
+  _focusEngine      = 'go2rtc';
+  _focusCurProf     = 0;
+  _manualTierActive = false;
+  await fetch(BASE + '/snap/focus/' + camId + '?engine=go2rtc',
+              {method: 'POST'}).catch(() => {});
+  if (session !== _focusSession) return true;
+  _go2rtcMount(camId, cam, info, session);
+  _loadFocusProfiles().then(() => {
+    const sel = document.getElementById('focus-res-sel');
+    if (sel && _go2rtc && _go2rtc.session === session) sel.value = String(_go2rtc.profIdx);
+  });
+  return true;
+}
+
+function _go2rtcMount(camId, cam, info, session) {
+  const img  = document.getElementById('focus-img');
+  const wrap = document.getElementById('focus-video');
+  img.style.display  = 'none';
+  wrap.innerHTML     = '';
+  wrap.style.display = 'block';
+  const el = document.createElement('anycam-video');
+  el.mode  = 'webrtc,mse';
+  el.media = 'video';
+  _go2rtc = {
+    el, camId, cam, session,
+    stream: info.stream, profIdx: info.profile,
+    codec: String(info.codec || cam.stream_codec || '').toUpperCase(),
+    played: false, closes: 0, modes: [], errs: {},
+    mode: 'connecting', lastFrames: 0, fps: null,
+  };
+  el.onanycam = (kind, value) => _go2rtcEvent(session, kind, value);
+  wrap.appendChild(el);
+  el.src = BASE + '/go2rtc/ws?src=' + encodeURIComponent(info.stream);
+  clearTimeout(_go2rtcWatchdog);
+  const watchdog = () => {
+    // A hidden tab pauses VideoRTC by design; do not blame the stream for it.
+    if (document.hidden) { _go2rtcWatchdog = setTimeout(watchdog, GO2RTC_FIRST_FRAME_MS); return; }
+    _go2rtcFail(session, 'no video within ' + (GO2RTC_FIRST_FRAME_MS / 1000) + ' s');
+  };
+  _go2rtcWatchdog = setTimeout(watchdog, GO2RTC_FIRST_FRAME_MS);
+  clearInterval(_go2rtcStatsTid);
+  _go2rtcStatsTid = setInterval(() => _go2rtcStats(session), 1000);
+  _go2rtcControls(true);
+  _go2rtcUpdateInfo();
+}
+
+function _go2rtcEvent(session, kind, value) {
+  const g = _go2rtc;
+  if (!g || g.session !== session) return;
+  if (kind === 'playing') {
+    _go2rtcPlayed(g);
+  } else if (kind === 'open') {
+    g.modes = Array.isArray(value) ? value : [];
+  } else if (kind === 'mode') {
+    g.mode = value;
+    _go2rtcUpdateInfo();
+  } else if (kind === 'error') {
+    console.warn('[AnyCam] go2rtc: ' + value);
+    if (g.played) return;   // VideoRTC recovers on its own once it has played
+    // go2rtc prefixes errors with the mode that failed ("mse: ...",
+    // "webrtc/offer: ..."). A WebRTC failure alone is normal behind a VPN
+    // while MSE keeps playing, so wait until every attempted mode has
+    // failed. An error naming no mode is fatal.
+    const failed = g.modes.find(m => value.startsWith(m));
+    if (!failed) { _go2rtcFail(session, value || 'stream error'); return; }
+    g.errs[failed] = true;
+    if (g.modes.length && g.modes.every(m => g.errs[m])) _go2rtcFail(session, value);
+  } else if (kind === 'close') {
+    if (g.played) { g.mode = 'reconnecting'; _go2rtcUpdateInfo(); return; }
+    if (++g.closes >= 2) _go2rtcFail(session, 'connection closed before the first frame');
+  }
+}
+
+function _go2rtcPlayed(g) {
+  if (g.played) return;
+  g.played = true;
+  clearTimeout(_go2rtcWatchdog);
+  _go2rtcWatchdog = null;
+  _go2rtcUpdateInfo();
+}
+
+// Once a second: measure decoded fps on this device, and catch a first frame
+// in browsers that do not fire 'playing' for a MediaStream source.
+function _go2rtcStats(session) {
+  const g = _go2rtc;
+  if (!g || g.session !== session || !g.el.video) return;
+  const v = g.el.video;
+  const q = (typeof v.getVideoPlaybackQuality === 'function') ? v.getVideoPlaybackQuality() : null;
+  const frames = q ? q.totalVideoFrames : (v.webkitDecodedFrameCount || 0);
+  const delta = frames - g.lastFrames;
+  g.lastFrames = frames;
+  // The counter restarts when VideoRTC swaps MSE for WebRTC; skip that tick.
+  g.fps = delta >= 0 ? delta : null;
+  if (!g.played && frames > 0 && v.videoWidth > 0) _go2rtcPlayed(g);
+  _go2rtcUpdateInfo();
+}
+
+function _go2rtcUpdateInfo() {
+  const g = _go2rtc;
+  if (!g) return;
+  const infoEl = document.getElementById('focus-info');
+  const v = g.el.video;
+  const res = (v && v.videoWidth) ? v.videoWidth + 'x' + v.videoHeight : '…';
+  const fps = (g.played && g.fps !== null) ? g.fps + ' fps' : '…';
+  const label = g.played ? g.mode : 'connecting…';
+  infoEl.innerHTML =
+    esc(displayName(g.cam)) + ' — <b>Live (' + esc(label) + '):</b> '
+    + res + ' · ' + fps + (g.codec ? ' · ' + esc(g.codec) : '')
+    + ' <span style="opacity:.55">— decoded on this device, not the Pi</span>';
+}
+
+// FPS and Auto drive the classic engine's ffmpeg ladder. Passthrough cannot
+// change the frame rate, so both are disabled in live view; Resolution
+// still works, by switching the camera profile go2rtc relays.
+function _go2rtcControls(on) {
+  const fs      = document.getElementById('focus-fps-sel');
+  const auto    = document.querySelector('.focus-auto-btn');
+  const classic = document.getElementById('focus-classic-grp');
+  if (fs) {
+    fs.disabled = on;
+    fs.title    = on ? "Live view passes the camera stream through unchanged, so it runs at the camera's own frame rate"
+                     : 'Frame rate cap';
+    if (on) fs.value = 'uncapped';
+    const grp = fs.closest('.focus-ctrl-group');
+    if (grp) grp.style.opacity = on ? '0.4' : '1';
+  }
+  if (auto) {
+    auto.disabled      = on;
+    auto.style.opacity = on ? '0.4' : '1';
+    auto.title         = on ? 'Automatic quality applies to the classic view only'
+                            : 'Let the system adapt automatically';
+  }
+  if (classic) classic.style.display = on ? '' : 'none';
+}
+
+function _go2rtcUnmount() {
+  clearTimeout(_go2rtcWatchdog);
+  clearInterval(_go2rtcStatsTid);
+  _go2rtcWatchdog = null;
+  _go2rtcStatsTid = null;
+  const g = _go2rtc;
+  _go2rtc = null;
+  if (g && g.el) {
+    g.el.onanycam = null;
+    // Close the socket and peer connection now. Removing the element alone
+    // leaves them open for VideoRTC's 5 s DISCONNECT_TIMEOUT, holding the
+    // camera's RTSP session in go2rtc for that long.
+    try { g.el.ondisconnect(); } catch (e) {}
+    if (g.el.reconnectTID) { clearTimeout(g.el.reconnectTID); g.el.reconnectTID = 0; }
+    g.el.remove();
+  }
+  const wrap = document.getElementById('focus-video');
+  if (wrap) { wrap.innerHTML = ''; wrap.style.display = 'none'; }
+  const img = document.getElementById('focus-img');
+  if (img) img.style.display = '';
+  _go2rtcControls(false);
+}
+
+// Leave live view for the classic engine inside the same focus session.
+// Keeps the profile the user was on, when that was not profile 0.
+function _go2rtcToClassic(camId, cam, profIdx, message, isError) {
+  _go2rtcUnmount();
+  _focusEngine = 'legacy';
+  if (message) showToast(message, !!isError);
+  _startFocusPoll(camId, cam).then(async () => {
+    if (!profIdx || _focusCamId !== camId) return;
+    _focusCurProf     = profIdx;
+    _manualTierActive = true;
+    const sel = document.getElementById('focus-res-sel');
+    if (sel) sel.value = String(profIdx);
+    await _applyFocusTier(profIdx, null);
+    if (_focusCamId !== camId) return;
+    // _startFocusPoll fires _loadFocusProfiles without awaiting it, and that
+    // answer can land after the line above and put the dropdown back on the
+    // server's old tier. Re-seed from the server now that it holds profIdx.
+    await _loadFocusProfiles();
+  });
+}
+
+function _go2rtcFail(session, reason) {
+  const g = _go2rtc;
+  if (!g || g.session !== session) return;
+  console.warn('[AnyCam] live view failed for ' + g.camId + ': ' + reason
+               + ' — using the classic view');
+  _go2rtcDeclined[g.camId] = reason;
+  _go2rtcToClassic(g.camId, g.cam, g.profIdx,
+                   'Live view unavailable (' + reason + ') — using the classic view', true);
+}
+
+// "Classic" button: compare against the classic view for this session only.
+// Not remembered, so closing and reopening the camera returns to live view.
+function focusUseClassic() {
+  const g = _go2rtc;
+  if (!g) return;
+  _go2rtcToClassic(g.camId, g.cam, g.profIdx,
+                   'Classic view for this session — reopen the camera for live view', false);
+}
+
+async function _go2rtcSwitchProfile(profIdx) {
+  const g = _go2rtc;
+  if (!g || profIdx === g.profIdx) return;
+  const camId = g.camId, cam = g.cam, session = g.session;
+  const info = await _go2rtcStreamInfo(camId, profIdx);
+  if (session !== _focusSession || !_go2rtc) return;
+  if (!info || !info.ok) {
+    // e.g. an MJPEG sub-stream: not playable as live video, so serve that
+    // profile the classic way rather than refuse the user's choice.
+    _go2rtcToClassic(camId, cam, profIdx,
+                     'That stream cannot play live (' + ((info && info.reason) || 'no answer')
+                     + ') — using the classic view', false);
+    return;
+  }
+  _go2rtcUnmount();
+  _go2rtcMount(camId, cam, info, session);
+  _focusCurProf = profIdx;
+}
+
 /* ── Focus / enhanced view ───────────────────────────────────────────────── */
 let _focusCamId   = null;
 let _focusTimer   = null;
@@ -11661,7 +12492,14 @@ async function openFocus(camId) {
   const cam = cameras.find(c => c.id === camId);
   if (!cam || cam.status !== 'ready') return;
 
+  const session = ++_focusSession;
   document.getElementById('focus-overlay').style.display = 'flex';
+  document.getElementById('focus-info').textContent = displayName(cam) + ' — loading…';
+  // 2.6.3: live view through go2rtc first; the classic view when that is
+  // off, not ready, not possible for this camera, or already failed.
+  if (await _go2rtcTryFocus(camId, cam, session)) return;
+  if (session !== _focusSession) return;
+  _focusEngine = 'legacy';
   _startFocusPoll(camId, cam);
 }
 
@@ -11906,7 +12744,10 @@ async function _startFocusPoll(camId, cam) {
 }
 
 async function closeFocus() {
-  _focusCamId = null;
+  _focusSession++;          // any open still awaiting the server bails out
+  _focusCamId  = null;
+  _focusEngine = null;
+  _go2rtcUnmount();         // no-op unless live view was playing
   clearTimeout(_focusTimer);
   clearTimeout(_focus4kWarnTimer);
   await fetch(BASE + '/snap/focus', {method: 'DELETE'}).catch(() => {});
@@ -12017,6 +12858,8 @@ async function _loadFocusProfiles() {
 async function focusPickRes(val) {
   const profIdx = parseInt(val);
   if (isNaN(profIdx)) return;
+  // 2.6.3: in live view the dropdown switches the profile go2rtc relays.
+  if (_focusEngine === 'go2rtc' && _go2rtc) { await _go2rtcSwitchProfile(profIdx); return; }
   _focusCurProf = profIdx;
   _manualTierActive = true;
   const fps = document.getElementById('focus-fps-sel')?.value || 'uncapped';
@@ -14683,6 +15526,8 @@ def build_html() -> str:
                                'true' if CFG_UNRESTRICTED_BROWSER else 'false')
     js_code = js_code.replace('___ADAPTIVE_QUALITY___',
                                'true' if CFG_ADAPTIVE_QUALITY else 'false')
+    js_code = js_code.replace('___GO2RTC___',
+                               'true' if CFG_GO2RTC else 'false')
     # CSS uses {{ }} for literal braces in Python f-string
     css = f"""\
 *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
@@ -14836,6 +15681,12 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 /* ── Focus overlay ── */
 #focus-overlay{{position:fixed;inset:0;background:#000;z-index:9000;display:flex;flex-direction:column;align-items:stretch;padding:0}}
 #focus-img{{width:100vw;height:calc(100vh - 52px - 44px);height:calc(100dvh - 52px - 44px);object-fit:contain;display:block;margin:44px 0 0 0}}
+/* 2.6.3 go2rtc live view: same box as #focus-img, swapped in its place */
+#focus-video{{width:100vw;height:calc(100vh - 52px - 44px);height:calc(100dvh - 52px - 44px);margin:44px 0 0 0;background:#000}}
+#focus-video anycam-video{{display:block;width:100%;height:100%}}
+#focus-video video{{object-fit:contain;background:#000}}
+.focus-engine-btn{{background:#1e1e2e;border:1px solid #555;color:#aaa;border-radius:6px;padding:3px 8px;font-size:.72rem;cursor:pointer;height:26px}}
+.focus-engine-btn:hover{{border-color:#4a9eff;color:#4a9eff}}
 #focus-bar{{position:absolute;bottom:0;left:0;right:0;height:52px;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:space-between;padding:0 16px;gap:12px;z-index:9001;border-top:1px solid #333}}
 #focus-info{{font-size:.78rem;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}}
 #focus-controls{{display:flex;align-items:flex-end;gap:12px;flex-shrink:0}}
@@ -15192,6 +16043,7 @@ header h1{{cursor:pointer}}
     <button onclick="document.getElementById('focus-warning').style.display='none'">OK</button>
   </div>
   <img id="focus-img" alt="Enhanced view">
+  <div id="focus-video" style="display:none"></div>
   <div id="focus-bar">
     <div id="focus-info">Loading…</div>
     <div id="focus-controls">
@@ -15216,6 +16068,10 @@ header h1{{cursor:pointer}}
       </div>
       <div class="focus-ctrl-group">
         <button class="focus-auto-btn" onclick="focusResetAuto()" title="Let the system adapt automatically">Auto</button>
+        <span class="focus-ctrl-label" style="visibility:hidden">&middot;</span>
+      </div>
+      <div class="focus-ctrl-group" id="focus-classic-grp" style="display:none">
+        <button class="focus-engine-btn" onclick="focusUseClassic()" title="Compare against the classic view for this session">Classic</button>
         <span class="focus-ctrl-label" style="visibility:hidden">&middot;</span>
       </div>
     </div>
@@ -15287,6 +16143,11 @@ def make_app() -> web.Application:
     app.router.add_get(   "/stream/{camera_id}/test",             handle_stream_test)
     app.router.add_get(   "/snapshot/{camera_id}",                handle_snapshot)
     app.router.add_get(   "/snap/status",                         handle_snap_status)
+    # 2.6.3 — Tier 2 go2rtc live view. Registered whether or not the option
+    # is on: each handler answers "not available" itself when it is off.
+    app.router.add_get(   "/api/go2rtc/focus/{camera_id}",        api_go2rtc_focus)
+    app.router.add_get(   "/go2rtc/ws",                           handle_go2rtc_ws)
+    app.router.add_get(   "/go2rtc/video-rtc.js",                 handle_go2rtc_player_js)
     app.router.add_post(  "/api/log_level",                        api_set_log_level)
     app.router.add_get(   "/api/logs",                            api_logs)
     app.router.add_post(  "/snap/focus/{camera_id}",              handle_focus_set)
@@ -15555,6 +16416,23 @@ async def _on_shutdown(app: web.Application) -> None:
             task.cancel()
             cancelled_tasks += 1
 
+    # ── 2b. Stop go2rtc (2.6.3) ────────────────────────────────────────────
+    # Cancelling the supervisor makes it SIGTERM go2rtc (SIGKILL after 3 s)
+    # and stops it restarting. The direct kill below catches the case where
+    # the supervisor is wedged and misses its 5 s window.
+    if _GO2RTC_TASK is not None and not _GO2RTC_TASK.done():
+        _GO2RTC_TASK.cancel()
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(_GO2RTC_TASK, return_exceptions=True), timeout=5)
+        except asyncio.TimeoutError:
+            log.warning("go2rtc: supervisor did not stop within 5s")
+    if _GO2RTC_PROC is not None and _GO2RTC_PROC.returncode is None:
+        try:
+            _GO2RTC_PROC.kill()
+        except ProcessLookupError:
+            pass
+
     # ── 3. SIGTERM ffmpeg children, wait 3s, SIGKILL survivors ─────────────
     procs_to_kill = []
     for state in _SNAP.values():
@@ -15621,7 +16499,7 @@ async def _on_shutdown(app: web.Application) -> None:
 
 
 async def main() -> None:
-    global _STOP_EVENT
+    global _STOP_EVENT, _GO2RTC_TASK
 
     load_cameras()
     load_blacklist()
@@ -15638,6 +16516,15 @@ async def main() -> None:
     # host devices; on non-Pi hardware the v4l2m2m devices simply won't exist).
     # Populates _HW_UNAVAILABLE so snap_loop never tries an unavailable decoder.
     await _probe_hw_decoders()
+
+    # ── go2rtc live view (2.6.3, Tier 2) ──────────────────────────────────────
+    # Supervised for the life of the addon; see _go2rtc_supervisor. Started
+    # before the web server so it is usually ready by the first page load.
+    if CFG_GO2RTC:
+        _GO2RTC_TASK = asyncio.create_task(_go2rtc_supervisor())
+    else:
+        log.info("go2rtc live view is off — Enhanced View uses the classic "
+                 "JPEG path")
 
     # ── Graceful shutdown plumbing ────────────────────────────────────────────
     # _STOP_EVENT is set by SIGTERM/SIGINT handlers below. main() blocks on it,

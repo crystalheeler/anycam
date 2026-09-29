@@ -114,8 +114,37 @@ RUN apt-get update \
         cryptography==48.0.0 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Step 3 (2.6.3): go2rtc, for Enhanced View live playback (Tier 2).
+#
+# Exact version, verified by SHA-256. Unlike the apt archives behind the
+# ffmpeg entry above, GitHub release assets are immutable, so an exact pin
+# does not rot here. The digests are the ones GitHub publishes for these two
+# assets on the v1.9.14 release.
+#
+# www/video-rtc.js is vendored from the same tag and must move with it: the
+# browser player and this binary speak one WebSocket protocol.
+#
+# sha256sum -c fails the build on any mismatch rather than ship an
+# unverified binary into an addon that runs with full_access. Running
+# `go2rtc -version` afterwards also proves the binary executes on this
+# architecture, so a wrong-arch download fails here and not at runtime.
+ARG GO2RTC_VERSION=v1.9.14
+ARG GO2RTC_SHA256_ARM64=359fabade8a7a51e81a55fe6df6b0ef81764a5e1d63179577534eaaa71904b50
+ARG GO2RTC_SHA256_AMD64=32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6
+RUN case "${BUILD_ARCH}" in \
+        aarch64) GO2RTC_ARCH=arm64; GO2RTC_SHA256="${GO2RTC_SHA256_ARM64}" ;; \
+        amd64)   GO2RTC_ARCH=amd64; GO2RTC_SHA256="${GO2RTC_SHA256_AMD64}" ;; \
+        *) echo "go2rtc: no build for arch ${BUILD_ARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /usr/local/bin/go2rtc \
+        "https://github.com/AlexxIT/go2rtc/releases/download/${GO2RTC_VERSION}/go2rtc_linux_${GO2RTC_ARCH}" \
+    && echo "${GO2RTC_SHA256}  /usr/local/bin/go2rtc" | sha256sum -c - \
+    && chmod 0755 /usr/local/bin/go2rtc \
+    && echo "==> go2rtc installed:" && /usr/local/bin/go2rtc -version
+
 COPY run.sh /
 COPY camera_discovery.py /
+COPY www/video-rtc.js /www/video-rtc.js
 
 RUN chmod +x /run.sh
 
