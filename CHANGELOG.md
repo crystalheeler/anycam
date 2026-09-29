@@ -1,3 +1,48 @@
+## 2.6.3
+
+Startup logging for the installed ffmpeg version. No change to camera
+discovery, streaming, or the Dockerfile.
+
+### Why
+
+Since 2.6.2 the Dockerfile installs ffmpeg with no exact version. apt
+picks the current build from the Raspberry Pi archive, held there by the
+origin pin. The version therefore changes over time.
+
+The Dockerfile echoes the resolved version during the build, but the
+Supervisor shows build output only when a build fails. After a successful
+install the version was visible only by running `dpkg-query` inside the
+container by hand.
+
+### Change
+
+`run.sh` now logs the ffmpeg version on every start:
+
+```
+ffmpeg: 8:5.1.9-0+deb12u1+rpt1
+```
+
+On aarch64 it also checks for the `+rpt` suffix, which marks the
+Raspberry Pi Foundation build carrying the patches rpivid needs. If the
+suffix is missing, it logs a warning:
+
+```
+ffmpeg 7:5.1.9-0+deb12u1 is not the Raspberry Pi build (no +rpt suffix).
+The Dockerfile origin pin did not hold, and rpivid hardware decode will
+not engage.
+```
+
+This matters because the failure is silent. With `hw_decode` off, which is
+the default, the addon behaves the same on either build, so a wrong ffmpeg
+would go unnoticed until someone turned hardware decode on.
+
+### Field results carried from 2.6.2
+
+2.6.2 installed and ran on the Raspberry Pi 4 / HAOS target on
+2026-09-28. `dpkg-query` inside the container returned
+`8:5.1.9-0+deb12u1+rpt1`, confirming that the origin pin selected the
+Raspberry Pi build.
+
 ## 2.6.2
 
 Build fix. 2.6.1 could not be installed at all. No functional change to

@@ -52,4 +52,23 @@ bashio::log.info "Config: fast_stream_start=${FAST_STREAM_START} low_latency=${L
 bashio::log.info "Config: recordings_path=${RECORDINGS_PATH} motion_sensitivity=${MOTION_SENSITIVITY} motion_cooldown=${MOTION_COOLDOWN_SECS}s motion_padding=${MOTION_CLIP_PADDING_SECS}s"
 bashio::log.info "Config: log_debug=${LOG_DEBUG} log_info=${LOG_INFO} log_warning=${LOG_WARNING} log_error=${LOG_ERROR} unrestricted_storage_browser=${UNRESTRICTED_STORAGE_BROWSER}"
 
+# 2.6.3: log the installed ffmpeg version at every start.
+#
+# Since 2.6.2 the Dockerfile does not pin ffmpeg to an exact version (see the
+# comment above its install step), so the version floats inside the bookworm
+# suite. The Dockerfile echoes the resolved version at build time, but the
+# Supervisor shows build output only when a build FAILS. After a successful
+# install, this line is the only place the version is visible.
+#
+# On aarch64 the version must carry a +rpt suffix: that marks the Raspberry
+# Pi Foundation build, which has the patches rpivid hardware decode needs.
+# Without it, apt resolved to Debian's ffmpeg, meaning the Dockerfile origin
+# pin failed. Everything still appears to work while hw_decode is off, which
+# is why this is checked here instead of waiting for someone to notice.
+FFMPEG_VER=$(dpkg-query -W -f='${Version}' ffmpeg 2>/dev/null || echo "unknown")
+bashio::log.info "ffmpeg: ${FFMPEG_VER}"
+if [ "$(uname -m)" = "aarch64" ] && [[ "${FFMPEG_VER}" != *+rpt* ]]; then
+    bashio::log.warning "ffmpeg ${FFMPEG_VER} is not the Raspberry Pi build (no +rpt suffix). The Dockerfile origin pin did not hold, and rpivid hardware decode will not engage."
+fi
+
 exec python3 /camera_discovery.py
