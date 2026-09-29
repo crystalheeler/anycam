@@ -1,3 +1,63 @@
+## 2.6.4
+
+Live view is now always on. The **Live View (Enhanced View)** option is
+removed from the Configuration tab.
+
+### Why
+
+2.6.3 shipped live view behind an option, off by default, until it had a
+field test. It has now passed one on both Raspberry Pi 4 / HAOS systems
+(2026-09-28 and 2026-09-29):
+
+- A Lorex DVR's 3840x2160 H.265 channels and the Hikvision's 2560x1440
+  H.265 stream played live in Chrome.
+- A live feed stayed up for more than 10 minutes through Home Assistant's
+  ingress proxy, with no freezes.
+- In the same browser, on the same camera, the classic view bogged down
+  while live view was smooth. The Pi's decode-and-JPEG pipeline, not the
+  browser, was the cause of the poor feeds.
+
+### What changes
+
+- Enhanced View always tries live view first. go2rtc starts with the
+  add-on every time.
+- A camera still falls back to the classic view on its own when live view
+  cannot play it: go2rtc is not running, the browser cannot play the
+  codec, or no video arrives within 12 s. That is the same result turning
+  the option off used to give, so nothing is lost by removing it.
+- The **Classic** button in Enhanced View still switches to the classic
+  view for the current session.
+
+### After updating
+
+Home Assistant keeps the old setting in its saved options until the
+add-on's options are next saved, and logs one warning at start:
+
+```
+Option 'go2rtc_live_view' does not exist in the schema for AnyCam
+```
+
+It is harmless. The Supervisor drops the unknown setting and starts the
+add-on normally.
+
+### Removed with the option
+
+`run.sh` no longer reads `go2rtc_live_view`. This had to change in the same
+release: for a setting that no longer exists, `bashio::config` returns the
+text `null`, which the old code would have read as "off", quietly
+disabling live view.
+
+### Known issues carried forward
+
+- Firefox and LibreWolf cannot play H.265 live. They show a red "Live view
+  unavailable" message once per H.265 camera per page load, then use the
+  classic view. With the option gone this can no longer be switched off.
+  A browser check that skips straight to classic with a plain message is
+  planned (build plan C10).
+- A camera whose stream takes longer than 12 s to deliver its first
+  complete frame falls back to the classic view with the same red message.
+  Seen on the H.264 camera at 192.168.50.73:8765 (build plan B13).
+
 ## 2.6.3
 
 Two changes. Enhanced View can now play a camera live through a bundled
