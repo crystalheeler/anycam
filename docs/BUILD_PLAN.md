@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026, at 2.6.3 (tagged locally, not yet pushed).
+**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.3, published.
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -50,7 +50,6 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | A5 | Blocked | Decide the Low Latency Probe option | Behind an option since 2.6.1. Its one-packet reorder queue drops packets that arrive out of order, and in H.265 a dropped packet can become a gray patch. It is on in CrystalHeeler's setup | Blocked on A11: test with it off and on once the H.264 camera works, then keep it or remove it |
 | A6 | You | Tens-of-seconds freezes | The original complaint. None seen in live view on the first Chrome test | Watch for freezes over a longer live session. Freezes that happen only in the classic view point to the Pi decoder (B11) |
 | A3 | Blocked | Turn Live View on by default | Off by default until proven | Blocked on A2 and A9 |
-| A8 | You | Push 2.6.3 | 2.6.3 and later docs commits exist only locally | On CrystalHeeler's order |
 
 ## B. Bugs
 
@@ -125,6 +124,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 |---|---|---|
 | Live view plays H.265 in Chrome | This plan, A1 | CrystalHeeler, 2026-09-28: Lorex DVR channels played "perfectly" in Chrome. Firefox and LibreWolf fall back to classic, as go2rtc's compatibility table predicts |
 | Motion detection records | This plan, B1 (reported as not recording) | CrystalHeeler, 2026-09-28: it works |
+| Push and publish 2.6.3 | This plan, A8 | Pushed and published on GitHub on 2026-09-29, on CrystalHeeler's order |
 | Promote a stable rc to 2.6.0 final | CLAUDE.md | 2.6.0 tagged; 2.6.2 published 2026-09-28 |
 | Fast Stream Start harmful at 4K HEVC | CLAUDE.md | Gated by resolution and codec in 2.6.1; the suppression line appears in Log1 on Lorex ch7 |
 | ONVIF SOAP calls ignore the throttle | CLAUDE.md | Fixed in 2.6.1 |
