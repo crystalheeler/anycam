@@ -7,7 +7,7 @@
 
 No version numbers are assigned here. Rule 7: version and scope are confirmed with CrystalHeeler at build time.
 
-A readable, colour-coded version is generated from this file by `docs/render_build_plan.py`.
+A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this file by `docs/render_build_plan.py`. Regenerate it after every change to this file.
 
 ---
 

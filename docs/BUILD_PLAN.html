@@ -1,0 +1,303 @@
+<title>AnyCam Build Plan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=JetBrains+Mono:wght@500;700&display=swap">
+<style>
+/* Layout: summary first (colour bar, filters, what is waiting on CrystalHeeler), then one
+   section per group; each group keeps its colour from the test-card bars. */
+:root{
+  --bg:#EEF0F3; --surface:#FFFFFF; --surface-2:#E5E9EE;
+  --ink:#1A1F27; --ink-2:#465060; --ink-3:#6A7483; --rule:#D0D6DE; --focus:#0F7387;
+  --grp-a:#0F8599; --grp-b:#C0412E; --grp-c:#A23D98; --grp-d:#3A8540; --grp-e:#3D58C0; --grp-f:#9A6F00;
+  --grp-ink:#FFFFFF;
+  --st-you-bg:#FBE7C0; --st-you-fg:#7A4A00;
+  --st-logs-bg:#ECE3FA; --st-logs-fg:#5A3A9C;
+  --st-discuss-bg:#DCE8F8; --st-discuss-fg:#1F4C8A;
+  --st-ready-bg:#DAEFDF; --st-ready-fg:#25613A;
+  --st-blocked-bg:#E6E8EC; --st-blocked-fg:#4E555F;
+  --st-later-fg:#6A7483;
+  --f-ui:"Archivo",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"JetBrains Mono",ui-monospace,"Cascadia Mono",Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0F131A; --surface:#161B23; --surface-2:#1D242E;
+    --ink:#DFE4EA; --ink-2:#A6B0BD; --ink-3:#7D8896; --rule:#2B333E; --focus:#45C3D8;
+    --grp-a:#45C3D8; --grp-b:#E4735E; --grp-c:#D67ACC; --grp-d:#6FBF83; --grp-e:#8A9DF2; --grp-f:#E3BD4A;
+    --grp-ink:#0F131A;
+    --st-you-bg:#3B2C10; --st-you-fg:#F2BA55;
+    --st-logs-bg:#2A2140; --st-logs-fg:#BBA5F2;
+    --st-discuss-bg:#16263A; --st-discuss-fg:#8FB9EF;
+    --st-ready-bg:#152F1E; --st-ready-fg:#80CC94;
+    --st-blocked-bg:#252A32; --st-blocked-fg:#A8B0BB;
+    --st-later-fg:#7D8896;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0F131A; --surface:#161B23; --surface-2:#1D242E;
+  --ink:#DFE4EA; --ink-2:#A6B0BD; --ink-3:#7D8896; --rule:#2B333E; --focus:#45C3D8;
+  --grp-a:#45C3D8; --grp-b:#E4735E; --grp-c:#D67ACC; --grp-d:#6FBF83; --grp-e:#8A9DF2; --grp-f:#E3BD4A;
+  --grp-ink:#0F131A;
+  --st-you-bg:#3B2C10; --st-you-fg:#F2BA55;
+  --st-logs-bg:#2A2140; --st-logs-fg:#BBA5F2;
+  --st-discuss-bg:#16263A; --st-discuss-fg:#8FB9EF;
+  --st-ready-bg:#152F1E; --st-ready-fg:#80CC94;
+  --st-blocked-bg:#252A32; --st-blocked-fg:#A8B0BB;
+  --st-later-fg:#7D8896;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--f-ui);
+  font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;padding-block:40px 72px}
+a{color:var(--focus);text-underline-offset:2px}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:3px}
+code{font-family:var(--f-mono);font-size:.86em;background:var(--surface-2);
+  padding:.08em .35em;border-radius:3px;overflow-wrap:anywhere}
+strong{font-weight:700}
+
+.g-a{--g:var(--grp-a)} .g-b{--g:var(--grp-b)} .g-c{--g:var(--grp-c)}
+.g-d{--g:var(--grp-d)} .g-e{--g:var(--grp-e)} .g-f{--g:var(--grp-f)}
+
+/* header */
+.eyebrow{font-size:.72rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink-3);margin:0 0 6px}
+h1{font-size:clamp(1.9rem,4.2vw,2.7rem);line-height:1.08;letter-spacing:-.02em;
+  margin:0 0 10px;text-wrap:balance}
+.meta{color:var(--ink-2);margin:0;max-width:75ch}
+.meta .mono{font-family:var(--f-mono);font-size:.82rem;color:var(--ink-3)}
+
+/* the plan's colour bar: one segment per group, width = open items */
+.bars{display:flex;gap:3px;margin:26px 0 8px;height:46px}
+.bar{flex:var(--n) 1 0;min-width:44px;background:var(--g);color:var(--grp-ink);
+  display:flex;flex-direction:column;justify-content:center;padding:0 10px;
+  text-decoration:none;border-radius:3px;line-height:1.1}
+.bar b{font-family:var(--f-mono);font-size:.95rem}
+.bar span{font-size:.68rem;font-weight:600;opacity:.9;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.bars-cap{font-size:.78rem;color:var(--ink-3);margin:0 0 26px}
+
+/* filters */
+.filters{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 30px}
+.chip{font:inherit;font-size:.82rem;font-weight:600;border:1px solid var(--rule);
+  background:var(--surface);color:var(--ink-2);border-radius:99px;padding:6px 12px;
+  cursor:pointer;display:inline-flex;gap:7px;align-items:center}
+.chip .n{font-family:var(--f-mono);font-weight:700}
+.chip[aria-pressed="true"]{border-color:var(--ink);color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--dc);flex:none}
+
+/* status pills */
+.pill{font-size:.7rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+  padding:3px 9px;border-radius:99px;white-space:nowrap;background:var(--pb);color:var(--pf)}
+.st-You{--pb:var(--st-you-bg);--pf:var(--st-you-fg);--dc:var(--st-you-fg)}
+.st-Logs{--pb:var(--st-logs-bg);--pf:var(--st-logs-fg);--dc:var(--st-logs-fg)}
+.st-Discuss{--pb:var(--st-discuss-bg);--pf:var(--st-discuss-fg);--dc:var(--st-discuss-fg)}
+.st-Ready{--pb:var(--st-ready-bg);--pf:var(--st-ready-fg);--dc:var(--st-ready-fg)}
+.st-Blocked{--pb:var(--st-blocked-bg);--pf:var(--st-blocked-fg);--dc:var(--st-blocked-fg)}
+.st-Later{--pb:transparent;--pf:var(--st-later-fg);--dc:var(--st-later-fg)}
+.pill.st-Later{box-shadow:inset 0 0 0 1px var(--rule)}
+
+/* summary panels */
+.top{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:18px;margin-bottom:44px}
+@media (max-width:860px){.top{grid-template-columns:minmax(0,1fr)}}
+.panel{background:var(--surface);border:1px solid var(--rule);border-radius:6px;padding:18px 20px}
+.panel h2{font-size:1.05rem;margin:0 0 12px;letter-spacing:-.005em}
+.panel.you{background:var(--st-you-bg);border-color:transparent}
+.panel.you h2{color:var(--st-you-fg)}
+.you-list{list-style:none;margin:0;padding:0;display:grid;gap:12px}
+.you-list li{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px}
+.you-list .t{font-weight:600;color:var(--ink)}
+.you-list .t a{color:inherit;text-decoration:none}
+.you-list .t a:hover{text-decoration:underline}
+.you-list .x{grid-column:2;color:var(--ink-2);font-size:.88rem}
+.order{margin:0;padding:0;list-style:none;counter-reset:o;display:grid;gap:10px}
+.order li{counter-increment:o;display:grid;grid-template-columns:28px minmax(0,1fr);gap:8px;color:var(--ink-2)}
+.order li::before{content:counter(o);font-family:var(--f-mono);font-weight:700;color:var(--ink);
+  background:var(--surface-2);border-radius:4px;text-align:center;height:24px;line-height:24px}
+.order-note{margin:12px 0 0;font-size:.85rem;color:var(--ink-3)}
+
+/* groups */
+section.group{margin:0 0 40px}
+.ghead{border-top:6px solid var(--g);padding-top:12px;display:flex;align-items:baseline;
+  gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.gl{font-family:var(--f-mono);font-weight:700;background:var(--g);color:var(--grp-ink);
+  border-radius:4px;padding:1px 9px;font-size:1rem}
+.ghead h2{margin:0;font-size:1.3rem;letter-spacing:-.01em}
+.gcount{color:var(--ink-3);font-size:.85rem}
+.cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:820px){.cards{grid-template-columns:minmax(0,1fr)}}
+.card{background:var(--surface);border:1px solid var(--rule);border-radius:6px;
+  padding:14px 16px 16px;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px}
+.card:target{border-color:var(--g);box-shadow:0 0 0 2px var(--g)}
+.ctop{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.id{font-family:var(--f-mono);font-weight:700;font-size:.8rem;color:var(--g);
+  background:color-mix(in srgb,var(--g) 14%,var(--surface));border-radius:4px;padding:2px 7px}
+.prio{font-size:.7rem;font-weight:700;color:var(--ink);letter-spacing:.04em;text-transform:uppercase}
+.card h3{margin:0;font-size:1.02rem;line-height:1.35;text-wrap:balance}
+.card dl{margin:0;display:grid;gap:6px}
+.card dt{font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
+.card dd{margin:0;color:var(--ink-2);font-size:.9rem;min-width:0}
+
+/* done */
+.done-wrap{overflow-x:auto;background:var(--surface);border:1px solid var(--rule);border-radius:6px}
+table{border-collapse:collapse;width:100%;min-width:640px;font-size:.86rem}
+th,td{text-align:left;vertical-align:top;padding:9px 14px;border-bottom:1px solid var(--rule)}
+th{font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);background:var(--surface-2)}
+td{color:var(--ink-2)} td:first-child{color:var(--ink);font-weight:600}
+tr:last-child td{border-bottom:none}
+.tick{color:var(--st-ready-fg);font-weight:700;margin-right:6px}
+.aside{color:var(--ink-3);font-size:.88rem;margin:18px 0 0}
+footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:var(--ink-3);font-size:.8rem}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+</style>
+<div class="wrap">
+<header>
+<p class="eyebrow">AnyCam · Home Assistant add-on</p>
+<h1>AnyCam Build Plan</h1>
+<p class="meta">the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.</p>
+<p class="meta"><span class="mono">28 September 2026; updated 29 September 2026. Current release: 2.6.3, published. · 49 open · 18 done</span></p>
+</header>
+<nav class="bars" aria-label="Open items per group">
+<a class="bar g-a" style="--n:9" href="#group-a" title="Field tests: 9 open"><b>A · 9</b><span>Field tests</span></a>
+<a class="bar g-b" style="--n:12" href="#group-b" title="Bugs: 12 open"><b>B · 12</b><span>Bugs</span></a>
+<a class="bar g-c" style="--n:12" href="#group-c" title="Video and recording: 12 open"><b>C · 12</b><span>Video and recording</span></a>
+<a class="bar g-d" style="--n:3" href="#group-d" title="Discovery and device support: 3 open"><b>D · 3</b><span>Discovery and device support</span></a>
+<a class="bar g-e" style="--n:7" href="#group-e" title="Code health: 7 open"><b>E · 7</b><span>Code health</span></a>
+<a class="bar g-f" style="--n:6" href="#group-f" title="Release engineering: 6 open"><b>F · 6</b><span>Release engineering</span></a>
+</nav><p class="bars-cap">Each bar is one group; its width is the number of open items.</p>
+<div class="filters" role="group" aria-label="Filter by status">
+<button type="button" class="chip" data-filter="all" aria-pressed="true">All <span class="n">49</span></button>
+<button type="button" class="chip st-You" data-filter="You" aria-pressed="false"><span class="dot"></span>Waiting on you <span class="n">7</span></button>
+<button type="button" class="chip st-Logs" data-filter="Logs" aria-pressed="false"><span class="dot"></span>Logs first <span class="n">3</span></button>
+<button type="button" class="chip st-Discuss" data-filter="Discuss" aria-pressed="false"><span class="dot"></span>Discuss first <span class="n">4</span></button>
+<button type="button" class="chip st-Ready" data-filter="Ready" aria-pressed="false"><span class="dot"></span>Ready to build <span class="n">18</span></button>
+<button type="button" class="chip st-Blocked" data-filter="Blocked" aria-pressed="false"><span class="dot"></span>Blocked <span class="n">6</span></button>
+<button type="button" class="chip st-Later" data-filter="Later" aria-pressed="false"><span class="dot"></span>Later <span class="n">11</span></button>
+</div>
+<div class="top" data-all-only>
+<div class="panel you"><h2>Waiting on you</h2><ul class="you-list">
+<li class="g-a"><span class="id">A9</span><span class="t"><a href="#A9">Install 2.6.3 on the Hikvision system and test live view</a></span><span class="x">Install 2.6.3, turn on Live View, open the Hikvision in Chrome. Its main stream is H.265 and should play live; its sub-stream is MJPEG and will always use the classic view</span></li>
+<li class="g-a"><span class="id">A2</span><span class="t"><a href="#A2">Does live view stay up through Home Assistant?</a></span><span class="x">Leave one camera live in Chrome for 10+ minutes. Still playing means live view through ingress is proven</span></li>
+<li class="g-a"><span class="id">A10</span><span class="t"><a href="#A10">Was the browser the problem all along?</a></span><span class="x">Quickest test: in 2.6.3, open a camera in Chrome and press <strong>Classic</strong>. That is the 2.6.2 pipeline in the same browser, on the same camera, at the same moment. Or reinstall 2.6.2 and use Chrome. If Classic in Chrome is as smooth as Live, the prediction is wrong</span></li>
+<li class="g-a"><span class="id">A7</span><span class="t"><a href="#A7">Hikvision I-frame interval</a></span><span class="x">Report the setting. Target: 1 to 2 times the frame rate</span></li>
+<li class="g-a"><span class="id">A4</span><span class="t"><a href="#A4">Tier 1 checks not yet exercised</a></span><span class="x">Remaining: a Microseven re-auth with no connection reset (needs the test system A, see A9), and Low Latency Probe on and off (A5)</span></li>
+<li class="g-a"><span class="id">A6</span><span class="t"><a href="#A6">Tens-of-seconds freezes</a></span><span class="x">Watch for freezes over a longer live session. Freezes that happen only in the classic view point to the Pi decoder (B11)</span></li>
+<li class="g-f"><span class="id">F6</span><span class="t"><a href="#F6">CLAUDE.md is out of date</a></span><span class="x">CrystalHeeler to say whether Part 6 was lost or never written; then refresh both lists</span></li>
+</ul></div>
+<div class="panel"><h2>Recommended order</h2><ol class="order">
+<li><span><strong>Field tests</strong> (group A). Above all: install 2.6.3 on the Hikvision system (A9), leave a camera live for 10+ minutes (A2), and compare Classic against Live in Chrome (A10).</span></li>
+<li><span><strong>Motion recording that never stops</strong> (B1). Logs first.</span></li>
+<li><span><strong>Missing cameras</strong> (B2). Logs first.</span></li>
+<li><span><strong>The small correctness bugs</strong>: B3, B4, B5, B12.</span></li>
+<li><span><strong>The automatic-behaviour discussion</strong> (C11, C3), then <strong>live cards</strong> (C1).</span></li>
+<li><span><strong>Tests into the repo</strong> (E7), then <strong>the module split</strong> (E1). The tests are the safety net the split needs.</span></li>
+</ol>
+<p class="order-note">Hardware decode (B11) is parked for later, at CrystalHeeler's request.</p>
+</div></div>
+<section class="group g-a" id="group-a">
+<div class="ghead"><span class="gl">A</span><h2>Field tests</h2><span class="gcount">9 open</span></div><div class="cards">
+<article class="card" id="A9" data-status="You"><div class="ctop"><span class="id">A9</span><span class="pill st-You">Waiting on you</span><span class="prio">Priority</span></div><h3>Install 2.6.3 on the Hikvision system and test live view</h3><dl><dt>Why</dt><dd>The Hikvision DS-2DE4A425IW-DE at 10.0.0.33 is on the other HAOS system (172.16.0.35), which still runs an older build. CrystalHeeler asked to be reminded: do not let this one drop</dd><dt>Next step</dt><dd>Install 2.6.3, turn on Live View, open the Hikvision in Chrome. Its main stream is H.265 and should play live; its sub-stream is MJPEG and will always use the classic view</dd></dl></article>
+<article class="card" id="A2" data-status="You"><div class="ctop"><span class="id">A2</span><span class="pill st-You">Waiting on you</span></div><h3>Does live view stay up through Home Assistant?</h3><dl><dt>Why</dt><dd>The biggest remaining unknown. Home Assistant's ingress proxy cut the old multipart streams after 10 to 24 frames in 1.6.0. Live view in Chrome played "perfectly" on 2026-09-28, but for how long was not recorded</dd><dt>Next step</dt><dd>Leave one camera live in Chrome for 10+ minutes. Still playing means live view through ingress is proven</dd></dl></article>
+<article class="card" id="A10" data-status="You"><div class="ctop"><span class="id">A10</span><span class="pill st-You">Waiting on you</span></div><h3>Was the browser the problem all along?</h3><dl><dt>Why</dt><dd>CrystalHeeler's question, 2026-09-28. Prediction: no. Before 2.6.3, every browser received the same JPEG images, which Firefox and Chrome display identically; the Pi did the decoding. The browser only matters since live view, which hands the camera's H.265 to the browser</dd><dt>Next step</dt><dd>Quickest test: in 2.6.3, open a camera in Chrome and press <strong>Classic</strong>. That is the 2.6.2 pipeline in the same browser, on the same camera, at the same moment. Or reinstall 2.6.2 and use Chrome. If Classic in Chrome is as smooth as Live, the prediction is wrong</dd></dl></article>
+<article class="card" id="A11" data-status="Blocked"><div class="ctop"><span class="id">A11</span><span class="pill st-Blocked">Blocked</span></div><h3>Test live view on the H.264 camera at 192.168.50.73:8765</h3><dl><dt>Why</dt><dd>H.264 plays live in every browser, Firefox included. Log1 shows its card polling for frames, so it is discovered, but every attempt fails on the Skip Non-Reference Frames setting, so the card shows nothing</dd><dt>Next step</dt><dd>Blocked on B3. With that setting off, the card should show video; then open it in Enhanced View</dd></dl></article>
+<article class="card" id="A7" data-status="You"><div class="ctop"><span class="id">A7</span><span class="pill st-You">Waiting on you</span></div><h3>Hikvision I-frame interval</h3><dl><dt>Why</dt><dd>Faster start when opening a camera</dd><dt>Next step</dt><dd>Report the setting. Target: 1 to 2 times the frame rate</dd></dl></article>
+<article class="card" id="A4" data-status="You"><div class="ctop"><span class="id">A4</span><span class="pill st-You">Waiting on you</span></div><h3>Tier 1 checks not yet exercised</h3><dl><dt>Why</dt><dd>2.6.1 audit. The fast-stream-start suppression line was confirmed in Log1 on Lorex ch7</dd><dt>Next step</dt><dd>Remaining: a Microseven re-auth with no connection reset (needs the test system A, see A9), and Low Latency Probe on and off (A5)</dd></dl></article>
+<article class="card" id="A5" data-status="Blocked"><div class="ctop"><span class="id">A5</span><span class="pill st-Blocked">Blocked</span></div><h3>Decide the Low Latency Probe option</h3><dl><dt>Why</dt><dd>Behind an option since 2.6.1. Its one-packet reorder queue drops packets that arrive out of order, and in H.265 a dropped packet can become a gray patch. It is on in CrystalHeeler's setup</dd><dt>Next step</dt><dd>Blocked on A11: test with it off and on once the H.264 camera works, then keep it or remove it</dd></dl></article>
+<article class="card" id="A6" data-status="You"><div class="ctop"><span class="id">A6</span><span class="pill st-You">Waiting on you</span></div><h3>Tens-of-seconds freezes</h3><dl><dt>Why</dt><dd>The original complaint. None seen in live view on the first Chrome test</dd><dt>Next step</dt><dd>Watch for freezes over a longer live session. Freezes that happen only in the classic view point to the Pi decoder (B11)</dd></dl></article>
+<article class="card" id="A3" data-status="Blocked"><div class="ctop"><span class="id">A3</span><span class="pill st-Blocked">Blocked</span></div><h3>Turn Live View on by default</h3><dl><dt>Why</dt><dd>Off by default until proven</dd><dt>Next step</dt><dd>Blocked on A2 and A9</dd></dl></article>
+</div></section>
+<section class="group g-b" id="group-b">
+<div class="ghead"><span class="gl">B</span><h2>Bugs</h2><span class="gcount">12 open</span></div><div class="cards">
+<article class="card" id="B1" data-status="Logs"><div class="ctop"><span class="id">B1</span><span class="pill st-Logs">Logs first</span><span class="prio">Priority</span></div><h3>A motion recording may never stop</h3><dl><dt>Why</dt><dd>CrystalHeeler, 2026-09-28: motion detection works and records, but once a recording starts it may not stop. Code fact: a recording is stopped automatically only inside the thumbnail loop, as each new frame arrives; the only other stop is disarming the camera. If that loop stops getting frames or exits, nothing ends the recording</dd><dt>Next step</dt><dd>Logs first: a log covering one full recording, from the motion that starts it to well past the cooldown</dd></dl></article>
+<article class="card" id="B2" data-status="Logs"><div class="ctop"><span class="id">B2</span><span class="pill st-Logs">Logs first</span><span class="prio">Priority</span></div><h3>One or two cameras are not discovered</h3><dl><dt>Why</dt><dd>CrystalHeeler, 2026-09-28</dd><dt>Next step</dt><dd>Logs first: the scan log, plus the IP and brand of each missing camera</dd></dl></article>
+<article class="card" id="B3" data-status="Ready"><div class="ctop"><span class="id">B3</span><span class="pill st-Ready">Ready to build</span></div><h3>Skip Non-Reference Frames breaks every camera it touches</h3><dl><dt>Why</dt><dd>ffmpeg rejects <code>nonref</code>; its valid value is <code>noref</code>. Confirmed in Log1: every launch of the H.264 camera at 192.168.50.73:8765 fails. The "~40% less CPU" in its description never happened, because the setting never applied</dd><dt>Next step</dt><dd>Fix the value and field-test, or remove the option (see C11). Until then, turning it off restores that camera</dd></dl></article>
+<article class="card" id="B4" data-status="Ready"><div class="ctop"><span class="id">B4</span><span class="pill st-Ready">Ready to build</span></div><h3>Camera names are written into the page unescaped</h3><dl><dt>Why</dt><dd>Found in 2.6.3: the classic Enhanced View info bar. Names are editable, so a crafted name could inject HTML</dd><dt>Next step</dt><dd>Escape it, then check every place the page inserts camera data</dd></dl></article>
+<article class="card" id="B5" data-status="Ready"><div class="ctop"><span class="id">B5</span><span class="pill st-Ready">Ready to build</span></div><h3>"Share with community" box is ticked and does nothing</h3><dl><dt>Why</dt><dd>Found in 2.6.3: a placeholder in the page is never filled in</dd><dt>Next step</dt><dd>Fill the placeholder when the page is built</dd></dl></article>
+<article class="card" id="B12" data-status="Ready"><div class="ctop"><span class="id">B12</span><span class="pill st-Ready">Ready to build</span></div><h3>VAAPI reported as available on a Pi 4</h3><dl><dt>Why</dt><dd>Log1 startup. The Pi has no VAAPI device; the check only confirms ffmpeg was built with VAAPI</dd><dt>Next step</dt><dd>Check for a real device before reporting it available</dd></dl></article>
+<article class="card" id="B6" data-status="Logs"><div class="ctop"><span class="id">B6</span><span class="pill st-Logs">Logs first</span></div><h3>Microseven "Invalid data found"</h3><dl><dt>Why</dt><dd>A regression from 2.3.x to 2.4.x, open since 2.4.0-rc3.3. Current status unknown</dd><dt>Next step</dt><dd>Confirm whether it still happens (test system A). If so, logs, a control run with plain ffmpeg, then compare builds</dd></dl></article>
+<article class="card" id="B7" data-status="Later"><div class="ctop"><span class="id">B7</span><span class="pill st-Later">Later</span></div><h3>Resolution dropdown flickers</h3><dl><dt>Why</dt><dd>Deferred at CrystalHeeler's request in 2.2.8-rc2.6</dd><dt>Next step</dt><dd>Confirm it still happens</dd></dl></article>
+<article class="card" id="B8" data-status="Ready"><div class="ctop"><span class="id">B8</span><span class="pill st-Ready">Ready to build</span></div><h3>Scan progress bar jumps and is inaccurate</h3><dl><dt>Why</dt><dd><code>MoreToDo.txt</code>; changelog 2.2.9 and 2.3.0</dd><dt>Next step</dt><dd>Base progress on work completed, not time elapsed</dd></dl></article>
+<article class="card" id="B9" data-status="Later"><div class="ctop"><span class="id">B9</span><span class="pill st-Later">Later</span></div><h3>"Unknown child process pid" warning</h3><dl><dt>Why</dt><dd>Cosmetic (changelog 2.2.9)</dd><dt>Next step</dt><dd>Low priority</dd></dl></article>
+<article class="card" id="B10" data-status="Later"><div class="ctop"><span class="id">B10</span><span class="pill st-Later">Later</span></div><h3>"Cannot connect to host 172.30.32.1:8099" for about 3 s at start</h3><dl><dt>Why</dt><dd>2.6.2 Supervisor log: Home Assistant connects before the web server is listening</dd><dt>Next step</dt><dd>Cosmetic. Start the web server before the slow startup steps</dd></dl></article>
+<article class="card" id="B11" data-status="Later"><div class="ctop"><span class="id">B11</span><span class="pill st-Later">Later</span><span class="prio">Priority</span></div><h3>Hardware decode silently falls back to software</h3><dl><dt>Why</dt><dd>Log1: ffmpeg cannot open the Pi's decoder devices (<code>/dev/media0</code> to <code>3</code>, "Operation not permitted"), then decodes in software, while AnyCam logs "hw first frame (hevc_drm)". Classic 4K runs at 8 fps; 2.6.0-rc2.5 measured 22 fps. The gray frames CrystalHeeler sees when the classic view bogs down fit this: ffmpeg's HEVC decoder fills any missing frame with mid-gray, and Log1 shows ch7 repeating one identical frame 400 times. Live view does no decoding on the Pi, which is why Chrome was clean</dd><dt>Next step</dt><dd>Parked by CrystalHeeler. When picked up: logs first, then find what changed since rc2.5 (HAOS or Supervisor update, ffmpeg 5.1.8 to 5.1.9, device permissions). Also make the log stop reporting hardware decode when it is not happening</dd></dl></article>
+</div></section>
+<section class="group g-c" id="group-c">
+<div class="ghead"><span class="gl">C</span><h2>Video and recording</h2><span class="gcount">12 open</span></div><div class="cards">
+<article class="card" id="C11" data-status="Discuss"><div class="ctop"><span class="id">C11</span><span class="pill st-Discuss">Discuss first</span><span class="prio">Priority</span></div><h3>Replace most or all of the option toggles with automatic behaviour</h3><dl><dt>Why</dt><dd>CrystalHeeler, 2026-09-28. Nine toggles today, several broken or no longer relevant: Skip Non-Reference Frames never worked (B3), Fast Stream Start does nothing at 4K, and Live View makes several decode options irrelevant for the camera being watched</dd><dt>Next step</dt><dd>Separate discussion. For each toggle: remove it, make it automatic, or keep it. Pairs with C3</dd></dl></article>
+<article class="card" id="C3" data-status="Discuss"><div class="ctop"><span class="id">C3</span><span class="pill st-Discuss">Discuss first</span></div><h3>Automatic quality, and retiring the FPS control</h3><dl><dt>Why</dt><dd>CLAUDE.md: the Enhanced View step-down redesign "requires full discussion before any coding." Correction to the 2026-09-26 research: WebRTC congestion control cannot adjust a stream that go2rtc passes through unchanged</dd><dt>Next step</dt><dd>In live view, automatic quality means switching between the camera's own streams (main to sub) when playback stalls. Discuss before coding</dd></dl></article>
+<article class="card" id="C1" data-status="Blocked"><div class="ctop"><span class="id">C1</span><span class="pill st-Blocked">Blocked</span></div><h3>Live video in the camera cards</h3><dl><dt>Why</dt><dd>CrystalHeeler approved 2026-09-28. Motion detection works, so it no longer blocks this</dd><dt>Next step</dt><dd>Blocked on C2. Use each camera's sub-stream: many live 4K H.265 streams would overload the viewing device. The Hikvision sub-stream is MJPEG, so that card stays on snapshots</dd></dl></article>
+<article class="card" id="C2" data-status="Ready"><div class="ctop"><span class="id">C2</span><span class="pill st-Ready">Ready to build</span></div><h3>Motion detection that does not depend on snapshot polling</h3><dl><dt>Why</dt><dd>Motion detection runs inside the thumbnail loop, which stops 30 s after the last snapshot request. Live cards would stop those requests. Related to B1, where the same loop stops recordings</dd><dt>Next step</dt><dd>Keep an armed camera's loop running whether or not anyone is watching</dd></dl></article>
+<article class="card" id="C12" data-status="Ready"><div class="ctop"><span class="id">C12</span><span class="pill st-Ready">Ready to build</span></div><h3>Configurable recording length: 30 s, 1 min, 2 min, 5 min</h3><dl><dt>Why</dt><dd>CrystalHeeler, 2026-09-28</dd><dt>Next step</dt><dd>New option. ffmpeg's segment muxer splits a recording into files with no re-encoding. It cuts at the first keyframe after each interval, so lengths are approximate</dd></dl></article>
+<article class="card" id="C10" data-status="Ready"><div class="ctop"><span class="id">C10</span><span class="pill st-Ready">Ready to build</span></div><h3>H.265 live view depends on the browser</h3><dl><dt>Why</dt><dd>Confirmed 2026-09-28: Chrome plays H.265 live; Firefox 156 and LibreWolf do not. go2rtc's own compatibility table lists Desktop Firefox as H.264-only for every live method, so this is not a security setting</dd><dt>Next step</dt><dd>Three changes. (1) Check what the browser can play before trying live view, and go straight to classic with a plain message instead of a red error. (2) Replace go2rtc's raw error text with something readable. (3) Optionally offer an H.264 sub-stream in live view, which trades resolution, so CrystalHeeler's decision</dd></dl></article>
+<article class="card" id="C4" data-status="Discuss"><div class="ctop"><span class="id">C4</span><span class="pill st-Discuss">Discuss first</span></div><h3>Thumbnails, motion and recording through go2rtc's local stream</h3><dl><dt>Why</dt><dd>CrystalHeeler's long-term interest since April 2026 ("Fix B"). One camera connection instead of several, and go2rtc copes with cameras that break the RTSP rules</dd><dt>Next step</dt><dd>Discuss scope. Most useful for the rate-limited Microseven</dd></dl></article>
+<article class="card" id="C5" data-status="Ready"><div class="ctop"><span class="id">C5</span><span class="pill st-Ready">Ready to build</span></div><h3>Audio in live view</h3><dl><dt>Why</dt><dd>2.6.3 plays video only</dd><dt>Next step</dt><dd>Add audio to the player; check codec support per browser</dd></dl></article>
+<article class="card" id="C6" data-status="Later"><div class="ctop"><span class="id">C6</span><span class="pill st-Later">Later</span></div><h3>Cameras that speak WebRTC or RTSP-over-WebSocket</h3><dl><dt>Why</dt><dd>Detected since 1.x, but shown as information cards only</dd><dt>Next step</dt><dd>go2rtc can play both</dd></dl></article>
+<article class="card" id="C7" data-status="Later"><div class="ctop"><span class="id">C7</span><span class="pill st-Later">Later</span></div><h3>Classic view JPEG quality</h3><dl><dt>Why</dt><dd>Very large frames at 4K</dd><dt>Next step</dt><dd>Moot once Live View is the default (A3)</dd></dl></article>
+<article class="card" id="C8" data-status="Later"><div class="ctop"><span class="id">C8</span><span class="pill st-Later">Later</span></div><h3>ZeroTier tuning</h3><dl><dt>Why</dt><dd>Deferred by CrystalHeeler 2026-09-26</dd><dt>Next step</dt><dd>Check <code>zerotier-cli peers</code> for <code>RELAY</code>; review the 2800-byte MTU</dd></dl></article>
+<article class="card" id="C9" data-status="Later"><div class="ctop"><span class="id">C9</span><span class="pill st-Later">Later</span></div><h3>Pi 4 decoder overlay check or toggle</h3><dl><dt>Why</dt><dd>Deferred since 2.2.8</dd><dt>Next step</dt><dd>Lower priority now that live view does no decoding on the Pi</dd></dl></article>
+</div></section>
+<section class="group g-d" id="group-d">
+<div class="ghead"><span class="gl">D</span><h2>Discovery and device support</h2><span class="gcount">3 open</span></div><div class="cards">
+<article class="card" id="D1" data-status="Later"><div class="ctop"><span class="id">D1</span><span class="pill st-Later">Later</span></div><h3>Lorex / Dahua: remaining pieces</h3><dl><dt>Why</dt><dd>Channel enumeration and per-channel cards shipped in 2.5.0. Still open: no sample of what a known-empty channel sends, and a fixed 16-channel limit</dd><dt>Next step</dt><dd>Watch for phantom or missing channel cards; make the limit a per-device setting</dd></dl></article>
+<article class="card" id="D2" data-status="Discuss"><div class="ctop"><span class="id">D2</span><span class="pill st-Discuss">Discuss first</span></div><h3>Merge the two camera databases, and use each camera's default ports</h3><dl><dt>Why</dt><dd>CLAUDE.md queued work</dd><dt>Next step</dt><dd>Write a plan document first</dd></dl></article>
+<article class="card" id="D3" data-status="Later"><div class="ctop"><span class="id">D3</span><span class="pill st-Later">Later</span></div><h3>Drag to reorder cards</h3><dl><dt>Why</dt><dd>Changelog 2.4.0-rc3.3: the groundwork is in place</dd><dt>Next step</dt><dd>Build when wanted</dd></dl></article>
+</div></section>
+<section class="group g-e" id="group-e">
+<div class="ghead"><span class="gl">E</span><h2>Code health</h2><span class="gcount">7 open</span></div><div class="cards">
+<article class="card" id="E7" data-status="Ready"><div class="ctop"><span class="id">E7</span><span class="pill st-Ready">Ready to build</span><span class="prio">Priority</span></div><h3>Automated tests in the repo</h3><dl><dt>Why</dt><dd>CLAUDE.md calls them "aspirational". 2.6.3 produced 79 Python and 46 JavaScript tests, which live only in a session scratchpad</dd><dt>Next step</dt><dd>Move them into <code>tests/</code> and run them from the release gate</dd></dl></article>
+<article class="card" id="E1" data-status="Blocked"><div class="ctop"><span class="id">E1</span><span class="pill st-Blocked">Blocked</span></div><h3>Split the 16,000-line file into modules</h3><dl><dt>Why</dt><dd>The 2.0.7 review called this the single change with the largest positive impact; confirmed feasible under HAOS then. The file has more than doubled since</dd><dt>Next step</dt><dd>Blocked on E7. Suggested modules: scan, stream, onvif, go2rtc, storage, web handlers, config</dd></dl></article>
+<article class="card" id="E2" data-status="Blocked"><div class="ctop"><span class="id">E2</span><span class="pill st-Blocked">Blocked</span></div><h3>Reduce shared global state</h3><dl><dt>Why</dt><dd>CLAUDE.md queued (SigRev-3 Issue 2). 2.6.3 added 7 more, following the existing pattern</dd><dt>Next step</dt><dd>Blocked on E1: do it during the split</dd></dl></article>
+<article class="card" id="E3" data-status="Ready"><div class="ctop"><span class="id">E3</span><span class="pill st-Ready">Ready to build</span></div><h3>One shared HTTP client session</h3><dl><dt>Why</dt><dd>aiohttp's own guidance; on the 2.0.7 list. 2.6.3 added three more short-lived sessions</dd><dt>Next step</dt><dd>Create one at startup and close it at shutdown</dd></dl></article>
+<article class="card" id="E4" data-status="Ready"><div class="ctop"><span class="id">E4</span><span class="pill st-Ready">Ready to build</span></div><h3>Strip credentials from every log line</h3><dl><dt>Why</dt><dd>2.0.7 list: applied in some places, not all</dd><dt>Next step</dt><dd>Check every log call that can carry a URL</dd></dl></article>
+<article class="card" id="E6" data-status="Ready"><div class="ctop"><span class="id">E6</span><span class="pill st-Ready">Ready to build</span></div><h3>Remove the old <code>/stream/{camera_id}</code> endpoint</h3><dl><dt>Why</dt><dd>Unused since 1.6.0</dd><dt>Next step</dt><dd>Delete the route and its handler</dd></dl></article>
+<article class="card" id="E5" data-status="Later"><div class="ctop"><span class="id">E5</span><span class="pill st-Later">Later</span></div><h3>Complete type hints</h3><dl><dt>Why</dt><dd>2.0.7 list</dd><dt>Next step</dt><dd>Do it alongside E1</dd></dl></article>
+</div></section>
+<section class="group g-f" id="group-f">
+<div class="ghead"><span class="gl">F</span><h2>Release engineering</h2><span class="gcount">6 open</span></div><div class="cards">
+<article class="card" id="F6" data-status="You"><div class="ctop"><span class="id">F6</span><span class="pill st-You">Waiting on you</span></div><h3>CLAUDE.md is out of date</h3><dl><dt>Why</dt><dd>Its queued-work and open-issue lists include items that have shipped (see Done). It describes a Part 6 of the best-practices document that does not exist</dd><dt>Next step</dt><dd>CrystalHeeler to say whether Part 6 was lost or never written; then refresh both lists</dd></dl></article>
+<article class="card" id="F1" data-status="Ready"><div class="ctop"><span class="id">F1</span><span class="pill st-Ready">Ready to build</span></div><h3>A release check for the Dockerfile</h3><dl><dt>Why</dt><dd>2.6.1 passed every check and still could not build</dd><dt>Next step</dt><dd>Check each pinned package version against its archive at release time</dd></dl></article>
+<article class="card" id="F2" data-status="Ready"><div class="ctop"><span class="id">F2</span><span class="pill st-Ready">Ready to build</span></div><h3>The blocking-I/O check misses some calls</h3><dl><dt>Why</dt><dd>Found by hand in 2.6.3</dd><dt>Next step</dt><dd>Extend it beyond <code>open()</code> to <code>read_bytes</code>, <code>read_text</code> and the write equivalents</dd></dl></article>
+<article class="card" id="F3" data-status="Ready"><div class="ctop"><span class="id">F3</span><span class="pill st-Ready">Ready to build</span></div><h3><code>build.yaml</code> is deprecated</h3><dl><dt>Why</dt><dd>The Supervisor warns on every build</dd><dt>Next step</dt><dd>Move the build settings into the Dockerfile</dd></dl></article>
+<article class="card" id="F4" data-status="Ready"><div class="ctop"><span class="id">F4</span><span class="pill st-Ready">Ready to build</span></div><h3>Docker warning about the base-image argument</h3><dl><dt>Why</dt><dd>The argument has no default value</dd><dt>Next step</dt><dd>Give it a default</dd></dl></article>
+<article class="card" id="F5" data-status="Ready"><div class="ctop"><span class="id">F5</span><span class="pill st-Ready">Ready to build</span></div><h3>20 of 25 older audit "PDFs" are ZIP bundles</h3><dl><dt>Why</dt><dd>Found 2026-09-27; their content is intact</dd><dt>Next step</dt><dd>Convert them to real PDFs</dd></dl></article>
+</div></section>
+<section data-all-only id="done"><div class="ghead" style="--g:var(--st-ready-fg)"><h2>Done</h2><span class="gcount">18 items off the older lists</span></div>
+<div class="done-wrap"><table><thead><tr><th>Item</th><th>Where it was listed</th><th>Evidence</th></tr></thead><tbody>
+<tr><td><span class="tick">✓</span>Live view plays H.265 in Chrome</td><td>This plan, A1</td><td>CrystalHeeler, 2026-09-28: Lorex DVR channels played "perfectly" in Chrome. Firefox and LibreWolf fall back to classic, as go2rtc's compatibility table predicts</td></tr>
+<tr><td><span class="tick">✓</span>Motion detection records</td><td>This plan, B1 (reported as not recording)</td><td>CrystalHeeler, 2026-09-28: it works</td></tr>
+<tr><td><span class="tick">✓</span>Push and publish 2.6.3</td><td>This plan, A8</td><td>Pushed and published on GitHub on 2026-09-29, on CrystalHeeler's order</td></tr>
+<tr><td><span class="tick">✓</span>Promote a stable rc to 2.6.0 final</td><td>CLAUDE.md</td><td>2.6.0 tagged; 2.6.2 published 2026-09-28</td></tr>
+<tr><td><span class="tick">✓</span>Fast Stream Start harmful at 4K HEVC</td><td>CLAUDE.md</td><td>Gated by resolution and codec in 2.6.1; the suppression line appears in Log1 on Lorex ch7</td></tr>
+<tr><td><span class="tick">✓</span>ONVIF SOAP calls ignore the throttle</td><td>CLAUDE.md</td><td>Fixed in 2.6.1</td></tr>
+<tr><td><span class="tick">✓</span>Bundle the Raspberry Pi build of ffmpeg</td><td>CLAUDE.md</td><td>Pinned by origin since 2.6.0-rc2.0; <code>8:5.1.9-0+deb12u1+rpt1</code> confirmed on the Pi 2026-09-28</td></tr>
+<tr><td><span class="tick">✓</span>RTSP OPTIONS fingerprint helper</td><td>CLAUDE.md, <code>MoreToDo.txt</code></td><td><code>_rtsp_options_fingerprint</code> exists and feeds <code>host_meta</code></td></tr>
+<tr><td><span class="tick">✓</span>Layered Stream Discovery ("View Locked Streams")</td><td><code>MoreToDo.txt</code>, changelog</td><td>Deep Re-Probe, <code>additional_streams</code>, <code>openLockedStreams</code></td></tr>
+<tr><td><span class="tick">✓</span>Lorex multi-channel cards</td><td>Changelog 2.5.0-rc1.0</td><td>Fixed in 2.5.0-rc1.7: eight distinct cards</td></tr>
+<tr><td><span class="tick">✓</span>Hikvision EOF after about 30 frames</td><td><code>MoreToDo.txt</code></td><td>Marked done there</td></tr>
+<tr><td><span class="tick">✓</span>Dead JavaScript functions <code>_estimateCpuPct</code>, <code>_focusWarnOK</code></td><td><code>MoreToDo.txt</code>, changelog</td><td>No longer in the source</td></tr>
+<tr><td><span class="tick">✓</span>"Waiting for camera (throttled)" indicator</td><td>Throttle Q&amp;A transcript</td><td>Cards show "Authenticating (Camera rate-limited, ~30 seconds)" with a warning dot</td></tr>
+<tr><td><span class="tick">✓</span>Microseven Enhanced View re-entry bug</td><td>Changelog 2.4.0-rc3.1</td><td>Fixed as Bug A in 2.4.0-rc3.3</td></tr>
+<tr><td><span class="tick">✓</span>Graceful shutdown, bounded thread pool, backoff jitter, duplicate-definition check</td><td>2.0.7 transcript</td><td>All present</td></tr>
+<tr><td><span class="tick">✓</span>Thumbnails from ONVIF snapshot URLs and brand snapshot paths</td><td>Feed-fix transcript (Techniques 4 and 9)</td><td><code>onvif_get_snapshot_uri</code> in use; snapshot paths in <code>STREAM_DB</code></td></tr>
+<tr><td><span class="tick">✓</span>Throttle-Aware Probe Pacing</td><td>Plan document</td><td>Superseded by 2.3.0</td></tr>
+<tr><td><span class="tick">✓</span>Live view without decoding on the Pi (Tier 2)</td><td>2026-09-26 research</td><td>2.6.3, behind the Live View option</td></tr>
+</tbody></table></div>
+<p class="aside"><strong>Not AnyCam work:</strong> Hikvision auto-tracking lost after a firmware update (<code>docs/legacy/HikvisionInfo.docx</code>). A camera firmware question, not software in this repository.</p>
+</section>
+<footer>Generated from <code>docs/BUILD_PLAN.md</code>. To update: edit the Markdown, then run <code>python docs/render_build_plan.py</code>.</footer>
+</div><script>
+(() => {
+  const chips = [...document.querySelectorAll('.chip')];
+  const cards = [...document.querySelectorAll('.card')];
+  const groups = [...document.querySelectorAll('section.group')];
+  const extras = [...document.querySelectorAll('[data-all-only]')];
+  function apply(f) {
+    cards.forEach(c => { c.hidden = f !== 'all' && c.dataset.status !== f; });
+    groups.forEach(g => { g.hidden = !g.querySelector('.card:not([hidden])'); });
+    extras.forEach(e => { e.hidden = f !== 'all'; });
+    chips.forEach(ch => ch.setAttribute('aria-pressed', String(ch.dataset.filter === f)));
+  }
+  chips.forEach(ch => ch.addEventListener('click', () => apply(ch.dataset.filter)));
+})();
+</script>

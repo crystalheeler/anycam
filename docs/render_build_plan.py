@@ -6,13 +6,14 @@ After editing the plan, run:
 
     python docs/render_build_plan.py [--out PATH]
 
-Default output is _build/BUILD_PLAN.html (gitignored). Standard library only.
+Default output is docs/BUILD_PLAN.html, committed beside the Markdown.
+Output is deterministic: the same Markdown always produces the same HTML,
+so the HTML changes in git only when the plan does. Standard library only.
 The parser is strict on purpose: an unknown status or a table row with the
 wrong number of cells stops the render with the line number, instead of
 silently dropping an item from the page.
 """
 import argparse
-import datetime
 import html
 import pathlib
 import re
@@ -20,7 +21,7 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 SRC = HERE / "BUILD_PLAN.md"
-DEFAULT_OUT = HERE.parent / "_build" / "BUILD_PLAN.html"
+DEFAULT_OUT = HERE / "BUILD_PLAN.html"
 
 # Order here is display order for the filter chips and the summary.
 STATUSES = {
@@ -374,8 +375,9 @@ def render(plan: dict) -> str:
         out.append(f'<p class="aside"><strong>Not AnyCam work:</strong> {e(n)}</p>')
     out.append('</section>')
 
-    stamp = datetime.date.today().strftime("%d %B %Y")
-    out.append(f'<footer>Generated {stamp} from <code>docs/BUILD_PLAN.md</code>. '
+    # No generation date here: the plan's own date line (shown in the header)
+    # is the date that matters, and a run date would make every render differ.
+    out.append(f'<footer>Generated from <code>docs/BUILD_PLAN.md</code>. '
                f'To update: edit the Markdown, then run <code>python docs/render_build_plan.py</code>.</footer>')
     out.append(f'</div><script>{JS}</script>')
     return "\n".join(out) + "\n"
