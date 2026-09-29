@@ -26,11 +26,11 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 ## Recommended order
 
-1. **Field tests** (group A). Above all: install 2.6.3 on the Hikvision system (A9), leave a camera live for 10+ minutes (A2), and compare Classic against Live in Chrome (A10).
-2. **Motion recording that never stops** (B1). Logs first.
-3. **Missing cameras** (B2). Logs first.
-4. **The small correctness bugs**: B3, B4, B5, B12.
-5. **The automatic-behaviour discussion** (C11, C3), then **live cards** (C1).
+1. **The slow-starting H.264 camera** (B13) and **the motion recording that never stops** (B1). Logs first for both.
+2. **Missing cameras** (B2). Logs first.
+3. **The Microseven lockout** (B6): power-cycle it, then logs if it locks up again.
+4. **The small correctness bugs**: B3, B4, B5, B12, B14.
+5. **Live View on by default** (A3), once B13 and C10 are fixed. Then **the automatic-behaviour discussion** (C11, C3) and **live cards** (C1).
 6. **Tests into the repo** (E7), then **the module split** (E1). The tests are the safety net the split needs.
 
 Hardware decode (B11) is parked for later, at CrystalHeeler's request.
@@ -41,15 +41,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| A9 | You | **Install 2.6.3 on the Hikvision system and test live view** | The Hikvision DS-2DE4A425IW-DE at 10.0.0.33 is on the other HAOS system (172.16.0.35), which still runs an older build. CrystalHeeler asked to be reminded: do not let this one drop | Install 2.6.3, turn on Live View, open the Hikvision in Chrome. Its main stream is H.265 and should play live; its sub-stream is MJPEG and will always use the classic view |
-| A2 | You | Does live view stay up through Home Assistant? | The biggest remaining unknown. Home Assistant's ingress proxy cut the old multipart streams after 10 to 24 frames in 1.6.0. Live view in Chrome played "perfectly" on 2026-09-28, but for how long was not recorded | Leave one camera live in Chrome for 10+ minutes. Still playing means live view through ingress is proven |
-| A10 | You | Was the browser the problem all along? | CrystalHeeler's question, 2026-09-28. Prediction: no. Before 2.6.3, every browser received the same JPEG images, which Firefox and Chrome display identically; the Pi did the decoding. The browser only matters since live view, which hands the camera's H.265 to the browser | Quickest test: in 2.6.3, open a camera in Chrome and press **Classic**. That is the 2.6.2 pipeline in the same browser, on the same camera, at the same moment. Or reinstall 2.6.2 and use Chrome. If Classic in Chrome is as smooth as Live, the prediction is wrong |
-| A11 | Blocked | Test live view on the H.264 camera at 192.168.50.73:8765 | H.264 plays live in every browser, Firefox included. Log1 shows its card polling for frames, so it is discovered, but every attempt fails on the Skip Non-Reference Frames setting, so the card shows nothing | Blocked on B3. With that setting off, the card should show video; then open it in Enhanced View |
-| A7 | You | Hikvision I-frame interval | Faster start when opening a camera | Report the setting. Target: 1 to 2 times the frame rate |
-| A4 | You | Tier 1 checks not yet exercised | 2.6.1 audit. The fast-stream-start suppression line was confirmed in Log1 on Lorex ch7 | Remaining: a Microseven re-auth with no connection reset (needs the test system A, see A9), and Low Latency Probe on and off (A5) |
-| A5 | Blocked | Decide the Low Latency Probe option | Behind an option since 2.6.1. Its one-packet reorder queue drops packets that arrive out of order, and in H.265 a dropped packet can become a gray patch. It is on in CrystalHeeler's setup | Blocked on A11: test with it off and on once the H.264 camera works, then keep it or remove it |
-| A6 | You | Tens-of-seconds freezes | The original complaint. None seen in live view on the first Chrome test | Watch for freezes over a longer live session. Freezes that happen only in the classic view point to the Pi decoder (B11) |
-| A3 | Blocked | Turn Live View on by default | Off by default until proven | Blocked on A2 and A9 |
+| A3 | Blocked | Turn Live View on by default | Proven in the field on 2026-09-29: both systems, 10+ minutes through Home Assistant, no freezes. Two things would still make default-on worse for some cameras: a slow-starting stream gives up after 12 s with a red error (B13), and Firefox shows a red error on every H.265 camera (C10) | Blocked on B13 and C10 |
 
 ## B. Bugs
 
@@ -61,7 +53,9 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | B4 | Ready | Camera names are written into the page unescaped | Found in 2.6.3: the classic Enhanced View info bar. Names are editable, so a crafted name could inject HTML | Escape it, then check every place the page inserts camera data |
 | B5 | Ready | "Share with community" box is ticked and does nothing | Found in 2.6.3: a placeholder in the page is never filled in | Fill the placeholder when the page is built |
 | B12 | Ready | VAAPI reported as available on a Pi 4 | Log1 startup. The Pi has no VAAPI device; the check only confirms ffmpeg was built with VAAPI | Check for a real device before reporting it available |
-| B6 | Logs | Microseven "Invalid data found" | A regression from 2.3.x to 2.4.x, open since 2.4.0-rc3.3. Current status unknown | Confirm whether it still happens (test system A). If so, logs, a control run with plain ffmpeg, then compare builds |
+| B13 | Logs | **The H.264 camera at 192.168.50.73:8765 is slow to start everywhere** | CrystalHeeler, 2026-09-29. Card: 20 to 30 s on "Connecting", sometimes "Stream unavailable" for 5 to 10 s before video arrives. Live view in Chrome: gives up after 12 s ("no video within 12 s"). Classic view: with Low Latency Probe off it never got past thumbnail-size frames and kept showing "Connecting to RTSP stream"; with it on, it reached 1280x720 after 10 to 15 s. One cause fits all three: the stream takes 20 to 30 s to deliver its first complete picture. Leading suspect: keyframes far apart. The picture carries "YOLOv6 Nano" and "Monitoring" overlays, so an AI-detection app is probably re-encoding it, and x264's default of one keyframe every 250 frames is one every 36 s at 7 fps | Logs first: the AnyCam log from opening this camera, plus what software serves this stream and its keyframe setting. Then decide: a shorter keyframe interval at the source, a longer first-frame limit in live view, or both |
+| B14 | Ready | Cards say "Stream unavailable" while a stream is still starting | Seen on the H.264 camera, 2026-09-29. The card switches to "Stream unavailable" after 3 failed snapshot requests, even though the server is still waiting for the first frame; video arrived 5 to 10 s later | Keep "Connecting" while the server reports the stream is starting; show "Stream unavailable" only when the stream has actually failed |
+| B6 | You | **The Microseven is stuck in its rate-limit lockout** | CrystalHeeler, 2026-09-29: the Microseven at 10.0.0.22 is recognized and authenticates, but serves MJPEG only, with no RTSP stream. That matches the lockout CLAUDE.md describes, which only a power cycle reliably clears. It may be the same fault as the "Invalid data found" regression open since 2.4.0-rc3.3. It also blocks the last Tier 1 check: that the 2.6.1 ONVIF fix stops AnyCam opening connections inside the Microseven's 5 s cooldown | Power-cycle the camera. If RTSP comes back and stays, check the log for connection resets while re-entering its credentials. If it locks up again, something is still hitting it too often: send the log from the test system A (rule 2) |
 | B7 | Later | Resolution dropdown flickers | Deferred at CrystalHeeler's request in 2.2.8-rc2.6 | Confirm it still happens |
 | B8 | Ready | Scan progress bar jumps and is inaccurate | `MoreToDo.txt`; changelog 2.2.9 and 2.3.0 | Base progress on work completed, not time elapsed |
 | B9 | Later | "Unknown child process pid" warning | Cosmetic (changelog 2.2.9) | Low priority |
@@ -72,7 +66,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| C11 | Discuss | **Replace most or all of the option toggles with automatic behaviour** | CrystalHeeler, 2026-09-28. Nine toggles today, several broken or no longer relevant: Skip Non-Reference Frames never worked (B3), Fast Stream Start does nothing at 4K, and Live View makes several decode options irrelevant for the camera being watched | Separate discussion. For each toggle: remove it, make it automatic, or keep it. Pairs with C3 |
+| C11 | Discuss | **Replace most or all of the option toggles with automatic behaviour** | CrystalHeeler, 2026-09-28. Nine toggles today, several broken or no longer relevant: Skip Non-Reference Frames never worked (B3), Fast Stream Start does nothing at 4K, and Live View makes several decode options irrelevant for the camera being watched. Low Latency Probe is the counter-example: it measurably helps the slow-starting H.264 camera (B13), so CrystalHeeler is keeping it for now. It is a candidate to switch on automatically for streams that start slowly | Separate discussion. For each toggle: remove it, make it automatic, or keep it. Pairs with C3 |
 | C3 | Discuss | Automatic quality, and retiring the FPS control | CLAUDE.md: the Enhanced View step-down redesign "requires full discussion before any coding." Correction to the 2026-09-26 research: WebRTC congestion control cannot adjust a stream that go2rtc passes through unchanged | In live view, automatic quality means switching between the camera's own streams (main to sub) when playback stalls. Discuss before coding |
 | C1 | Blocked | Live video in the camera cards | CrystalHeeler approved 2026-09-28. Motion detection works, so it no longer blocks this | Blocked on C2. Use each camera's sub-stream: many live 4K H.265 streams would overload the viewing device. The Hikvision sub-stream is MJPEG, so that card stays on snapshots |
 | C2 | Ready | Motion detection that does not depend on snapshot polling | Motion detection runs inside the thumbnail loop, which stops 30 s after the last snapshot request. Live cards would stop those requests. Related to B1, where the same loop stops recordings | Keep an armed camera's loop running whether or not anyone is watching |
@@ -122,6 +116,14 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
+| Live view on the Hikvision system | This plan, A9 | CrystalHeeler, 2026-09-29: 2.6.3 installed on the test system A; the Hikvision plays live and looks good |
+| Was the browser the problem all along? No | This plan, A10 | CrystalHeeler, 2026-09-29: in Chrome, Classic bogs down and is not smooth while Live is smooth, on the same camera. The Pi's decode-and-JPEG pipeline was the cause, as predicted |
+| Live view stays up through Home Assistant | This plan, A2 | CrystalHeeler, 2026-09-29: a live feed stayed up for 10+ minutes |
+| Tens-of-seconds freezes | This plan, A6; the original complaint | CrystalHeeler, 2026-09-29: no freezes in live view |
+| Low Latency Probe: keep it | This plan, A5 | CrystalHeeler, 2026-09-29: with it on, the H.264 camera's classic view reached 1280x720 after 10 to 15 s; with it off, it never did. No other camera changed |
+| Tier 1 checks | This plan, A4 | Fast Stream Start suppression confirmed in Log1; Low Latency Probe tested (A5); the Microseven check moved to B6 because the camera is locked out |
+| H.264 camera tested | This plan, A11 | CrystalHeeler, 2026-09-29: its card now shows video after 20 to 30 s; the test surfaced B13 |
+| Hikvision I-frame interval | This plan, A7 | 60 at 20 fps, a keyframe every 3 s. Suggested 40, optional. The main stream is 2560x1440 H.265, not 4K, so Fast Stream Start's 4K gate does not apply to it |
 | Live view plays H.265 in Chrome | This plan, A1 | CrystalHeeler, 2026-09-28: Lorex DVR channels played "perfectly" in Chrome. Firefox and LibreWolf fall back to classic, as go2rtc's compatibility table predicts |
 | Motion detection records | This plan, B1 (reported as not recording) | CrystalHeeler, 2026-09-28: it works |
 | Push and publish 2.6.3 | This plan, A8 | Pushed and published on GitHub on 2026-09-29, on CrystalHeeler's order |
