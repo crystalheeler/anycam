@@ -108,7 +108,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.6.4"  # must match config.yaml
+CURRENT_VERSION = "2.6.5"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -8350,6 +8350,8 @@ async def handle_snapshot(request: web.Request) -> web.Response:
                                          "X-Snap-Mode":     snap_mode,
                                          "X-Stream-Status": stream_status,
                                          "X-Frame-Count":   str(state.get("frame_count", 0)),
+                                         "X-Focus-Frames":  str(state.get("frame_count", 0)
+                                                               - state.get("focus_frame_base", 0)),
                                          "X-Step-Res":      step_res,
                                          "X-Step-FPS":      step_fps})
         return web.Response(status=204)  # no frame yet — JS will retry
@@ -8974,6 +8976,14 @@ async def handle_focus_set(request: web.Request) -> web.Response:
     if ada:
         ada["restarts_since_lock"] = 0
         ada["run_start"]           = None
+        # 2.6.5: the page no longer offers Resolution, Frame Rate or Auto,
+        # so a manual tier pinned from an older page could never be
+        # cleared. Drop it on every entry; learned adaptive locks stay.
+        if ada.pop("manual_override", None):
+            ada["locked"]   = False
+            ada["tier_idx"] = 0
+            log.info(f"Focus [{camera_id}]: cleared a manual tier "
+                     f"pinned by an older page")
     # Always cancel any existing task (likely a low-fps sub-stream thumbnail task)
     # and start a fresh native_res=True task on the main high-res stream_url.
     # Without this, a running thumbnail task would block the focus task from starting.
@@ -8986,6 +8996,11 @@ async def handle_focus_set(request: web.Request) -> web.Response:
             existing.cancel()
             log.info(f"Focus: cancelled existing snap_loop for {camera_id} "
                      f"— starting native-res main-stream task")
+        # 2.6.5: count frames from here, so the page can tell this
+        # session's first frame from the card thumbnail still in the
+        # buffer (X-Focus-Frames). The cancelled task cannot add to
+        # frame_count: it stops at its next await.
+        state["focus_frame_base"] = state.get("frame_count", 0)
         state["task"] = asyncio.create_task(
             snap_loop(camera_id, url, camera, native_res=True))
     return web.json_response({"status": "ok", "focused": camera_id})
@@ -11640,6 +11655,13 @@ async function loadCameras() {
    Debug info is logged to the browser console (open DevTools → Console). */
 const _snapTimers  = {};   // camId → setTimeout handle
 const _snapErrors  = {};   // camId → consecutive error count
+const _snapErrSince = {};  // camId → time of the first error in the run
+// 2.6.5 (B14): the server answers 503 while a camera's stream is still
+// starting, so errors alone do not mean the stream failed. The H.264 camera
+// at 192.168.50.73:8765 took up to 28 s to its first frame (2026-09-29 log),
+// and one 30 s read timeout plus a retry takes about 60 s. Say "Stream
+// unavailable" only after 90 s of errors.
+const SNAP_UNAVAILABLE_MS = 90000;
 
 function startSnap(camId) {
   stopSnap(camId);
@@ -11650,6 +11672,7 @@ function startSnap(camId) {
     const loader = new Image();
     loader.onload = () => {
       _snapErrors[camId] = 0;
+      delete _snapErrSince[camId];
       // Show img, hide placeholder
       display.src         = loader.src;
       display.style.display = '';
@@ -11662,11 +11685,17 @@ function startSnap(camId) {
       _snapErrors[camId] = (_snapErrors[camId] || 0) + 1;
       const errs = _snapErrors[camId];
       console.warn('[AnyCam] snapshot error #' + errs + ' for ' + camId);
-      if (errs === 3) {
-        // After 3 consecutive errors, show placeholder
+      if (!_snapErrSince[camId]) _snapErrSince[camId] = Date.now();
+      const failed = Date.now() - _snapErrSince[camId] >= SNAP_UNAVAILABLE_MS;
+      if (errs >= 3) {
+        // After 3 consecutive errors, show the placeholder
         display.style.display = 'none';
         const ph = document.getElementById('ph-' + camId);
-        if (ph) { ph.querySelector('span').textContent = 'Stream unavailable'; ph.style.display = 'flex'; }
+        if (ph) {
+          ph.querySelector('span').textContent =
+            failed ? 'Stream unavailable' : 'Loading feed, please wait…';
+          ph.style.display = 'flex';
+        }
       }
       // Back off: 500ms for first few errors, 2s after 5 errors
       _snapTimers[camId] = setTimeout(poll, errs > 5 ? 2000 : 500);
@@ -12167,17 +12196,26 @@ setInterval(pollMotion, 3000);
  * the classic view after GO2RTC_FIRST_FRAME_MS with no video, after two
  * unexpected socket closes, or once every attempted mode has errored.
  * After the first frame it never falls back on its own.
+ *
+ * 2.6.5: 30 s, up from 12 s. A player cannot draw until the stream's first
+ * keyframe. The H.264 camera at 192.168.50.73:8765 took 19 to 28 s to its
+ * first frame on every connection in the 2026-09-29 log, so 12 s always
+ * failed there.
  */
-const GO2RTC_FIRST_FRAME_MS = 12000;
+const GO2RTC_FIRST_FRAME_MS = 30000;
+const FOCUS_BLANK_POSTER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 let _go2rtc          = null;   // live session state; see _go2rtcMount
 let _go2rtcWatchdog  = null;
 let _go2rtcStatsTid  = null;
 let _go2rtcPlayer    = null;   // Promise<boolean>: player module loaded
 let _focusEngine     = null;   // 'go2rtc' | 'legacy' | null
 let _focusSession    = 0;      // bumped on every open and close
-// Cameras whose live view failed during this page load, camId -> reason.
-// A retry costs up to GO2RTC_FIRST_FRAME_MS of black screen per open, so
-// they use the classic view until the page is reloaded.
+// Cameras whose browser cannot play the stream, camId -> reason. Only a
+// codec or mode error is remembered: it fails the same way on every open
+// and would show the same red message each time. A timeout or a dropped
+// connection is not remembered (2.6.5): the HA app keeps this page open
+// for days, and in 2.6.3 one slow start kept a camera on the classic view
+// until the page was reloaded.
 const _go2rtcDeclined = {};
 
 function _go2rtcLoadPlayer() {
@@ -12194,6 +12232,9 @@ function _go2rtcLoadPlayer() {
           // Surveillance view: no scrub bar, and muted so autoplay is never blocked.
           this.video.controls = false;
           this.video.muted    = true;
+          // 2.6.5: an empty poster. Without one, Android WebView (the HA
+          // app) draws a large gray play icon until the first frame.
+          this.video.poster   = FOCUS_BLANK_POSTER;
           this.video.addEventListener('playing', () => this._emit('playing'));
         }
         onopen() {
@@ -12254,18 +12295,12 @@ async function _go2rtcTryFocus(camId, cam, session) {
                  + ((info && info.reason) || 'no answer'));
     return false;
   }
-  _focusCamId       = camId;
-  _focusEngine      = 'go2rtc';
-  _focusCurProf     = 0;
-  _manualTierActive = false;
+  _focusCamId  = camId;
+  _focusEngine = 'go2rtc';
   await fetch(BASE + '/snap/focus/' + camId + '?engine=go2rtc',
               {method: 'POST'}).catch(() => {});
   if (session !== _focusSession) return true;
   _go2rtcMount(camId, cam, info, session);
-  _loadFocusProfiles().then(() => {
-    const sel = document.getElementById('focus-res-sel');
-    if (sel && _go2rtc && _go2rtc.session === session) sel.value = String(_go2rtc.profIdx);
-  });
   return true;
 }
 
@@ -12280,7 +12315,7 @@ function _go2rtcMount(camId, cam, info, session) {
   el.media = 'video';
   _go2rtc = {
     el, camId, cam, session,
-    stream: info.stream, profIdx: info.profile,
+    stream: info.stream,
     codec: String(info.codec || cam.stream_codec || '').toUpperCase(),
     played: false, closes: 0, modes: [], errs: {},
     mode: 'connecting', lastFrames: 0, fps: null,
@@ -12292,12 +12327,13 @@ function _go2rtcMount(camId, cam, info, session) {
   const watchdog = () => {
     // A hidden tab pauses VideoRTC by design; do not blame the stream for it.
     if (document.hidden) { _go2rtcWatchdog = setTimeout(watchdog, GO2RTC_FIRST_FRAME_MS); return; }
-    _go2rtcFail(session, 'no video within ' + (GO2RTC_FIRST_FRAME_MS / 1000) + ' s');
+    _go2rtcFail(session, 'no video within ' + (GO2RTC_FIRST_FRAME_MS / 1000) + ' s', false);
   };
   _go2rtcWatchdog = setTimeout(watchdog, GO2RTC_FIRST_FRAME_MS);
   clearInterval(_go2rtcStatsTid);
   _go2rtcStatsTid = setInterval(() => _go2rtcStats(session), 1000);
   _go2rtcControls(true);
+  _focusLoading(true);
   _go2rtcUpdateInfo();
 }
 
@@ -12319,12 +12355,12 @@ function _go2rtcEvent(session, kind, value) {
     // while MSE keeps playing, so wait until every attempted mode has
     // failed. An error naming no mode is fatal.
     const failed = g.modes.find(m => value.startsWith(m));
-    if (!failed) { _go2rtcFail(session, value || 'stream error'); return; }
+    if (!failed) { _go2rtcFail(session, value || 'stream error', false); return; }
     g.errs[failed] = true;
-    if (g.modes.length && g.modes.every(m => g.errs[m])) _go2rtcFail(session, value);
+    if (g.modes.length && g.modes.every(m => g.errs[m])) _go2rtcFail(session, value, true);
   } else if (kind === 'close') {
     if (g.played) { g.mode = 'reconnecting'; _go2rtcUpdateInfo(); return; }
-    if (++g.closes >= 2) _go2rtcFail(session, 'connection closed before the first frame');
+    if (++g.closes >= 2) _go2rtcFail(session, 'connection closed before the first frame', false);
   }
 }
 
@@ -12333,6 +12369,7 @@ function _go2rtcPlayed(g) {
   g.played = true;
   clearTimeout(_go2rtcWatchdog);
   _go2rtcWatchdog = null;
+  _focusLoading(false);
   _go2rtcUpdateInfo();
 }
 
@@ -12362,31 +12399,13 @@ function _go2rtcUpdateInfo() {
   const label = g.played ? g.mode : 'connecting…';
   infoEl.innerHTML =
     esc(displayName(g.cam)) + ' — <b>Live (' + esc(label) + '):</b> '
-    + res + ' · ' + fps + (g.codec ? ' · ' + esc(g.codec) : '')
-    + ' <span style="opacity:.55">— decoded on this device, not the Pi</span>';
+    + res + ' · ' + fps + (g.codec ? ' · ' + esc(g.codec) : '');
 }
 
-// FPS and Auto drive the classic engine's ffmpeg ladder. Passthrough cannot
-// change the frame rate, so both are disabled in live view; Resolution
-// still works, by switching the camera profile go2rtc relays.
+// The Classic button shows only while live view is mounted. 2.6.5 removed
+// the Resolution, Frame Rate and Auto controls.
 function _go2rtcControls(on) {
-  const fs      = document.getElementById('focus-fps-sel');
-  const auto    = document.querySelector('.focus-auto-btn');
   const classic = document.getElementById('focus-classic-grp');
-  if (fs) {
-    fs.disabled = on;
-    fs.title    = on ? "Live view passes the camera stream through unchanged, so it runs at the camera's own frame rate"
-                     : 'Frame rate cap';
-    if (on) fs.value = 'uncapped';
-    const grp = fs.closest('.focus-ctrl-group');
-    if (grp) grp.style.opacity = on ? '0.4' : '1';
-  }
-  if (auto) {
-    auto.disabled      = on;
-    auto.style.opacity = on ? '0.4' : '1';
-    auto.title         = on ? 'Automatic quality applies to the classic view only'
-                            : 'Let the system adapt automatically';
-  }
   if (classic) classic.style.display = on ? '' : 'none';
 }
 
@@ -12414,33 +12433,22 @@ function _go2rtcUnmount() {
 }
 
 // Leave live view for the classic engine inside the same focus session.
-// Keeps the profile the user was on, when that was not profile 0.
-function _go2rtcToClassic(camId, cam, profIdx, message, isError) {
+function _go2rtcToClassic(camId, cam, message, isError) {
   _go2rtcUnmount();
   _focusEngine = 'legacy';
   if (message) showToast(message, !!isError);
-  _startFocusPoll(camId, cam).then(async () => {
-    if (!profIdx || _focusCamId !== camId) return;
-    _focusCurProf     = profIdx;
-    _manualTierActive = true;
-    const sel = document.getElementById('focus-res-sel');
-    if (sel) sel.value = String(profIdx);
-    await _applyFocusTier(profIdx, null);
-    if (_focusCamId !== camId) return;
-    // _startFocusPoll fires _loadFocusProfiles without awaiting it, and that
-    // answer can land after the line above and put the dropdown back on the
-    // server's old tier. Re-seed from the server now that it holds profIdx.
-    await _loadFocusProfiles();
-  });
+  _startFocusPoll(camId, cam);
 }
 
-function _go2rtcFail(session, reason) {
+// remember: true only for a failure that repeats on every open (see
+// _go2rtcDeclined).
+function _go2rtcFail(session, reason, remember) {
   const g = _go2rtc;
   if (!g || g.session !== session) return;
   console.warn('[AnyCam] live view failed for ' + g.camId + ': ' + reason
                + ' — using the classic view');
-  _go2rtcDeclined[g.camId] = reason;
-  _go2rtcToClassic(g.camId, g.cam, g.profIdx,
+  if (remember) _go2rtcDeclined[g.camId] = reason;
+  _go2rtcToClassic(g.camId, g.cam,
                    'Live view unavailable (' + reason + ') — using the classic view', true);
 }
 
@@ -12449,27 +12457,60 @@ function _go2rtcFail(session, reason) {
 function focusUseClassic() {
   const g = _go2rtc;
   if (!g) return;
-  _go2rtcToClassic(g.camId, g.cam, g.profIdx,
+  _go2rtcToClassic(g.camId, g.cam,
                    'Classic view for this session — reopen the camera for live view', false);
 }
 
-async function _go2rtcSwitchProfile(profIdx) {
-  const g = _go2rtc;
-  if (!g || profIdx === g.profIdx) return;
-  const camId = g.camId, cam = g.cam, session = g.session;
-  const info = await _go2rtcStreamInfo(camId, profIdx);
-  if (session !== _focusSession || !_go2rtc) return;
-  if (!info || !info.ok) {
-    // e.g. an MJPEG sub-stream: not playable as live video, so serve that
-    // profile the classic way rather than refuse the user's choice.
-    _go2rtcToClassic(camId, cam, profIdx,
-                     'That stream cannot play live (' + ((info && info.reason) || 'no answer')
-                     + ') — using the classic view', false);
-    return;
-  }
-  _go2rtcUnmount();
-  _go2rtcMount(camId, cam, info, session);
-  _focusCurProf = profIdx;
+/* ── Enhanced View loading message (2.6.5) ───────────────────────────────
+ * Shown from open until the first frame of this session, in both engines.
+ * The classic view hides its picture meanwhile: until the new stream
+ * delivers, the server holds only the card's small thumbnail frame. */
+function _focusLoading(on) {
+  const el = document.getElementById('focus-loading');
+  if (!el) return;
+  el.style.display = on ? 'block' : 'none';
+  if (on) _focusLoadingNote('');
+}
+
+function _focusLoadingNote(text) {
+  const el = document.getElementById('focus-loading-note');
+  if (el) el.textContent = text;
+}
+
+/* ── Enhanced View landscape (2.6.5) ─────────────────────────────────────
+ * Landscape on a touch screen fills the screen with the picture: the
+ * bottom bar hides, and the page asks Home Assistant to hide its title
+ * bar. HA's app panel turns on kiosk mode when the add-on page sends
+ * subscribe-properties with kioskMode, and off again on unsubscribe
+ * (home-assistant/frontend, src/panels/app/ha-panel-app.ts). The
+ * Fullscreen API is not an option: HA's iframe does not allow it. */
+const _focusLandMq = window.matchMedia
+  ? window.matchMedia('(orientation: landscape) and (pointer: coarse)') : null;
+let _haKioskOn = false;
+
+function _haKiosk(on) {
+  if (on === _haKioskOn || window.parent === window) return;
+  _haKioskOn = on;
+  try {
+    window.parent.postMessage({
+      type: on ? 'home-assistant/subscribe-properties'
+               : 'home-assistant/unsubscribe-properties',
+      kioskMode: true,
+    }, window.location.origin);
+  } catch (e) {}
+}
+
+function _focusLandscapeSync() {
+  const ov = document.getElementById('focus-overlay');
+  if (!ov) return;
+  const on = ov.style.display !== 'none' && !!(_focusLandMq && _focusLandMq.matches);
+  ov.classList.toggle('focus-landscape', on);
+  _haKiosk(on);
+}
+
+if (_focusLandMq) {
+  if (_focusLandMq.addEventListener) _focusLandMq.addEventListener('change', _focusLandscapeSync);
+  else if (_focusLandMq.addListener) _focusLandMq.addListener(_focusLandscapeSync);
 }
 
 /* ── Focus / enhanced view ───────────────────────────────────────────────── */
@@ -12484,8 +12525,10 @@ async function openFocus(camId) {
   const session = ++_focusSession;
   document.getElementById('focus-overlay').style.display = 'flex';
   document.getElementById('focus-info').textContent = displayName(cam) + ' — loading…';
-  // 2.6.3: live view through go2rtc first; the classic view when that is
-  // off, not ready, not possible for this camera, or already failed.
+  _focusLoading(true);
+  _focusLandscapeSync();
+  // 2.6.3: live view through go2rtc first; the classic view when go2rtc is
+  // not ready, cannot serve this camera, or this browser cannot play it.
   if (await _go2rtcTryFocus(camId, cam, session)) return;
   if (session !== _focusSession) return;
   _focusEngine = 'legacy';
@@ -12493,14 +12536,17 @@ async function openFocus(camId) {
 }
 
 async function _startFocusPoll(camId, cam) {
-  _focusCamId   = camId;
-  _focusCurProf = 0;
+  _focusCamId = camId;
+  const img   = document.getElementById('focus-img');
+  // 2.6.5: hide the picture until this session's stream delivers (see
+  // _focusLoading). Hidden before the POST: the server may answer with
+  // the card's last frame at any time after it.
+  let _ready = false;
+  img.style.visibility = 'hidden';
+  _focusLoading(true);
   // Tell server: enter focus mode (other cams throttle, this cam goes native res)
   await fetch(BASE + '/snap/focus/' + camId, {method: 'POST'}).catch(() => {});
-  // Load profile list for the resolution dropdown (async, non-blocking)
-  _loadFocusProfiles();
 
-  const img    = document.getElementById('focus-img');
   const infoEl = document.getElementById('focus-info');
   const codec  = (cam.stream_codec || '?').toUpperCase();
   const name   = displayName(cam);
@@ -12543,11 +12589,11 @@ async function _startFocusPoll(camId, cam) {
     const stepFpsS = _stepFps  !== null
       ? (_stepFps === 'uncapped' ? 'uncapped' : _stepFps + ' fps')
       : '…';
-    // Only show Adapted Quality when using ffmpeg (rtsp mode) — in http
-    // fallback mode the controls are disabled so Adapted Quality is irrelevant.
-    const httpMode    = document.querySelector('.focus-ctrl-group select')?.disabled || false;
-    const showAdapted = !httpMode && (_manualTierActive
-      || (typeof CFG_ADAPTIVE_QUALITY !== 'undefined' && CFG_ADAPTIVE_QUALITY));
+    // Only show Adapted Quality when using ffmpeg (rtsp mode): in http
+    // fallback mode there is no quality ladder.
+    const httpMode    = _lastSnapMode === 'http';
+    const showAdapted = !httpMode
+      && typeof CFG_ADAPTIVE_QUALITY !== 'undefined' && CFG_ADAPTIVE_QUALITY;
     infoEl.innerHTML =
       name + ' — ' +
       '<b>Actual Feed:</b> ' + realRes + ' · ' + realFps +
@@ -12580,21 +12626,23 @@ async function _startFocusPoll(camId, cam) {
         //   http_fallback       — both transports gave up, in http_snap mode
         //                         (handled separately via the existing httpFallback path)
         const streamStatus = resp.headers.get('X-Stream-Status') || 'ok';
+        // 2.6.5: frames this camera has produced since this focus session
+        // began. 0 means the server still holds only the card's thumbnail.
+        const focusFrames  = parseInt(resp.headers.get('X-Focus-Frames') || '1');
+        if (!_ready && focusFrames > 0) {
+          _ready = true;
+          img.style.visibility = '';
+          _focusLoading(false);
+        }
         if (stepRes) {
           // Detect 4K → smaller fallback so we can surface a one-time message.
           // _stepRes is the previously seen tier resolution; if it was 4K-class
           // (≥3840 wide) and the new tier is smaller, the adaptive controller
           // just stepped down due to fast-death (CPU couldn't keep up with 4K).
           //
-          // rc2.4: Only surface the toast when the step-down is *automatic*.
-          // When _manualTierActive is true, the user is driving the resolution
-          // change themselves and the popup is misleading — it implies the
-          // system is auto-degrading when in fact the user just clicked a
-          // smaller resolution from the dropdown. Gating on !_manualTierActive
-          // suppresses the popup in that case while preserving it for the
-          // genuine auto-degrade path (when the adaptive controller steps
-          // down on its own due to repeated EOF / fast-death).
-          if (_stepRes && _stepRes !== stepRes && !_manualTierActive) {
+          // 2.6.5: the manual Resolution control is gone, so every
+          // step-down is automatic and always gets the message.
+          if (_stepRes && _stepRes !== stepRes) {
             const oldW = parseInt((_stepRes.split('x')[0]) || '0');
             const newW = parseInt((stepRes.split('x')[0])  || '0');
             if (oldW >= 3840 && newW > 0 && newW < oldW) {
@@ -12613,14 +12661,9 @@ async function _startFocusPoll(camId, cam) {
           _stepRes = stepRes;
         }
         if (stepFps) _stepFps = stepFps;
-        // Disable resolution/fps controls when in http_snap fallback —
-        // profile switching is impossible via HTTP snapshot endpoints.
         const httpFallback = (snapMode === 'http');
-        // 2.4.0-rc3.2: surface the fallback transition as a visible toast
-        // so the user knows WHY the dropdown just greyed out. The
-        // existing hover-tooltip on the disabled select wasn't enough —
-        // most users don't think to hover over a disabled control. We
-        // reuse the focus-warning element that already exists for the
+        // 2.4.0-rc3.2: surface the fallback transition as a visible toast.
+        // We reuse the focus-warning element that already exists for the
         // 4K-too-demanding case. Toast stays visible the whole time
         // we're in HTTP fallback; clears the moment RTSP comes back.
         if (_lastSnapMode !== null && _lastSnapMode !== snapMode) {
@@ -12649,7 +12692,14 @@ async function _startFocusPoll(camId, cam) {
         // looks frozen on the last cached frame with no explanation.
         // Suppress when snapMode is already 'http' since the existing
         // httpFallback toast covers that state more specifically.
-        if (_lastStreamStatus !== streamStatus && snapMode !== 'http') {
+        // 2.6.5: before the first frame the loading message carries this
+        // status as its second line instead, so the two do not overlap.
+        if (!_ready) {
+          _focusLoadingNote(
+            streamStatus === 'connecting' ? 'Still connecting to the camera'
+            : streamStatus === 'switching_transport' ? 'Trying UDP: this camera does not accept RTSP over TCP'
+            : '');
+        } else if (_lastStreamStatus !== streamStatus && snapMode !== 'http') {
           const warnEl = document.getElementById('focus-warning');
           const txt    = document.getElementById('focus-warn-text');
           if (warnEl && txt) {
@@ -12674,22 +12724,6 @@ async function _startFocusPoll(camId, cam) {
           }
         }
         _lastStreamStatus = streamStatus;
-        const ctrlGroups = document.querySelectorAll('.focus-ctrl-group');
-        const autoBtn    = document.querySelector('.focus-auto-btn');
-        ctrlGroups.forEach(g => {
-          const sel = g.querySelector('select');
-          if (sel) {
-            sel.disabled = httpFallback;
-            sel.title    = httpFallback
-              ? 'Stream switching unavailable — RTSP not accessible on this camera'
-              : '';
-            g.style.opacity = httpFallback ? '0.4' : '1';
-          }
-        });
-        if (autoBtn) {
-          autoBtn.disabled = httpFallback;
-          autoBtn.style.opacity = httpFallback ? '0.4' : '1';
-        }
         return resp.blob().then(blob => ({ blob, serverCount }));
       })
       .then(result => {
@@ -12742,12 +12776,10 @@ async function closeFocus() {
   await fetch(BASE + '/snap/focus', {method: 'DELETE'}).catch(() => {});
   document.getElementById('focus-overlay').style.display = 'none';
   document.getElementById('focus-img').src = '';
+  document.getElementById('focus-img').style.visibility = '';
   document.getElementById('focus-warning').style.display = 'none';
-  // Reset dropdowns for next open
-  const rs = document.getElementById('focus-res-sel');
-  const fs = document.getElementById('focus-fps-sel');
-  if (rs) rs.value = '';
-  if (fs) fs.value = 'uncapped';
+  _focusLoading(false);
+  _focusLandscapeSync();   // leaves HA kiosk mode
 }
 
 // Close focus on Escape key
@@ -12760,129 +12792,12 @@ document.addEventListener('keydown', e => {
 // prevents those stale failures from triggering "Stream unavailable" on the card.
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
-    Object.keys(_snapErrors).forEach(camId => { _snapErrors[camId] = 0; });
+    Object.keys(_snapErrors).forEach(camId => {
+      _snapErrors[camId] = 0;
+      delete _snapErrSince[camId];
+    });
   }
 });
-
-/* ── Focus manual resolution/fps controls ─────────────────────────────── */
-// Populated when openFocus() runs
-let _focusProfiles    = [];     // [{idx, label, width, height, codec}]
-let _focusCurProf     = 0;     // currently selected profile index
-let _manualTierActive = false; // true when user has manually picked res/fps
-
-async function _loadFocusProfiles() {
-  try {
-    const r = await fetch(BASE + '/snap/focus/profiles');
-    if (!r.ok) return;
-    const data = await r.json();
-
-    // rc2.3: response is now an object {profiles, current_tier}.
-    // Older shape was a bare array — handle both for safety even though
-    // server and JS ship together (defensive against split deployments
-    // and stale browser caches across upgrades).
-    let profiles, currentTier;
-    if (Array.isArray(data)) {
-      profiles    = data;
-      currentTier = null;
-    } else {
-      profiles    = data.profiles    || [];
-      currentTier = data.current_tier || null;
-    }
-    if (profiles.length === 0) return;  // keep placeholder if empty
-
-    _focusProfiles = profiles;
-    const sel = document.getElementById('focus-res-sel');
-    if (!sel) return;
-    // Rebuild options from real profile data
-    sel.innerHTML = '';
-    _focusProfiles.forEach(p => {
-      const opt = document.createElement('option');
-      opt.value = String(p.idx);
-      opt.textContent = p.label;
-      sel.appendChild(opt);
-    });
-
-    // rc2.3: seed both dropdowns from the server's current adaptive-tier
-    // state. Without this, re-entering enhanced view after a manual tier
-    // change resets the dropdowns to profile[0]/uncapped while the server
-    // is still streaming whatever the user last selected — the dropdowns
-    // become a UI lie. When current_tier is null (server hasn't locked
-    // a tier yet), fall through to the default "0 / uncapped".
-    const fpsSel = document.getElementById('focus-fps-sel');
-    if (currentTier && currentTier.profile_idx !== undefined) {
-      // Resolution: only set if the profile_idx is actually in the dropdown.
-      const profIdxStr = String(currentTier.profile_idx);
-      const optExists  = _focusProfiles.some(p => String(p.idx) === profIdxStr);
-      if (optExists) {
-        sel.value      = profIdxStr;
-        _focusCurProf  = currentTier.profile_idx;
-      } else {
-        sel.value      = '0';
-        _focusCurProf  = 0;
-      }
-      // FPS: server returns null for uncapped, int for a cap.
-      if (fpsSel) {
-        const fpsVal = currentTier.fps;
-        const newVal = (fpsVal === null || fpsVal === undefined)
-                         ? 'uncapped' : String(fpsVal);
-        // Only set if the option exists (defensive — in case the FPS
-        // dropdown was changed in a future build to have fewer rungs).
-        const fpsOptExists = Array.from(fpsSel.options)
-                                  .some(o => o.value === newVal);
-        fpsSel.value = fpsOptExists ? newVal : 'uncapped';
-      }
-      // If it's a manual override on the server, the user previously
-      // pinned a tier — surface that immediately so "Adapted Quality"
-      // shows up without waiting for the next dropdown change.
-      _manualTierActive = !!currentTier.manual_override;
-    } else {
-      sel.value      = '0';
-      _focusCurProf  = 0;
-      if (fpsSel) fpsSel.value = 'uncapped';
-      _manualTierActive = false;
-    }
-  } catch(e) {}
-}
-
-async function focusPickRes(val) {
-  const profIdx = parseInt(val);
-  if (isNaN(profIdx)) return;
-  // 2.6.3: in live view the dropdown switches the profile go2rtc relays.
-  if (_focusEngine === 'go2rtc' && _go2rtc) { await _go2rtcSwitchProfile(profIdx); return; }
-  _focusCurProf = profIdx;
-  _manualTierActive = true;
-  const fps = document.getElementById('focus-fps-sel')?.value || 'uncapped';
-  await _applyFocusTier(profIdx, fps === 'uncapped' ? null : parseInt(fps));
-}
-
-async function focusPickFps(val) {
-  const fps = val === 'uncapped' ? null : parseInt(val);
-  _manualTierActive = true;
-  await _applyFocusTier(_focusCurProf, fps);
-}
-
-async function focusResetAuto() {
-  await fetch(BASE + '/snap/focus/tier', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({profile_idx: null})
-  }).catch(() => {});
-  // Reset dropdowns and manual flag
-  const rs = document.getElementById('focus-res-sel');
-  const fs = document.getElementById('focus-fps-sel');
-  if (rs && _focusProfiles.length > 0) rs.value = '0';
-  if (fs) fs.value = 'uncapped';
-  _focusCurProf = 0;
-  _manualTierActive = false;
-}
-
-async function _applyFocusTier(profIdx, fps) {
-  await fetch(BASE + '/snap/focus/tier', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({profile_idx: profIdx, fps: fps})
-  }).catch(() => {});
-}
 
 /* ── Storage browser ─────────────────────────────────────────────────────── */
 let _storageData    = null;
@@ -13149,7 +13064,7 @@ function feedHTML(cam) {
          + '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">'
          + '<path d="M15 10l4.553-2.069A1 1 0 0121 8.87v6.26a1 1 0 01-1.447.9L15 14"/>'
          + '<rect x="1" y="7" width="14" height="10" rx="2" ry="2"/></svg>'
-         + '<span>Connecting...</span></div>';
+         + '<span>Loading feed, please wait…</span></div>';
 
   if (d === 'hls' && cam.status === 'ready')
     return '<video data-hls="' + esc(cam.stream_url) + '" autoplay muted playsinline></video>';
@@ -15676,15 +15591,14 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .focus-engine-btn:hover{{border-color:#4a9eff;color:#4a9eff}}
 #focus-bar{{position:absolute;bottom:0;left:0;right:0;height:52px;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:space-between;padding:0 16px;gap:12px;z-index:9001;border-top:1px solid #333}}
 #focus-info{{font-size:.78rem;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}}
-#focus-controls{{display:flex;align-items:flex-end;gap:12px;flex-shrink:0}}
+#focus-controls{{display:flex;align-items:center;gap:12px;flex-shrink:0}}
 #focus-close{{position:absolute;top:6px;right:14px;background:transparent;border:2.5px solid #e03;color:#e03;font-size:1rem;font-weight:bold;width:32px;height:32px;border-radius:50%;cursor:pointer;z-index:9002;line-height:1;display:flex;align-items:center;justify-content:center}}
 #focus-close:hover{{background:#e03;color:#fff}}
-.focus-select{{appearance:none;-webkit-appearance:none;background:#1e1e2e url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23aaa'/%3E%3C/svg%3E") no-repeat right 6px center;background-size:9px 5px;border:1px solid #555;color:#e0e0e0;border-radius:6px;padding:3px 22px 3px 6px;font-size:.72rem;cursor:pointer;height:26px;min-width:68px}}
-.focus-select:focus{{outline:none;border-color:#4a9eff}}
-.focus-auto-btn{{background:#1e1e2e;border:1px solid #555;color:#aaa;border-radius:6px;padding:3px 8px;font-size:.72rem;cursor:pointer;height:26px}}
-.focus-auto-btn:hover{{border-color:#4a9eff;color:#4a9eff}}
-.focus-ctrl-group{{display:flex;flex-direction:column;align-items:center;gap:3px}}
-.focus-ctrl-label{{font-size:.62rem;color:#777;white-space:nowrap;text-align:center;letter-spacing:.02em}}
+#focus-loading{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:9001;color:#ddd;font-size:1rem;text-align:center;pointer-events:none}}
+#focus-loading-note{{color:#999;font-size:.8rem;margin-top:8px}}
+/* 2.6.5: landscape on a touch screen, set by _focusLandscapeSync */
+#focus-overlay.focus-landscape #focus-bar{{display:none}}
+#focus-overlay.focus-landscape #focus-img,#focus-overlay.focus-landscape #focus-video{{height:100vh;height:100dvh;margin:0}}
 #focus-warning{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a1a;border:1px solid var(--orange);border-radius:10px;padding:24px;max-width:480px;text-align:center;z-index:9003;display:flex;flex-direction:column;gap:14px;align-items:center}}
 #focus-warn-text{{color:#f5b942;font-size:.9rem;line-height:1.5}}
 /* ── Toast ── */
@@ -16029,37 +15943,17 @@ header h1{{cursor:pointer}}
     <span id="focus-warn-text"></span>
     <button onclick="document.getElementById('focus-warning').style.display='none'">OK</button>
   </div>
-  <img id="focus-img" alt="Enhanced view">
+  <img id="focus-img" alt="">
   <div id="focus-video" style="display:none"></div>
+  <div id="focus-loading" style="display:none">
+    <div>Loading feed, please wait…</div>
+    <div id="focus-loading-note"></div>
+  </div>
   <div id="focus-bar">
     <div id="focus-info">Loading…</div>
     <div id="focus-controls">
-      <div class="focus-ctrl-group">
-        <select id="focus-res-sel" class="focus-select" title="Resolution" onchange="focusPickRes(this.value)">
-          <option value="">—</option>
-        </select>
-        <span class="focus-ctrl-label">Resolution</span>
-      </div>
-      <div class="focus-ctrl-group">
-        <select id="focus-fps-sel" class="focus-select" title="Frame rate cap" onchange="focusPickFps(this.value)">
-          <option value="uncapped">Uncapped</option>
-          <option value="30">30 FPS</option>
-          <option value="20">20 FPS</option>
-          <option value="15">15 FPS</option>
-          <option value="10">10 FPS</option>
-          <option value="5">5 FPS</option>
-          <option value="2">2 FPS</option>
-          <option value="1">1 FPS</option>
-        </select>
-        <span class="focus-ctrl-label">Frame Rate</span>
-      </div>
-      <div class="focus-ctrl-group">
-        <button class="focus-auto-btn" onclick="focusResetAuto()" title="Let the system adapt automatically">Auto</button>
-        <span class="focus-ctrl-label" style="visibility:hidden">&middot;</span>
-      </div>
-      <div class="focus-ctrl-group" id="focus-classic-grp" style="display:none">
+      <div id="focus-classic-grp" style="display:none">
         <button class="focus-engine-btn" onclick="focusUseClassic()" title="Compare against the classic view for this session">Classic</button>
-        <span class="focus-ctrl-label" style="visibility:hidden">&middot;</span>
       </div>
     </div>
   </div>

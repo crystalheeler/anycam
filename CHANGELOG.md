@@ -1,3 +1,82 @@
+## 2.6.5
+
+Enhanced View: slow-starting cameras now play live, landscape on a phone
+fills the screen, the manual quality menus are gone, and a loading message
+replaces the blank or gray screen while a feed starts.
+
+### Slow-starting cameras (build plan B13)
+
+The 2026-09-29 log from the test system B showed that every new connection to
+the H.264 camera at 192.168.50.73:8765 took 19 to 28 s to deliver its first
+frame. A player cannot draw anything until the stream's first keyframe
+arrives, so a stream with keyframes far apart starts slowly for every
+viewer.
+
+- Live view now waits 30 s for the first frame, up from 12 s. In 2.6.4 it
+  gave up on this camera every time.
+- Live view now tries again every time you open Enhanced View. In 2.6.4 one
+  failure kept a camera on the classic view until the page was reloaded,
+  and the Home Assistant app keeps the page open for days. A browser that
+  cannot play the codec (Firefox with H.265) is still remembered, so it
+  does not show the red message on every open.
+
+### Landscape on a phone or tablet
+
+In Enhanced View, turn a touch-screen device to landscape. The picture
+fills the screen, keeps its aspect ratio, and has black bars at the edges.
+The bottom bar hides, and Home Assistant hides its "AnyCam" title bar
+through the kiosk-mode request its app panel accepts from an add-on page.
+The red X stays. Turn back to portrait, or close the view, and everything
+returns. Desktop browsers do not change.
+
+The phone's own status bar (clock, battery) stays: a web page cannot hide
+it, and Home Assistant's frame does not allow the browser's full-screen
+mode.
+
+### Menus removed
+
+The Resolution, Frame Rate and Auto controls are gone from Enhanced View.
+The Classic button and the stream information stay. The "decoded on this
+device, not the Pi" text is gone.
+
+The classic view still adapts its quality on its own when the Adaptive
+Quality option is on. A resolution or frame rate chosen on an older page
+was remembered by the server, with no way left to clear it, so AnyCam now
+clears it each time Enhanced View opens.
+
+### Loading message
+
+- Enhanced View shows "Loading feed, please wait…" until the first frame.
+  In the Home Assistant app on Android the live player showed a large gray
+  play icon instead.
+- The classic view hides the card's small thumbnail until the full stream
+  delivers. In 2.6.4 the thumbnail looked like a poor-quality feed. The
+  server reports frames produced since the view opened in a new
+  `X-Focus-Frames` response header.
+- Before the first frame, "Still connecting to the camera" shows under the
+  loading message instead of the separate "Connecting to RTSP stream" box.
+
+### Camera cards (build plan B14)
+
+Cards say "Loading feed, please wait…" while a stream starts, in place of
+"Connecting...". A card says "Stream unavailable" only after 90 s of
+failed requests. In 2.6.4 it said so after 3 failed requests, about 16 s,
+while the stream was still starting.
+
+### Known issues carried forward
+
+- The camera at 192.168.50.73:8765 still needs about 20 s to start. The
+  stream comes from the Oak-D camera add-on, whose ffmpeg encoder uses
+  x264's default of one keyframe every 250 frames. A shorter keyframe
+  interval there is the real fix.
+- Home Assistant can show "No changelog found" for AnyCam after an update
+  when the new version is in a folder with a new name. The Supervisor
+  checks for CHANGELOG.md in the old folder before it reads the new one.
+  After the update, change any file in the new folder (for example
+  `touch /addons/<folder>/CHANGELOG.md`) and check for updates again.
+- Opening the classic view still stops the card's stream and opens a new
+  full-resolution connection.
+
 ## 2.6.4
 
 Live view is now always on. The **Live View (Enhanced View)** option is

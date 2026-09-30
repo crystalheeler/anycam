@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.4, published.
+**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.5, committed and tagged locally, not pushed. 2.6.4 is the latest published release.
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -26,10 +26,10 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 ## Recommended order
 
-1. **The slow-starting H.264 camera** (B13) and **the motion recording that never stops** (B1). Logs first for both.
+1. **The slow-starting H.264 camera** (B13): a keyframe setting in the Oak-D add-on, CrystalHeeler's decision. **The motion recording that never stops** (B1): logs first.
 2. **Missing cameras** (B2). Logs first.
 3. **The Microseven lockout** (B6): power-cycle it, then logs if it locks up again.
-4. **The small correctness bugs**: B3, B4, B5, B12, B14, and C10's plain message for Firefox, which matters more now that live view cannot be switched off.
+4. **The small correctness bugs**: B3, B4, B5, B12, and C10's plain message for Firefox, which matters more now that live view cannot be switched off.
 5. **The automatic-behaviour discussion** (C11, C3), then **live cards** (C1).
 6. **Tests into the repo** (E7), then **the module split** (E1). The tests are the safety net the split needs.
 
@@ -41,7 +41,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| A12 | You | Install 2.6.4 on both systems | 2.6.4 removes the Live View option and makes live view always on | Check that Live View is gone from the Configuration tab and Enhanced View still opens live in Chrome. Expect at most one harmless Supervisor warning: Option 'go2rtc_live_view' does not exist in the schema |
+| A12 | You | Install 2.6.5 on both systems | 2.6.5 changes Enhanced View: 30 s live-view wait, retry on every open, landscape full screen, no Resolution / Frame Rate / Auto menus, loading message | On the HA app: turn the phone to landscape in Enhanced View. The picture should fill the screen, and the AnyCam title bar and bottom bar should hide. Open the camera at 192.168.50.73:8765: it should play live after about 20 s, with "Loading feed, please wait" until then. After updating, check the changelog shows (see F8) |
 
 ## B. Bugs
 
@@ -53,10 +53,9 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | B4 | Ready | Camera names are written into the page unescaped | Found in 2.6.3: the classic Enhanced View info bar. Names are editable, so a crafted name could inject HTML | Escape it, then check every place the page inserts camera data |
 | B5 | Ready | "Share with community" box is ticked and does nothing | Found in 2.6.3: a placeholder in the page is never filled in | Fill the placeholder when the page is built |
 | B12 | Ready | VAAPI reported as available on a Pi 4 | Log1 startup. The Pi has no VAAPI device; the check only confirms ffmpeg was built with VAAPI | Check for a real device before reporting it available |
-| B13 | Logs | **The H.264 camera at 192.168.50.73:8765 is slow to start everywhere** | CrystalHeeler, 2026-09-29. Card: 20 to 30 s on "Connecting", sometimes "Stream unavailable" for 5 to 10 s before video arrives. Live view in Chrome: gives up after 12 s ("no video within 12 s"). Classic view: with Low Latency Probe off it never got past thumbnail-size frames and kept showing "Connecting to RTSP stream"; with it on, it reached 1280x720 after 10 to 15 s. One cause fits all three: the stream takes 20 to 30 s to deliver its first complete picture. Leading suspect: keyframes far apart. The picture carries "YOLOv6 Nano" and "Monitoring" overlays, so an AI-detection app is probably re-encoding it, and x264's default of one keyframe every 250 frames is one every 36 s at 7 fps | Logs first: the AnyCam log from opening this camera, plus what software serves this stream and its keyframe setting. Then decide: a shorter keyframe interval at the source, a longer first-frame limit in live view, or both |
-| B14 | Ready | Cards say "Stream unavailable" while a stream is still starting | Seen on the H.264 camera, 2026-09-29. The card switches to "Stream unavailable" after 3 failed snapshot requests, even though the server is still waiting for the first frame; video arrived 5 to 10 s later | Keep "Connecting" while the server reports the stream is starting; show "Stream unavailable" only when the stream has actually failed |
+| B13 | You | **The H.264 camera at 192.168.50.73:8765 is slow to start everywhere** | CrystalHeeler, 2026-09-29. The test system B log measured every connection: 12 produced a first frame after 19 to 28 s (median 23 s); 13 gave up first, at 12 s in live view or 30 s in classic. Cause found in the source: the stream comes from the Oak-D camera add-on (`<project folder>`, version 2.4.1), whose ffmpeg runs libx264 with no `-g`, so x264's default applies: one keyframe every 250 frames. 2.6.5 works around it in AnyCam: live view waits 30 s and retries on every open | CrystalHeeler to decide: add `-g` to `start_ffmpeg()` in the Oak-D add-on's `oak_bridge.py`, for a keyframe every 1 or 2 s. That is a separate project and release |
 | B6 | You | **The Microseven is stuck in its rate-limit lockout** | CrystalHeeler, 2026-09-29: the Microseven at 10.0.0.22 is recognized and authenticates, but serves MJPEG only, with no RTSP stream. That matches the lockout CLAUDE.md describes, which only a power cycle reliably clears. It may be the same fault as the "Invalid data found" regression open since 2.4.0-rc3.3. It also blocks the last Tier 1 check: that the 2.6.1 ONVIF fix stops AnyCam opening connections inside the Microseven's 5 s cooldown | Power-cycle the camera. If RTSP comes back and stays, check the log for connection resets while re-entering its credentials. If it locks up again, something is still hitting it too often: send the log from the test system A (rule 2) |
-| B7 | Later | Resolution dropdown flickers | Deferred at CrystalHeeler's request in 2.2.8-rc2.6 | Confirm it still happens |
+| B15 | Discuss | Opening the classic view stops the card's working stream | test system B log, 12:19:35 on 2026-09-29: entering the classic view cancelled a card stream at frame 38,450 and opened a new full-resolution connection, which timed out after 30 s with no frames. Proposed for 2.6.5 as fix 1c and held back: keeping the old stream until the new one delivers needs two connections to one camera at once, through per-camera state that assumes one. Rate-limited cameras (Microseven) cannot take two connections | Discuss. Live view now covers this camera in Chrome, so the classic view is the fallback path only |
 | B8 | Ready | Scan progress bar jumps and is inaccurate | `MoreToDo.txt`; changelog 2.2.9 and 2.3.0 | Base progress on work completed, not time elapsed |
 | B9 | Later | "Unknown child process pid" warning | Cosmetic (changelog 2.2.9) | Low priority |
 | B10 | Later | "Cannot connect to host 172.30.32.1:8099" for about 3 s at start | 2.6.2 Supervisor log: Home Assistant connects before the web server is listening | Cosmetic. Start the web server before the slow startup steps |
@@ -67,7 +66,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
 | C11 | Discuss | **Replace most or all of the option toggles with automatic behaviour** | CrystalHeeler, 2026-09-28. Eight toggles since 2.6.4 removed Live View, several broken or no longer relevant: Skip Non-Reference Frames never worked (B3), Fast Stream Start does nothing at 4K, and Live View makes several decode options irrelevant for the camera being watched. Low Latency Probe is the counter-example: it measurably helps the slow-starting H.264 camera (B13), so CrystalHeeler is keeping it for now. It is a candidate to switch on automatically for streams that start slowly | Separate discussion. For each toggle: remove it, make it automatic, or keep it. Pairs with C3 |
-| C3 | Discuss | Automatic quality, and retiring the FPS control | CLAUDE.md: the Enhanced View step-down redesign "requires full discussion before any coding." Correction to the 2026-09-26 research: WebRTC congestion control cannot adjust a stream that go2rtc passes through unchanged | In live view, automatic quality means switching between the camera's own streams (main to sub) when playback stalls. Discuss before coding |
+| C3 | Discuss | Automatic quality in live view | CLAUDE.md: the Enhanced View step-down redesign "requires full discussion before any coding." 2.6.5 removed the Resolution, Frame Rate and Auto controls at CrystalHeeler's request. Correction to the 2026-09-26 research: WebRTC congestion control cannot adjust a stream that go2rtc passes through unchanged | In live view, automatic quality means switching between the camera's own streams (main to sub) when playback stalls. Discuss before coding |
 | C1 | Blocked | Live video in the camera cards | CrystalHeeler approved 2026-09-28. Motion detection works, so it no longer blocks this | Blocked on C2. Use each camera's sub-stream: many live 4K H.265 streams would overload the viewing device. The Hikvision sub-stream is MJPEG, so that card stays on snapshots |
 | C2 | Ready | Motion detection that does not depend on snapshot polling | Motion detection runs inside the thumbnail loop, which stops 30 s after the last snapshot request. Live cards would stop those requests. Related to B1, where the same loop stops recordings | Keep an armed camera's loop running whether or not anyone is watching |
 | C12 | Ready | Configurable recording length: 30 s, 1 min, 2 min, 5 min | CrystalHeeler, 2026-09-28 | New option. ffmpeg's segment muxer splits a recording into files with no re-encoding. It cuts at the first keyframe after each interval, so lengths are approximate |
@@ -97,6 +96,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | E3 | Ready | One shared HTTP client session | aiohttp's own guidance; on the 2.0.7 list. 2.6.3 added three more short-lived sessions | Create one at startup and close it at shutdown |
 | E4 | Ready | Strip credentials from every log line | 2.0.7 list: applied in some places, not all | Check every log call that can carry a URL |
 | E6 | Ready | Remove the old `/stream/{camera_id}` endpoint | Unused since 1.6.0 | Delete the route and its handler |
+| E8 | Ready | Remove the manual-tier server endpoints | 2.6.5 removed the page controls. `/snap/focus/tier` and `/snap/focus/profiles` have no caller now, and the snap loop still carries `tier_change_kill` handling for them | Remove the routes, the handlers and the flag together; the classic view's automatic ladder must keep working. Do it with C3 or C11 |
 | E5 | Later | Complete type hints | 2.0.7 list | Do it alongside E1 |
 
 ## F. Release engineering
@@ -105,6 +105,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 |---|---|---|---|---|
 | F6 | You | CLAUDE.md is out of date | Its queued-work and open-issue lists include items that have shipped (see Done). It describes a Part 6 of the best-practices document that does not exist | CrystalHeeler to say whether Part 6 was lost or never written; then refresh both lists |
 | F7 | Ready | A release check that run.sh and config.yaml agree | 2.6.4 audit. run.sh passes each setting to the program; for a setting missing from config.yaml, bashio returns the text null, which the code reads as off. Removing the Live View option nearly shipped exactly that. Checked by hand in 2.6.4 | Fail the release gate when run.sh reads a setting config.yaml does not define, or config.yaml defines one run.sh never reads |
+| F8 | You | **Home Assistant shows "No changelog found" after an update** | CrystalHeeler, 2026-09-29, on 2.6.4. `CHANGELOG.md` was present in `/addons/camera_discovery-2.6.4/`. Supervisor source: on a store reload it refreshes each add-on's file checks before it reads the new folder location (`supervisor/store/__init__.py`, `reload()`), so it checks the deleted `camera_discovery-2.6.3` folder and caches "no changelog". Cause: the folder name changes every release (CLAUDE.md rule 3) | Workaround now: `touch /addons/camera_discovery-2.6.4/CHANGELOG.md`, then check for updates. CrystalHeeler to choose the lasting fix: a fixed folder name inside the zip (changes rule 3), or that extra step on each update. Optional: report the ordering to the Supervisor project |
 | F1 | Ready | A release check for the Dockerfile | 2.6.1 passed every check and still could not build | Check each pinned package version against its archive at release time |
 | F2 | Ready | The blocking-I/O check misses some calls | Found by hand in 2.6.3 | Extend it beyond `open()` to `read_bytes`, `read_text` and the write equivalents |
 | F3 | Ready | `build.yaml` is deprecated | The Supervisor warns on every build | Move the build settings into the Dockerfile |
@@ -117,6 +118,9 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
+| Cards said "Stream unavailable" while starting | This plan, B14 | 2.6.5: cards say "Loading feed, please wait…" and switch to "Stream unavailable" only after 90 s of errors |
+| Resolution dropdown flickers | This plan, B7 | 2.6.5 removed the dropdown |
+| Enhanced View menus, landscape, loading message | CrystalHeeler, 2026-09-29 | 2.6.5, in code and tests. Field check in A12 |
 | Live View on by default | This plan, A3 | 2.6.4, 2026-09-29: the option is removed and live view is always on; each camera still falls back to the classic view on its own |
 | Live view on the Hikvision system | This plan, A9 | CrystalHeeler, 2026-09-29: 2.6.3 installed on the test system A; the Hikvision plays live and looks good |
 | Was the browser the problem all along? No | This plan, A10 | CrystalHeeler, 2026-09-29: in Chrome, Classic bogs down and is not smooth while Live is smooth, on the same camera. The Pi's decode-and-JPEG pipeline was the cause, as predicted |
