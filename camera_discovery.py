@@ -9535,7 +9535,16 @@ async def api_motion_toggle(request: web.Request) -> web.Response:
     if not camera:
         return web.json_response({"error": "Not found"}, status=404)
     ms = _motion_state(camera_id)
-    ms["enabled"] = not ms["enabled"]
+    # 2.6.5: the page sends the state the user asked for. A blind flip
+    # turned "Record" on a camera the page wrongly showed as off into a
+    # disarm (test system B log, 2026-09-30 07:20:45). No body keeps the old flip.
+    want = None
+    if request.can_read_body:
+        try:
+            want = (await request.json()).get("enabled")
+        except (ValueError, AttributeError):
+            want = None
+    ms["enabled"] = (not ms["enabled"]) if want is None else bool(want)
     ms["prev_frame"] = None
     if ms["enabled"]:
         _motion_ensure_loop(camera_id)
@@ -9547,6 +9556,19 @@ async def api_motion_toggle(request: web.Request) -> web.Response:
     except OSError as ex:
         log.warning(f"Motion: could not save {MOTION_FILE}: {ex}")
     return web.json_response({"motion_enabled": ms["enabled"]})
+
+
+async def api_motion_all(request: web.Request) -> web.Response:
+    """GET /api/motion — motion state of every armed or recording camera.
+
+    2.6.5: the page loads this at start and every 3 s. Before, it never
+    asked, so every card showed "Record" after a page load even when the
+    server had the camera armed.
+    """
+    return web.json_response({
+        cid: {"enabled": ms["enabled"], "recording": ms["recording"]}
+        for cid, ms in _MOTION.items() if ms["enabled"] or ms["recording"]
+    })
 
 
 async def api_motion_status(request: web.Request) -> web.Response:
@@ -11761,6 +11783,7 @@ async function pollScan() {
 async function loadCameras() {
   try {
     cameras = await (await fetch(BASE + '/api/cameras')).json();
+    await syncMotion(false);   // 2.6.5: cards start with the server's motion state
     renderGrid();
   } catch(e) {
     console.error('loadCameras error:', e);
@@ -12274,7 +12297,12 @@ const _recording     = {};   // camId → bool
 
 async function toggleMotion(camId) {
   try {
-    const r = await fetch(BASE + '/api/cameras/' + camId + '/motion', {method: 'POST'});
+    // 2.6.5: ask for the opposite of what the button shows, not a blind flip.
+    const r = await fetch(BASE + '/api/cameras/' + camId + '/motion', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: !_motionEnabled[camId]}),
+    });
     const d = await r.json();
     _motionEnabled[camId] = d.motion_enabled;
     _recording[camId]     = d.recording || false;
@@ -12284,18 +12312,25 @@ async function toggleMotion(camId) {
   } catch(e) { console.error('toggleMotion error:', e); }
 }
 
-/* Poll motion status for all ready cameras every 3s */
-function pollMotion() {
-  cameras.filter(c => c.status === 'ready' && _motionEnabled[c.id]).forEach(async cam => {
-    try {
-      const d = await (await fetch(BASE + '/api/cameras/' + cam.id + '/motion')).json();
-      const wasRec = _recording[cam.id];
-      _recording[cam.id] = d.recording;
-      if (wasRec !== d.recording) updateCard(cam);   // refresh button state
-    } catch(e) {}
-  });
+/* Mirror the server's motion state for every camera: at page load and every
+ * 3 s. 2.6.5: one request for all cameras. Before, the page asked only about
+ * cameras it already believed armed, so after a page load it never learned
+ * that a camera was armed, and another device's change never showed. */
+async function syncMotion(redraw) {
+  try {
+    const all = await (await fetch(BASE + '/api/motion')).json();
+    cameras.forEach(cam => {
+      const m  = all[cam.id] || {};
+      const on = !!m.enabled, rec = !!m.recording;
+      if (on !== !!_motionEnabled[cam.id] || rec !== !!_recording[cam.id]) {
+        _motionEnabled[cam.id] = on;
+        _recording[cam.id]     = rec;
+        if (redraw) updateCard(cam);
+      }
+    });
+  } catch(e) {}
 }
-setInterval(pollMotion, 3000);
+setInterval(() => syncMotion(true), 3000);
 
 /* ── go2rtc live view (2.6.3, Tier 2) ──────────────────────────────────────
  * Enhanced View plays through the bundled
@@ -16156,6 +16191,7 @@ def make_app() -> web.Application:
     app.router.add_get(   "/snap/focus/profiles",                 handle_focus_profiles)
     app.router.add_post(  "/api/cameras/{camera_id}/motion",      api_motion_toggle)
     app.router.add_get(   "/api/cameras/{camera_id}/motion",      api_motion_status)
+    app.router.add_get(   "/api/motion",                          api_motion_all)
     app.router.add_get(   "/api/storage",                         api_storage_list)
     app.router.add_post(  "/api/storage/rename",                  api_storage_rename)
     app.router.add_post(  "/api/storage/move",                    api_storage_move)
