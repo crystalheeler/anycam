@@ -26,6 +26,12 @@ detection on the Lorex channels stopped with it.
   "recording never stops" report.
 - The armed state is saved in `/data/motion.json` and restored at start.
   Before, every restart or update silently disarmed every camera.
+- The Record button shows the server's state. The page never asked for
+  it: after any page load every card showed "Record", even on an armed
+  camera, and clicking it then disarmed the camera, because the button
+  flipped the state blindly (test system B log, 2026-09-30 07:20:45). The page now
+  reads every camera's state at load and every 3 s, and the button asks
+  for the state you click for.
 - A recording whose ffmpeg exits on its own is marked stopped, so the next
   motion starts a new one. The recording's error output is now read, so
   a full pipe cannot stall it.
@@ -121,6 +127,10 @@ touch /addons/local_camera_discovery/CHANGELOG.md
   full-resolution connection.
 - Recordings are single files per motion event. Fixed-length pieces
   (30 s, 1, 2 or 5 min) are build plan C12.
+- Motion detection compares JPEG file sizes, so a sudden light change
+  counts as motion. Seen 2026-09-30 06:21 on Lorex ch7: a 9 s clip when
+  the snapshot size stepped from 8,773 to about 10,000 bytes at dawn,
+  most likely the camera's night-to-day switch. Build plan C13.
 
 ## 2.6.4
 
