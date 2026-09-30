@@ -1,3 +1,158 @@
+## 2.6.6
+
+Motion detection now compares the pictures themselves, so it sees people
+on the Lorex channels. Long motion events are split into files of a length
+you choose. Camera cards play live video. Also: four bug fixes and a
+stronger release check.
+
+### Motion detection compares pictures (build plan B16, C13)
+
+2.6.5 compared JPEG file sizes. On 2026-09-30 the Lorex channels' loops ran
+all day but recorded nothing after 08:24: a person barely changes the size
+of a 9 to 10 KB Lorex snapshot. The same method recorded a clip at 06:21
+when a camera switched from night to day mode.
+
+- **How it works now.** Once a second at most, each frame is shrunk to a
+  64 x 48 grey picture and compared with the last one, cell by cell. Before
+  comparing, both pictures are brought to the same brightness and contrast,
+  so a cloud, an exposure change or a night-mode switch changes nothing.
+- **Light changes.** The picture is split into 16 areas. A change that
+  reaches more than 75% of them is treated as a light change: it is logged
+  with its size and not recorded. A person changes a few neighbouring
+  areas.
+- **Test results** on synthetic pictures: a 30% brightness step, a 40%
+  contrast step and a night-mode switch all measured 0% changed. A block
+  the size of a person covering 4.7% of the picture measured 5.0%.
+- **Cost:** about 1.3 ms per comparison on a desktop PC; expect several
+  times that on a Raspberry Pi 4, once a second per armed camera.
+- **New dependency:** Pillow 12.3.0, which decodes the JPEGs.
+
+### New setting: Motion Sensitivity (replaces the old one)
+
+`motion_detect_level`, 1 to 100: 1 is least sensitive, 100 is most. It
+replaces `motion_sensitivity`, whose numbers meant file-size changes. The
+default, 63, records when 5% of the picture changes. The scale runs from
+74% of the picture at 1 down to 1% at 100, with finer steps at the
+sensitive end:
+
+| Setting | Share of the picture that must change |
+|---|---|
+| 1 | 74% |
+| 25 | 26% |
+| 50 | 8.8% |
+| 63 (default) | 5.0% |
+| 75 | 3.0% |
+| 90 | 1.5% |
+| 100 | 1.0% |
+
+A person walking through counts roughly twice their own size, because
+both where they were and where they are now change. At the default, a
+person covering about 2.5% of the picture triggers a recording.
+
+After updating, the Supervisor logs one harmless warning, because the old
+setting is still saved:
+
+```
+Option 'motion_sensitivity' does not exist in the schema for AnyCam
+```
+
+### New setting: Recording Length (build plan C12)
+
+`motion_clip_length`: 10s, 20s, 30s, 1min (default), 2min or 5min. While
+motion continues, a new file starts this often; an event shorter than this
+is one file. Files are named so the parts of one event group together:
+
+```
+motion_20260930_081151_part01.mp4   ← a new event
+motion_20260930_081151_part02.mp4   ← its continuation
+motion_20260930_093505_part01.mp4   ← the next event
+```
+
+A file can only end on a keyframe, so lengths are approximate: within
+about 1 s on the Oak-D camera and 3 s on the Hikvision. Recording now also
+starts and stops exactly once per event; 2.6.5 logged "recording stopped"
+two or three times per clip.
+
+### Live video in the camera cards (build plan C1)
+
+Cards play live through go2rtc, using each camera's smallest stream:
+
+- The Lorex channels play the DVR's sub-stream. AnyCam knows only their
+  3840-wide main stream, so it asks the DVR for the same channel with
+  `subtype=1`.
+- A camera whose smallest stream is wider than 1920 stays on snapshots, so
+  a phone never decodes several 4K streams at once. The Hikvision is one:
+  its main stream is 2560 wide and its sub-stream is MJPEG, which cannot
+  play live.
+- Only the cards on screen play. Cards pause when the page is in the
+  background, and while Enhanced View is open.
+- A card that cannot play live uses snapshots, as before: for the rest of
+  the page visit when the browser cannot play the codec (Firefox with
+  H.265), and for 5 minutes after a connection that shows no video in 30 s.
+- Motion detection does not depend on the cards, since 2.6.5.
+
+### Bug fixes
+
+- **B4: camera names and IDs in the page.** Thirteen card buttons pasted
+  the camera's ID, IP or name between quotes in their click handlers. A
+  camera ID can carry an ONVIF token from the camera itself, and names are
+  editable, so a crafted value could break out and run script. They are
+  now encoded properly, and the classic Enhanced View info bar escapes the
+  name.
+- **B5: "Share with community"** showed ticked and did nothing. A build
+  placeholder was never filled, and its own text read as a configured
+  address. The box is now hidden while no community server exists.
+- **B9: "Unknown child process pid N, will report returncode 255".**
+  AnyCam killed an ffmpeg that had already exited; Python's kill() checks
+  the process first, and that check collected it before asyncio could. It
+  now waits briefly for an exiting ffmpeg before killing it. Harmless, but
+  no longer logged.
+- **B10: "Cannot connect to host 172.30.32.1:8099"** for about 3 s at
+  start. The web server now starts before the 2-second hardware-decoder
+  check.
+- **Manufacturer database** (found by the new release check): its 40,000
+  entries were written to disk on the event loop, pausing everything else;
+  now written on a separate thread.
+- **Unrestricted Storage Browser** had no description in the Configuration
+  tab (found by the new release check).
+
+### Build and release (build plan F1 to F7)
+
+- `build.yaml` is gone. The Supervisor warned on every build that it is
+  deprecated. The Dockerfile now names the base image itself:
+  `ghcr.io/home-assistant/base-debian:bookworm`, a multi-arch image.
+- `verify_release.py` has seven gates, up from five:
+  - Gate 6 checks that `run.sh`, `config.yaml` and the translations name
+    the same settings.
+  - Gate 7 checks every Dockerfile input where the build will fetch it:
+    the Debian package versions, the pip wheels, the go2rtc digests and the
+    base image. It needs internet access.
+  - The best-practice gate also catches pathlib file I/O in async code and
+    page placeholders that are never filled.
+  - 7 new function contracts cover motion detection, live cards and the
+    ffmpeg stop.
+- The 20 older audit reports that were ZIP files are now real PDFs.
+- The full coding best-practices document (sections 1.6 to 1.18 and
+  Part 6) is restored; it had been lost from the repository.
+
+### After updating
+
+The folder inside the zip is still `local_camera_discovery`, so the
+changelog shows without extra steps. The Supervisor may log the warning
+about `motion_sensitivity` once.
+
+### Known issues carried forward
+
+- **Not tested before release: file splitting.** No ffmpeg on the PC this
+  was built on, so the segment options were checked against the ffmpeg 5.1
+  documentation only. If recordings fail to start, the add-on log shows
+  ffmpeg's error on the `REC:` line.
+- **Not tested before release: the image build.** The base image changed.
+  The release check confirms it exists for both processor types, but no
+  Docker build ran here.
+- Opening the classic view still stops the card's stream (build plan B15).
+- Skip Non-Reference Frames breaks every H.264 camera (build plan B3).
+
 ## 2.6.5
 
 Motion detection works on the Lorex channels again and no longer needs a

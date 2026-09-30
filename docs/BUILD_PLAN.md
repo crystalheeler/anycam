@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.5, committed and tagged locally, not pushed. 2.6.4 is the latest published release.
+**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.6, committed and tagged locally, not pushed. 2.6.5 is the latest published release.
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -26,11 +26,11 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 ## Recommended order
 
-1. **Motion detection that misses real motion on the Lorex channels** (B16, C13): pixel comparison. Then finish the 2.6.5 field test (A12).
+1. **Field-test 2.6.6** (A12): motion on the Lorex channels, recording length, live cards.
 2. **Missing cameras** (B2). Logs first.
 3. **The Microseven lockout** (B6): power-cycle it, then logs if it locks up again.
-4. **The small correctness bugs**: B3, B4, B5, B12, and C10's plain message for Firefox, which matters more now that live view cannot be switched off.
-5. **The automatic-behaviour discussion** (C11, C3), then **live cards** (C1) and **recording length** (C12).
+4. **The small correctness bugs**: B3, B12, and C10's plain message for Firefox, which matters more now that live view cannot be switched off.
+5. **The automatic-behaviour discussion** (C11, C3).
 6. **Tests into the repo** (E7), then **the module split** (E1). The tests are the safety net the split needs.
 
 Hardware decode (B11) is parked for later, at CrystalHeeler's request.
@@ -41,7 +41,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| A12 | You | Finish the 2.6.5 field test | CrystalHeeler, 2026-09-30, on the test system B: landscape, menus removed, loading message, the Oak-D camera live, card loading text, Record button, zip folder and changelog, and recordings that stop all confirmed good | Still open: the classic view hiding the card thumbnail until the full stream arrives; "Stream unavailable" after 90 s (not yet seen); install 2.6.5 on the Hikvision (172) system. The ffmpeg version line is confirmed in the 2026-09-30 log | 
+| A12 | You | Install 2.6.6 and field-test it | 2.6.6: pixel-comparison motion detection, the new Motion Sensitivity and Recording Length settings, live cards, B4, B5, B9, B10, and a new base image. Two things could not be tested here: the image build (no Docker) and file splitting (no ffmpeg) | Check: the image builds; a person walking past an armed Lorex channel records a clip; a long event gives motion_..._part01.mp4, part02; the log shows light changes ignored at dawn and dusk; cards play live, and the Hikvision card stays on snapshots; no "Cannot connect" and no "Unknown child process" lines at start. Carried from 2.6.5: the classic view hiding the card thumbnail, "Stream unavailable" after 90 s, and 2.6.5 or later on the Hikvision (172) system |
 
 ## B. Bugs
 
@@ -49,15 +49,10 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 |---|---|---|---|---|
 | B2 | Logs | **One or two cameras are not discovered** | CrystalHeeler, 2026-09-28 | Logs first: the scan log, plus the IP and brand of each missing camera |
 | B3 | Ready | Skip Non-Reference Frames breaks every camera it touches | ffmpeg rejects `nonref`; its valid value is `noref`. Confirmed in Log1: every launch of the H.264 camera at 192.168.50.73:8765 fails. The "~40% less CPU" in its description never happened, because the setting never applied | Fix the value and field-test, or remove the option (see C11). Until then, turning it off restores that camera |
-| B4 | Ready | Camera names are written into the page unescaped | Found in 2.6.3: the classic Enhanced View info bar. Names are editable, so a crafted name could inject HTML | Escape it, then check every place the page inserts camera data |
-| B5 | Ready | "Share with community" box is ticked and does nothing | Found in 2.6.3: a placeholder in the page is never filled in | Fill the placeholder when the page is built |
 | B12 | Ready | VAAPI reported as available on a Pi 4 | Log1 startup. The Pi has no VAAPI device; the check only confirms ffmpeg was built with VAAPI | Check for a real device before reporting it available |
 | B6 | You | **The Microseven is stuck in its rate-limit lockout** | CrystalHeeler, 2026-09-29: the Microseven at 10.0.0.22 is recognized and authenticates, but serves MJPEG only, with no RTSP stream. That matches the lockout CLAUDE.md describes, which only a power cycle reliably clears. It may be the same fault as the "Invalid data found" regression open since 2.4.0-rc3.3. It also blocks the last Tier 1 check: that the 2.6.1 ONVIF fix stops AnyCam opening connections inside the Microseven's 5 s cooldown | Power-cycle the camera. If RTSP comes back and stays, check the log for connection resets while re-entering its credentials. If it locks up again, something is still hitting it too often: send the log from the test system A (rule 2) |
-| B16 | Discuss | **Motion detection misses real motion on the Lorex channels** | CrystalHeeler, 2026-09-30, on 2.6.5: the Oak-D camera, ch4 and ch7 armed; the Oak-D camera recorded all day (23 clips), ch4 and ch7 did not after 08:24. Log (07:34 to 14:21): both Lorex loops ran all day, one snapshot every 1.9 s, no stops or restarts, so "stops when the app closes" is ruled out. Lorex snapshots are 9,000 to 10,500 bytes; after 08:26 they drift under 1% per 10 min. Sensitivity was 50 all day (log, 07:34 start), which triggers on a file-size change over 5.1%. A person in the picture changes a 10 KB JPEG by less than that, so the file-size method cannot see them. The 1 to 100 scale maps to a 10% to 0.1% size change, so "50" is less sensitive than it sounds. ch4's clips from 07:45 to 08:24 came while the sizes still moved with the morning light. The the Oak-D camera frames are 28 to 35 KB, and the Oak-D add-on draws boxes and labels on detected people, which moves the size a lot. Also seen: "recording stopped" logged 2 or 3 times per clip; the keeper and the frame path both stop the same recording | Pixel comparison (C13) is the fix for both. It needs an image library (Pillow) added to the image. CrystalHeeler to choose the version. Optional test first: raise Motion Sensitivity to 80 (a 2.1% threshold) to confirm. It applies to every camera, so the Oak-D camera and light changes will trigger more |
 | B15 | Discuss | Opening the classic view stops the card's working stream | test system B log, 12:19:35 on 2026-09-29: entering the classic view cancelled a card stream at frame 38,450 and opened a new full-resolution connection, which timed out after 30 s with no frames. Proposed for 2.6.5 as fix 1c and held back: keeping the old stream until the new one delivers needs two connections to one camera at once, through per-camera state that assumes one. Rate-limited cameras (Microseven) cannot take two connections | Discuss. Live view now covers this camera in Chrome, so the classic view is the fallback path only |
 | B8 | Ready | Scan progress bar jumps and is inaccurate | `MoreToDo.txt`; changelog 2.2.9 and 2.3.0 | Base progress on work completed, not time elapsed |
-| B9 | Later | "Unknown child process pid" warning | Cosmetic (changelog 2.2.9) | Low priority |
-| B10 | Later | "Cannot connect to host 172.30.32.1:8099" for about 3 s at start | 2.6.2 Supervisor log: Home Assistant connects before the web server is listening | Cosmetic. Start the web server before the slow startup steps |
 | B11 | Later | **Hardware decode silently falls back to software** | Log1: ffmpeg cannot open the Pi's decoder devices (`/dev/media0` to `3`, "Operation not permitted"), then decodes in software, while AnyCam logs "hw first frame (hevc_drm)". Classic 4K runs at 8 fps; 2.6.0-rc2.5 measured 22 fps. The gray frames CrystalHeeler sees when the classic view bogs down fit this: ffmpeg's HEVC decoder fills any missing frame with mid-gray, and Log1 shows ch7 repeating one identical frame 400 times. Live view does no decoding on the Pi, which is why Chrome was clean | Parked by CrystalHeeler. When picked up: logs first, then find what changed since rc2.5 (HAOS or Supervisor update, ffmpeg 5.1.8 to 5.1.9, device permissions). Also make the log stop reporting hardware decode when it is not happening |
 
 ## C. Video and recording
@@ -66,9 +61,6 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 |---|---|---|---|---|
 | C11 | Discuss | **Replace most or all of the option toggles with automatic behaviour** | CrystalHeeler, 2026-09-28. Eight toggles since 2.6.4 removed Live View, several broken or no longer relevant: Skip Non-Reference Frames never worked (B3), Fast Stream Start does nothing at 4K, and Live View makes several decode options irrelevant for the camera being watched. Low Latency Probe is the counter-example: it measurably helps the slow-starting H.264 camera (B13), so CrystalHeeler is keeping it for now. It is a candidate to switch on automatically for streams that start slowly | Separate discussion. For each toggle: remove it, make it automatic, or keep it. Pairs with C3 |
 | C3 | Discuss | Automatic quality in live view | CLAUDE.md: the Enhanced View step-down redesign "requires full discussion before any coding." 2.6.5 removed the Resolution, Frame Rate and Auto controls at CrystalHeeler's request. Correction to the 2026-09-26 research: WebRTC congestion control cannot adjust a stream that go2rtc passes through unchanged | In live view, automatic quality means switching between the camera's own streams (main to sub) when playback stalls. Discuss before coding |
-| C1 | Ready | Live video in the camera cards | CrystalHeeler approved 2026-09-28. The blocker, C2, closed in 2.6.5: an armed camera's motion detection no longer depends on the page polling its card | Use each camera's sub-stream: many live 4K H.265 streams would overload the viewing device. The Hikvision sub-stream is MJPEG, so that card stays on snapshots |
-| C12 | Ready | Configurable recording length: 30 s, 1 min, 2 min, 5 min | CrystalHeeler, 2026-09-28 | New option. ffmpeg's segment muxer splits a recording into files with no re-encoding. It cuts at the first keyframe after each interval, so lengths are approximate |
-| C13 | Later | **Light changes trigger motion recordings** | CrystalHeeler, 2026-09-30: a clip at 06:21 on Lorex ch7 with no motion in it. Log: snapshot size grew from 7,028 to 8,773 bytes between 06:05 and 06:20 as it got light, then stepped to about 10,000 bytes at 06:21, most likely the camera's night-to-day switch. Detection compares JPEG file sizes; at sensitivity 15, a change over 8.6% counts. No other false clip from 00:03 to 06:21 | CrystalHeeler, 2026-09-30: leave it for now and collect more clips; he leans toward pixel comparison later (compare the pictures, not file sizes: more accurate, more CPU on the Pi). Plan it as its own release |
 | C10 | Ready | H.265 live view depends on the browser | Confirmed 2026-09-28: Chrome plays H.265 live; Firefox 156 and LibreWolf do not. go2rtc's own compatibility table lists Desktop Firefox as H.264-only for every live method, so this is not a security setting | Three changes. (1) Check what the browser can play before trying live view, and go straight to classic with a plain message instead of a red error. (2) Replace go2rtc's raw error text with something readable. (3) Optionally offer an H.264 sub-stream in live view, which trades resolution, so CrystalHeeler's decision |
 | C4 | Discuss | Thumbnails, motion and recording through go2rtc's local stream | CrystalHeeler's long-term interest since April 2026 ("Fix B"). One camera connection instead of several, and go2rtc copes with cameras that break the RTSP rules | Discuss scope. Most useful for the rate-limited Microseven |
 | C5 | Ready | Audio in live view | 2.6.3 plays video only | Add audio to the player; check codec support per browser |
@@ -102,14 +94,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| F6 | Ready | CLAUDE.md is out of date | Its queued-work and open-issue lists include items that have shipped (see Done). Part 6 question settled 2026-09-30: the full best-practices document (sections 1.6 to 1.18 and Part 6, added May 2026) was lost from the repo, which held the April copy; CrystalHeeler found it in his Claude Chat project and it is restored | Refresh CLAUDE.md's queued-work and open-issue lists. From 2.6.6, audits score against all six parts |
-| F7 | Ready | A release check that run.sh and config.yaml agree | 2.6.4 audit. run.sh passes each setting to the program; for a setting missing from config.yaml, bashio returns the text null, which the code reads as off. Removing the Live View option nearly shipped exactly that. Checked by hand in 2.6.4 | Fail the release gate when run.sh reads a setting config.yaml does not define, or config.yaml defines one run.sh never reads |
 | F9 | Ready | The packager lives outside the repo | `/tmp/mkzip.py` in Git Bash builds every release zip, including the rule 3 folder change in 2.6.5. A cleared temp folder loses it | Move it into the repo, for example `tools/mkzip.py`, and have the release notes name it |
-| F1 | Ready | A release check for the Dockerfile | 2.6.1 passed every check and still could not build | Check each pinned package version against its archive at release time |
-| F2 | Ready | The blocking-I/O check misses some calls | Found by hand in 2.6.3 | Extend it beyond `open()` to `read_bytes`, `read_text` and the write equivalents |
-| F3 | Ready | `build.yaml` is deprecated | The Supervisor warns on every build | Move the build settings into the Dockerfile |
-| F4 | Ready | Docker warning about the base-image argument | The argument has no default value | Give it a default |
-| F5 | Ready | 20 of 25 older audit "PDFs" are ZIP bundles | Found 2026-09-27; their content is intact | Convert them to real PDFs |
 
 ---
 
@@ -117,6 +102,17 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
+| Motion detection that sees people; light changes ignored | This plan, B16, C13 | 2.6.6: pixel comparison after cancelling brightness and contrast; light told apart by spread over 16 areas. Synthetic tests: brightness, contrast and night-mode changes 0%, a person block 5.0%. New Motion Sensitivity setting (default 5% of the picture). Field check in A12 |
+| Recording length: 10 s to 5 min | This plan, C12; CrystalHeeler, 2026-09-28 | 2.6.6: motion_clip_length, default 1min; files motion_<date>_<time>_partNN.mp4. Field check in A12 |
+| Live video in the camera cards | This plan, C1 | 2.6.6: the smallest stream per camera; the Lorex DVR's subtype=1 sub-stream; wider than 1920 stays on snapshots. Field check in A12 |
+| Camera values escaped in the page | This plan, B4 | 2.6.6: 13 click handlers encoded with jsArg(); the info bar and IP badge escaped |
+| "Share with community" ticked and doing nothing | This plan, B5 | 2.6.6: the placeholder is filled at build time; a gate check now catches unfilled placeholders |
+| "Unknown child process pid" warning | This plan, B9 | 2.6.6: an exiting ffmpeg is no longer signalled (Python's kill() collected it first) |
+| "Cannot connect to host 172.30.32.1:8099" at start | This plan, B10 | 2.6.6: the web server starts before the hardware probe |
+| Release checks: Dockerfile inputs, blocking I/O, settings agreement | This plan, F1, F2, F7 | 2.6.6: gates 6 and 7 added and gate 3 extended; each broken on purpose to confirm it fails. They found the OUI database written on the event loop and a missing option description, both fixed |
+| build.yaml deprecated; base-image default | This plan, F3, F4 | 2.6.6: build.yaml removed; the Dockerfile defaults to the multi-arch ghcr.io/home-assistant/base-debian:bookworm |
+| Old audit reports that were ZIP files | This plan, F5 | 2.6.6: 20 converted to real, searchable PDFs |
+| CLAUDE.md out of date | This plan, F6 | 2026-09-30: best-practices document restored; CLAUDE.md lists point to this plan |
 | 2.6.5 Enhanced View: landscape full screen, menus removed, loading message | CrystalHeeler, 2026-09-29 | CrystalHeeler, 2026-09-30: all good on the HA app |
 | The the Oak-D camera camera slow to start | This plan, B13 | CrystalHeeler, 2026-09-30: good, with AnyCam 2.6.5 and Oak-D 2.4.2 (one keyframe per second) |
 | Cards say "Loading feed, please wait…" | This plan, B14 | CrystalHeeler, 2026-09-30: good. "Stream unavailable" after 90 s not yet seen |
