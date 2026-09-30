@@ -115,13 +115,19 @@ Structure:
 
 ## Release gate
 
-`verify_release.py` is a five-gate check that must pass before packaging:
+`verify_release.py` is a seven-gate check that must pass before packaging:
 
 1. AST/compile clean, no duplicate top-level definitions
 2. Semantic function contracts satisfied
-3. Best-practice audit clean
+3. Best-practice audit clean (includes blocking file I/O in async code and
+   unfilled page placeholders)
 4. Version consistent across `camera_discovery.py` and `config.yaml`
 5. `CHANGELOG.md` top entry matches the version being built
+6. Settings agree across `run.sh`, `config.yaml` options and schema, and
+   `translations/en.yaml` (2.6.6)
+7. Every Dockerfile input exists where the build fetches it: apt pins,
+   pip wheels, go2rtc digests, base image platforms (2.6.6; needs internet
+   access, and fails without it)
 
 ---
 
@@ -141,7 +147,8 @@ via rpivid — the correct overlay line in `/boot/firmware/config.txt` is
 
 **test system B** (`192.168.1.0/24`)
 - `.217` Lorex/Dahua DVR-NVR (D861A8B-Z, 8ch), channels ch2–ch8 populated
-- `.73:8765` h264 camera
+- `.73:8765` H.264 stream from CrystalHeeler's own Oak-D camera add-on
+  (`<project folder>`), not a third-party camera
 
 ## Known device behavior
 
@@ -159,37 +166,20 @@ via rpivid — the correct overlay line in `/boot/firmware/config.txt` is
   decode at 4K cannot produce a first frame faster than hardware warmup
   completes.
 
-## Open issues carried into this repo
+## Open issues and queued work
 
-- `skip_nonref=true` breaks every h264 launch. ffmpeg rejects `nonref` as a
-  value for `skip_frame`. Pre-existing, predates 2.6.0-rc2.5. Needs a
-  different approach or removal of the option.
-- `fast_stream_start=true` is actively harmful at 4K HEVC — software decode
-  can't beat hardware warmup, so it burns CPU on a parallel decode that
-  never renders, and opens a second RTSP session that triggers
-  `RTP bad cseq` warnings. Should be gated by resolution and codec.
-- ONVIF SOAP calls during credential auth do not appear to consult
-  `_throttle_wait_if_needed`, so several TCP opens land inside a
-  rate-limited brand's cooldown window. Latent, pre-existing.
+`docs/BUILD_PLAN.md` is the task list (rule 7), with a readable copy in
+`docs/BUILD_PLAN.html`. It supersedes the lists that used to be here, most
+of whose items have shipped (see its Done section). Standing reminders:
 
-## Queued work
-
-- Promote a stable rc to **2.6.0** final once field issues resolve
-- Runtime consumption of `default_ports`; `STREAM_DB` → `CAMERA_DB`
-  consolidation
-- Bundle rpi-ffmpeg for rpivid HEVC hardware decode (Dockerfile hw-decoder
-  selection for Pi 4)
-- Lorex/Dahua DVR family support (~170 LoC) — see
-  `docs/Lorex_Dahua_DVR_Family_Support_Plan.md`
-- RTSP OPTIONS fingerprinting as reusable core infrastructure — see
-  `docs/RTSP_OPTIONS_Fingerprint_Helper_Plan.md`
-- Enhanced View resolution auto-step-down redesign — **requires full
-  discussion before any coding.** The current system steps within the same
-  profile, which masks real quality changes.
-- Return card view to live RTSP rather than HTTP snapshot (no version
-  assigned)
-- Global mutable variables refactor (SigRev-3 Issue 2)
-- Behavioral tests (aspirational)
+- `skip_nonref=true` breaks every H.264 launch: ffmpeg rejects `nonref`
+  (build plan B3).
+- The Enhanced View automatic-quality redesign **requires full discussion
+  before any coding** (build plan C3).
+- `STREAM_DB` → `CAMERA_DB` consolidation and runtime use of
+  `default_ports` need a plan document first (build plan D2).
+- Splitting the single file into modules waits on tests in the repo
+  (build plan E7, then E1 and E2).
 
 ## Repository notes
 
