@@ -103,6 +103,12 @@ configuration:
     description: >-
       Extra seconds recorded after the cooldown ends, to capture the
       tail of a motion event. Default 3.
+  unrestricted_storage_browser:
+    name: Unrestricted Storage Browser
+    description: >-
+      Default OFF. When OFF, the Storage tab shows only the recordings
+      folder. When ON, it can browse the whole file system the add-on can
+      see. Turn it on only when you need to find files elsewhere.
   log_debug:
     name: Log Debug
     description: >-

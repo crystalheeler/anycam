@@ -1,4 +1,12 @@
-ARG BUILD_FROM
+# 2.6.6 (build plan F3, F4): the base image is set here, not in build.yaml.
+# The Supervisor warns that build.yaml is deprecated ("Move build parameters
+# into the Dockerfile directly"), and without build.yaml it passes no
+# BUILD_FROM, so the default below is what builds. Home Assistant publishes
+# its base images as multi-arch since 2026.03.1; this tag's index lists
+# linux/amd64 and linux/arm64 (checked on ghcr.io, 2026-09-30), and the
+# Supervisor builds with --platform, so each system gets its own. BUILD_ARCH
+# is still passed by the Supervisor.
+ARG BUILD_FROM=ghcr.io/home-assistant/base-debian:bookworm
 FROM $BUILD_FROM
 ARG BUILD_ARCH
 

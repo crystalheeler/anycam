@@ -10,8 +10,7 @@ for single-camera focus, hardware-accelerated decode, and PTZ control.
 camera_discovery.py     Main application (single file, ~15k lines)
 config.yaml             Addon manifest and options schema
 run.sh                  Addon entrypoint; exports config as env vars
-Dockerfile              Addon image
-build.yaml              Base image selection
+Dockerfile              Addon image (base image set here since 2.6.6)
 translations/en.yaml    Option help text
 verify_release.py       Five-gate pre-packaging check
 CHANGELOG.md            Full release history
