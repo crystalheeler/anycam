@@ -76,11 +76,23 @@ configuration:
       Base directory for motion-triggered recording clips. Defaults to
       /media/anycam which is exposed via HA Media Browser and Samba share.
       Each camera gets a sub-folder named after its display name.
-  motion_sensitivity:
+  motion_detect_level:
     name: Motion Sensitivity
     description: >-
-      How sensitive motion detection is, from 1 (least) to 100 (most).
-      Uses JPEG size comparison. Default 15 works well for outdoor cameras.
+      How much of the picture must change to count as motion, from 1
+      (least sensitive: a large change) to 100 (most sensitive: a small
+      change). Default 63. AnyCam compares the pictures themselves and
+      ignores a change across most of the picture at once, such as a
+      camera switching between night and day mode.
+  motion_clip_length:
+    name: Recording Length
+    description: >-
+      While motion continues, start a new file this often. An event
+      shorter than this is one file. Files are named
+      motion_DATE_TIME_part01.mp4, part02 and so on: a new event gets a
+      new date and time, and its later parts are continuations. Lengths
+      are approximate, because a file can only end on a keyframe.
+      Default 1min.
   motion_cooldown_secs:
     name: Motion Cooldown (seconds)
     description: >-
