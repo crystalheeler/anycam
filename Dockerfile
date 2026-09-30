@@ -100,6 +100,11 @@ RUN if [ "${BUILD_ARCH}" = "aarch64" ]; then \
 # exactly which ffmpeg that build received.
 #
 # Every other package here keeps its exact pin.
+#
+# 2.6.6: Pillow decodes camera JPEGs for pixel-comparison motion detection
+# (camera_discovery.py, _motion_thumb). The standard library cannot decode
+# JPEG. PyPI publishes Pillow 12.3.0 wheels for CPython 3.11 on
+# manylinux_2_28 aarch64 and x86_64; Debian bookworm's glibc is 2.36.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3=3.11.2-1+b1 \
@@ -112,6 +117,7 @@ RUN apt-get update \
     && pip3 install --break-system-packages \
         aiohttp==3.13.5 \
         cryptography==48.0.0 \
+        Pillow==12.3.0 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Step 3 (2.6.3): go2rtc, for Enhanced View live playback (Tier 2).
