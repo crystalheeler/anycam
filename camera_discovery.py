@@ -94,6 +94,7 @@ class _DockerIPFilter(logging.Filter):
 DATA_DIR       = Path("/data")
 KEY_FILE       = DATA_DIR / "secret.key"
 CAMS_FILE      = DATA_DIR / "cameras.json"
+MOTION_FILE    = DATA_DIR / "motion.json"   # 2.6.5: armed cameras, kept across restarts
 BLACKLIST_FILE = DATA_DIR / "blacklist.json"
 RUNTIME_FILE   = DATA_DIR / "runtime.json"
 OUI_CACHE_FILE  = DATA_DIR / "oui_cache.json"
@@ -7208,13 +7209,17 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # Idle check — stop if nobody has polled recently
             last   = _snap_last_access.get(camera_id, 0)
             idle_s = time.monotonic() - last
-            if state["frame_count"] > 0 and idle_s > 30:
+            if state["frame_count"] > 0 and idle_s > 30 and not _motion_armed(camera_id):
                 log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s — stopping")
                 return
 
             # Focus-mode throttle: if another camera has focus, sleep most of
             # the time so the focused camera gets the CPU.
-            if _FOCUSED_CAMERA and _FOCUSED_CAMERA != camera_id:
+            # 2.6.5: not for an armed camera while the focus is live view,
+            # which decodes nothing on the Pi; the wait would blind motion
+            # detection for as long as someone watches another camera.
+            if (_FOCUSED_CAMERA and _FOCUSED_CAMERA != camera_id
+                    and not (_motion_armed(camera_id) and _FOCUS_ENGINE == "go2rtc")):
                 await asyncio.sleep(1.0)   # ~1fps while another cam is focused
                 continue
 
@@ -7368,6 +7373,10 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # re-entry retry happened, masking the true "ffmpeg dead, retrying"
             # state behind a misleading X-Stream-Status: ok.
             state["current_run_frames"] = 0
+            # 2.6.5: a new ffmpeg may run at another resolution (card, focus,
+            # adaptive tier). Comparing JPEG sizes across that change would
+            # read as motion, so start the comparison afresh.
+            _motion_reset_prev(camera_id)
             # hw_tried and hw_started_at were set above conditionally based
             # on whether fast_stream_start is active. They control the rc2.5
             # HW-EOF-fallback logic in the read loop below. In fast_stream
@@ -7379,7 +7388,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                     # Idle check inside the read loop
                     last   = _snap_last_access.get(camera_id, 0)
                     idle_s = time.monotonic() - last
-                    if frames > 10 and idle_s > 30:
+                    if frames > 10 and idle_s > 30 and not _motion_armed(camera_id):
                         log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s — stopping")
                         return
 
@@ -7611,30 +7620,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                                      f"— {len(frame)} bytes "
                                      f"(last poll {poll_ago:.1f}s ago)")
 
-                        # Motion detection — runs only when enabled for this camera.
-                        # Uses JPEG size comparison: a scene with motion has more
-                        # high-frequency content and compresses to a larger file.
-                        ms = _MOTION.get(camera_id)
-                        if ms and ms["enabled"]:
-                            motion = _detect_motion(
-                                ms.get("prev_frame"), frame, CFG_MOTION_SENS)
-                            ms["prev_frame"] = frame
-                            now_m = time.monotonic()
-                            if motion:
-                                ms["last_motion"] = now_m
-                                if not ms["recording"]:
-                                    cam_url = build_authenticated_url(
-                                        CAMERAS.get(camera_id, {}))
-                                    if cam_url:
-                                        asyncio.create_task(
-                                            _start_recording(camera_id,
-                                                CAMERAS[camera_id], cam_url))
-                            elif ms["recording"]:
-                                # Stop after cooldown + padding with no motion
-                                idle = now_m - ms.get("last_motion", 0)
-                                if idle > CFG_MOTION_COOL + CFG_MOTION_PAD:
-                                    asyncio.create_task(
-                                        _stop_recording(camera_id))
+                        _motion_on_frame(camera_id, frame)
 
             except asyncio.CancelledError:
                 log.info(f"SNAP [{camera_id}]: task cancelled")
@@ -7653,7 +7639,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # Before restarting, check idle
             last   = _snap_last_access.get(camera_id, 0)
             idle_s = time.monotonic() - last
-            if frames > 0 and idle_s > 30:
+            if frames > 0 and idle_s > 30 and not _motion_armed(camera_id):
                 log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s after exit — not restarting")
                 return
 
@@ -8064,6 +8050,7 @@ async def http_snap_loop(camera_id: str, camera: dict) -> None:
             log.debug(f"SNAP [{camera_id}]: http_snap_loop: decrypt_creds failed: {exc}")
 
     log.info(f"SNAP [{camera_id}]: http starting → {snap_url}")
+    _motion_reset_prev(camera_id)   # 2.6.5: see the same call in snap_loop
 
     timeout = aiohttp.ClientTimeout(total=5)
     # ssl=False: LAN cameras often present self-signed certs (Hikvision redirects
@@ -8148,7 +8135,8 @@ async def http_snap_loop(camera_id: str, camera: dict) -> None:
             # ── Idle check: stop if nothing has polled us in 30 s ────────────
             last   = _snap_last_access.get(camera_id, 0)
             idle_s = time.monotonic() - last
-            if idle_s > 30 and state["frame"] is not None:
+            if (idle_s > 30 and state["frame"] is not None
+                    and not _motion_armed(camera_id)):
                 log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s — stopping")
                 break
 
@@ -8208,6 +8196,10 @@ async def http_snap_loop(camera_id: str, camera: dict) -> None:
                         state["frame_count"] = (state.get("frame_count") or 0) + 1
                         fc = state["frame_count"]
                         _err_count = 0
+                        # 2.6.5: motion detection on this path too. Every
+                        # Lorex channel runs here, and before 2.6.5 motion
+                        # was only checked on the ffmpeg path.
+                        _motion_on_frame(camera_id, data)
                         if fc % 50 == 0:
                             log.debug(
                                 f"SNAP [{camera_id}]: http frame {fc} "
@@ -8501,6 +8493,7 @@ GO2RTC_READY_TIMEOUT_S = 10.0
 
 _GO2RTC_PROC: asyncio.subprocess.Process | None = None
 _GO2RTC_TASK: asyncio.Task | None = None
+_MOTION_TASK: asyncio.Task | None = None   # 2.6.5: _motion_keeper
 _GO2RTC_READY = False
 # Streams registered in the CURRENT go2rtc process, name -> source URL.
 # Cleared whenever go2rtc restarts, because its streams live in memory only.
@@ -8869,7 +8862,8 @@ async def _focus_set_go2rtc(camera_id: str) -> web.Response:
 
     The thumbnail snap_loop is the one thing that must be decided here,
     because motion detection runs inside it (it compares consecutive JPEG
-    frames) and it exits 30 s after the last poll:
+    frames). Since 2.6.5 an armed camera's loop never idles out, and
+    _motion_keeper restarts it:
       * Motion armed: keep it running, and start it if it is not. Motion
         recording keeps working, at the cost of a second RTSP session and
         the thumbnail decode the grid view runs anyway.
@@ -9323,6 +9317,121 @@ def _motion_state(camera_id: str) -> dict:
     return _MOTION[camera_id]
 
 
+# ── 2.6.5: motion detection that does not depend on a viewer ────────────
+# Before 2.6.5 motion ran only on the ffmpeg thumbnail path, and every loop
+# stopped 30 s after the last page poll. The Lorex channels poll HTTP
+# snapshots, so they detected motion only while open in the classic
+# Enhanced View; once 2.6.4 made live view the default, never. A recording
+# was stopped only when a frame arrived, so leaving the view left it
+# running (build plan B1). Now: both loops call _motion_on_frame, an armed
+# camera's loop does not idle out, and _motion_keeper restarts dead loops
+# and ends recordings on time whether or not frames arrive.
+MOTION_KEEPER_S = 10
+
+
+def _motion_armed(camera_id: str) -> bool:
+    ms = _MOTION.get(camera_id)
+    return bool(ms and ms["enabled"])
+
+
+def _motion_on_frame(camera_id: str, frame: bytes) -> None:
+    """Compare one new JPEG with the previous one; start or stop recording.
+
+    Uses JPEG size comparison: a scene with motion has more high-frequency
+    content and compresses to a larger file.
+    """
+    ms = _MOTION.get(camera_id)
+    if not (ms and ms["enabled"]):
+        return
+    motion = _detect_motion(ms.get("prev_frame"), frame, CFG_MOTION_SENS)
+    ms["prev_frame"] = frame
+    now_m = time.monotonic()
+    if motion:
+        ms["last_motion"] = now_m
+        if not ms["recording"]:
+            camera = CAMERAS.get(camera_id)
+            cam_url = build_authenticated_url(camera) if camera else None
+            if cam_url:
+                asyncio.create_task(_start_recording(camera_id, camera, cam_url))
+    elif ms["recording"] and _motion_quiet(ms, now_m):
+        asyncio.create_task(_stop_recording(camera_id))
+
+
+def _motion_reset_prev(camera_id: str) -> None:
+    ms = _MOTION.get(camera_id)
+    if ms:
+        ms["prev_frame"] = None
+
+
+def _motion_quiet(ms: dict, now_m: float) -> bool:
+    """True once cooldown plus padding have passed with no motion."""
+    return now_m - ms.get("last_motion", 0) > CFG_MOTION_COOL + CFG_MOTION_PAD
+
+
+def _motion_ensure_loop(camera_id: str) -> None:
+    """Start the thumbnail loop for an armed camera if it is not running."""
+    camera = CAMERAS.get(camera_id)
+    if not camera or camera.get("display") in ("webrtc", "wsrtsp", "info"):
+        return
+    # The classic Enhanced View runs its own native-res loop for this
+    # camera, and motion runs inside it.
+    if _FOCUSED_CAMERA == camera_id and _FOCUS_ENGINE == "legacy":
+        return
+    state = _snap_state(camera_id)
+    task = state.get("task")
+    if task and not task.done():
+        return
+    url = build_authenticated_url(camera)
+    if not url:
+        return
+    _snap_last_access[camera_id] = time.monotonic()
+    state["task"] = asyncio.create_task(snap_loop(camera_id, url, camera))
+    log.info(f"Motion [{camera_id}]: started the thumbnail loop — "
+             f"motion detection is armed")
+
+
+async def _motion_keeper() -> None:
+    """Every MOTION_KEEPER_S: keep armed cameras watched, end recordings."""
+    while True:
+        await asyncio.sleep(MOTION_KEEPER_S)
+        now_m = time.monotonic()
+        for camera_id, ms in list(_MOTION.items()):
+            try:
+                proc = ms.get("proc")
+                if ms["recording"] and proc is not None and proc.returncode is not None:
+                    log.warning(f"Motion [{camera_id}]: recording ffmpeg exited "
+                                f"(rc={proc.returncode}) → {ms.get('clip_path')}")
+                    ms["recording"] = False
+                    ms["proc"] = None
+                elif ms["recording"] and (not ms["enabled"] or _motion_quiet(ms, now_m)):
+                    await _stop_recording(camera_id)
+                if ms["enabled"]:
+                    _motion_ensure_loop(camera_id)
+            except Exception as ex:
+                log.warning(f"Motion [{camera_id}]: keeper error: {ex}")
+
+
+def _motion_load() -> None:
+    """Re-arm the cameras that were armed before the last restart."""
+    if not MOTION_FILE.exists():
+        return
+    try:
+        armed = json.loads(MOTION_FILE.read_text(encoding="utf-8")).get("armed", [])
+    except (OSError, ValueError) as ex:
+        log.warning(f"Motion: could not read {MOTION_FILE}: {ex}")
+        return
+    for camera_id in armed:
+        if camera_id in CAMERAS:
+            _motion_state(camera_id)["enabled"] = True
+            log.info(f"Motion [{camera_id}]: armed (restored)")
+
+
+def _motion_save() -> None:
+    armed = sorted(cid for cid, ms in _MOTION.items() if ms["enabled"])
+    DATA_DIR.mkdir(exist_ok=True)
+    MOTION_FILE.write_text(json.dumps({"armed": armed}), encoding="utf-8")
+
+
 def _detect_motion(prev_jpeg: bytes, curr_jpeg: bytes, sensitivity: int) -> bool:
     """
     Fast motion detection by comparing JPEG file sizes.
@@ -9392,6 +9501,9 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
+        # 2.6.5: drain stderr. An undrained pipe fills at 64 KB of warnings
+        # and ffmpeg then blocks, stalling the recording.
+        asyncio.create_task(_drain_stderr(ms["proc"], f"REC:{camera_id}"))
         ms["recording"] = True
     except Exception as ex:
         log.warning(f"Motion [{camera_id}]: failed to start recording: {ex}")
@@ -9424,9 +9536,16 @@ async def api_motion_toggle(request: web.Request) -> web.Response:
         return web.json_response({"error": "Not found"}, status=404)
     ms = _motion_state(camera_id)
     ms["enabled"] = not ms["enabled"]
-    if not ms["enabled"]:
+    ms["prev_frame"] = None
+    if ms["enabled"]:
+        _motion_ensure_loop(camera_id)
+    else:
         await _stop_recording(camera_id)
     log.info(f"Motion [{camera_id}]: {'enabled' if ms['enabled'] else 'disabled'}")
+    try:
+        await asyncio.to_thread(_motion_save)
+    except OSError as ex:
+        log.warning(f"Motion: could not save {MOTION_FILE}: {ex}")
     return web.json_response({"motion_enabled": ms["enabled"]})
 
 
@@ -16290,6 +16409,9 @@ async def _on_shutdown(app: web.Application) -> None:
             log.warning(f"  Could not save last_frame_wall: {ex}")
 
     # ── 2. Cancel snap_loop tasks ──────────────────────────────────────────
+    # 2.6.5: the motion keeper first, or it would restart them.
+    if _MOTION_TASK is not None and not _MOTION_TASK.done():
+        _MOTION_TASK.cancel()
     cancelled_tasks = 0
     for state in _SNAP.values():
         task = state.get("task")
@@ -16380,7 +16502,7 @@ async def _on_shutdown(app: web.Application) -> None:
 
 
 async def main() -> None:
-    global _STOP_EVENT, _GO2RTC_TASK
+    global _STOP_EVENT, _GO2RTC_TASK, _MOTION_TASK
 
     load_cameras()
     load_blacklist()
@@ -16406,6 +16528,12 @@ async def main() -> None:
     # the classic JPEG path per camera, which is the same result the option
     # used to give.
     _GO2RTC_TASK = asyncio.create_task(_go2rtc_supervisor())
+
+    # ── Motion detection (2.6.5) ──────────────────────────────────────────────
+    # Re-arm the cameras armed before this restart; the keeper starts their
+    # loops within MOTION_KEEPER_S, with or without a viewer.
+    _motion_load()
+    _MOTION_TASK = asyncio.create_task(_motion_keeper())
 
     # ── Graceful shutdown plumbing ────────────────────────────────────────────
     # _STOP_EVENT is set by SIGTERM/SIGINT handlers below. main() blocks on it,

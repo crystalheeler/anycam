@@ -1,8 +1,41 @@
 ## 2.6.5
 
-Enhanced View: slow-starting cameras now play live, landscape on a phone
-fills the screen, the manual quality menus are gone, and a loading message
-replaces the blank or gray screen while a feed starts.
+Motion detection works on the Lorex channels again and no longer needs a
+viewer. Enhanced View: slow-starting cameras now play live, landscape on a
+phone fills the screen, the manual quality menus are gone, and a loading
+message replaces the blank or gray screen while a feed starts. The folder
+inside the zip no longer carries the version.
+
+### Motion detection (build plan B1)
+
+Motion detection compared frames only on the ffmpeg thumbnail path. The
+Lorex channels poll HTTP snapshots for their cards, so on those cameras
+motion was checked only while a channel was open in the classic Enhanced
+View, which runs ffmpeg. That is how it worked on 2026-09-28. 2.6.4 made
+live view the default, so the classic view stopped running and motion
+detection on the Lorex channels stopped with it.
+
+- Motion is now checked on both paths, HTTP snapshots included.
+- An armed camera keeps its loop running with no one watching. Before,
+  every loop stopped 30 s after the last page poll, and detection stopped
+  with it.
+- A background check every 10 s restarts the loop of an armed camera that
+  has stopped, and ends a recording once the cooldown and padding have
+  passed, whether or not frames arrive. Before, a recording ended only
+  when a new frame arrived, so leaving the view left it running: the
+  "recording never stops" report.
+- The armed state is saved in `/data/motion.json` and restored at start.
+  Before, every restart or update silently disarmed every camera.
+- A recording whose ffmpeg exits on its own is marked stopped, so the next
+  motion starts a new one. The recording's error output is now read, so
+  a full pipe cannot stall it.
+- The comparison starts afresh whenever the stream changes resolution
+  (card to Enhanced View, or an adaptive step), which read as motion.
+- An armed camera keeps detecting while you watch another camera in live
+  view. The classic view still pauses other cameras for CPU.
+
+Cost: each armed Lorex channel polls one HTTP snapshot every 1.8 s (measured),
+all the time. Each armed ffmpeg camera keeps one thumbnail decode running.
 
 ### Slow-starting cameras (build plan B13)
 
@@ -63,19 +96,31 @@ Cards say "Loading feed, please wait…" while a stream starts, in place of
 failed requests. In 2.6.4 it said so after 3 failed requests, about 16 s,
 while the stream was still starting.
 
+### The folder inside the zip is now `local_camera_discovery`
+
+Up to 2.6.4 the folder carried the version (`camera_discovery-2.6.4`), and
+Home Assistant showed "No changelog found" after each update. On a store
+reload the Supervisor checks for `CHANGELOG.md` at the add-on's old folder
+path before it reads the new one, and the old folder was already deleted.
+The zip name still carries the version.
+
+This update is the last one with a new folder name, so the message can
+show once more. After installing, run this once in the Terminal & SSH
+add-on, then check for updates again:
+
+```
+touch /addons/local_camera_discovery/CHANGELOG.md
+```
+
 ### Known issues carried forward
 
-- The camera at 192.168.50.73:8765 still needs about 20 s to start. The
-  stream comes from the Oak-D camera add-on, whose ffmpeg encoder uses
-  x264's default of one keyframe every 250 frames. A shorter keyframe
-  interval there is the real fix.
-- Home Assistant can show "No changelog found" for AnyCam after an update
-  when the new version is in a folder with a new name. The Supervisor
-  checks for CHANGELOG.md in the old folder before it reads the new one.
-  After the update, change any file in the new folder (for example
-  `touch /addons/<folder>/CHANGELOG.md`) and check for updates again.
+- The camera at 192.168.50.73:8765 needs about 20 s to start until the
+  Oak-D camera add-on 2.4.2 is installed. That release sets one keyframe
+  per second; x264's default was one every 250 frames.
 - Opening the classic view still stops the card's stream and opens a new
   full-resolution connection.
+- Recordings are single files per motion event. Fixed-length pieces
+  (30 s, 1, 2 or 5 min) are build plan C12.
 
 ## 2.6.4
 
