@@ -13083,7 +13083,7 @@ async function _startFocusPoll(camId, cam) {
 
   const infoEl = document.getElementById('focus-info');
   const codec  = (cam.stream_codec || '?').toUpperCase();
-  const name   = displayName(cam);
+  const name   = esc(displayName(cam));   // 2.6.6 (B4): innerHTML below
 
   // Show placeholder until first real measurements arrive
   infoEl.textContent = name + ' — loading…';
@@ -13670,31 +13670,31 @@ function credFormHTML(cam) {
     + '<label>PASSWORD</label>'
     + '<input type="password" id="p_' + cam.id + '" placeholder="••••••••"'
     + ' autocomplete="current-password"'
-    + ' onkeydown="if(event.key===\'Enter\')submitCreds(\'' + cam.id + '\')">'
+    + ' onkeydown="if(event.key===\'Enter\')submitCreds(' + jsArg(cam.id) + ')">'
     + '<div class="cred-error" id="err_' + cam.id + '"></div>'
     + '<div class="cred-row">'
-    + '<button class="btn btn-primary btn-sm" onclick="submitCreds(\'' + cam.id + '\')">Connect</button>'
+    + '<button class="btn btn-primary btn-sm" onclick="submitCreds(' + jsArg(cam.id) + ')">Connect</button>'
     + '</div></div>';
 }
 
 function cardActions(cam, clearBtn, notCamBtn) {
   if (cam.upgrade_missing) {
-    return '<button class="btn btn-ghost btn-sm" onclick="confirmCamera(\'' + cam.id + '\')">Keep (may be offline)</button>'
-         + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(\'' + cam.id + '\')">Remove</button>';
+    return '<button class="btn btn-ghost btn-sm" onclick="confirmCamera(' + jsArg(cam.id) + ')">Keep (may be offline)</button>'
+         + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(' + jsArg(cam.id) + ')">Remove</button>';
   }
   const testBtn = (cam.status === 'ready' && ['proxy','hls'].includes(cam.display || 'proxy'))
-    ? '<button class="btn btn-ghost btn-sm" onclick="testStream(event,\'' + cam.id + '\')" title="Test stream connectivity">Test Stream</button>'
+    ? '<button class="btn btn-ghost btn-sm" onclick="testStream(event,' + jsArg(cam.id) + ')" title="Test stream connectivity">Test Stream</button>'
     : '';
   const motOn = !!_motionEnabled[cam.id];
   const recOn = !!_recording[cam.id];
   const recBtn = (cam.status === 'ready' && ['proxy'].includes(cam.display || 'proxy'))
     ? '<button class="btn btn-sm ' + (recOn ? 'btn-rec-active' : (motOn ? 'btn-rec-on' : 'btn-rec-off'))
-      + '" onclick="toggleMotion(\'' + cam.id + '\')" title="' + (motOn ? 'Motion recording on' : 'Enable motion recording') + '">'
+      + '" onclick="toggleMotion(' + jsArg(cam.id) + ')" title="' + (motOn ? 'Motion recording on' : 'Enable motion recording') + '">'
       + (recOn ? '⏺ REC' : (motOn ? '⏺ Armed' : '⏺ Record')) + '</button>'
     : '';
   // Globe button: opens camera web page (via Firefox addon or new tab)
   const webBtn = (cam.status === 'ready' && cam.ip)
-    ? '<button class="btn btn-ghost btn-sm" onclick="openCameraPage(\'' + cam.ip + '\')" title="Open camera web page">🌐</button>'
+    ? '<button class="btn btn-ghost btn-sm" onclick="openCameraPage(' + jsArg(cam.ip) + ')" title="Open camera web page">🌐</button>'
     : '';
   // 2.4.0-rc2.4: Deep Re-Probe button. Available on any card where
   // we may have skipped paths during the original scan (Layer 1 early-
@@ -13741,13 +13741,13 @@ function cardActions(cam, clearBtn, notCamBtn) {
       reprobeBtn = '<button class="btn btn-sm" '
         + 'style="' + _reprobeStyle
         + 'background:#3a2e1e;color:#f5b942;border:1px solid #f5b942" '
-        + 'onclick="deepReprobe(\'' + cam.id + '\')" '
+        + 'onclick="deepReprobe(' + jsArg(cam.id) + ')" '
         + 'title="Resume scan from where rc2.4 fast-skipped — walks the unwalked paths">'
         + '🔍 Deep Re-Probe (skipped paths)</button>';
     }
   }
   return testBtn + clearBtn + reprobeBtn + notCamBtn + recBtn + webBtn
-       + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(\'' + cam.id + '\')">Remove</button>';
+       + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(' + jsArg(cam.id) + ')">Remove</button>';
 }
 
 // 2.4.0-rc2.4: Deep Re-Probe handler. Posts to api_deep_reprobe and
@@ -13902,9 +13902,9 @@ function cardHTML(cam) {
     ? '<span class="badge" style="background:#3a2e1e;color:#f5b942" title="'
       + esc(cam.verdict_reason || '') + '">⚠ Unverified</span>' : '';
   const clearBtn = cam.has_credentials
-    ? '<button class="btn btn-ghost btn-sm" onclick="clearCreds(\'' + cam.id + '\')">Clear Creds</button>' : '';
+    ? '<button class="btn btn-ghost btn-sm" onclick="clearCreds(' + jsArg(cam.id) + ')">Clear Creds</button>' : '';
   const notCamBtn =
-    '<button class="btn btn-ghost btn-sm" onclick="markNotCamera(\'' + cam.id + '\')"'
+    '<button class="btn btn-ghost btn-sm" onclick="markNotCamera(' + jsArg(cam.id) + ')"'
     + ' title="Permanently hide — not a camera">🚫 Not a Camera</button>';
   const upgradeBdg = cam.upgrade_missing
     ? '<span class="badge" style="background:#3a2a10;color:var(--orange)">⚠ Not found after upgrade</span>' : '';
@@ -13923,7 +13923,7 @@ function cardHTML(cam) {
   const lockedBdg = (_locked.length > 0 && !cam.has_credentials)
     ? '<span class="badge locked-streams-badge" title="' + _locked.length
       + ' additional stream(s) found that require credentials"'
-      + ' onclick="event.stopPropagation();openLockedStreams(\'' + cam.id + '\')"'
+      + ' onclick="event.stopPropagation();openLockedStreams(' + jsArg(cam.id) + ')"'
       + ' style="background:#2d2640;color:#b39ddb;cursor:pointer">'
       + '🔒 ' + _locked.length + ' Locked Stream' + (_locked.length === 1 ? '' : 's')
       + '</span>'
@@ -13933,10 +13933,10 @@ function cardHTML(cam) {
     + '<div class="card-info">'
     + '<div class="status-dot ' + dotClass(cam) + '"></div>'
     + '<span class="card-name" title="' + name + '"'
-    + ' onclick="openRename(\'' + cam.id + '\',\'' + name.replace(/'/g, "\\'") + '\')">'
+    + ' onclick="openRename(' + jsArg(cam.id) + ',' + jsArg(displayName(cam)) + ')">'
     + name + '</span></div>'
     + '<div class="badges">' + protoBadge(cam.protocol)
-    + '<span class="badge" style="background:#2d2020;color:#e88">' + cam.ip + '</span>'
+    + '<span class="badge" style="background:#2d2020;color:#e88">' + esc(cam.ip) + '</span>'
     + '<span class="badge" style="background:#1e2d1e;color:#6fcf97">:' + cardPort(cam) + '</span>'
     + credBdg + uncBdg + upgradeBdg + hevcPlusBdg + lockedBdg + '</div>'
     + '</div>'
@@ -14062,7 +14062,7 @@ async function confirmCamera(cid) {
 
 /* ── Not a Camera modal ────────────────────────────────────────────────────── */
 let _notCamId = null;
-const COMMUNITY_ENDPOINT = '___COMMUNITY___';
+const COMMUNITY_ENDPOINT = ___COMMUNITY___;   // 2.6.6 (B5): filled by build_html
 
 function openNotCamModal(cid) {
   _notCamId = cid;
@@ -14484,7 +14484,17 @@ async function submitAddCamera() {
 function esc(s) {
   return String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// 2.6.6 (B4): a value as a JavaScript string argument inside a double-quoted
+// onclick attribute. JSON.stringify escapes quotes and backslashes for JS;
+// esc() then protects the attribute (the browser turns &quot; back into "
+// before the handler runs). Camera IDs can carry an ONVIF profile token and
+// names are editable, so neither may be pasted between quotes raw.
+function jsArg(s) {
+  return esc(JSON.stringify(String(s)));
 }
 
 /* ── Init ──────────────────────────────────────────────────────────────────── */
@@ -15966,6 +15976,11 @@ def build_html() -> str:
                                'true' if CFG_UNRESTRICTED_BROWSER else 'false')
     js_code = js_code.replace('___ADAPTIVE_QUALITY___',
                                'true' if CFG_ADAPTIVE_QUALITY else 'false')
+    # 2.6.6 (B5): never filled before, so the literal placeholder read as a
+    # configured endpoint: "Share with community" showed ticked and did
+    # nothing. A JSON string literal, with < escaped for the <script> block.
+    js_code = js_code.replace('___COMMUNITY___',
+                               json.dumps(COMMUNITY_ENDPOINT).replace('<', '\\u003c'))
     # CSS uses {{ }} for literal braces in Python f-string
     css = f"""\
 *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
