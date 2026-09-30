@@ -12,7 +12,7 @@ config.yaml             Addon manifest and options schema
 run.sh                  Addon entrypoint; exports config as env vars
 Dockerfile              Addon image (base image set here since 2.6.6)
 translations/en.yaml    Option help text
-verify_release.py       Five-gate pre-packaging check
+verify_release.py       Seven-gate pre-packaging check
 CHANGELOG.md            Full release history
 
 docs/                   Plan documents, RTSP database, research
