@@ -31,16 +31,25 @@ older log.
 
 ## 3. Release packaging
 
-Both the zip filename **and** the top-level folder inside it carry the full
-version string:
+The zip filename carries the full version string. The top-level folder
+inside it is always `local_camera_discovery`, the add-on's slug, with no
+version:
 
 ```
-camera_discovery-2.6.0-rc3.1.zip
-└── camera_discovery-2.6.0-rc3.1/
+camera_discovery-2.6.5.zip
+└── local_camera_discovery/
 ```
 
-Stage the source under the renamed folder, then zip from the staging parent.
+Stage the source under that folder, then zip from the staging parent.
 The working source directory itself keeps its own name and is not renamed.
+
+**Why the folder has no version (changed 2026-09-29, CrystalHeeler's order).** Up to
+2.6.4 the folder also carried the version. Home Assistant then showed "No
+changelog found" after every update: on a store reload the Supervisor checks
+for CHANGELOG.md at the add-on's *old* folder path before it reads the new
+one (`supervisor/store/__init__.py`, `reload()`), and the old folder had
+been deleted. A folder name that never changes avoids it. The version stays
+visible in the zip name, `config.yaml` and the changelog.
 
 ## 4. Missing tools means stop
 
