@@ -8653,15 +8653,16 @@ async def _go2rtc_supervisor() -> None:
         backoff = min(backoff * 2, 60.0)
 
 
-def _go2rtc_stream_name(camera_id: str, prof_idx: int) -> str:
+def _go2rtc_stream_name(camera_id: str, prof_idx: int, kind: str = "p") -> str:
     """Stable, URL-safe go2rtc stream name for one camera profile.
 
     The hash keeps two camera_ids that differ only in punctuation from
     collapsing onto the same name once the punctuation is replaced.
+    kind "p" is an Enhanced View profile; "c" (2.6.6) is a card stream.
     """
     tag = re.sub(r"[^A-Za-z0-9]", "_", camera_id)[:40]
     digest = hashlib.sha1(camera_id.encode("utf-8")).hexdigest()[:8]
-    return f"anycam_{tag}_{digest}_p{prof_idx}"
+    return f"anycam_{tag}_{digest}_{kind}{prof_idx}"
 
 
 def _go2rtc_profile_source(camera: dict,
@@ -8677,19 +8678,33 @@ def _go2rtc_profile_source(camera: dict,
     """
     if camera.get("display") in ("webrtc", "wsrtsp", "info"):
         return None, "", "this camera is not an RTSP stream"
-    profiles = camera.get("stream_profiles") or []
-    if not profiles:
-        # Cameras discovered before stream_profiles existed.
-        profiles = [{"url": camera.get("stream_url", ""),
-                     "stream_codec": camera.get("stream_codec")}]
-        if camera.get("sub_stream_url"):
-            profiles.append({"url": camera.get("sub_stream_url", ""),
-                             "stream_codec": camera.get("sub_stream_codec")})
+    profiles = _go2rtc_profiles(camera)
     if not 0 <= prof_idx < len(profiles):
         return None, "", f"profile {prof_idx} does not exist"
     prof = profiles[prof_idx]
     raw = prof.get("url") or camera.get(prof.get("_url_key", "stream_url"))
-    codec = (prof.get("stream_codec") or "").lower()
+    return _go2rtc_relay_url(camera, raw, (prof.get("stream_codec") or "").lower())
+
+
+def _go2rtc_profiles(camera: dict) -> list[dict]:
+    """The camera's stream profiles, best quality first."""
+    profiles = camera.get("stream_profiles") or []
+    if not profiles:
+        # Cameras discovered before stream_profiles existed, and DVR channel
+        # cards, which start with none.
+        profiles = [{"url": camera.get("stream_url", ""),
+                     "stream_codec": camera.get("stream_codec"),
+                     "stream_width": camera.get("stream_width")}]
+        if camera.get("sub_stream_url"):
+            profiles.append({"url": camera.get("sub_stream_url", ""),
+                             "stream_codec": camera.get("sub_stream_codec"),
+                             "stream_width": camera.get("sub_stream_width")})
+    return profiles
+
+
+def _go2rtc_relay_url(camera: dict, raw: str | None,
+                      codec: str) -> tuple[str | None, str, str]:
+    """Check one RTSP URL can be relayed; return (auth url, codec, reason)."""
     if not raw:
         return None, codec, "no stream URL for this profile"
     if not raw.lower().startswith(("rtsp://", "rtsps://")):
@@ -8745,6 +8760,77 @@ async def _go2rtc_register(name: str, src: str, camera_id: str) -> bool:
     _GO2RTC_STREAMS[name] = src
     _GO2RTC_STREAM_CAM[name] = camera_id
     return True
+
+
+# ── 2.6.6: live cards (build plan C1) ──────────────────────────────────────
+# Cards play the camera's smallest stream. A phone decoding seven 3840-wide
+# H.265 streams at once would stall, so a card whose smallest known stream
+# is wider than CARD_MAX_WIDTH stays on snapshots.
+CARD_MAX_WIDTH = 1920
+
+
+def _dahua_sub_stream(url: str) -> str | None:
+    """The sub-stream of a Dahua/Lorex main-stream URL, or None.
+
+    DVR channel cards know only /cam/realmonitor?channel=N&subtype=0 (3840
+    wide on the Lorex DVR); the DVR serves the sub-stream at subtype=1.
+    """
+    if "/cam/realmonitor" not in url:
+        return None
+    sub, n = re.subn(r"([?&]subtype=)0(?=&|$)", r"\g<1>1", url)
+    return sub if n else None
+
+
+def _go2rtc_card_source(camera: dict) -> tuple[str | None, str, str]:
+    """Pick the stream a live card plays; return (auth url, codec, reason)."""
+    if camera.get("display") in ("webrtc", "wsrtsp", "info"):
+        return None, "", "this camera is not an RTSP stream"
+    best: tuple[int, str, str] | None = None     # (width, url, codec)
+    for prof in _go2rtc_profiles(camera):
+        raw = prof.get("url") or camera.get(prof.get("_url_key", "stream_url"))
+        url, codec, _ = _go2rtc_relay_url(camera, raw,
+                                          (prof.get("stream_codec") or "").lower())
+        if not url:
+            continue
+        width = prof.get("stream_width") or 0
+        if best is None or (width and (not best[0] or width < best[0])):
+            best = (width, url, codec)
+    if best is not None and best[0] > CARD_MAX_WIDTH:
+        sub = _dahua_sub_stream(camera.get("stream_url") or "")
+        if sub:
+            # Codec unknown: the browser negotiates, and the card falls
+            # back to snapshots if it cannot play it.
+            url, codec, _ = _go2rtc_relay_url(camera, sub, "")
+            if url:
+                return url, codec, "ok"
+        return None, best[2], f"no stream small enough for a card ({best[0]} wide)"
+    if best is None:
+        return None, "", "no stream that can play live"
+    return best[1], best[2], "ok"
+
+
+async def api_go2rtc_card(request: web.Request) -> web.Response:
+    """GET /api/go2rtc/card/{camera_id} — prepare a live card (2.6.6, C1).
+
+    Like api_go2rtc_focus, but picks the stream itself (_go2rtc_card_source)
+    and registers it under a card name, so a card and Enhanced View on the
+    same camera are two go2rtc streams. Never dials the camera.
+    """
+    camera_id = request.match_info["camera_id"]
+    if not _GO2RTC_READY:
+        return web.json_response({"ok": False, "reason": "go2rtc is not running"})
+    camera = CAMERAS.get(camera_id)
+    if not camera:
+        return web.json_response({"ok": False, "reason": "camera not found"},
+                                 status=404)
+    src, codec, reason = _go2rtc_card_source(camera)
+    if not src:
+        return web.json_response({"ok": False, "reason": reason, "codec": codec})
+    name = _go2rtc_stream_name(camera_id, 0, kind="c")
+    if not await _go2rtc_register(name, src, camera_id):
+        return web.json_response({"ok": False,
+                                  "reason": "go2rtc rejected the stream"})
+    return web.json_response({"ok": True, "stream": name, "codec": codec})
 
 
 async def api_go2rtc_focus(request: web.Request) -> web.Response:
@@ -12418,7 +12504,8 @@ function initSnaps() {
     // Click-to-focus: open enhanced view on click
     img.style.cursor = 'pointer';
     img.onclick = () => openFocus(img.dataset.snap);
-    startSnap(img.dataset.snap);
+    // 2.6.6: live first; snapshots when the card cannot play live.
+    if (!cardLiveAttach(img.dataset.snap)) startSnap(img.dataset.snap);
   });
 }
 
@@ -12798,6 +12885,167 @@ if (_focusLandMq) {
   else if (_focusLandMq.addListener) _focusLandMq.addListener(_focusLandscapeSync);
 }
 
+/* ── Live cards (2.6.6, build plan C1) ───────────────────────────────────
+ * Each card plays the camera's smallest stream through go2rtc, chosen by
+ * the server (/api/go2rtc/card). A card that cannot play live uses the
+ * snapshot path (startSnap), as before 2.6.6.
+ *
+ * One player per camera lives in _cardLive for the whole page. renderGrid
+ * and updateCard rewrite a card's HTML on every refresh, so the player is
+ * moved into the new card instead of rebuilt: VideoRTC keeps its stream
+ * across a move (its disconnect waits DISCONNECT_TIMEOUT, and the
+ * reconnect cancels that wait).
+ *
+ * VideoRTC pauses a player that is off screen (visibilityThreshold) or on
+ * a hidden page (visibilityCheck), which gives "only the cards on screen
+ * play". Enhanced View pauses every card while it is open.
+ */
+const _cardLive      = {};   // camId -> {el, played, modes, errs, closes, tid}
+const _cardLiveOff   = {};   // camId -> {reason, retryAt}: use snapshots
+const CARD_LIVE_RETRY_MS = 5 * 60 * 1000;   // retry a timeout after 5 min
+let _cardLiveTick = null;
+
+// Called by initSnaps for each card image. True when the card is (or is
+// becoming) live, false when the caller should poll snapshots.
+function cardLiveAttach(camId) {
+  const off = _cardLiveOff[camId];
+  if (off && (off.retryAt === 0 || Date.now() < off.retryAt)) return false;
+  if (off) delete _cardLiveOff[camId];
+  const st = _cardLive[camId];
+  if (!st) { _cardLiveStart(camId); _cardLivePlace(camId); return true; }
+  _cardLivePlace(camId);
+  return true;
+}
+
+// Put the camera's player into its current card, over the placeholder.
+function _cardLivePlace(camId) {
+  const st  = _cardLive[camId];
+  const img = document.querySelector('[data-snap="' + CSS.escape(camId) + '"]');
+  if (!st || !st.el || !img) return;
+  const wrap = img.parentNode;
+  if (st.el.parentNode !== wrap) wrap.appendChild(st.el);
+  if (st.played) _cardLiveShow(camId);
+}
+
+function _cardLiveShow(camId) {
+  const st = _cardLive[camId];
+  if (st && st.el) st.el.style.opacity = '1';
+  const ph = document.getElementById('ph-' + camId);
+  if (ph) ph.style.display = 'none';
+}
+
+async function _cardLiveStart(camId) {
+  const st = {el: null, played: false, modes: [], errs: {}, closes: 0, tid: 0};
+  _cardLive[camId] = st;
+  if (!(await _go2rtcLoadPlayer())) { _cardLiveFail(camId, st, 'player did not load', true); return; }
+  let info = null;
+  try {
+    info = await (await fetch(BASE + '/api/go2rtc/card/' + encodeURIComponent(camId))).json();
+  } catch (e) {}
+  if (_cardLive[camId] !== st) return;
+  if (!info || !info.ok) {
+    _cardLiveFail(camId, st, (info && info.reason) || 'no answer from the addon', !!info);
+    return;
+  }
+  const el = document.createElement('anycam-video');
+  el.className = 'card-live';
+  el.mode  = 'webrtc,mse';
+  el.media = 'video';
+  el.visibilityThreshold = 0.01;   // read once, when the player is first attached
+  el.style.opacity = '0';          // not display:none: that reads as off screen
+  el.onanycam = (kind, value) => _cardLiveEvent(camId, st, kind, value);
+  el.onclick  = () => openFocus(camId);
+  st.el = el;
+  _cardLivePlace(camId);
+  if (!el.isConnected) { _cardLiveFail(camId, st, 'card is gone', false); return; }
+  el.src = BASE + '/go2rtc/ws?src=' + encodeURIComponent(info.stream);
+  _cardLiveArm(camId, st);
+  if (!_cardLiveTick) _cardLiveTick = setInterval(_cardLiveCheck, 1000);
+}
+
+// Give up on a card that shows no video within GO2RTC_FIRST_FRAME_MS of
+// actually connecting. An off-screen or hidden player is not connected,
+// so the time does not count against it.
+function _cardLiveArm(camId, st) {
+  clearTimeout(st.tid);
+  st.tid = setTimeout(() => {
+    if (_cardLive[camId] !== st || st.played) return;
+    if (document.hidden || _focusCamId || !(st.el.ws || st.el.pc)) { _cardLiveArm(camId, st); return; }
+    _cardLiveFail(camId, st, 'no video within ' + (GO2RTC_FIRST_FRAME_MS / 1000) + ' s', false);
+  }, GO2RTC_FIRST_FRAME_MS);
+}
+
+// Once a second: catch a first frame in browsers that do not fire 'playing'.
+function _cardLiveCheck() {
+  Object.keys(_cardLive).forEach(camId => {
+    const st = _cardLive[camId];
+    const v = st.el && st.el.video;
+    if (!st.played && v && v.videoWidth > 0) _cardLivePlayed(camId, st);
+  });
+}
+
+function _cardLivePlayed(camId, st) {
+  if (st.played) return;
+  st.played = true;
+  clearTimeout(st.tid);
+  _cardLiveShow(camId);
+}
+
+function _cardLiveEvent(camId, st, kind, value) {
+  if (_cardLive[camId] !== st) return;
+  if (kind === 'playing') {
+    _cardLivePlayed(camId, st);
+  } else if (kind === 'open') {
+    st.modes = Array.isArray(value) ? value : [];
+  } else if (kind === 'error') {
+    if (st.played) return;   // VideoRTC recovers on its own once it has played
+    const failed = st.modes.find(m => value.startsWith(m));
+    if (!failed) { _cardLiveFail(camId, st, value || 'stream error', false); return; }
+    st.errs[failed] = true;
+    // Every mode failed: this browser cannot play the codec. That will not
+    // change during this page load.
+    if (st.modes.length && st.modes.every(m => st.errs[m])) _cardLiveFail(camId, st, value, true);
+  } else if (kind === 'close') {
+    if (!st.played && ++st.closes >= 2) _cardLiveFail(camId, st, 'connection closed before the first frame', false);
+  }
+}
+
+// Switch one card to snapshots. remember: the failure repeats on every try
+// (codec, no suitable stream), so do not retry during this page load.
+function _cardLiveFail(camId, st, reason, remember) {
+  if (_cardLive[camId] !== st) return;
+  console.info('[AnyCam] card ' + camId + ' uses snapshots: ' + reason);
+  clearTimeout(st.tid);
+  if (st.el) {
+    st.el.onanycam = null;
+    try { st.el.ondisconnect(); } catch (e) {}
+    if (st.el.reconnectTID) { clearTimeout(st.el.reconnectTID); st.el.reconnectTID = 0; }
+    st.el.remove();
+  }
+  delete _cardLive[camId];
+  _cardLiveOff[camId] = {reason, retryAt: remember ? 0 : Date.now() + CARD_LIVE_RETRY_MS};
+  if (document.querySelector('[data-snap="' + CSS.escape(camId) + '"]')) startSnap(camId);
+}
+
+// Enhanced View open: stop every card's stream; closed: resume them.
+function cardLivePauseAll(pause) {
+  Object.values(_cardLive).forEach(st => {
+    if (!st.el || !st.el.isConnected) return;
+    if (pause) st.el.disconnectedCallback();
+    else st.el.connectedCallback();
+  });
+}
+
+// Drop the players of cards no longer on the page (camera removed).
+function cardLivePrune() {
+  Object.keys(_cardLive).forEach(camId => {
+    if (document.querySelector('[data-snap="' + CSS.escape(camId) + '"]')) return;
+    const st = _cardLive[camId];
+    _cardLiveFail(camId, st, 'card removed', false);
+    delete _cardLiveOff[camId];
+  });
+}
+
 /* ── Focus / enhanced view ───────────────────────────────────────────────── */
 let _focusCamId   = null;
 let _focusTimer   = null;
@@ -12812,6 +13060,7 @@ async function openFocus(camId) {
   document.getElementById('focus-info').textContent = displayName(cam) + ' — loading…';
   _focusLoading(true);
   _focusLandscapeSync();
+  cardLivePauseAll(true);   // 2.6.6: one stream at a time on the viewing device
   // 2.6.3: live view through go2rtc first; the classic view when go2rtc is
   // not ready, cannot serve this camera, or this browser cannot play it.
   if (await _go2rtcTryFocus(camId, cam, session)) return;
@@ -13065,6 +13314,7 @@ async function closeFocus() {
   document.getElementById('focus-warning').style.display = 'none';
   _focusLoading(false);
   _focusLandscapeSync();   // leaves HA kiosk mode
+  cardLivePauseAll(false);
 }
 
 // Close focus on Escape key
@@ -13275,6 +13525,7 @@ function renderGrid() {
 
   grid.querySelectorAll('video[data-hls]').forEach(v => { if (!v._hls) initHls(v); });
   initSnaps();   // start polling for any newly added data-snap images
+  cardLivePrune();
 }
 
 function buildCard(cam) {
@@ -15762,6 +16013,8 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .feed-wrap{{position:relative;width:100%;aspect-ratio:16/9;background:#000;
             display:flex;align-items:center;justify-content:center;overflow:hidden}}
 .feed-wrap img,.feed-wrap video{{width:100%;height:100%;object-fit:cover;display:block}}
+/* 2.6.6 live cards: the player sits over the placeholder until it plays */
+.feed-wrap anycam-video{{position:absolute;inset:0;display:block;transition:opacity .3s;cursor:pointer}}
 .feed-placeholder{{display:flex;flex-direction:column;align-items:center;gap:6px;
                    color:var(--text-dim);font-size:.78rem;text-align:center;padding:10px}}
 .feed-placeholder svg{{opacity:.3}}
@@ -16312,6 +16565,7 @@ def make_app() -> web.Application:
     # 2.6.3 — Tier 2 go2rtc live view. Each handler answers "not available"
     # itself when go2rtc is not running.
     app.router.add_get(   "/api/go2rtc/focus/{camera_id}",        api_go2rtc_focus)
+    app.router.add_get(   "/api/go2rtc/card/{camera_id}",         api_go2rtc_card)
     app.router.add_get(   "/go2rtc/ws",                           handle_go2rtc_ws)
     app.router.add_get(   "/go2rtc/video-rtc.js",                 handle_go2rtc_player_js)
     app.router.add_post(  "/api/log_level",                        api_set_log_level)
