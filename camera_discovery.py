@@ -508,6 +508,9 @@ _FOCUS_ENGINE: str | None = None
 # When v4l2m2m reports "Could not find a valid device", the decoder name
 # is added here so future stream requests skip hw decode immediately.
 _HW_UNAVAILABLE: set = set()
+# 2.6.6 (B10): set once _probe_hw_decoders has finished or skipped. The web
+# server now starts before the probe, so a snapshot request can arrive first.
+_HW_PROBED = asyncio.Event()
 
 # 2.4.0-rc3.0: ordered list of (label, codec, ffmpeg_args) candidates
 # that _probe_hw_decoders tries at startup, and that snap_loop iterates
@@ -6973,6 +6976,33 @@ def _kill_hw_preheater(state: dict) -> None:
     state.pop("hw_preheat_elapsed", None)
 
 
+async def _stop_proc(proc: asyncio.subprocess.Process, *,
+                     exited_grace: float = 0.0, timeout: float = 3.0) -> None:
+    """Kill an ffmpeg if it is still running, then wait for it.
+
+    2.6.6 (B9): Popen.send_signal() polls the child before signalling
+    (Python 3.9+), and that poll collects a child that has already exited.
+    asyncio's child watcher then finds no child and logs "Unknown child
+    process pid N, will report returncode 255" (seen twice in the test system B logs,
+    each right after an ffmpeg EOF). After EOF the process is exiting on
+    its own, so give asyncio exited_grace seconds to collect it first.
+    """
+    if exited_grace and proc.returncode is None:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=exited_grace)
+        except asyncio.TimeoutError:
+            pass
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        pass
+
+
 async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = False) -> None:
     """
     Background task: keeps ffmpeg running for one camera, continuously
@@ -7015,6 +7045,15 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         return
 
     state        = _snap_state(camera_id)
+
+    # 2.6.6 (B10): the web server now starts before the hardware probe, so
+    # a request can land first. Choose a decoder only once the probe is done.
+    if not _HW_PROBED.is_set():
+        try:
+            await asyncio.wait_for(_HW_PROBED.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            log.warning(f"SNAP [{camera_id}]: hardware probe still running after "
+                        f"15 s — starting anyway")
 
     # rc2.6: Each snap_loop call is a fresh failure-tracking session.
     # zero_frame_streak persists in _SNAP[cid] across calls (which is needed
@@ -7505,10 +7544,8 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                                      f"will relaunch with new tier")
                             break
                         if hw_tried and frames == 0:
-                            try: proc.kill()
-                            except Exception: pass
-                            try: await asyncio.wait_for(proc.wait(), timeout=2)
-                            except Exception: pass
+                            # 2.6.6 (B9): EOF, so ffmpeg is exiting; see _stop_proc.
+                            await _stop_proc(proc, exited_grace=1.0, timeout=2)
                             if hw_started_at is not None:
                                 elapsed = time.monotonic() - hw_started_at
                                 log.info(f"SNAP [{camera_id}]: hw EOF "
@@ -7648,10 +7685,8 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 log.warning(f"SNAP [{camera_id}]: inner exception: {ex}")
             finally:
                 stderr_t.cancel()
-                try: proc.kill()
-                except Exception: pass
-                try: await asyncio.wait_for(proc.wait(), timeout=3)
-                except Exception: pass
+                # 2.6.6 (B9): most exits here follow EOF; see _stop_proc.
+                await _stop_proc(proc, exited_grace=0.5, timeout=3)
                 try: await asyncio.wait_for(stderr_t, timeout=2)
                 except Exception: pass
 
@@ -8818,7 +8853,10 @@ async def api_go2rtc_card(request: web.Request) -> web.Response:
     """
     camera_id = request.match_info["camera_id"]
     if not _GO2RTC_READY:
-        return web.json_response({"ok": False, "reason": "go2rtc is not running"})
+        # retry: go2rtc may still be starting (it starts with the web server);
+        # the card uses snapshots now and tries live again later.
+        return web.json_response({"ok": False, "reason": "go2rtc is not running",
+                                  "retry": True})
     camera = CAMERAS.get(camera_id)
     if not camera:
         return web.json_response({"ok": False, "reason": "camera not found"},
@@ -12944,7 +12982,9 @@ async function _cardLiveStart(camId) {
   } catch (e) {}
   if (_cardLive[camId] !== st) return;
   if (!info || !info.ok) {
-    _cardLiveFail(camId, st, (info && info.reason) || 'no answer from the addon', !!info);
+    // Remembered for the page unless the server says to retry (go2rtc
+    // still starting) or did not answer.
+    _cardLiveFail(camId, st, (info && info.reason) || 'no answer from the addon', !!info && !info.retry);
     return;
   }
   const el = document.createElement('anycam-video');
@@ -16650,6 +16690,7 @@ async def _probe_hw_decoders() -> None:
     """
     if not CFG_HW_DECODE:
         log.info("Hardware decode disabled by config — skipping probe")
+        _HW_PROBED.set()
         return
 
     log.info("Probing hardware decoder availability...")
@@ -16949,16 +16990,10 @@ async def main() -> None:
     _access_log = logging.getLogger("aiohttp.access")
     _access_log.addFilter(_DockerIPFilter())
 
-    # ── Hardware decoder availability probe ───────────────────────────────────
-    # Run once at startup. Checks which hw decoders ffmpeg was compiled with
-    # AND which devices are actually accessible (full_access: true exposes all
-    # host devices; on non-Pi hardware the v4l2m2m devices simply won't exist).
-    # Populates _HW_UNAVAILABLE so snap_loop never tries an unavailable decoder.
-    await _probe_hw_decoders()
-
     # ── go2rtc live view (2.6.3, Tier 2; always on since 2.6.4) ───────────────
     # Supervised for the life of the addon; see _go2rtc_supervisor. Started
-    # before the web server so it is usually ready by the first page load.
+    # before the web server so it is usually ready by the first page load;
+    # a card that asks before it is ready retries (api_go2rtc_card).
     # There is no option to turn it off: when go2rtc is missing or not
     # running, or a browser cannot play a stream, Enhanced View falls back to
     # the classic JPEG path per camera, which is the same result the option
@@ -16989,6 +17024,20 @@ async def main() -> None:
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
     log.info(f"AnyCam on :{PORT}  ingress='{INGRESS_PATH}'")
+
+    # ── Hardware decoder availability probe ───────────────────────────────────
+    # Run once at startup. Checks which hw decoders ffmpeg was compiled with
+    # AND which devices are actually accessible (full_access: true exposes all
+    # host devices; on non-Pi hardware the v4l2m2m devices simply won't exist).
+    # Populates _HW_UNAVAILABLE so snap_loop never tries an unavailable decoder.
+    # 2.6.6 (B10): after the web server starts, not before. The probe takes
+    # about 2 s, and Home Assistant's ingress proxy logged "Cannot connect to
+    # host 172.30.32.1:8099" until the server listened. snap_loop waits for
+    # _HW_PROBED before choosing a decoder.
+    try:
+        await _probe_hw_decoders()
+    finally:
+        _HW_PROBED.set()
     # Register all saved cameras on startup
     startup_mode = get_startup_mode()
     log.info(f"Startup mode: {startup_mode}")
