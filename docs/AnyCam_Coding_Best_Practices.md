@@ -5,7 +5,7 @@
 
 ## How To Use This Document
 
-This is a living reference, not a checklist to run through once. The issues are ranked within each section by how likely they are to cause **silent, hard-to-catch bugs** — the kind that pass `ast.parse()` and still make production behave wrong.
+This is a living reference, not a checklist to run through once. The issues in PART 1.1–1.5 and PARTS 2–5 are ranked within each section by how likely they are to cause **silent, hard-to-catch bugs** — the kind that pass `ast.parse()` and still make production behave wrong. Sections 1.6–1.18 and PART 6 (added May 2026) shift focus from "errors that sneak through" to **proactive engineering practices** — design choices that prevent classes of bug from arising in the first place.
 
 ---
 
@@ -70,12 +70,10 @@ print('✓ Semantic contract checks passed')
 - Variable defined inside a function, used outside (scope error)
 - Variable used before assignment
 - Forgot quotes on a string: `print(hello)` vs `print("hello")`
-
 **TypeError** — Wrong type for an operation. Common in AnyCam:
 - Calling a method on `None`: `camera.get("snap_url").split("/")` fails if snap_url is None
 - Passing wrong argument type to a function
 - `str + int` without conversion
-
 **AttributeError** — Accessing a property that doesn't exist. Use `dict.get()` instead of `dict[]` when key may be missing.
 
 **KeyError** — Accessing a dict key that doesn't exist. Prefer `.get(key, default)`.
@@ -105,7 +103,7 @@ AnyCam is an async application. These mistakes are silent — no error, just wro
 for cam in cameras:
     result = await probe_rtsp(cam)
 
-# GOOD — all run concurrently  
+# GOOD — all run concurrently
 results = await asyncio.gather(*[probe_rtsp(cam) for cam in cameras])
 ```
 
@@ -132,13 +130,319 @@ async def my_loop():
 - **Mutable default arguments:** `def f(x=[]):` is a classic bug — the list persists between calls. Use `def f(x=None): x = x or []`
 - **Global mutable state:** Each global dict or list that's mutated from multiple coroutines is a race condition waiting to happen; prefer passing state explicitly
 - **`f-string` with HTML/JS:** Never use raw f-strings to inject user input into HTML — use `html.escape()`. In AnyCam's case the values come from camera metadata, not user input, but the pattern matters
-
 **Tools:** Pylint, Flake8, Black (formatter), Ruff (fast all-in-one), mypy (type checker), Pyright (type checker)
 
 **Sources:** PEP 8 (python.org), PEP 501 (peps.python.org), realpython.com, scrapingant.com, editorialge.com
 
 ---
 
+---
+
+### 1.6 Function Design
+
+Beyond naming and return-statement consistency, function-level design choices have a big impact on whether code stays maintainable.
+
+- **Single, clear responsibility.** If you find yourself adding "and" to a function name (`fetch_and_parse_and_save`), consider splitting it. Smaller functions are easier to test and reuse.
+- **Verb-first names.** Functions perform actions: `write_camera`, `fetch_rtsp_metadata`, `validate_credentials`. Avoid noun-only names like `data()` or `user_input()`.
+- **Snake_case** (PEP 8); leading underscore for non-public helpers (`_probe_rtsp_paths_single_socket`).
+- **Pure functions where possible.** A pure function depends only on its arguments and has no side effects (no I/O, no global mutation). Pure functions are easier to test and reason about. AnyCam example: `_parse_throttle_seconds` is pure; `find_rtsp_path` is not (network I/O, mutates state) — that's appropriate, but the boundary should be deliberate.
+- **Limit parameter count.** More than ~5 positional parameters is a smell. Group related values into a dataclass or pass a dict.
+- **Keyword-only arguments with sensible defaults** for optional parameters. Prevents call-site mistakes:
+  ```python
+  # WRONG
+  def find_rtsp_path(ip, creds, timeout, retries, fast_bail):
+      ...
+  # call site is unreadable:
+  result = find_rtsp_path("10.0.0.22", c, 5, 3, True)
+
+  # RIGHT
+  def find_rtsp_path(ip, creds, *, timeout=5, retries=3, fast_bail=True):
+      ...
+  result = find_rtsp_path("10.0.0.22", c, fast_bail=True)
+  ```
+- **No hidden expensive work.** A function called `get_config()` that hits the network is a trap. If it does network I/O, name it `fetch_config()` or `load_config_from_server()`.
+### 1.7 Object Mutability and Mutable Defaults
+
+The classic mutable-default-argument bug is silent and easy to miss:
+
+```python
+# WRONG — list persists across calls
+def add_path(path, paths=[]):
+    paths.append(path)
+    return paths
+
+print(add_path("a"))  # ['a']
+print(add_path("b"))  # ['a', 'b']  ← surprise!
+
+# RIGHT — None sentinel, fresh list each call
+def add_path(path, paths=None):
+    if paths is None:
+        paths = []
+    paths.append(path)
+    return paths
+```
+
+Other mutability rules that matter for AnyCam:
+
+- **Prefer immutable types** (tuple, frozenset, frozen dataclass) for stable records. Immutable values can be shared safely between coroutines without copy.
+- **Be explicit when sharing mutable state across coroutines.** AnyCam's `CAMERAS`, `SCAN_STATE`, `_snap_state`, and `_THROTTLE_TRACK` dicts are all globally mutated from multiple coroutines. Document the ownership and the synchronization assumption (or add an asyncio.Lock if one is needed).
+- **Right data structure for the job:** list (ordered, growable), dict (keyed lookup, ~O(1)), set (uniqueness/membership tests), tuple (fixed-size record), frozenset/frozendict (immutable variants).
+### 1.8 Conditionals and Control-Flow Patterns
+
+**Guard clauses** flatten the happy path. Compare:
+
+```python
+# WRONG — pyramid of doom
+def process(camera):
+    if camera:
+        if camera.get('manufacturer'):
+            if camera['manufacturer'] == 'Hipcam/Microseven':
+                return handle_hipcam(camera)
+    return None
+
+# RIGHT — early exits, flat happy path
+def process(camera):
+    if not camera:
+        return None
+    if not camera.get('manufacturer'):
+        return None
+    if camera['manufacturer'] != 'Hipcam/Microseven':
+        return None
+    return handle_hipcam(camera)
+```
+
+- **Truthy check for empty sequences** (`if not paths:` — both PEP 8 and Real Python agree).
+- **Explicit `is None` for None checks.** `if value is None:` not `if not value:`, because `0`, `""`, `[]` are all falsy and you almost certainly mean only `None`.
+- **Dict dispatch over long elif chains.** When branching on a single value, a lookup table is clearer and easier to extend than a chain of `elif` clauses:
+  ```python
+  # WRONG
+  if codec == 'h264':
+      return handle_h264(...)
+  elif codec == 'h265':
+      return handle_h265(...)
+  elif codec == 'mjpeg':
+      return handle_mjpeg(...)
+
+  # RIGHT
+  CODEC_HANDLERS = {'h264': handle_h264, 'h265': handle_h265, 'mjpeg': handle_mjpeg}
+  return CODEC_HANDLERS[codec](...)
+  ```
+- **Walrus operator** (`:=`) is fine when it eliminates a duplicated computation, e.g. `if (m := re.search(pat, s)):`. Skip it when it makes the line harder to read.
+- **`match` statement (3.10+)** for branching on data shape — cleaner than nested if/isinstance chains.
+### 1.9 Loops, Comprehensions, and Generator Expressions
+
+**Iterate directly over the iterable**, not by index:
+```python
+# WRONG
+for i in range(len(cameras)):
+    print(cameras[i])
+# RIGHT
+for cam in cameras:
+    print(cam)
+```
+
+- **`enumerate()` when you need both index and value:** `for i, cam in enumerate(cameras):`
+- **`zip()` for parallel iteration:** `for url, codec in zip(urls, codecs):`
+- **Avoid string concatenation in loops** — `s += part` is O(n²) in CPython. Use `''.join(parts)` or `io.StringIO`.
+**Comprehensions for transformations:**
+```python
+# Transformation
+authed = [c for c in cameras if c.get('credentials')]
+
+# Generator expression for one-pass / large data — doesn't materialize
+total_fps = sum(c.fps for c in cameras if c.active)
+```
+
+- **Keep comprehensions flat.** Multiple `for` clauses + multiple `if` filters → switch to a regular for loop, it'll be clearer.
+- **No side effects in comprehensions.** They're for computing values, not for printing or mutating state. Use a regular loop if you need side effects.
+- **Generator expressions are single-use.** Once consumed, exhausted. If you need to iterate twice, materialize to a list first.
+### 1.10 Exception Handling Philosophy
+
+Beyond the mechanical PEP 8 rules (specific excepts, no bare `except:`, inherit from Exception), there's a design dimension:
+
+- **Fail fast.** Raise as soon as you detect bad state — don't let it propagate.
+- **Raise low, catch high.** Low-level helpers raise specific exceptions; the top-level handler (HTTP route, async task) catches them and decides how to surface to the user. AnyCam's `find_rtsp_path` and `probe_rtsp_socket` raise/return exceptional results; the request handlers in `api_set_credentials` etc. translate those into HTTP responses. Keep this separation.
+- **EAFP > LBYL** (Easier to Ask Forgiveness than Permission, vs Look Before You Leap):
+  ```python
+  # LBYL — race condition window between check and use
+  if os.path.exists(path):
+      with open(path) as f:
+          ...
+  # EAFP — atomic, Pythonic
+  try:
+      with open(path) as f:
+          ...
+  except FileNotFoundError:
+      ...
+  ```
+- **Catch the narrowest exception you can handle.** `except Exception:` masks bugs you didn't anticipate. AnyCam has many `except Exception:` blocks — most are appropriate (top-level catchalls in long-running coroutines that must not die), but each one is worth scrutinizing.
+- **Don't use exceptions for routine control flow.** Exceptions signal errors. Branching is `if/else`.
+- **Custom exceptions for domain errors.** `HipcamRateLimitedError`, `OnvifAuthRequired`. Inherit from Exception.
+- **`raise NewError(...) from original`** preserves the original traceback. Don't swallow it silently.
+- **`logger.exception(...)`** inside except blocks captures the stack trace into the log. Or pass `exc_info=True` to any logger call.
+### 1.11 Resource Management with Context Managers
+
+Always use `with` for resources that need setup + teardown: files, sockets, locks, subprocesses, sessions, locks.
+
+- **Keep resource lifetimes short.** Acquire inside the function that uses the resource; release before returning. Don't open a socket at module level and hope it gets closed.
+- **Custom context managers** for any setup/teardown pair you write more than once:
+  ```python
+  from contextlib import contextmanager
+
+  @contextmanager
+  def rtsp_socket(host, port, timeout=5):
+      sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      sock.settimeout(timeout)
+      sock.connect((host, port))
+      try:
+          yield sock
+      finally:
+          sock.close()
+
+  # Usage — guaranteed cleanup even on exception
+  with rtsp_socket(ip, 554) as s:
+      s.send(options_request)
+      response = s.recv(4096)
+  ```
+- **`contextlib.ExitStack`** for dynamically composing multiple context managers (e.g. opening N files based on runtime input).
+- **Don't leak resources across module boundaries.** Returning an open socket or file handle from a low-level helper makes it the caller's job to close — easy to forget. Prefer returning the data the caller actually wants.
+- **AnyCam-specific:** `snap_loop` and `http_snap_loop` manage ffmpeg subprocess lifetimes via try/finally. These are good candidates for promotion to custom context managers in a future refactor — would centralize the cleanup logic and reduce the chance of a leak in a new code path.
+### 1.12 Logging
+
+- **Use stdlib `logging`, not `print()`.** Logging levels let you control verbosity at runtime; print can't be filtered, redirected to a file, or formatted consistently.
+- **Module-level logger with `__name__`:**
+  ```python
+  import logging
+  log = logging.getLogger(__name__)
+  ```
+  This names log records after their module, so you can tune verbosity per-module via config.
+- **Use the right level:** DEBUG for noisy diagnostics, INFO for normal operations, WARNING for unexpected-but-handled, ERROR for failures, CRITICAL for unrecoverable. Consistent levels make log filtering useful.
+- **Configure once near the entry point** (in `if __name__ == '__main__':`, a CLI main, or a dedicated `logging_config.py`). Library/module code should NEVER call `basicConfig()` or add global handlers — that's the application's job.
+- **Include useful context:** identifiers, paths, response codes — but **never credentials or PII.** AnyCam's `_strip_creds` helper handles URLs in JSON payloads; the same discipline should apply to log messages. If you log a URL that contains creds, strip them first.
+- **`logger.exception(...)` inside except blocks** captures the stack trace automatically. Or `logger.error(..., exc_info=True)`. This is invaluable for production debugging.
+- **No structured-logging hygiene mistakes:** don't pre-format with f-strings if you can help it. `log.info("found %d cameras", n)` lets the logging system decide whether to format; `log.info(f"found {n} cameras")` always formats, even when the level is filtered out.
+### 1.13 Pythonic Idioms
+
+A non-exhaustive catalog of idioms that make Python code feel native:
+
+- **Context managers for resources** (covered in 1.11) — `with` over manual try/finally.
+- **Comprehensions and generator expressions** (covered in 1.9) — over manual append-loops.
+- **`enumerate()`, `zip()`, `any()`, `all()`, `sum()`** — often replace 5-line loops with a one-liner.
+- **Unpacking:** `a, b = b, a` for swap; `first, *rest = lst` for variable destructuring; `*args, **kwargs` for forwarding.
+- **f-strings** for formatting (Python 3.6+) — over `.format()` or `%` interpolation.
+- **`if __name__ == '__main__':`** for script entry points.
+- **Duck typing** where reasonable: instead of `if isinstance(x, list): x.append(...)`, just call `x.append(...)` and let TypeError happen if x doesn't support it. Less rigid; works with any list-like type. (Note: this complements rather than overrides PEP 8's "use isinstance() not type() comparisons" — that rule is about HOW to type-check, this is about WHETHER.)
+- **`pathlib.Path`** over `os.path` string manipulation: `(Path('/tmp') / 'snap.jpg').read_bytes()`.
+- **`dict.get(key, default)`** over try/except KeyError when missing keys are normal.
+- **`collections.Counter`, `collections.defaultdict`, `itertools.chain`** — reach for stdlib helpers before rolling your own.
+- **`functools.lru_cache`** for memoization of pure functions.
+### 1.14 Type Checking Workflow
+
+AnyCam currently uses no type hints. Adding them gradually would catch a class of bugs that even semantic-contract checks miss.
+
+- **Add hints gradually.** Start with public APIs and high-traffic functions; expand as you touch existing code. Don't try to annotate everything in one pass.
+- **Use a static type checker** (mypy, pyright, or pyre) as part of development. Catches type errors before runtime. AnyCam's `verify_release.py` could grow a type-check gate alongside the existing five.
+- **Prefer precise types over `Any`.** `Any` opts out of type checking — bugs slip through.
+- **Model structured data explicitly:**
+  ```python
+  from typing import TypedDict, Optional
+
+  class CameraRecord(TypedDict, total=False):
+      id: str
+      ip: str
+      manufacturer: str
+      stream_url: str
+      stream_codec: str
+      stream_width: int
+      stream_height: int
+      stream_fps: float
+      credentials: Optional[bytes]   # encrypted blob or None
+      # ... etc
+  ```
+  Right now AnyCam's CAMERAS records are plain dicts with ~50 unenforced keys. A TypedDict would catch typos (`cam['mainufacturer']`) and missing required fields at type-check time.
+- **`Protocol`** when you need duck typing with type-checker support (e.g. "anything with a `.read()` method").
+- **Keep type hints in sync with behavior.** Stale types lie. When you change a function's behavior, update its annotation in the same commit.
+- **`# type: ignore[error-code]`** and `typing.cast()` are escape hatches. Use them sparingly with a comment explaining why.
+### 1.15 Class Design
+
+AnyCam currently uses dict-based records and module-level functions, with very few classes. That's not wrong — it's a deliberate tradeoff that keeps the code procedural and inspectable. But if a future refactor introduces classes, these principles apply:
+
+- **Single responsibility per class.** Each class models one concept. If a class accumulates many methods doing different things, split it.
+- **Composition > inheritance.** Use inheritance only for unambiguous "is-a" relationships. For most reuse, build small classes that delegate to each other. (Note: PEP 8 has a thoughtful "Designing for Inheritance" section if you do go down that path — including `__` name-mangling for subclass-API protection. Both perspectives are legitimate.)
+- **Dataclasses (`@dataclass`)** for value-object-style classes that mostly hold data. Saves boilerplate `__init__`, `__repr__`, `__eq__`. Combine with `frozen=True` for immutability.
+  ```python
+  from dataclasses import dataclass
+
+  @dataclass(frozen=True)
+  class CameraIdentity:
+      ip: str
+      manufacturer: str
+      mac_vendor: str
+      page_title: str
+  ```
+- **Properties** to add behavior to attributes without breaking the API:
+  ```python
+  @dataclass
+  class Camera:
+      stream_url: str
+
+      @property
+      def is_authenticated(self) -> bool:
+          return '@' in self.stream_url and ':' in self.stream_url
+  ```
+- **Special methods (`__str__`, `__repr__`, `__len__`, `__iter__`)** where they aid usability.
+- **Be cautious with very small one-method classes** — a regular function in a module is often simpler than `class Foo: def do_thing(self): ...`.
+### 1.16 Refactoring and Optimization
+
+**Refactoring:**
+- **Small steps.** Rename one thing, extract one helper, simplify one loop. Don't refactor and add features in the same commit.
+- **Tests guide refactors.** AnyCam's `verify_release.py` semantic contracts already serve this role at the function-symbol level. Expanding to behavioral tests (snap_loop runs N restarts, find_rtsp_path returns expected URL for known camera fixture) would let larger refactors happen with confidence.
+- **Watch for code smells:** functions over ~50 lines, deeply nested conditionals (>3 levels), repeated code fragments (extract a helper), classes that "know too much" (split responsibilities), magic numbers (extract named constants).
+**Optimization:**
+- **Don't optimize prematurely.** Readability and correctness first.
+- **Profile before optimizing.** `cProfile`, `timeit`, py-spy, or similar identify hot paths. Don't guess. Most slow code isn't slow where you think it is.
+- **Algorithmic improvements > clever micro-tweaks.** Switching from O(n²) to O(n log n) wins; replacing `+=` with `''.join()` matters for big string builds; rewriting a list comprehension as a manual loop "for speed" almost never matters for AnyCam-scale workloads (tens of cameras, hundreds of paths).
+### 1.17 Standard Library First
+
+Reach for the stdlib before installing a third-party package or rolling your own. Python's stdlib is huge and battle-tested.
+
+Common AnyCam-relevant stdlib modules:
+- **`pathlib.Path`** for filesystem paths (over `os.path` string manipulation)
+- **`collections.Counter`, `defaultdict`, `OrderedDict`, `deque`** — common data structures done right
+- **`itertools.chain`, `groupby`, `islice`** — efficient iteration patterns
+- **`functools.lru_cache`, `partial`, `reduce`** — function composition and memoization
+- **`contextlib.contextmanager`, `ExitStack`, `suppress`** — see 1.11
+- **`secrets.compare_digest`, `secrets.token_urlsafe`** — security-critical comparisons and token generation (see 6.1)
+- **`urllib.parse.urlparse`, `quote`, `urljoin`** — URL handling
+- **`json`** — serialization (safer than pickle for untrusted input)
+- **`hashlib`** — cryptographic digests (already used by AnyCam's qop-aware Digest auth)
+- **`socket`, `ssl`** — low-level networking
+- **`asyncio`** — event loop, tasks, queues, locks (already core to AnyCam)
+- **`subprocess.run`** with argument lists for shelling out (never `shell=True` with untrusted input)
+If a stdlib module solves your problem, prefer it. Each third-party dep is a maintenance liability — pinned version, security advisories, possible Python-version incompatibilities, abandonment risk.
+
+### 1.18 Testing
+
+AnyCam's `verify_release.py` already provides syntax-and-contract checks at release time. This section is about the next layer up: behavioral tests that catch logic bugs.
+
+- **Small, focused tests.** Each test exercises one behavior. A test that "verifies the whole scan flow" is useful but should be one of many — most tests should be unit-level.
+- **pytest fixtures** for shared setup (fake camera dicts, mock RTSP server, mock ffmpeg). Avoids duplicate setup code across tests.
+- **pytest parametrize** for the same logic against multiple inputs. AnyCam's CAMERA_DB brand-id matching is a natural fit:
+  ```python
+  @pytest.mark.parametrize("server,title,expected", [
+      ("Hipcam RealServer/V1.0", "Microseven", "Hipcam/Microseven"),
+      ("nginx", "Hikvision", "Hikvision"),
+      ("Boa/0.94", "", "Generic"),
+  ])
+  def test_brand_identification(server, title, expected):
+      result = _identify_camera_brand({"server_header": server, "page_title": title})
+      assert result["name"] == expected
+  ```
+- **Run tests frequently.** Pre-commit hook + CI = caught before merge.
+- **Reasonable coverage, not 100%.** Focus on the paths that matter: credential handling, brand-id, throttle pacing, snap_loop restart logic, the qop-aware Digest formula. Skip trivial getters and one-line helpers.
+- **Fast and deterministic.** No real network, no real files (use `tmp_path` fixture), no random. Mock external deps.
+- **Mock external dependencies.** AnyCam's external deps are mostly network — ONVIF SOAP, RTSP, HTTP, ffmpeg. Each can be mocked. `unittest.mock.patch`, `aioresponses` for aiohttp, dedicated RTSP test servers for integration.
+- **Complement unit tests with a small number of integration tests** against a real test camera (or `mediamtx` / `rtsp-simple-server` in Docker) for end-to-end confidence.
 ## PART 2 — JAVASCRIPT
 
 ### 2.1 The Three Core Error Types
@@ -148,18 +452,15 @@ async def my_loop():
 - Using `;` instead of `,` in object literals: `{prop: 'a'; prop2: 'b'}` → use `,`
 - Unterminated string literal
 - Using a reserved keyword as a variable name
-
 **ReferenceError** — Variable/function not found.
 - Typo in name: `userName` vs `username` — JS is case-sensitive
 - Using `let`/`const` variable before declaration (temporal dead zone)
 - Variable declared inside a function, accessed outside (scope)
-
 **TypeError** — Right variable, wrong type.
 - `null.property` or `undefined.property` — most common JS crash in the wild
-- Calling something that isn't a function: `let x = 5; x()` 
+- Calling something that isn't a function: `let x = 5; x()`
 - Using array method on non-array: `obj.map(...)` → `obj` must be an array
 - `typeof` vs `instanceof` — use the right check
-
 **Sources:** digitalocean.com, raygun.com, w3schools.com/js/js_mistakes, saad-minhas.com, fullstackfoundations.com, dev.to/__khojiakbar__, pixelfreestudio.com, linkedin.com/Dinesh-Rawat
 
 ---
@@ -202,7 +503,6 @@ function getData() {
 - **`var` hoisting:** `var` declarations are hoisted to function scope. Use `const`/`let` exclusively in modern code
 - **Named index on array:** `arr["name"] = "x"` silently converts the array to an object; `arr.length` then returns 0
 - **`//` is not a CSS comment in JS:** CSS uses `/* */`. If CSS appears in a JS string/template literal, `//` comments break it
-
 **Sources:** w3schools.com, raygun.com, ccodelearner.com, dev.to errors article
 
 ---
@@ -213,7 +513,6 @@ function getData() {
 - Use `addEventListener` over `onclick =` for multiple listeners
 - Use optional chaining before DOM access: `document.getElementById('foo')?.value`
 - Clean up event listeners when components are removed (memory leaks in SPAs)
-
 ---
 
 ## PART 3 — HTML
@@ -253,7 +552,6 @@ AnyCam generates HTML as Python triple-quoted strings. Specific risks:
 - **Quote collision:** HTML attributes use `"`, Python f-strings use `"` — use `\"` or switch to `'` for HTML attributes inside f-strings
 - **Newline in JS strings inside Python strings:** A bare newline inside a JS string literal inside a Python triple-quoted string is a JS syntax error. Use `String.fromCharCode(10)` or `\n` in a JS template literal
 - **XSS from camera metadata:** Camera names come from ONVIF and could contain `<script>` or `"` characters. Escape with `html.escape()` before inserting into HTML
-
 **Sources:** ssojet.com, mojoauth.com, bomberbot.com, dev.to/fosres (XSS framework), peps.python.org/pep-0501
 
 ---
@@ -270,7 +568,6 @@ AnyCam generates HTML as Python triple-quoted strings. Specific risks:
 3. ID selectors (`#myId`)
 4. Class selectors (`.myClass`), attribute selectors, pseudo-classes
 5. Element selectors (`div`, `p`), pseudo-elements
-
 **Common bug:** You add a class rule but an older ID rule overrides it. You add `!important` to fix it. Now you've started a specificity war that only escalates.
 
 **Fix:** Use class selectors almost exclusively. Reserve IDs for JS hooks, not styling. Never use `!important` except to override third-party library styles, and comment why.
@@ -324,16 +621,13 @@ CSS is uniquely dangerous for typos: **an invalid property is silently ignored**
 - **Implicit `min-width: auto`:** Flex items won't shrink below their content size by default, causing overflow with long text. Fix: `min-width: 0` on the flex item
 - **`justify-content` vs `align-items`:** `justify` = main axis (row direction by default); `align` = cross axis. Mixing these up is the #1 flexbox frustration
 - `gap` is now supported everywhere and is better than margin hacks for spacing
-
 **Grid:**
 - `visual order ≠ tab order` — `order` property and `grid-column`/`grid-row` placement reorder things visually but not for keyboard/screen reader navigation
 - `will-change: grid-template-columns` — only add when actually animating; uses extra memory
-
 **Z-index:**
 - z-index only works on positioned elements (`position: relative/absolute/fixed/sticky`)
 - Properties that create new stacking contexts: `transform`, `opacity < 1`, `position: fixed` — these reset z-index context unexpectedly
 - Debugging tip: open browser DevTools → Layers panel to see stacking contexts
-
 **Sources:** dev.to/thebitforge, medium.com/@ss-tech (z-index), dev.to/umarsiddique010, css-tricks.com
 
 ---
@@ -355,7 +649,6 @@ Python f-string → HTML string → <script> block → JS strings → DOM values
 3. **JS → DOM:** Use `textContent` not `innerHTML` when inserting dynamic values; `innerHTML` executes script tags
 4. **Python → JS string literals:** A bare newline in a Python triple-quoted string that contains a JS string is a JS `SyntaxError`. Use `String.fromCharCode(10)` or `\\n`
 5. **CSS comments:** `/* comment */` — not `//`. Using `//` inside a CSS block in a Python string introduces a subtle validity error
-
 **The `//` CSS comment bug (appeared in AnyCam's history):**
 ```python
 # WRONG — // is not valid CSS
@@ -437,11 +730,62 @@ In all four languages, a syntactically valid construct can be logically incomple
 
 ---
 
+---
+
+## PART 6 — PROJECT ENGINEERING PRACTICE
+
+This part covers project-level concerns that sit outside any one language: security, dependency management, and version-control discipline.
+
+### 6.1 Security
+
+AnyCam handles user credentials, processes untrusted network input from cameras and ONVIF servers, and runs `ffmpeg` subprocesses against URLs derived from those inputs. Security is a real concern, not a theoretical one.
+
+**Validate untrusted input at the boundary.** Camera names from ONVIF, RTSP `Server:` headers, ONVIF SOAP responses, page `<title>` tags — all untrusted. They could contain anything (control characters, HTML/JS, very long strings, malformed encodings). Sanitize before logging, persisting, or rendering.
+
+- **Allowlists over denylists** when possible. AnyCam currently filters dangerous chars in camera names; an explicit allowlist (alphanumeric + space + a small punctuation set) is safer than trying to ban every dangerous char.
+- **Length limits everywhere.** Cap string fields at reasonable maxima (camera name 200 chars, RTSP URL 500 chars, log line 2000 chars). Unbounded input is a DoS surface.
+- **Escape before rendering in HTML.** AnyCam's UI is generated from Python triple-quoted f-strings. Camera metadata flows into the HTML — `html.escape()` it first. PART 3.3 of this document already covers this.
+**Subprocess safety.**
+- **Never `shell=True` with untrusted input.** AnyCam already uses `subprocess` with argument lists for ffmpeg — keep doing that. Never construct ffmpeg command strings via string concatenation that includes camera-derived URLs or metadata.
+- **`subprocess.run([...], shell=False)`** is the safe pattern. Only use `shell=True` with fully-static command strings you control.
+**Credential handling.**
+- **Use `secrets.compare_digest()`** for comparing tokens, hashes, or any security-relevant byte string. `==` is timing-attack vulnerable.
+- **Generate tokens with `secrets.token_urlsafe()` or `secrets.token_bytes()`**, never `random.*` (which is not cryptographically secure).
+- **Encrypt at rest, never plaintext.** AnyCam uses `cryptography.Fernet` for credential persistence — keep it.
+- **Never log credentials.** AnyCam's `_strip_creds` helper exists for URL strings. Extend its use to any new place that handles URLs, including log messages. The recent rc2.x credential-leak fix in `_safe_cam` is the kind of audit that should happen periodically.
+- **The Fernet key itself stays out of the repo.** It's stored separately and gitignored. Confirmed.
+**Deserialization.**
+- **Avoid pickling untrusted data.** `pickle.loads()` can execute arbitrary code from a malicious payload. AnyCam's persistence is JSON, which is safe. Keep it that way.
+- **JSON for any persisted state from the network.**
+**Supply chain.**
+- **Pin dependency versions.** Reproducible builds + protection against malicious upstream updates.
+- **Watch for security advisories** on `cryptography`, `aiohttp`, etc. Run `pip-audit` periodically against requirements.txt.
+- **Minimal dependency surface.** Each unused dep removed is one less supply-chain risk. AnyCam's deps are already minimal — preserve that discipline.
+### 6.2 Dependency Management
+
+AnyCam's dependencies are intentionally minimal: `aiohttp`, `cryptography`, plus the stdlib. Recommendations for keeping them that way:
+
+- **Each new third-party dep is a deliberate decision.** Each one adds: install time, attack surface, future maintenance burden, version-conflict risk, abandonment risk. The bar for adding a dependency should be "stdlib genuinely cannot solve this."
+- **Evaluate before installing.** Check the PyPI page, repo activity, last release date, supported Python versions, open-issue count, maintainer count. Avoid abandoned packages.
+- **Pin versions** in your dependency manifest. AnyCam's Dockerfile/requirements should pin specific versions for reproducible builds. Floating ranges (`aiohttp>=3.0`) lead to drift.
+- **Document why a dep exists.** A short comment near the import or in the dependency manifest explaining why a package is used helps future maintainers (including future-you) decide whether it can be removed.
+- **Remove unused deps regularly.** If you stop using something, uninstall it. `pip-autoremove`, manual review at release time.
+### 6.3 Version Control Practices
+
+- **Small, self-contained commits.** Each commit does one thing — one bugfix, one feature, one rename. AnyCam's release rhythm with its rc2.1 → rc2.1.1 → rc2.2 → rc2.3 → ... cadence already reflects this discipline; extending it to in-progress work (between releases) would help further.
+- **Clear commit messages.** Subject line summarizes WHAT; body explains WHY when not obvious. AnyCam's CHANGELOG entries are essentially commit-message material — keeping that level of explanation in actual commit messages would let `git log` tell the same story.
+- **Branch for non-trivial work.** Even solo, a feature branch lets you keep `main` stable while exploring a refactor.
+- **Tag releases with annotated tags.** `git tag -a 2.2.9 -m "..."`. AnyCam's version-bump-then-zip workflow is effectively informal tagging; formalizing it adds release markers visible in `git log` and Github releases.
+- **Run automated checks on every change.** AnyCam's `verify_release.py` is the pre-release gate. Wiring it as a git pre-commit hook (or CI step on push) would prevent broken commits from ever landing.
+- **`.gitignore` generated artifacts, caches, and local config.** Already in place — `__pycache__/`, `.venv/`, `*.pyc`, the Fernet key file.
+- **Never commit secrets.** AnyCam's encrypted-cred-store + Fernet-key approach is correct. The Fernet key itself stays out of the repo — that's the linchpin.
+- **Sync frequently.** If the project lives on multiple machines (laptop, Pi, dev VM), keep them in sync. Small frequent syncs avoid divergent histories that need painful merges.
+- **Document the workflow.** Even for a solo project, writing down "how I release AnyCam" (the script of: `verify_release.py` → bump versions → CHANGELOG entry → versioned zip → audit PDF → present_files) protects against forgotten steps after a long break.
 ## Sources Summary
 
 **200+ sources consulted, including:**
 
-- Real Python (realpython.com) — Python syntax errors, asyncio, f-strings
+- Real Python (realpython.com) — Python syntax errors, asyncio, f-strings; and the full **Python Best Practices** reference set (realpython.com/ref/best-practices/) covering classes, code formatting, code testing, comments, comprehensions, concurrency, conditionals, constants, dependency management, distribution, docstrings, documentation, exception handling, functions, generator expressions, imports, logging, loops, object mutability, optimization, project layout, public-API surface, Pythonic code, refactoring, resource management, security, standard library, third-party libraries, type checking, variables, version control, and virtual environments — 33 individual sub-pages consulted
 - Python official docs (docs.python.org) — asyncio-dev, asyncio-task, ast module
 - MDN Web Docs (developer.mozilla.org) — CSS specificity, cascade, template literals, JS errors
 - W3Schools — Python errors, JS mistakes, CSS units, JS conventions
@@ -457,5 +801,4 @@ In all four languages, a syntactically valid construct can be logically incomple
 - GitHub (analysis-tools-dev, lukehutch) — static analysis tool catalogs
 - ACM SIGSOFT 2024, emergentmind.com — academic static analysis research
 - Plus 150+ additional blog posts, forum answers, and documentation pages
-
-*Compiled April 2026 for the AnyCam project*
+*Compiled April 2026, expanded May 2026 with engineering best-practice additions (sections 1.6–1.18 and PART 6) sourced from Real Python's Python Best Practices reference. Original PART 1.1–1.5 and PARTS 2–5 preserved as-is.*
