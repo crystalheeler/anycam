@@ -6,9 +6,13 @@ Run before every release: python3 verify_release.py
 Checks (in order):
   1. Python syntax  (ast.parse + compile)
   2. Semantic contracts — key functions contain required identifiers
-  3. Best-practice audit — mutable defaults, blocking I/O in async, CSS // comments
+  3. Best-practice audit — mutable defaults, blocking I/O in async, CSS // comments,
+     unfilled page placeholders
   4. Version consistency — CURRENT_VERSION matches config.yaml
   5. Changelog — top entry matches CURRENT_VERSION
+  6. Settings — run.sh, config.yaml options/schema and translations agree (2.6.6)
+  7. Build inputs — every Dockerfile pin exists where the build fetches it
+     (2.6.6; needs internet access)
 
 Exit 0 = all checks passed.
 Exit 1 = one or more checks failed (details printed).
@@ -44,7 +48,7 @@ src   = src_path.read_text(encoding="utf-8")
 lines = src.splitlines()
 
 # ── 1. Syntax ─────────────────────────────────────────────────────────────────
-print("\n[1/5] Syntax check")
+print("\n[1/7] Syntax check")
 try:
     tree = ast.parse(src)
     ok("ast.parse() passed")
@@ -80,7 +84,7 @@ else:
     ok(f"{len(top_names)} top-level definitions, no duplicates")
 
 # ── 2. Semantic contracts ─────────────────────────────────────────────────────
-print("\n[2/5] Semantic contract checks")
+print("\n[2/7] Semantic contract checks")
 CONTRACTS = {
     "run_verification_scan": ["save_cameras", "SCAN_STATE", "run_scan"],
     "http_snap_loop":        ["asyncio.sleep", "_snap_state", "TCPConnector"],
@@ -189,7 +193,7 @@ else:
 # ── 2b. rc2 CAMERA_DB structure contracts ─────────────────────────────────────
 # These checks pull CAMERA_DB out of the AST (not by importing) so they don't
 # need any runtime deps installed.
-print("\n[2b/5] rc2 CAMERA_DB throttle field validation")
+print("\n[2b/7] rc2 CAMERA_DB throttle field validation")
 
 VALID_THROTTLE_TYPES = {
     "rate_limit_per_ip_tcp",
@@ -330,7 +334,7 @@ else:
            f"in {{HIGH,MED,LOW}}")
 
 # ── 3. Best-practice audit ────────────────────────────────────────────────────
-print("\n[3/5] Best-practice audit")
+print("\n[3/7] Best-practice audit")
 audit_ok = True
 
 # P6: mutable default arguments (skip inner closures — they're intentional)
@@ -341,18 +345,36 @@ for node in ast.walk(tree):
                 fail(f"P6 Mutable default arg in {node.name}() at line {default.lineno}")
                 audit_ok = False
 
-# P4: blocking open() in async functions (top-level only, not closures)
+# P4: blocking file I/O in async functions (top-level only, not closures).
+# 2.6.6 (build plan F2): pathlib's read_text/read_bytes/write_text/write_bytes
+# block the event loop exactly like open(), and the 2.6.3 audit found one by
+# hand that this check had missed.
+_BLOCKING_PATH_IO = {"read_text", "read_bytes", "write_text", "write_bytes"}
 for node in ast.walk(tree):
     if isinstance(node, ast.AsyncFunctionDef) and node.col_offset == 0:
         for child in ast.walk(node):
             if isinstance(child, ast.Call):
                 func = child.func
+                what = None
                 if isinstance(func, ast.Name) and func.id == "open":
-                    # Check it's not already wrapped in run_in_executor on same line
+                    what = "open()"
+                elif isinstance(func, ast.Attribute) and func.attr in _BLOCKING_PATH_IO:
+                    what = f".{func.attr}()"
+                if what:
+                    # Check it's not already wrapped in an executor on the same line
                     line_txt = lines[child.lineno - 1] if child.lineno <= len(lines) else ""
-                    if "run_in_executor" not in line_txt and "lambda" not in line_txt:
-                        fail(f"P4 Blocking open() in async def {node.name}() at line {child.lineno}")
+                    if not any(w in line_txt for w in ("run_in_executor", "to_thread", "lambda")):
+                        fail(f"P4 Blocking {what} in async def {node.name}() at line {child.lineno}")
                         audit_ok = False
+
+# P7: every ___NAME___ placeholder in the page script is filled by build_html.
+# 2.6.6 (build plan B5): ___COMMUNITY___ never was, so the page read the
+# placeholder text itself as a configured community endpoint.
+_placeholders = set(re.findall(r"___[A-Z_]+___", src))
+_filled = set(re.findall(r"\.replace\(\s*'(___[A-Z_]+___)'", src))
+for _ph in sorted(_placeholders - _filled):
+    fail(f"P7 Page placeholder {_ph} is never replaced in build_html")
+    audit_ok = False
 
 # J3: // comments in CSS sections
 css_start = next((i for i, l in enumerate(lines) if "css = f\"\"\"" in l or "<style>" in l), None)
@@ -371,7 +393,7 @@ if audit_ok:
     ok("No best-practice violations found")
 
 # ── 4. Version consistency ────────────────────────────────────────────────────
-print("\n[4/5] Version consistency")
+print("\n[4/7] Version consistency")
 cv_match = re.search(r'CURRENT_VERSION\s*=\s*"(.+?)"', src)
 _cfg_text = cfg_path.read_text(encoding="utf-8")
 cfg_match = re.search(r'^version:\s*"(.+?)"', _cfg_text, re.MULTILINE)
@@ -388,7 +410,7 @@ else:
         fail(f"Version mismatch: CURRENT_VERSION={cv} vs config.yaml={cfg_v}")
 
 # ── 5. Changelog ─────────────────────────────────────────────────────────────
-print("\n[5/5] Changelog check")
+print("\n[5/7] Changelog check")
 if cv_match:
     version = cv_match.group(1)
     cl_text = cl_path.read_text(encoding="utf-8")
@@ -397,6 +419,151 @@ if cv_match:
     else:
         top = cl_text.splitlines()[0] if cl_text.strip() else "(empty)"
         fail(f"CHANGELOG.md top entry '{top}' does not match version {version}")
+
+# ── 6. Settings consistency (2.6.6, build plan F7) ──────────────────────────
+# run.sh hands each setting to the program with bashio::config. For a setting
+# config.yaml does not define, bashio returns the text "null", which the code
+# reads as off: removing the Live View option in 2.6.4 nearly shipped exactly
+# that. The four lists must name the same settings.
+print("\n[6/7] Settings consistency (run.sh, config.yaml, translations)")
+
+
+def _yaml_block_keys(text: str, block: str) -> set:
+    """Keys indented two spaces under a top-level 'block:' line."""
+    keys, inside = set(), False
+    for ln in text.splitlines():
+        if re.match(rf"^{block}:\s*$", ln):
+            inside = True
+            continue
+        if inside:
+            if ln and not ln.startswith(" "):
+                break
+            m = re.match(r"^  ([a-z0-9_]+):", ln)
+            if m:
+                keys.add(m.group(1))
+    return keys
+
+
+_root = pathlib.Path(__file__).parent
+_run_reads = set(re.findall(r"bashio::config '([a-z0-9_]+)'",
+                            (_root / "run.sh").read_text(encoding="utf-8")))
+_opts   = _yaml_block_keys(_cfg_text, "options")
+_schema = _yaml_block_keys(_cfg_text, "schema")
+_trans  = _yaml_block_keys((_root / "translations" / "en.yaml").read_text(encoding="utf-8"),
+                           "configuration")
+settings_ok = True
+for k in sorted(_run_reads - _opts):
+    fail(f"F7 run.sh reads '{k}', which config.yaml does not define (bashio would return null)")
+    settings_ok = False
+for k in sorted(_opts - _run_reads):
+    fail(f"F7 config.yaml defines '{k}', which run.sh never reads")
+    settings_ok = False
+for k in sorted(_opts ^ _schema):
+    fail(f"F7 '{k}' is in only one of config.yaml options and schema")
+    settings_ok = False
+for k in sorted(_opts - _trans):
+    fail(f"F7 option '{k}' has no entry in translations/en.yaml")
+    settings_ok = False
+for k in sorted(_trans - _opts):
+    fail(f"F7 translations/en.yaml describes '{k}', which config.yaml does not define")
+    settings_ok = False
+if settings_ok:
+    ok(f"{len(_opts)} settings agree across run.sh, config.yaml options and "
+       f"schema, and translations")
+
+# ── 7. Build inputs (2.6.6, build plan F1) ───────────────────────────────────
+# 2.6.1 passed every check above and still could not build: an apt pin had
+# rotated out of the archive. Every pinned input the Dockerfile fetches is
+# looked up where the build will fetch it. Needs internet access; with none,
+# this gate fails rather than pass unchecked.
+print("\n[7/7] Build inputs (network)")
+import json as _json
+import urllib.error
+import urllib.request
+
+_docker = (_root / "Dockerfile").read_text(encoding="utf-8")
+
+
+def _get(url: str, headers: dict | None = None) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "anycam-verify-release",
+                                               **(headers or {})})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return resp.read()
+
+
+def _check_build_inputs() -> bool:
+    good = True
+    # apt pins: name=version inside the RUN block
+    apt = re.findall(r"^\s+([a-z0-9][a-z0-9.+-]*)=([0-9][^\s\\]*)\s*\\?$", _docker, re.MULTILINE)
+    if not apt:
+        fail("F1 found no apt pins in the Dockerfile — the parser needs updating")
+        return False
+    names = "+".join(n for n, _ in apt)
+    madison = _get("https://qa.debian.org/madison.php?package=" + names +
+                   "&table=debian&s=bookworm,bookworm-updates,bookworm-security"
+                   "&a=all,amd64,arm64&text=on").decode()
+    for name, ver in apt:
+        archs = set()
+        for row in madison.splitlines():
+            cols = [c.strip() for c in row.split("|")]
+            if len(cols) == 4 and cols[0] == name and cols[1] == ver:
+                archs |= {a.strip() for a in cols[3].split(",")}
+        if "all" in archs or {"amd64", "arm64"} <= archs:
+            ok(f"apt {name}={ver} is in Debian bookworm")
+        else:
+            fail(f"F1 apt {name}={ver} not found in Debian bookworm for amd64 and arm64")
+            good = False
+    # pip pins: a wheel for CPython 3.11 on manylinux aarch64 and x86_64
+    for name, ver in re.findall(r"^\s+([A-Za-z0-9_.-]+)==([0-9][^\s\\]*)", _docker, re.MULTILINE):
+        files = [u["filename"] for u in
+                 _json.loads(_get(f"https://pypi.org/pypi/{name}/{ver}/json"))["urls"]]
+        def has(arch: str) -> bool:
+            return any(f.endswith(".whl") and "manylinux" in f and f"_{arch}" in f
+                       and re.search(r"-(cp311-cp311|cp3\d+-abi3|py3-none)-", f)
+                       for f in files)
+        if has("aarch64") and has("x86_64"):
+            ok(f"pip {name}=={ver} has CPython 3.11 wheels for aarch64 and x86_64")
+        else:
+            fail(f"F1 pip {name}=={ver}: no CPython 3.11 manylinux wheel for both "
+                 f"aarch64 and x86_64")
+            good = False
+    # go2rtc: the pinned digests match the release assets
+    ver = re.search(r"^ARG GO2RTC_VERSION=(\S+)", _docker, re.MULTILINE).group(1)
+    rel = _json.loads(_get(f"https://api.github.com/repos/AlexxIT/go2rtc/releases/tags/{ver}"))
+    digests = {a["name"]: (a.get("digest") or "") for a in rel["assets"]}
+    for arch in ("ARM64", "AMD64"):
+        pinned = re.search(rf"^ARG GO2RTC_SHA256_{arch}=(\S+)", _docker, re.MULTILINE).group(1)
+        if digests.get(f"go2rtc_linux_{arch.lower()}") == f"sha256:{pinned}":
+            ok(f"go2rtc {ver} linux_{arch.lower()} digest matches the release")
+        else:
+            fail(f"F1 go2rtc {ver} linux_{arch.lower()} digest differs from the release")
+            good = False
+    # base image: the multi-arch index has both platforms
+    base = re.search(r"^ARG BUILD_FROM=(\S+)", _docker, re.MULTILINE)
+    if not base:
+        fail("F1 Dockerfile has no default BUILD_FROM (build plan F4)")
+        return False
+    m = re.match(r"ghcr\.io/([^:]+):(\S+)", base.group(1))
+    token = _json.loads(_get(f"https://ghcr.io/token?scope=repository:{m.group(1)}:pull"))["token"]
+    index = _json.loads(_get(
+        f"https://ghcr.io/v2/{m.group(1)}/manifests/{m.group(2)}",
+        {"Authorization": f"Bearer {token}",
+         "Accept": "application/vnd.oci.image.index.v1+json, "
+                   "application/vnd.docker.distribution.manifest.list.v2+json"}))
+    plats = {(p["platform"]["os"], p["platform"]["architecture"])
+             for p in index.get("manifests", []) if "platform" in p}
+    if {("linux", "arm64"), ("linux", "amd64")} <= plats:
+        ok(f"base image {base.group(1)} has linux/arm64 and linux/amd64")
+    else:
+        fail(f"F1 base image {base.group(1)} lacks linux/arm64 or linux/amd64")
+        good = False
+    return good
+
+
+try:
+    _check_build_inputs()
+except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError) as e:
+    fail(f"F1 could not check the build inputs ({e}) — needs internet access")
 
 # ── Result ────────────────────────────────────────────────────────────────────
 print()

@@ -2946,7 +2946,9 @@ async def refresh_oui_db() -> None:
                 oui_map[key] = org
 
         DATA_DIR.mkdir(exist_ok=True)
-        OUI_CACHE_FILE.write_text(json.dumps(oui_map))
+        # 2.6.6: off the event loop; the file holds about 40,000 entries.
+        # Found by the extended P4 check in verify_release.py (F2).
+        await asyncio.to_thread(OUI_CACHE_FILE.write_text, json.dumps(oui_map))
         _OUI_DB.update(oui_map)
         log.info(f"OUI DB refreshed: {len(oui_map)} entries cached")
     except Exception as e:
