@@ -27,12 +27,14 @@ import subprocess
 import time
 import uuid
 import xml.etree.ElementTree as ET
+import io
 from pathlib import Path
 from urllib.parse import urlparse, quote
 
 from aiohttp import web
 import aiohttp
 from cryptography.fernet import Fernet
+from PIL import Image   # 2.6.6: pixel-comparison motion detection
 
 log = logging.getLogger("anycam")
 logging.basicConfig(
@@ -140,7 +142,24 @@ CFG_FAST_STREAM_START    = os.environ.get("FAST_STREAM_START", "false").lower() 
 # Pi 4 / HAOS target has a field test.
 CFG_LOW_LATENCY          = os.environ.get("LOW_LATENCY", "false").lower() == "true"
 CFG_RECORDINGS           = os.environ.get("RECORDINGS_PATH", "/media/anycam")
-CFG_MOTION_SENS          = int(os.environ.get("MOTION_SENSITIVITY",       "15"))
+# 2.6.6: 1 (least sensitive) to 100 (most), shown to the user as a plain
+# scale. It maps to the share of the picture that must change, from 74%
+# down to 1%, on a log curve so the steps are finer at the sensitive end.
+# 63 maps to 5.0%, the default CrystalHeeler chose. Above 75% a change counts as
+# light, not motion (MOTION_LIGHT_FRACTION), hence the 74% ceiling.
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        return min(hi, max(lo, int(os.environ.get(name, default))))
+    except ValueError:
+        return default
+
+
+CFG_MOTION_LEVEL         = _env_int("MOTION_DETECT_LEVEL", 63, 1, 100)
+CFG_MOTION_AREA_PCT      = 74.0 * (1.0 / 74.0) ** ((CFG_MOTION_LEVEL - 1) / 99.0)
+# 2.6.6: new file every N seconds while motion continues (build plan C12).
+CFG_MOTION_CLIP_S        = {"10s": 10, "20s": 20, "30s": 30, "1min": 60,
+                            "2min": 120, "5min": 300}.get(
+                                os.environ.get("MOTION_CLIP_LENGTH", "1min"), 60)
 CFG_MOTION_COOL          = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
 CFG_MOTION_PAD           = int(os.environ.get("MOTION_CLIP_PADDING_SECS", "3"))
 CFG_UNRESTRICTED_BROWSER = os.environ.get("UNRESTRICTED_STORAGE_BROWSER", "false").lower() == "true"
@@ -9343,9 +9362,18 @@ def _motion_on_frame(camera_id: str, frame: bytes) -> None:
     ms = _MOTION.get(camera_id)
     if not (ms and ms["enabled"]):
         return
-    motion = _detect_motion(ms.get("prev_frame"), frame, CFG_MOTION_SENS)
-    ms["prev_frame"] = frame
     now_m = time.monotonic()
+    motion = False
+    # 2.6.6: compare at most once per MOTION_COMPARE_S. At 10 fps two
+    # neighbouring frames barely differ, and a slow walker would never
+    # cross the threshold; the Lorex snapshots arrive every 1.9 s anyway.
+    if now_m - ms.get("prev_time", 0.0) >= MOTION_COMPARE_S:
+        thumb = _motion_thumb(frame)
+        if thumb is not None:
+            prev = ms.get("prev_frame")
+            ms["prev_frame"], ms["prev_time"] = thumb, now_m
+            if prev is not None:
+                motion = _motion_judge(camera_id, prev, thumb)
     if motion:
         ms["last_motion"] = now_m
         if not ms["recording"]:
@@ -9361,6 +9389,93 @@ def _motion_reset_prev(camera_id: str) -> None:
     ms = _MOTION.get(camera_id)
     if ms:
         ms["prev_frame"] = None
+        ms["prev_time"] = 0.0
+
+
+# ── 2.6.6: pixel comparison (build plan B16, C13) ──────────────────────────
+# 2.6.5 compared JPEG file sizes. A person barely changes the size of a
+# 9-10 KB Lorex snapshot, so nothing was recorded all day on 2026-09-30,
+# while the night-to-day switch at 06:21 did trigger. Now each frame is
+# shrunk to a MOTION_GRID greyscale picture and compared pixel by pixel,
+# after cancelling any change in overall brightness and contrast.
+MOTION_GRID = (64, 48)          # 3,072 cells; a person at 20 m covers several
+MOTION_PIXEL_DELTA = 24         # of 255: smaller differences are sensor noise
+MOTION_LIGHT_FRACTION = 0.75    # change spread over more of the picture = light
+MOTION_REGIONS = (4, 4)         # the picture in 16 areas, for MOTION_LIGHT_FRACTION
+MOTION_REGION_CHANGED = 0.10    # an area counts as changed at 10% of its cells
+MOTION_COMPARE_S = 1.0          # at most one comparison per second per camera
+
+
+def _motion_thumb(jpeg: bytes) -> tuple[bytes, float, float] | None:
+    """Decode a JPEG to MOTION_GRID greyscale; return (pixels, mean, spread).
+
+    spread is the standard deviation, floored at 1 for a flat picture.
+
+    draft() lets the JPEG decoder skip to a 1/2 to 1/8 scale, so a frame
+    costs about a millisecond. None when the bytes do not decode.
+    """
+    try:
+        img = Image.open(io.BytesIO(jpeg))
+        img.draft("L", (MOTION_GRID[0] * 2, MOTION_GRID[1] * 2))
+        pixels = img.convert("L").resize(MOTION_GRID, Image.Resampling.BOX).tobytes()
+    except (OSError, ValueError, Image.DecompressionBombError):
+        return None
+    mean = sum(pixels) / len(pixels)
+    spread = (sum((v - mean) ** 2 for v in pixels) / len(pixels)) ** 0.5
+    return pixels, mean, max(spread, 1.0)
+
+
+def _motion_diff(prev: tuple[bytes, float, float],
+                 curr: tuple[bytes, float, float]) -> tuple[float, float]:
+    """Return (changed, spread) for two MOTION_GRID pictures.
+
+    changed: share of cells that differ by more than MOTION_PIXEL_DELTA.
+    spread:  share of the MOTION_REGIONS areas with MOTION_REGION_CHANGED
+             or more of their cells changed.
+
+    Both pictures are first normalised to the same brightness and contrast
+    (each cell measured from its picture's mean, in units of its spread),
+    so a cloud or an exposure change that moves the whole picture together
+    changes nothing. That normalisation also means even an unrelated
+    picture shows only about half its cells changed, so a light change is
+    told apart by spread, not by amount: a person changes a few
+    neighbouring areas, a night-to-day switch changes all of them.
+    """
+    (pa, ma, sa), (ca, mc, sc) = prev, curr
+    gw, gh = MOTION_GRID
+    rx, ry = MOTION_REGIONS
+    # MOTION_PIXEL_DELTA is in grey levels at the previous picture's contrast.
+    limit = MOTION_PIXEL_DELTA / sa
+    per_region = [0] * (rx * ry)
+    changed = 0
+    for i, (a, c) in enumerate(zip(pa, ca)):
+        if abs((c - mc) / sc - (a - ma) / sa) > limit:
+            changed += 1
+            y, x = divmod(i, gw)
+            per_region[(y * ry // gh) * rx + (x * rx // gw)] += 1
+    region_cells = (gw // rx) * (gh // ry)
+    busy = sum(1 for n in per_region if n >= MOTION_REGION_CHANGED * region_cells)
+    return changed / len(ca), busy / len(per_region)
+
+
+def _motion_judge(camera_id: str, prev: tuple[bytes, float, float],
+                  curr: tuple[bytes, float, float]) -> bool:
+    """True for motion; logs light changes and near misses for tuning."""
+    frac, spread = _motion_diff(prev, curr)
+    pct = frac * 100.0
+    if spread > MOTION_LIGHT_FRACTION:
+        log.info(f"Motion [{camera_id}]: change across {spread:.0%} of the "
+                 f"picture ({pct:.0f}% of it changed) — treated as a light "
+                 f"change, not recorded")
+        return False
+    if pct >= CFG_MOTION_AREA_PCT:
+        log.info(f"Motion [{camera_id}]: {pct:.1f}% of the picture changed "
+                 f"(threshold {CFG_MOTION_AREA_PCT:.1f}%)")
+        return True
+    if pct >= CFG_MOTION_AREA_PCT / 2:
+        log.debug(f"Motion [{camera_id}]: {pct:.1f}% changed, under the "
+                  f"{CFG_MOTION_AREA_PCT:.1f}% threshold")
+    return False
 
 
 def _motion_quiet(ms: dict, now_m: float) -> bool:
@@ -9432,24 +9547,6 @@ def _motion_save() -> None:
     MOTION_FILE.write_text(json.dumps({"armed": armed}), encoding="utf-8")
 
 
-def _detect_motion(prev_jpeg: bytes, curr_jpeg: bytes, sensitivity: int) -> bool:
-    """
-    Fast motion detection by comparing JPEG file sizes.
-    JPEG size is strongly correlated with image entropy — a scene with motion
-    has more high-frequency content and compresses less.  Size difference
-    > threshold% of the smaller size → motion detected.
-
-    sensitivity: 1-100 (higher = more sensitive, triggers on smaller changes)
-    threshold%  = (100 - sensitivity) / 10  → sensitivity=15 → 8.5% threshold
-    """
-    if not prev_jpeg or not curr_jpeg:
-        return False
-    small = min(len(prev_jpeg), len(curr_jpeg))
-    diff  = abs(len(curr_jpeg) - len(prev_jpeg))
-    threshold_pct = (101 - sensitivity) / 10.0   # sensitivity=15 → 8.6%
-    return (diff / max(small, 1)) * 100 > threshold_pct
-
-
 def _cam_folder_name(camera: dict) -> str:
     """Derive a short filesystem-safe folder name from the camera display name.
     Uses dashes (not underscores) per naming convention."""
@@ -9480,23 +9577,42 @@ async def _ensure_cam_dir(camera: dict) -> Path:
 
 
 async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
-    """Start an ffmpeg recording subprocess for this camera (stream-copy, full quality)."""
+    """Start an ffmpeg recording subprocess for this camera (stream-copy, full quality).
+
+    2.6.6: the segment muxer starts a new file every CFG_MOTION_CLIP_S
+    while motion continues (build plan C12). Files are
+    motion_<date>_<time>_part01.mp4, part02, ...: a new event gets a new
+    date and time; a higher part number is a continuation. Each file ends
+    on the first keyframe after the interval, so lengths are approximate.
+    """
     ms = _motion_state(camera_id)
-    if ms["recording"] and ms["proc"] and ms["proc"].returncode is None:
-        return  # already recording
+    if ms["recording"]:
+        return  # already recording, or starting
+    # 2.6.6: claim the slot before the first await, so a second motion
+    # frame arriving meanwhile cannot start a second ffmpeg.
+    ms["recording"] = True
     cam_dir  = await _ensure_cam_dir(camera)
     ts       = time.strftime("%Y%m%d_%H%M%S")
-    clip     = cam_dir / f"motion_{ts}.mp4"
+    base     = f"motion_{ts}"
+    clip     = cam_dir / f"{base}_part01.mp4"
     ms["clip_path"] = clip
-    log.info(f"Motion [{camera_id}]: recording started → {clip}")
+    ms["clip_base"] = base
+    log.info(f"Motion [{camera_id}]: recording started → {clip} "
+             f"(a new file every {CFG_MOTION_CLIP_S} s while motion continues)")
     try:
         ms["proc"] = await asyncio.create_subprocess_exec(
             "ffmpeg", "-nostdin", "-loglevel", "warning",
             "-rtsp_transport", "tcp", "-timeout", "8000000",
+            "-fflags", "+genpts",   # 2.6.6: Lorex packets arrive without timestamps
             "-i", url,
             "-c", "copy",   # stream-copy: no decode/encode — nearly zero CPU
-            "-movflags", "+faststart",
-            str(clip),
+            "-f", "segment",
+            "-segment_time", str(CFG_MOTION_CLIP_S),
+            "-segment_start_number", "1",
+            "-reset_timestamps", "1",
+            "-segment_format", "mp4",
+            "-segment_format_options", "movflags=+faststart",
+            str(cam_dir / f"{base}_part%02d.mp4"),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
@@ -9504,28 +9620,43 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
         # 2.6.5: drain stderr. An undrained pipe fills at 64 KB of warnings
         # and ffmpeg then blocks, stalling the recording.
         asyncio.create_task(_drain_stderr(ms["proc"], f"REC:{camera_id}"))
-        ms["recording"] = True
     except Exception as ex:
+        ms["recording"] = False
         log.warning(f"Motion [{camera_id}]: failed to start recording: {ex}")
 
 
 async def _stop_recording(camera_id: str) -> None:
     """Gracefully stop the recording ffmpeg process."""
     ms = _motion_state(camera_id)
-    if not ms["recording"]:
+    # 2.6.6: one stop only. The keeper and the frame path could both call
+    # this for the same recording; the log showed "recording stopped" two
+    # or three times per clip (build plan B16).
+    if not ms["recording"] or ms.get("stopping"):
         return
-    proc = ms.get("proc")
-    if proc and proc.returncode is None:
-        try:
-            proc.stdin  # just accessing it is harmless
-            proc.terminate()
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except Exception:
-            try: proc.kill()
-            except Exception: pass
-    log.info(f"Motion [{camera_id}]: recording stopped → {ms.get('clip_path')}")
-    ms["recording"] = False
-    ms["proc"]      = None
+    ms["stopping"] = True
+    try:
+        proc = ms.get("proc")
+        if proc and proc.returncode is None:
+            try:
+                proc.terminate()   # ffmpeg finishes the current file on SIGTERM
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except (ProcessLookupError, asyncio.TimeoutError):
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+        base = ms.get("clip_base")
+        clip = ms.get("clip_path")
+        parts = sorted(clip.parent.glob(f"{base}_part*.mp4")) if base and clip else []
+        if len(parts) > 1:
+            log.info(f"Motion [{camera_id}]: recording stopped → {len(parts)} files, "
+                     f"{parts[0].name} to {parts[-1].name}")
+        else:
+            log.info(f"Motion [{camera_id}]: recording stopped → {clip}")
+    finally:
+        ms["recording"] = False
+        ms["proc"]      = None
+        ms["stopping"]  = False
 
 
 async def api_motion_toggle(request: web.Request) -> web.Response:
