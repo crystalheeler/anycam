@@ -26,7 +26,7 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 ## Recommended order
 
-1. **Install and check 2.6.5 and Oak-D 2.4.2** (A12, B13): motion on the Lorex channels, landscape, and the Oak-D camera start time.
+1. **Motion detection that stops after the viewer leaves** (B16): logs first. Then finish the 2.6.5 field test (A12).
 2. **Missing cameras** (B2). Logs first.
 3. **The Microseven lockout** (B6): power-cycle it, then logs if it locks up again.
 4. **The small correctness bugs**: B3, B4, B5, B12, and C10's plain message for Firefox, which matters more now that live view cannot be switched off.
@@ -41,7 +41,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| A12 | You | Install 2.6.5 on both systems | 2.6.5: motion detection on the Lorex channels with no viewer; Enhanced View changes (30 s live-view wait, retry on every open, landscape full screen, no Resolution / Frame Rate / Auto menus, loading message); zip folder is now `local_camera_discovery` | Delete the old `camera_discovery-2.6.4` folder and drop in `local_camera_discovery`, then run `touch /addons/local_camera_discovery/CHANGELOG.md` once and check for updates, so the changelog shows. Arm motion on a Lorex channel, close the page, and walk past: a clip should appear in `/media/anycam` and end about 10 s after the motion stops. Restart the add-on: the card should still say Armed (2.6.5 as first sent showed Record after any page load; the corrected zip fixes that). On the HA app, turn the phone to landscape in Enhanced View |
+| A12 | You | Finish the 2.6.5 field test | CrystalHeeler, 2026-09-30, on the test system B: landscape, menus removed, loading message, the Oak-D camera live, card loading text, Record button, zip folder and changelog, and recordings that stop all confirmed good | Still open: the classic view hiding the card thumbnail until the full stream arrives; "Stream unavailable" after 90 s (not yet seen); install 2.6.5 on the Hikvision (172) system; the ffmpeg version line in the next log |
 
 ## B. Bugs
 
@@ -52,8 +52,8 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | B4 | Ready | Camera names are written into the page unescaped | Found in 2.6.3: the classic Enhanced View info bar. Names are editable, so a crafted name could inject HTML | Escape it, then check every place the page inserts camera data |
 | B5 | Ready | "Share with community" box is ticked and does nothing | Found in 2.6.3: a placeholder in the page is never filled in | Fill the placeholder when the page is built |
 | B12 | Ready | VAAPI reported as available on a Pi 4 | Log1 startup. The Pi has no VAAPI device; the check only confirms ffmpeg was built with VAAPI | Check for a real device before reporting it available |
-| B13 | You | **The H.264 camera at 192.168.50.73:8765 is slow to start everywhere** | CrystalHeeler, 2026-09-29. The test system B log measured every connection: 12 produced a first frame after 19 to 28 s (median 23 s); 13 gave up first. Cause: the stream comes from the Oak-D camera add-on, whose ffmpeg ran libx264 with no `-g`, so x264's default of one keyframe every 250 frames applied. Oak-D 2.4.2 (`<project folder>`, tag v2.4.2, CrystalHeeler's order) sets one keyframe per second. AnyCam 2.6.5 also waits 30 s and retries | Install Oak-D 2.4.2 (`oak_camera_app-2.4.2.zip`, folder `oak_camera_app`). Then open the camera: the card and live view should show a picture in about 1 s |
 | B6 | You | **The Microseven is stuck in its rate-limit lockout** | CrystalHeeler, 2026-09-29: the Microseven at 10.0.0.22 is recognized and authenticates, but serves MJPEG only, with no RTSP stream. That matches the lockout CLAUDE.md describes, which only a power cycle reliably clears. It may be the same fault as the "Invalid data found" regression open since 2.4.0-rc3.3. It also blocks the last Tier 1 check: that the 2.6.1 ONVIF fix stops AnyCam opening connections inside the Microseven's 5 s cooldown | Power-cycle the camera. If RTSP comes back and stays, check the log for connection resets while re-entering its credentials. If it locks up again, something is still hitting it too often: send the log from the test system A (rule 2) |
+| B16 | Logs | **Motion detection stops after the viewer leaves** | CrystalHeeler, 2026-09-30, on 2.6.5: three cameras armed since the morning; they seem to have stopped detecting around 08:45, when he left the house, or a little before. He suspects something stops once the HA app is closed. 2.6.5 is meant to keep an armed camera's loop running with no viewer | Logs first: the add-on log covering 08:00 onward, which three cameras, and a time when motion should have been recorded |
 | B15 | Discuss | Opening the classic view stops the card's working stream | test system B log, 12:19:35 on 2026-09-29: entering the classic view cancelled a card stream at frame 38,450 and opened a new full-resolution connection, which timed out after 30 s with no frames. Proposed for 2.6.5 as fix 1c and held back: keeping the old stream until the new one delivers needs two connections to one camera at once, through per-camera state that assumes one. Rate-limited cameras (Microseven) cannot take two connections | Discuss. Live view now covers this camera in Chrome, so the classic view is the fallback path only |
 | B8 | Ready | Scan progress bar jumps and is inaccurate | `MoreToDo.txt`; changelog 2.2.9 and 2.3.0 | Base progress on work completed, not time elapsed |
 | B9 | Later | "Unknown child process pid" warning | Cosmetic (changelog 2.2.9) | Low priority |
@@ -117,6 +117,13 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
+| 2.6.5 Enhanced View: landscape full screen, menus removed, loading message | CrystalHeeler, 2026-09-29 | CrystalHeeler, 2026-09-30: all good on the HA app |
+| The the Oak-D camera camera slow to start | This plan, B13 | CrystalHeeler, 2026-09-30: good, with AnyCam 2.6.5 and Oak-D 2.4.2 (one keyframe per second) |
+| Cards say "Loading feed, please wait…" | This plan, B14 | CrystalHeeler, 2026-09-30: good. "Stream unavailable" after 90 s not yet seen |
+| Record button shows the server's state | 2.6.5 field test | CrystalHeeler, 2026-09-30: good |
+| Recordings stop | This plan, B1 | Log 2026-09-30: a 9 s clip at 06:21; CrystalHeeler: good |
+| Changelog shows in HA; fixed zip folder | This plan, F8 | CrystalHeeler, 2026-09-30: good |
+| Live View option removed from the Configuration tab | 2.6.4 | CrystalHeeler, 2026-09-30: good |
 | Motion detection on the Lorex channels; recordings that never stop | This plan, B1; CrystalHeeler, 2026-09-29 ("no longer working" on 2.6.4) | 2.6.5. Cause: motion ran only on the ffmpeg path, which the Lorex channels used only in the classic Enhanced View; 2.6.4's live view removed that. Now both paths, no viewer needed, a 10 s keeper ends recordings, armed state saved. Field check in A12 |
 | Motion detection that does not depend on snapshot polling | This plan, C2 | 2.6.5: an armed camera's loop no longer idles out, and the keeper restarts it |
 | "No changelog found" after an update | This plan, F8 | 2.6.5, CrystalHeeler's order: the zip folder is always `local_camera_discovery`; CLAUDE.md rule 3 changed. One `touch` needed on the first update |
