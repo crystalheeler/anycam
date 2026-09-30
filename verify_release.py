@@ -161,9 +161,32 @@ CONTRACTS = {
     # The go2rtc exit must drop an unconsumed flag (2.4.0-rc3.3 Bug A shape).
     "handle_focus_clear":    ["_FOCUS_ENGINE",
                               'state.pop("focus_leave_kill", None)'],
+    # 2.6.6: motion detection. Both frame paths must feed the detector; the
+    # detector must cancel brightness and contrast and tell light by spread;
+    # a recording must be split, and started and stopped once each.
+    "_motion_on_frame":      ["MOTION_COMPARE_S", "_motion_thumb", "_motion_judge",
+                              "_start_recording", "_stop_recording"],
+    "_motion_diff":          ["MOTION_PIXEL_DELTA", "MOTION_REGIONS", "/ sa", "/ sc"],
+    "_motion_judge":         ["MOTION_LIGHT_FRACTION", "CFG_MOTION_AREA_PCT"],
+    "_start_recording":      ['"segment"', "CFG_MOTION_CLIP_S", "_part%02d.mp4",
+                              'ms["recording"] = True', "_drain_stderr"],
+    "_stop_recording":       ['ms.get("stopping")', 'ms["stopping"] = True'],
+    # 2.6.6: live cards stay within the width a phone can decode.
+    "_go2rtc_card_source":   ["CARD_MAX_WIDTH", "_go2rtc_relay_url", "_dahua_sub_stream"],
+    # 2.6.6 (B9): never signal an ffmpeg that is already exiting.
+    "_stop_proc":            ["exited_grace", "proc.returncode is None"],
 }
+# Frame paths that must call the motion detector (checked below).
+MOTION_CALLERS = ("snap_loop", "http_snap_loop")
 all_ok = True
 found_contracts = set()
+for node in ast.walk(tree):
+    # 2.6.6: before 2.6.5 motion was checked on the ffmpeg path only, and the
+    # Lorex channels, which poll HTTP snapshots, recorded nothing.
+    if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name in MOTION_CALLERS:
+        if "_motion_on_frame(" not in (ast.get_source_segment(src, node) or ""):
+            fail(f"{node.name}() no longer calls _motion_on_frame — motion detection would miss that path")
+            all_ok = False
 for node in ast.walk(tree):
     if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
         if node.name in CONTRACTS:
