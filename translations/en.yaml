@@ -98,9 +98,9 @@ configuration:
     description: >-
       Used only when Use Global Recording Settings is ON. While motion
       continues, start a new file this often; an event shorter than this
-      is one file. Files are named motion_DATE_TIME_part01.mp4, part02 and
-      so on. Lengths are approximate, because a file can only end on a
-      keyframe. Default 30s.
+      is one file, named motion_DATE_TIME.mp4. A longer event is split into
+      motion_DATE_TIME_part01.mp4, part02 and so on. Lengths are
+      approximate, because a file can only end on a keyframe. Default 30s.
   motion_cooldown_secs:
     name: Global Motion Cooldown (seconds)
     description: >-
