@@ -155,13 +155,15 @@ def _env_int(name: str, default: int, lo: int, hi: int) -> int:
 
 
 CFG_MOTION_LEVEL         = _env_int("MOTION_DETECT_LEVEL", 63, 1, 100)
-CFG_MOTION_AREA_PCT      = 74.0 * (1.0 / 74.0) ** ((CFG_MOTION_LEVEL - 1) / 99.0)
 # 2.6.6: new file every N seconds while motion continues (build plan C12).
 CFG_MOTION_CLIP_S        = {"10s": 10, "20s": 20, "30s": 30, "1min": 60,
                             "2min": 120, "5min": 300}.get(
-                                os.environ.get("MOTION_CLIP_LENGTH", "1min"), 60)
-CFG_MOTION_COOL          = int(os.environ.get("MOTION_COOLDOWN_SECS",     "10"))
-CFG_MOTION_PAD           = int(os.environ.get("MOTION_CLIP_PADDING_SECS", "3"))
+                                os.environ.get("MOTION_CLIP_LENGTH", "30s"), 30)
+CFG_MOTION_COOL          = _env_int("MOTION_COOLDOWN_SECS", 5, 1, 300)
+CFG_MOTION_PAD           = _env_int("MOTION_CLIP_PADDING_SECS", 3, 0, 30)
+# 2.6.6: the recording settings above apply only when this is on; then they
+# replace every camera's own settings (CrystalHeeler, 2026-09-30).
+CFG_MOTION_GLOBAL        = os.environ.get("GLOBAL_RECORDING_SETTINGS", "false").lower() == "true"
 CFG_UNRESTRICTED_BROWSER = os.environ.get("UNRESTRICTED_STORAGE_BROWSER", "false").lower() == "true"
 CFG_LOG_DEBUG            = os.environ.get("LOG_DEBUG",   "false").lower() == "true"
 CFG_LOG_INFO             = os.environ.get("LOG_INFO",    "true").lower()  == "true"
@@ -9507,7 +9509,7 @@ def _motion_on_frame(camera_id: str, frame: bytes) -> None:
             cam_url = build_authenticated_url(camera) if camera else None
             if cam_url:
                 asyncio.create_task(_start_recording(camera_id, camera, cam_url))
-    elif ms["recording"] and _motion_quiet(ms, now_m):
+    elif ms["recording"] and _motion_quiet(camera_id, ms, now_m):
         asyncio.create_task(_stop_recording(camera_id))
 
 
@@ -9595,13 +9597,14 @@ def _motion_judge(camera_id: str, prev: tuple[bytes, float, float],
                  f"picture ({pct:.0f}% of it changed) — treated as a light "
                  f"change, not recorded")
         return False
-    if pct >= CFG_MOTION_AREA_PCT:
+    area = _motion_cfg(camera_id)["area_pct"]
+    if pct >= area:
         log.info(f"Motion [{camera_id}]: {pct:.1f}% of the picture changed "
-                 f"(threshold {CFG_MOTION_AREA_PCT:.1f}%)")
+                 f"(threshold {area:.1f}%)")
         return True
-    if pct >= CFG_MOTION_AREA_PCT / 2:
+    if pct >= area / 2:
         log.debug(f"Motion [{camera_id}]: {pct:.1f}% changed, under the "
-                  f"{CFG_MOTION_AREA_PCT:.1f}% threshold")
+                  f"{area:.1f}% threshold")
     return False
 
 
@@ -9633,18 +9636,152 @@ def _motion_report_peak(camera_id: str, ms: dict, now_m: float) -> None:
     ms["peak_since"], ms["peak_n"], ms["peak_pct"], ms["peak_light"] = now_m, 0, 0.0, 0
     if not n:
         return
+    ms["last_peak_pct"] = pct      # for the settings panel's live readout
+    cfg = _motion_cfg(camera_id)
     extra = f"; {light} light change(s) ignored" if light else ""
+    needed = _motion_level_for_pct(pct)
+    at = (f"would record at sensitivity {needed} or higher" if needed <= 100
+          else "too small to record at any sensitivity")
     # INFO when something moved, DEBUG for a still scene, so a quiet night
     # does not fill the log.
     (log.info if pct >= 0.5 or light else log.debug)(
         f"Motion [{camera_id}]: largest change in the last {MOTION_PEAK_REPORT_S} s: "
-        f"{pct:.1f}% of the picture (records at {CFG_MOTION_AREA_PCT:.1f}%; "
-        f"{n} comparisons{extra})")
+        f"{pct:.1f}% of the picture, {at} (set to {cfg['level']}, "
+        f"{cfg['area_pct']:.1f}%; {n} comparisons{extra})")
 
 
-def _motion_quiet(ms: dict, now_m: float) -> bool:
-    """True once cooldown plus padding have passed with no motion."""
-    return now_m - ms.get("last_motion", 0) > CFG_MOTION_COOL + CFG_MOTION_PAD
+def _motion_quiet(camera_id: str, ms: dict, now_m: float) -> bool:
+    """True once the camera's cooldown plus tail have passed with no motion."""
+    cfg = _motion_cfg(camera_id)
+    return now_m - ms.get("last_motion", 0) > cfg["cooldown"] + cfg["tail"]
+
+
+# ── 2.6.6: per-camera recording settings ───────────────────────────────────
+# Each camera has its own sensitivity, cooldown, tail, file length and
+# folder, set from the cog on its card (CrystalHeeler, 2026-09-30). When the
+# Configuration tab's global_recording_settings is on, its values replace
+# every camera's. Stored in MOTION_FILE beside the armed list.
+MOTION_DEFAULTS = {"level": 63, "cooldown": 5, "tail": 3, "clip": "30s",
+                   "path": "/media/anycam"}
+MOTION_CLIP_CHOICES = {"10s": 10, "20s": 20, "30s": 30, "1min": 60,
+                       "2min": 120, "5min": 300}
+MOTION_PATH_ROOT = "/media"     # the add-on maps only /media (config.yaml)
+_MOTION_CFG: dict = {}          # camera_id -> settings that differ from defaults
+
+
+def _motion_area_pct(level: int) -> float:
+    """Sensitivity 1 to 100 -> share of the picture, 74% down to 1% (log)."""
+    return 74.0 * (1.0 / 74.0) ** ((level - 1) / 99.0)
+
+
+def _motion_level_for_pct(pct: float) -> int:
+    """Lowest sensitivity that records a change of pct%; 101 = none does."""
+    import math
+    if pct <= 0:
+        return 101
+    if pct >= 74.0:
+        return 1
+    return min(101, math.ceil(1 + 99 * math.log(74.0 / pct) / math.log(74.0) - 1e-9))
+
+
+def _motion_cfg(camera_id: str) -> dict:
+    """The settings in force for one camera."""
+    if CFG_MOTION_GLOBAL:
+        cfg = {"level": CFG_MOTION_LEVEL, "cooldown": CFG_MOTION_COOL,
+               "tail": CFG_MOTION_PAD, "path": CFG_RECORDINGS,
+               "clip": next((k for k, v in MOTION_CLIP_CHOICES.items()
+                             if v == CFG_MOTION_CLIP_S), "30s")}
+    else:
+        cfg = {**MOTION_DEFAULTS, **_MOTION_CFG.get(camera_id, {})}
+    cfg["area_pct"] = _motion_area_pct(cfg["level"])
+    cfg["clip_s"] = MOTION_CLIP_CHOICES[cfg["clip"]]
+    return cfg
+
+
+def _motion_validate(data: dict) -> tuple[dict, list[str]]:
+    """Check one camera's settings from the page; return (clean, errors)."""
+    clean, errors = {}, []
+    for key, lo, hi, label in (("level", 1, 100, "Sensitivity"),
+                               ("cooldown", 1, 300, "Cooldown"),
+                               ("tail", 0, 30, "Tail")):
+        try:
+            v = int(data.get(key, MOTION_DEFAULTS[key]))
+        except (TypeError, ValueError):
+            errors.append(f"{label} must be a whole number")
+            continue
+        if not lo <= v <= hi:
+            errors.append(f"{label} must be {lo} to {hi}")
+        clean[key] = v
+    clip = str(data.get("clip", MOTION_DEFAULTS["clip"]))
+    if clip not in MOTION_CLIP_CHOICES:
+        errors.append("Recording length must be one of " + ", ".join(MOTION_CLIP_CHOICES))
+    clean["clip"] = clip
+    raw = str(data.get("path", MOTION_DEFAULTS["path"])).strip()
+    # posixpath: these are paths inside the Linux container on any host.
+    import posixpath
+    path = posixpath.normpath(raw) if raw else ""
+    if not path.startswith("/") or not (path == MOTION_PATH_ROOT
+                                        or path.startswith(MOTION_PATH_ROOT + "/")):
+        errors.append(f"Recording folder must be under {MOTION_PATH_ROOT}")
+    clean["path"] = path
+    return clean, errors
+
+
+def _motion_settings_payload(camera_id: str) -> dict:
+    ms = _MOTION.get(camera_id) or {}
+    peak = max(ms.get("peak_pct", 0.0), ms.get("last_peak_pct", 0.0))
+    cfg = _motion_cfg(camera_id)
+    return {
+        "settings": {k: cfg[k] for k in MOTION_DEFAULTS},
+        "custom":   camera_id in _MOTION_CFG,
+        "global":   CFG_MOTION_GLOBAL,
+        "defaults": MOTION_DEFAULTS,
+        "clip_choices": list(MOTION_CLIP_CHOICES),
+        "armed":    bool(ms.get("enabled")),
+        # The lowest sensitivity that would have recorded the biggest
+        # movement in the last minute or two; None before any comparison.
+        "peak_level": _motion_level_for_pct(peak) if peak > 0 else None,
+    }
+
+
+async def api_motion_settings(request: web.Request) -> web.Response:
+    """GET/POST/DELETE /api/cameras/{camera_id}/motion/settings (2.6.6).
+
+    POST saves the camera's own settings; DELETE returns it to defaults.
+    Both are refused while the global settings are on, because they would
+    not apply.
+    """
+    camera_id = request.match_info["camera_id"]
+    if camera_id not in CAMERAS:
+        return web.json_response({"error": "Camera not found"}, status=404)
+    if request.method != "GET":
+        if CFG_MOTION_GLOBAL:
+            return web.json_response(
+                {"error": "Global recording settings are on in the Configuration tab"},
+                status=409)
+        if request.method == "DELETE":
+            _MOTION_CFG.pop(camera_id, None)
+        else:
+            try:
+                data = await request.json()
+            except ValueError:
+                return web.json_response({"error": "Invalid JSON"}, status=400)
+            clean, errors = _motion_validate(data if isinstance(data, dict) else {})
+            if errors:
+                return web.json_response({"error": "; ".join(errors)}, status=400)
+            custom = {k: v for k, v in clean.items() if v != MOTION_DEFAULTS[k]}
+            if custom:
+                _MOTION_CFG[camera_id] = custom
+            else:
+                _MOTION_CFG.pop(camera_id, None)
+        log.info(f"Motion [{camera_id}]: settings saved — "
+                 + ", ".join(f"{k}={v}" for k, v in _motion_cfg(camera_id).items()
+                             if k in MOTION_DEFAULTS))
+        try:
+            await asyncio.to_thread(_motion_save)
+        except OSError as ex:
+            log.warning(f"Motion: could not save {MOTION_FILE}: {ex}")
+    return web.json_response(_motion_settings_payload(camera_id))
 
 
 def _motion_ensure_loop(camera_id: str) -> None:
@@ -9682,7 +9819,7 @@ async def _motion_keeper() -> None:
                                 f"(rc={proc.returncode}) → {ms.get('clip_path')}")
                     ms["recording"] = False
                     ms["proc"] = None
-                elif ms["recording"] and (not ms["enabled"] or _motion_quiet(ms, now_m)):
+                elif ms["recording"] and (not ms["enabled"] or _motion_quiet(camera_id, ms, now_m)):
                     await _stop_recording(camera_id)
                 if ms["enabled"]:
                     _motion_ensure_loop(camera_id)
@@ -9704,12 +9841,25 @@ def _motion_load() -> None:
         if camera_id in CAMERAS:
             _motion_state(camera_id)["enabled"] = True
             log.info(f"Motion [{camera_id}]: armed (restored)")
+    try:
+        saved = json.loads(MOTION_FILE.read_text(encoding="utf-8")).get("cameras", {})
+    except (OSError, ValueError):
+        saved = {}
+    for camera_id, raw in (saved.items() if isinstance(saved, dict) else []):
+        clean, errors = _motion_validate({**MOTION_DEFAULTS, **(raw or {})})
+        if camera_id in CAMERAS and not errors:
+            _MOTION_CFG[camera_id] = {k: v for k, v in clean.items()
+                                      if v != MOTION_DEFAULTS[k]}
+    if CFG_MOTION_GLOBAL:
+        log.info("Motion: global recording settings are on — they apply to "
+                 "every camera")
 
 
 def _motion_save() -> None:
     armed = sorted(cid for cid, ms in _MOTION.items() if ms["enabled"])
     DATA_DIR.mkdir(exist_ok=True)
-    MOTION_FILE.write_text(json.dumps({"armed": armed}), encoding="utf-8")
+    MOTION_FILE.write_text(json.dumps({"armed": armed, "cameras": _MOTION_CFG}),
+                           encoding="utf-8")
 
 
 def _cam_folder_name(camera: dict) -> str:
@@ -9733,10 +9883,13 @@ def _cam_folder_name(camera: dict) -> str:
             name = f"{name}-{suffix}"
     return name[:30]
 
-async def _ensure_cam_dir(camera: dict) -> Path:
-    """Create and return the recording directory for a camera."""
+async def _ensure_cam_dir(camera: dict, base: Path | None = None) -> Path:
+    """Create and return the recording directory for a camera.
+
+    2.6.6: base is the camera's own recording folder; MEDIA_DIR otherwise.
+    """
     folder = _cam_folder_name(camera)
-    path   = MEDIA_DIR / folder
+    path   = (base or MEDIA_DIR) / folder
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -9744,7 +9897,7 @@ async def _ensure_cam_dir(camera: dict) -> Path:
 async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
     """Start an ffmpeg recording subprocess for this camera (stream-copy, full quality).
 
-    2.6.6: the segment muxer starts a new file every CFG_MOTION_CLIP_S
+    2.6.6: the segment muxer starts a new file every clip_s seconds
     while motion continues (build plan C12). Files are
     motion_<date>_<time>_part01.mp4, part02, ...: a new event gets a new
     date and time; a higher part number is a continuation. Each file ends
@@ -9756,14 +9909,15 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
     # 2.6.6: claim the slot before the first await, so a second motion
     # frame arriving meanwhile cannot start a second ffmpeg.
     ms["recording"] = True
-    cam_dir  = await _ensure_cam_dir(camera)
+    cfg      = _motion_cfg(camera_id)
+    cam_dir  = await _ensure_cam_dir(camera, Path(cfg["path"]))
     ts       = time.strftime("%Y%m%d_%H%M%S")
     base     = f"motion_{ts}"
     clip     = cam_dir / f"{base}_part01.mp4"
     ms["clip_path"] = clip
     ms["clip_base"] = base
     log.info(f"Motion [{camera_id}]: recording started → {clip} "
-             f"(a new file every {CFG_MOTION_CLIP_S} s while motion continues)")
+             f"(a new file every {cfg['clip_s']} s while motion continues)")
     try:
         ms["proc"] = await asyncio.create_subprocess_exec(
             "ffmpeg", "-nostdin", "-loglevel", "warning",
@@ -9772,7 +9926,7 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
             "-i", url,
             "-c", "copy",   # stream-copy: no decode/encode — nearly zero CPU
             "-f", "segment",
-            "-segment_time", str(CFG_MOTION_CLIP_S),
+            "-segment_time", str(cfg["clip_s"]),
             "-segment_start_number", "1",
             "-reset_timestamps", "1",
             "-segment_format", "mp4",
@@ -11972,6 +12126,15 @@ const BASE = '___BASE___';
 const CFG_UNRESTRICTED_BROWSER = ___UNRESTRICTED___;
 const CFG_ADAPTIVE_QUALITY     = ___ADAPTIVE_QUALITY___;
 const STORAGE_UNRESTRICTED = ___UNRESTRICTED___;
+const COG_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+  + ' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/>'
+  + '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33'
+  + ' 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06'
+  + 'a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09'
+  + 'A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68'
+  + ' 1.65 1.65 0 0 0 10 3.17V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06'
+  + 'a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09'
+  + 'a1.65 1.65 0 0 0-1.51 1z"/></svg>';
 const PROTO_ICONS = {RTSP:'📹',ONVIF:'🔭',MJPEG:'🖼️',HLS:'📡',RTMP:'📺',WebRTC:'🔗','WS-RTSP':'🔌',HTTP:'🌐',DVR:'💾'};
 const PROTO_CLR   = {
   RTSP:['1e3a5f','79b8ff'],ONVIF:['2d1e4a','c09eff'],MJPEG:['1e3a30','79ffcd'],
@@ -12628,6 +12791,120 @@ async function syncMotion(redraw) {
   } catch(e) {}
 }
 setInterval(() => syncMotion(true), 3000);
+
+/* ── Camera settings: the cog menu (2.6.6) ───────────────────────────────
+ * One camera's motion and recording settings. The sensitivity slider runs
+ * from 1 (left, least sensitive) to 100 (right, most sensitive) and shows
+ * its value as it moves. Under it, a live reading: the lowest setting that
+ * would have recorded the biggest movement of the last minute or two, also
+ * marked on the slider. Read-only while the Configuration tab's global
+ * recording settings are on. */
+let _csCamId = null;
+let _csTimer = null;
+
+async function openCamSettings(camId) {
+  const cam = cameras.find(c => c.id === camId);
+  _csCamId = camId;
+  document.getElementById('cs-title').textContent = 'Settings — ' + (cam ? displayName(cam) : camId);
+  document.getElementById('cs-error').textContent = '';
+  document.getElementById('cam-settings-modal').classList.add('open');
+  await _csLoad(true);
+  clearInterval(_csTimer);
+  _csTimer = setInterval(() => _csLoad(false), 3000);
+}
+
+function closeCamSettings() {
+  clearInterval(_csTimer);
+  _csTimer = null;
+  _csCamId = null;
+  document.getElementById('cam-settings-modal').classList.remove('open');
+}
+
+// fill: true sets every field; false refreshes only the live reading, so
+// a poll never overwrites what the user is typing.
+async function _csLoad(fill) {
+  const camId = _csCamId;
+  if (!camId) return;
+  let d;
+  try {
+    d = await (await fetch(BASE + '/api/cameras/' + encodeURIComponent(camId) + '/motion/settings')).json();
+  } catch (e) { return; }
+  if (camId !== _csCamId || !d || !d.settings) return;
+  if (fill) _csFill(d);
+  _csPeak(d);
+}
+
+function _csFill(d) {
+  const st = d.settings;
+  const sel = document.getElementById('cs-clip');
+  sel.innerHTML = d.clip_choices.map(c => '<option value="' + esc(c) + '">' + esc(c) + '</option>').join('');
+  document.getElementById('cs-level').value    = st.level;
+  document.getElementById('cs-cooldown').value = st.cooldown;
+  document.getElementById('cs-tail').value     = st.tail;
+  sel.value                                    = st.clip;
+  document.getElementById('cs-path').value     = st.path;
+  csLevelShow();
+  const off = !!d.global;
+  ['cs-level', 'cs-cooldown', 'cs-tail', 'cs-clip', 'cs-path', 'cs-save', 'cs-reset']
+    .forEach(id => { document.getElementById(id).disabled = off; });
+  document.getElementById('cs-global').style.display = off ? '' : 'none';
+}
+
+function csLevelShow() {
+  document.getElementById('cs-level-val').textContent = document.getElementById('cs-level').value;
+}
+
+function _csPeak(d) {
+  const txt  = document.getElementById('cs-peak');
+  const mark = document.getElementById('cs-peak-mark');
+  mark.style.display = 'none';
+  if (!d.armed) {
+    txt.textContent = 'Arm this camera (Record button) to see how strongly movement registers.';
+  } else if (d.peak_level === null || d.peak_level === undefined) {
+    txt.textContent = 'No movement seen yet. Walk past the camera to test.';
+  } else if (d.peak_level > 100) {
+    txt.textContent = 'Recent movement was too small to record, even at 100.';
+  } else {
+    txt.textContent = 'Biggest recent movement: records at ' + d.peak_level + ' or higher.';
+    mark.style.left = ((d.peak_level - 1) / 99 * 100) + '%';
+    mark.style.display = '';
+  }
+}
+
+async function saveCamSettings() {
+  const camId = _csCamId;
+  if (!camId) return;
+  const body = {
+    level:    parseInt(document.getElementById('cs-level').value, 10),
+    cooldown: parseInt(document.getElementById('cs-cooldown').value, 10),
+    tail:     parseInt(document.getElementById('cs-tail').value, 10),
+    clip:     document.getElementById('cs-clip').value,
+    path:     document.getElementById('cs-path').value.trim(),
+  };
+  const err = document.getElementById('cs-error');
+  try {
+    const r = await fetch(BASE + '/api/cameras/' + encodeURIComponent(camId) + '/motion/settings',
+                          {method: 'POST', headers: {'Content-Type': 'application/json'},
+                           body: JSON.stringify(body)});
+    const d = await r.json();
+    if (!r.ok) { err.textContent = d.error || 'Could not save'; return; }
+  } catch (e) { err.textContent = 'Could not save: ' + e; return; }
+  closeCamSettings();
+  showToast('Settings saved');
+}
+
+async function resetCamSettings() {
+  const camId = _csCamId;
+  if (!camId) return;
+  try {
+    const r = await fetch(BASE + '/api/cameras/' + encodeURIComponent(camId) + '/motion/settings',
+                          {method: 'DELETE'});
+    const d = await r.json();
+    if (!r.ok) { document.getElementById('cs-error').textContent = d.error || 'Could not reset'; return; }
+    _csFill(d);
+    _csPeak(d);
+  } catch (e) {}
+}
 
 /* ── go2rtc live view (2.6.3, Tier 2) ──────────────────────────────────────
  * Enhanced View plays through the bundled
@@ -13401,6 +13678,7 @@ async function closeFocus() {
 // Close focus on Escape key
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && _focusCamId) closeFocus();
+  else if (e.key === 'Escape' && _csCamId) closeCamSettings();
 });
 
 // When the browser tab returns to focus after being backgrounded, the browser
@@ -13644,12 +13922,6 @@ function dotClass(cam) {
   return 'dot-error';
 }
 
-function protoBadge(proto) {
-  const [bg, fg] = PROTO_CLR[proto] || ['2a2a2a', 'aaaaaa'];
-  return '<span class="badge" style="background:#' + bg + ';color:#' + fg + '">'
-       + (PROTO_ICONS[proto] || '') + ' ' + proto + '</span>';
-}
-
 /* rc2.5: pick the most useful port to show in the card badge.
    cam.port is the camera's primary HTTP/identification port (set at ONVIF
    discovery, often 80) and may differ from where the actual feed comes
@@ -13712,6 +13984,12 @@ function feedHTML(cam) {
 
 function identityHTML(cam) {
   const rows = [];
+  // 2.6.6: protocol, IP and port moved here from the card's badges, and
+  // always first (CrystalHeeler, 2026-09-30).
+  if (cam.protocol) rows.push(['Protocol', ((PROTO_ICONS[cam.protocol] || '') + ' ' + cam.protocol).trim()]);
+  if (cam.ip)       rows.push(['IP address', cam.ip]);
+  const port = cardPort(cam);
+  if (port)         rows.push(['Port', String(port)]);
   if (cam.manufacturer)   rows.push(['Manufacturer', cam.manufacturer]);
   if (cam.mac_addr) {
     const macLabel = cam.mac_addr + (cam.mac_vendor ? '  (' + cam.mac_vendor + ')' : '');
@@ -13763,9 +14041,6 @@ function cardActions(cam, clearBtn, notCamBtn) {
     return '<button class="btn btn-ghost btn-sm" onclick="confirmCamera(' + jsArg(cam.id) + ')">Keep (may be offline)</button>'
          + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(' + jsArg(cam.id) + ')">Remove</button>';
   }
-  const testBtn = (cam.status === 'ready' && ['proxy','hls'].includes(cam.display || 'proxy'))
-    ? '<button class="btn btn-ghost btn-sm" onclick="testStream(event,' + jsArg(cam.id) + ')" title="Test stream connectivity">Test Stream</button>'
-    : '';
   const motOn = !!_motionEnabled[cam.id];
   const recOn = !!_recording[cam.id];
   const recBtn = (cam.status === 'ready' && ['proxy'].includes(cam.display || 'proxy'))
@@ -13827,7 +14102,7 @@ function cardActions(cam, clearBtn, notCamBtn) {
         + '🔍 Deep Re-Probe (skipped paths)</button>';
     }
   }
-  return testBtn + clearBtn + reprobeBtn + notCamBtn + recBtn + webBtn
+  return clearBtn + reprobeBtn + notCamBtn + recBtn + webBtn
        + '<button class="btn btn-danger btn-sm" onclick="deleteCamera(' + jsArg(cam.id) + ')">Remove</button>';
 }
 
@@ -13867,20 +14142,6 @@ async function deepReprobe(cid) {
     try { await loadCameras(); } catch (_) {}
   }
 }
-async function testStream(ev, cid) {
-  const btn = ev.target, orig = btn.textContent;
-  btn.textContent = 'Testing...'; btn.disabled = true;
-  try {
-    const r = await fetch(BASE + '/stream/' + cid + '/test');
-    const d = await r.json();
-    const msg = d.success
-      ? 'Stream OK  Codec:' + (d.codec||'?') + '  ' + (d.width||'?') + 'x' + (d.height||'?') + ' FPS:' + (d.fps||'?') + '\n\nIf live view fails, try H.264 720p on the camera.'
-      : 'Stream test failed\n' + (d.error||'Unknown') + '\nURL: ' + (d.url||'');
-    alert(msg);
-  } catch(e) { alert('Test failed: ' + e); }
-  finally { btn.textContent = orig; btn.disabled = false; }
-}
-
 /* rc2.1: generic-name detector. ONVIF often returns boilerplate names
    like "IPCAM" or "Network Camera" instead of a real model. When the
    camera record has a manufacturer (typically set from MAC OUI lookup),
@@ -14015,11 +14276,17 @@ function cardHTML(cam) {
     + '<div class="status-dot ' + dotClass(cam) + '"></div>'
     + '<span class="card-name" title="' + name + '"'
     + ' onclick="openRename(' + jsArg(cam.id) + ',' + jsArg(displayName(cam)) + ')">'
-    + name + '</span></div>'
-    + '<div class="badges">' + protoBadge(cam.protocol)
-    + '<span class="badge" style="background:#2d2020;color:#e88">' + esc(cam.ip) + '</span>'
-    + '<span class="badge" style="background:#1e2d1e;color:#6fcf97">:' + cardPort(cam) + '</span>'
-    + credBdg + uncBdg + upgradeBdg + hevcPlusBdg + lockedBdg + '</div>'
+    + name + '</span>'
+    // 2.6.6: per-camera settings (motion and recording), top right of the
+    // card's lower half.
+    + (cam.status === 'ready'
+        ? '<button class="card-cog" title="Camera settings" aria-label="Camera settings"'
+          + ' onclick="event.stopPropagation();openCamSettings(' + jsArg(cam.id) + ')">' + COG_SVG + '</button>'
+        : '')
+    + '</div>'
+    + ((credBdg + uncBdg + upgradeBdg + hevcPlusBdg + lockedBdg)
+        ? '<div class="badges">' + credBdg + uncBdg + upgradeBdg + hevcPlusBdg + lockedBdg + '</div>'
+        : '')
     + '</div>'
     + identityHTML(cam)
     + credFormHTML(cam)
@@ -15997,60 +16264,6 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
 
 
 
-async def handle_stream_test(request: web.Request) -> web.Response:
-    """
-    GET /stream/{camera_id}/test — quick stream reachability check via ffprobe.
-    Returns JSON with codec info or an error.
-    """
-    camera_id = request.match_info["camera_id"]
-    camera    = CAMERAS.get(camera_id)
-    if not camera:
-        return web.json_response({"ok": False, "error": "Not found"}, status=404)
-
-    url = build_authenticated_url(camera)
-    if not url:
-        return web.json_response({"ok": False, "error": "No stream URL"})
-
-    proto = camera.get("protocol", "RTSP")
-    extra = ["-rtsp_transport", "tcp"] if proto in ("RTSP", "DVR", "ONVIF") else []
-    # 2.4.0-rc3.5 Leak F fix: handle_stream_test fires when the user clicks
-    # the Test Stream button. Single ffprobe = single TCP open. Single click
-    # is fine, but rapid double-clicks (or clicks while a scan is running on
-    # the same IP) could land inside the per-IP cooldown for throttled
-    # brands. Cross-sequence tracker handles this — if no recent activity,
-    # throttle_wait_if_needed returns immediately; if recent, it waits the
-    # right amount. User-perceptible cost: up to throttle_s (~5s for Hipcam)
-    # for the affected camera; zero impact otherwise.
-    throttle_s = _brand_throttle_seconds(camera)
-    if throttle_s > 0:
-        await _throttle_wait_if_needed(camera.get("ip", ""),
-                                       throttle_s, "stream test ffprobe")
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", *extra,
-            "-show_entries", "stream=codec_type,codec_name,width,height",
-            "-print_format", "json", "-i", url,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
-        if proc.returncode == 0:
-            streams = json.loads(out.decode("utf-8", errors="replace")).get("streams", [])
-            video   = next((s for s in streams if s.get("codec_type") == "video"), None)
-            return web.json_response({
-                "ok":      bool(video),
-                "streams": len(streams),
-                "codec":   video.get("codec_name", "") if video else "",
-                "width":   video.get("width") if video else None,
-                "height":  video.get("height") if video else None,
-            })
-    except Exception as ex:
-        log.debug(f"handle_stream_test {camera_id}: {ex}")
-
-    return web.json_response({"ok": False, "error": "Probe failed"})
-
-
-
 def build_html() -> str:
     js_code = _JS.replace('___BASE___', INGRESS_PATH)
     js_code = js_code.replace('___UNRESTRICTED___',
@@ -16122,6 +16335,8 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .info-overlay a{{color:var(--primary);font-size:.76rem}}
 .info-overlay code{{font-size:.68rem;color:var(--text-dim);word-break:break-all;background:var(--surface2);padding:3px 6px;border-radius:4px}}
 .card-info{{padding:10px 12px 5px;display:flex;align-items:flex-start;gap:8px}}
+.card-cog{{margin-left:auto;flex-shrink:0;background:transparent;border:none;color:var(--text-dim);cursor:pointer;padding:2px;line-height:0;border-radius:6px}}
+.card-cog:hover{{color:var(--text);background:var(--surface2)}}
 .card-name{{font-size:.86rem;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}}
 .card-name:hover{{color:var(--primary)}}
 .badges{{padding:0 12px 8px;display:flex;flex-wrap:wrap;gap:4px}}
@@ -16288,6 +16503,23 @@ header h1{{cursor:pointer}}
 .modal input{{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.86rem;padding:7px 10px;outline:none}}
 .modal input:focus{{border-color:var(--primary)}}
 .modal-btns{{display:flex;gap:8px;justify-content:flex-end}}
+/* 2.6.6 camera settings (cog menu) */
+.cs-modal{{width:min(440px,94vw)}}
+.cs-section{{font-size:.7rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-dim);margin-top:4px}}
+.cs-label{{display:flex;justify-content:space-between;font-size:.84rem}}
+.cs-val{{font-weight:700;color:var(--primary);min-width:2.5em;text-align:right}}
+.cs-slider{{position:relative}}
+.cs-modal .cs-slider input[type=range]{{width:100%;padding:0;border:none;background:transparent;accent-color:var(--primary);cursor:pointer}}
+.cs-peak-mark{{position:absolute;top:-2px;width:3px;height:22px;margin-left:-1px;background:var(--orange);border-radius:2px;pointer-events:none}}
+.cs-ends{{display:flex;justify-content:space-between;font-size:.7rem;color:var(--text-dim);margin-top:-6px}}
+.cs-peak{{font-size:.78rem;color:var(--orange);min-height:1.2em}}
+.cs-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}}
+.cs-modal label{{display:flex;flex-direction:column;gap:4px;font-size:.76rem;color:var(--text-dim)}}
+.cs-modal select{{background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.86rem;padding:7px 8px}}
+.cs-help{{font-size:.72rem;color:var(--text-dim);line-height:1.45}}
+.cs-global{{font-size:.78rem;color:var(--yellow);border:1px solid var(--yellow);border-radius:8px;padding:8px 10px}}
+.cs-error{{font-size:.78rem;color:var(--red);min-height:1em}}
+.cs-modal input:disabled,.cs-modal select:disabled{{opacity:.45;cursor:not-allowed}}
 .nc-modal-inner{{width:min(460px,94vw)}}
 .nc-subtitle{{font-size:.82rem;color:var(--text-dim);margin-top:-4px}}
 .nc-reasons{{display:flex;flex-wrap:wrap;gap:7px}}
@@ -16466,6 +16698,39 @@ header h1{{cursor:pointer}}
     <div class="modal-btns">
       <button class="btn btn-ghost btn-sm" onclick="closeRename()">Cancel</button>
       <button class="btn btn-primary btn-sm" onclick="submitRename()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- 2.6.6: per-camera settings, opened from the cog on each card -->
+<div class="modal-backdrop" id="cam-settings-modal" onclick="if(event.target.id==='cam-settings-modal')closeCamSettings()">
+  <div class="modal cs-modal">
+    <h3 id="cs-title">Settings</h3>
+    <div class="cs-global" id="cs-global" style="display:none">Global recording settings are on in the
+      Configuration tab, so they apply to every camera. Turn them off there to set each camera here.</div>
+    <div class="cs-section">Motion</div>
+    <div class="cs-label"><span>Sensitivity</span><span class="cs-val" id="cs-level-val">63</span></div>
+    <div class="cs-slider">
+      <input type="range" id="cs-level" min="1" max="100" step="1" oninput="csLevelShow()">
+      <div class="cs-peak-mark" id="cs-peak-mark" style="display:none" title="Biggest recent movement"></div>
+    </div>
+    <div class="cs-ends"><span>Less sensitive</span><span>More sensitive</span></div>
+    <div class="cs-peak" id="cs-peak"></div>
+    <div class="cs-section">Recording</div>
+    <div class="cs-grid">
+      <label>Cooldown (s)<input type="number" id="cs-cooldown" min="1" max="300"></label>
+      <label>Tail (s)<input type="number" id="cs-tail" min="0" max="30"></label>
+      <label>File length<select id="cs-clip"></select></label>
+    </div>
+    <label class="cs-full">Recording folder<input type="text" id="cs-path" spellcheck="false"></label>
+    <div class="cs-help">Under /media. For a Samba or NFS share, add it in Home Assistant
+      (Settings, System, Storage, Add network storage, usage Media); it appears as
+      /media/&lt;name&gt;. SFTP and FTP upload are planned for 2.6.7.</div>
+    <div class="cs-error" id="cs-error"></div>
+    <div class="modal-btns">
+      <button class="btn btn-ghost btn-sm" id="cs-reset" onclick="resetCamSettings()" style="margin-right:auto">Defaults</button>
+      <button class="btn btn-ghost btn-sm" onclick="closeCamSettings()">Cancel</button>
+      <button class="btn btn-primary btn-sm" id="cs-save" onclick="saveCamSettings()">Save</button>
     </div>
   </div>
 </div>
@@ -16655,7 +16920,6 @@ def make_app() -> web.Application:
     app.router.add_delete("/api/cameras/{camera_id}",             api_delete_camera)
     app.router.add_post(  "/api/cameras/add",                     api_add_camera)
     app.router.add_get(   "/stream/{camera_id}",                  handle_stream)
-    app.router.add_get(   "/stream/{camera_id}/test",             handle_stream_test)
     app.router.add_get(   "/snapshot/{camera_id}",                handle_snapshot)
     app.router.add_get(   "/snap/status",                         handle_snap_status)
     # 2.6.3 — Tier 2 go2rtc live view. Each handler answers "not available"
@@ -16673,6 +16937,7 @@ def make_app() -> web.Application:
     app.router.add_post(  "/api/cameras/{camera_id}/motion",      api_motion_toggle)
     app.router.add_get(   "/api/cameras/{camera_id}/motion",      api_motion_status)
     app.router.add_get(   "/api/motion",                          api_motion_all)
+    app.router.add_route("*", "/api/cameras/{camera_id}/motion/settings", api_motion_settings)
     app.router.add_get(   "/api/storage",                         api_storage_list)
     app.router.add_post(  "/api/storage/rename",                  api_storage_rename)
     app.router.add_post(  "/api/storage/move",                    api_storage_move)

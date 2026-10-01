@@ -36,6 +36,7 @@ export LOG_WARNING=$(bashio::config 'log_warning')
 export LOG_ERROR=$(bashio::config 'log_error')
 
 # String / int options
+export GLOBAL_RECORDING_SETTINGS=$(bashio::config 'global_recording_settings')
 export RECORDINGS_PATH=$(bashio::config 'recordings_path')
 export MOTION_DETECT_LEVEL=$(bashio::config 'motion_detect_level')
 export MOTION_CLIP_LENGTH=$(bashio::config 'motion_clip_length')
@@ -50,7 +51,7 @@ bashio::log.info "Ingress path: ${INGRESS_PATH}"
 # pipeline is broken — investigate run.sh first.
 bashio::log.info "Config: hw_decode=${HW_DECODE} low_fps_mode=${LOW_FPS_MODE} skip_nonref=${SKIP_NONREF} limit_threads=${LIMIT_THREADS} stagger_polling=${STAGGER_POLLING} adaptive_quality=${ADAPTIVE_QUALITY}"
 bashio::log.info "Config: fast_stream_start=${FAST_STREAM_START} low_latency=${LOW_LATENCY}"
-bashio::log.info "Config: recordings_path=${RECORDINGS_PATH} motion_detect_level=${MOTION_DETECT_LEVEL} motion_clip_length=${MOTION_CLIP_LENGTH} motion_cooldown=${MOTION_COOLDOWN_SECS}s motion_padding=${MOTION_CLIP_PADDING_SECS}s"
+bashio::log.info "Config: global_recording_settings=${GLOBAL_RECORDING_SETTINGS} recordings_path=${RECORDINGS_PATH} motion_detect_level=${MOTION_DETECT_LEVEL} motion_clip_length=${MOTION_CLIP_LENGTH} motion_cooldown=${MOTION_COOLDOWN_SECS}s motion_padding=${MOTION_CLIP_PADDING_SECS}s"
 bashio::log.info "Config: log_debug=${LOG_DEBUG} log_info=${LOG_INFO} log_warning=${LOG_WARNING} log_error=${LOG_ERROR} unrestricted_storage_browser=${UNRESTRICTED_STORAGE_BROWSER}"
 
 # 2.6.3: log the installed ffmpeg version at every start.

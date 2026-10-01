@@ -70,39 +70,47 @@ configuration:
       artifacts for latency on a lossy link. Turn this ON to test, and
       turn it OFF again if any camera fails to start or shows new
       artifacts.
+  global_recording_settings:
+    name: Use Global Recording Settings
+    description: >-
+      Default OFF. Each camera has its own recording settings, set from the
+      cog on its card. Turn this ON to use the five Global settings below
+      for every camera instead; they override each camera's own settings.
+      While this is OFF, the five settings below are ignored.
   recordings_path:
-    name: Recordings Path
+    name: Global Recordings Path
     description: >-
-      Base directory for motion-triggered recording clips. Defaults to
-      /media/anycam which is exposed via HA Media Browser and Samba share.
-      Each camera gets a sub-folder named after its display name.
+      Used only when Use Global Recording Settings is ON. Folder for
+      motion recordings, under /media; each camera gets a sub-folder named
+      after it. Default /media/anycam. A Samba or NFS share added in Home
+      Assistant (Settings, System, Storage, Add network storage, usage
+      Media) appears under /media/NAME. This folder is also where the
+      Storage tab opens.
   motion_detect_level:
-    name: Motion Sensitivity
+    name: Global Motion Sensitivity
     description: >-
-      How much of the picture must change to count as motion, from 1
-      (least sensitive: a large change) to 100 (most sensitive: a small
-      change). Default 63. AnyCam compares the pictures themselves and
-      ignores a change across most of the picture at once, such as a
-      camera switching between night and day mode.
+      Used only when Use Global Recording Settings is ON. 1 is least
+      sensitive, 100 is most sensitive. Default 63. Each camera's cog menu
+      has the same setting as a slider, with a live reading of how strongly
+      recent movement registered.
   motion_clip_length:
-    name: Recording Length
+    name: Global Recording Length
     description: >-
-      While motion continues, start a new file this often. An event
-      shorter than this is one file. Files are named
-      motion_DATE_TIME_part01.mp4, part02 and so on: a new event gets a
-      new date and time, and its later parts are continuations. Lengths
-      are approximate, because a file can only end on a keyframe.
-      Default 1min.
+      Used only when Use Global Recording Settings is ON. While motion
+      continues, start a new file this often; an event shorter than this
+      is one file. Files are named motion_DATE_TIME_part01.mp4, part02 and
+      so on. Lengths are approximate, because a file can only end on a
+      keyframe. Default 30s.
   motion_cooldown_secs:
-    name: Motion Cooldown (seconds)
+    name: Global Motion Cooldown (seconds)
     description: >-
-      Seconds of no detected motion before recording stops. Default 10.
-      Increase for cameras with intermittent motion such as PTZ patrol.
+      Used only when Use Global Recording Settings is ON. Seconds with no
+      motion before recording stops. Default 5.
   motion_clip_padding_secs:
-    name: Recording Tail Padding (seconds)
+    name: Global Recording Tail (seconds)
     description: >-
-      Extra seconds recorded after the cooldown ends, to capture the
-      tail of a motion event. Default 3.
+      Used only when Use Global Recording Settings is ON. Extra seconds
+      recorded after the cooldown ends. Default 3.
   unrestricted_storage_browser:
     name: Unrestricted Storage Browser
     description: >-

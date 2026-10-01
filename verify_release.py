@@ -167,8 +167,11 @@ CONTRACTS = {
     "_motion_on_frame":      ["MOTION_COMPARE_S", "_motion_thumb", "_motion_judge",
                               "_start_recording", "_stop_recording"],
     "_motion_diff":          ["MOTION_PIXEL_DELTA", "MOTION_REGIONS", "/ sa", "/ sc"],
-    "_motion_judge":         ["MOTION_LIGHT_FRACTION", "CFG_MOTION_AREA_PCT"],
-    "_start_recording":      ['"segment"', "CFG_MOTION_CLIP_S", "_part%02d.mp4",
+    "_motion_judge":         ["MOTION_LIGHT_FRACTION", "_motion_cfg(camera_id)"],
+    # 2.6.6: per-camera settings; the global override wins when it is on.
+    "_motion_cfg":           ["CFG_MOTION_GLOBAL", "_MOTION_CFG", "MOTION_DEFAULTS"],
+    "_motion_validate":      ["MOTION_PATH_ROOT", "MOTION_CLIP_CHOICES"],
+    "_start_recording":      ['"segment"', "_motion_cfg(camera_id)", "_part%02d.mp4",
                               'ms["recording"] = True', "_drain_stderr"],
     "_stop_recording":       ['ms.get("stopping")', 'ms["stopping"] = True'],
     # 2.6.6: live cards stay within the width a phone can decode.
