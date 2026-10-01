@@ -9511,21 +9511,32 @@ def _motion_on_frame(camera_id: str, frame: bytes) -> None:
     _motion_feed(camera_id, thumb, now_m)
 
 
-def _motion_feed(camera_id: str, thumb: tuple[bytes, float, float], now_m: float) -> None:
+def _motion_feed(camera_id: str, thumb: tuple[bytes, float, float], now_m: float,
+                 stream_t: float | None = None) -> None:
     """Compare one picture with the one MOTION_REF_S before; act on the result.
 
     Comparing with a picture about a second old, rather than the previous
     frame, keeps a slow walker visible at 4 frames a second.
+
+    2.6.7: stream_t is the picture's place in the live stream (picture
+    count / MOTION_DETECT_FPS), so the reference is exactly 4 pictures back
+    however the pictures arrive. With arrival times, a burst of pictures all
+    compared with the same reference: an insect in that reference showed
+    as two or three changes in a row (log, 01:48:17: 1.1%, 1.1%, 1.1%).
+    On the live stream a recording then needs a second changed picture
+    within MOTION_CONFIRM_S, or one picture with MOTION_INSTANT_PCT.
     """
     ms = _MOTION.get(camera_id)
     if not (ms and ms["enabled"]):
         return
+    live = stream_t is not None
+    t = stream_t if live else now_m
     refs = ms.setdefault("refs", collections.deque())
-    while len(refs) > 1 and now_m - refs[1][0] >= MOTION_REF_S:
+    while len(refs) > 1 and t - refs[1][0] >= MOTION_REF_S - 1e-6:
         refs.popleft()
-    ref = refs[0][1] if refs and now_m - refs[0][0] >= MOTION_REF_S else None
-    refs.append((now_m, thumb))
-    if ref is not None and _motion_judge(camera_id, ref, thumb):
+    ref = refs[0][1] if refs and t - refs[0][0] >= MOTION_REF_S - 1e-6 else None
+    refs.append((t, thumb))
+    if ref is not None and _motion_decide(camera_id, ms, ref, thumb, t, live):
         ms["last_motion"] = now_m
         if not ms["recording"]:
             camera = CAMERAS.get(camera_id)
@@ -9534,6 +9545,48 @@ def _motion_feed(camera_id: str, thumb: tuple[bytes, float, float], now_m: float
                 asyncio.create_task(_start_recording(camera_id, camera, cam_url))
         return
     _motion_tick(camera_id, ms, now_m)
+
+
+def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
+                   t: float, live: bool) -> bool:
+    """Judge one comparison; apply the light hold and, live, the confirmation."""
+    verdict, pct = _motion_judge(camera_id, ref, thumb)
+    # ffmpeg repeats a picture when the stream stalls; a repeat is not news.
+    repeat = live and (thumb[0] == ms.get("last_cur") or ref[0] == ms.get("last_ref"))
+    ms["last_cur"], ms["last_ref"] = thumb[0], ref[0]
+    hits = ms.setdefault("hits", [])
+    if hits and t - hits[-1][0] > MOTION_CONFIRM_S + 1e-6:
+        if len(hits) == 1:
+            # 1 s on, that picture is the reference: the same change again.
+            ms["echo_of"] = hits[0][2]
+            ms["peak_single"] = ms.get("peak_single", 0) + 1
+            log.info(f"Motion [{camera_id}]: {hits[0][1]:.1f}% changed in one picture "
+                     f"only — not recorded (most often an insect near the lens)")
+        hits.clear()
+    if verdict == "light":
+        ms["light_until"] = t + MOTION_LIGHT_HOLD_S
+        hits.clear()
+        return False
+    # One big change records one picture later, unless that picture shows a
+    # light change: the first, half-switched picture of an infrared switch
+    # changed 24% of ch7 with only 69% spread (06:20:35).
+    if live and not ms["recording"] and hits and hits[0][1] >= MOTION_INSTANT_PCT:
+        return True
+    if verdict != "motion":
+        return False
+    if t < ms.get("light_until", float("-inf")):
+        log.debug(f"Motion [{camera_id}]: {pct:.1f}% changed within "
+                  f"{MOTION_LIGHT_HOLD_S:.0f} s of a light change — not recorded")
+        return False
+    if not live or ms["recording"]:
+        return True
+    if repeat:
+        ms["peak_repeat"] = ms.get("peak_repeat", 0) + 1
+        return False
+    if ref[0] == ms.get("echo_of"):
+        return False
+    hits.append((t, pct, thumb[0]))
+    return len(hits) >= 2
 
 
 def _motion_tick(camera_id: str, ms: dict, now_m: float) -> None:
@@ -9547,6 +9600,9 @@ def _motion_reset_prev(camera_id: str) -> None:
     if ms:
         ms.setdefault("refs", collections.deque()).clear()
         ms["snap_cmp_t"] = 0.0
+        # 2.6.7: the live and snapshot paths keep different clocks.
+        ms["hits"], ms["light_until"] = [], float("-inf")
+        ms["last_cur"] = ms["last_ref"] = ms["echo_of"] = None
 
 
 # ── 2.6.6: pixel comparison (build plan B16, C13) ──────────────────────────
@@ -9562,6 +9618,14 @@ MOTION_REGIONS = (4, 4)         # the picture in 16 areas, for MOTION_LIGHT_FRAC
 MOTION_REGION_CHANGED = 0.10    # an area counts as changed at 10% of its cells
 MOTION_COMPARE_S = 1.0          # snapshot path: at most one decode per second
 MOTION_REF_S = 1.0              # compare each picture with the one this long before
+# 2.6.7 (CrystalHeeler's overnight test, 2026-10-01). 11 of 22 ch4 recordings were
+# insects: one blurred streak, lit by the infrared, in a single picture.
+# Two infrared-colour switches on ch7 were recorded although each was
+# logged as a light change: a switch spreads over about a second of
+# comparisons, and some of them stay under the 75% light rule.
+MOTION_CONFIRM_S = 0.5          # live stream: a 2nd changed picture within this
+MOTION_INSTANT_PCT = 3.0        # one picture this changed records (0.25 s later)
+MOTION_LIGHT_HOLD_S = 2.0       # after a light change, nothing counts for this
 
 
 def _motion_thumb(jpeg: bytes) -> tuple[bytes, float, float] | None:
@@ -9622,8 +9686,8 @@ def _motion_diff(prev: tuple[bytes, float, float],
 
 
 def _motion_judge(camera_id: str, prev: tuple[bytes, float, float],
-                  curr: tuple[bytes, float, float]) -> bool:
-    """True for motion; logs light changes and near misses for tuning."""
+                  curr: tuple[bytes, float, float]) -> tuple[str, float]:
+    """("motion" | "light" | "", % changed); logs for tuning."""
     frac, spread = _motion_diff(prev, curr)
     pct = frac * 100.0
     _motion_note_peak(camera_id, pct, spread > MOTION_LIGHT_FRACTION)
@@ -9631,16 +9695,16 @@ def _motion_judge(camera_id: str, prev: tuple[bytes, float, float],
         log.info(f"Motion [{camera_id}]: change across {spread:.0%} of the "
                  f"picture ({pct:.0f}% of it changed) — treated as a light "
                  f"change, not recorded")
-        return False
+        return "light", pct
     area = _motion_area_now(camera_id)
     if pct >= area:
         log.info(f"Motion [{camera_id}]: {pct:.1f}% of the picture changed "
                  f"(threshold {area:.1f}%)")
-        return True
+        return "motion", pct
     if pct >= area / 2:
         log.debug(f"Motion [{camera_id}]: {pct:.1f}% changed, under the "
                   f"{area:.1f}% threshold")
-    return False
+    return "", pct
 
 
 # ── 2.6.6: tuning line ──────────────────────────────────────────────────────
@@ -9668,12 +9732,16 @@ def _motion_report_peak(camera_id: str, ms: dict, now_m: float) -> None:
     if now_m - start < MOTION_PEAK_REPORT_S:
         return
     n, pct, light = ms.get("peak_n", 0), ms.get("peak_pct", 0.0), ms.get("peak_light", 0)
+    single, repeat = ms.get("peak_single", 0), ms.get("peak_repeat", 0)
     ms["peak_since"], ms["peak_n"], ms["peak_pct"], ms["peak_light"] = now_m, 0, 0.0, 0
+    ms["peak_single"] = ms["peak_repeat"] = 0
     if not n:
         return
     ms["last_peak_pct"] = pct      # for the settings panel's live readout
     cfg = _motion_cfg(camera_id)
     extra = f"; {light} light change(s) ignored" if light else ""
+    extra += f"; {single} single-picture change(s) ignored" if single else ""
+    extra += f"; {repeat} repeated picture(s)" if repeat else ""
     boost = _motion_boost(camera_id)
     needed = _motion_level_for_pct(pct, boost)
     at = (f"would record at sensitivity {needed} or higher" if needed <= 100
@@ -9683,7 +9751,7 @@ def _motion_report_peak(camera_id: str, ms: dict, now_m: float) -> None:
     colour = f", colour {chroma:.1f}" if chroma is not None else ""
     # INFO when something moved, DEBUG for a still scene, so a quiet night
     # does not fill the log.
-    (log.info if pct >= 0.5 or light else log.debug)(
+    (log.info if pct >= 0.5 or light or single else log.debug)(
         f"Motion [{camera_id}]: largest change in the last {MOTION_PEAK_REPORT_S} s: "
         f"{pct:.1f}% of the picture, {at} (set to {cfg['level']}, {mode}, "
         f"{_motion_area_now(camera_id):.2f}%{colour}; {n} comparisons{extra})")
@@ -9695,8 +9763,8 @@ def _motion_finish_files(camera_id: str, ms: dict) -> None:
     2.6.6 (CrystalHeeler, 2026-10-01): the _partNN suffix only when an event ran
     past the file length and was split. ffmpeg's segment muxer must number
     every file while it records, because it cannot know the event will end
-    early, so a lone motion_<date>_<time>_part01.mp4 is renamed here to
-    motion_<date>_<time>.mp4 once ffmpeg has stopped.
+    early, so a lone <camera>_<date>_<time>_part01.mp4 is renamed here to
+    <camera>_<date>_<time>.mp4 once ffmpeg has stopped.
     """
     base, clip = ms.get("clip_base"), ms.get("clip_path")
     if not (base and clip):
@@ -10046,7 +10114,8 @@ async def _motion_detector(camera_id: str, url: str) -> None:
                     now_m = time.monotonic()
                     if frames % MOTION_DETECT_FPS == 1:      # colour once a second
                         _motion_night_observe(camera_id, _motion_chroma(px[luma:]), now_m)
-                    _motion_feed(camera_id, _motion_thumb_gray(px[:luma]), now_m)
+                    _motion_feed(camera_id, _motion_thumb_gray(px[:luma]), now_m,
+                                 stream_t=frames / MOTION_DETECT_FPS)
             finally:
                 err_t.cancel()
         except asyncio.IncompleteReadError:
@@ -10057,6 +10126,7 @@ async def _motion_detector(camera_id: str, url: str) -> None:
             log.warning(f"Motion [{camera_id}]: could not start detection ffmpeg: {ex}")
         finally:
             ms["detector_live"] = False
+            _motion_reset_prev(camera_id)      # 2.6.7: the stream clock ends here
             if proc is not None:
                 await _stop_proc(proc, exited_grace=0.5)
         if _motion_armed(camera_id):
@@ -10467,6 +10537,24 @@ def _cam_folder_name(camera: dict) -> str:
             name = f"{name}-{suffix}"
     return name[:30]
 
+def _cam_file_tag(camera: dict) -> str:
+    """Short camera tag that starts each recording's name.
+
+    2.6.7 (CrystalHeeler, 2026-10-01): the camera in the file name, kept short.
+    The first real word of the camera's name, then the DVR channel or the
+    last part of the IP address: LorexCH4, Hikvision33, Camera73.
+    """
+    import re as _re
+    skip = {"generic", "unknown", "ip", "camera", "cam"}
+    words = _re.findall(r"[A-Za-z0-9]+", camera.get("name") or "")
+    word = next((w for w in words if w.lower() not in skip and not w.isdigit()), "Camera")
+    word = (word[:1].upper() + word[1:])[:12]
+    if camera.get("channel"):
+        return f"{word}CH{camera['channel']}"
+    ip = camera.get("ip") or ""
+    return word + (ip.rsplit(".", 1)[-1] if ip.count(".") == 3 else "")
+
+
 async def _ensure_cam_dir(camera: dict, base: Path | None = None) -> Path:
     """Create and return the recording directory for a camera.
 
@@ -10483,8 +10571,9 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
 
     2.6.6: the segment muxer starts a new file every clip_s seconds
     while motion continues (build plan C12). Files are
-    motion_<date>_<time>_part01.mp4, part02, ...: a new event gets a new
-    date and time; a higher part number is a continuation. Each file ends
+    <camera>_<date>_<time>_part01.mp4, part02, ...: a new event gets a new
+    date and time; a higher part number is a continuation. 2.6.7: <camera>
+    is _cam_file_tag, for example LorexCH4. Each file ends
     on the first keyframe after the interval, so lengths are approximate.
     """
     ms = _motion_state(camera_id)
@@ -10496,7 +10585,7 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
     cfg      = _motion_cfg(camera_id)
     cam_dir  = await _ensure_cam_dir(camera, Path(cfg["path"]))
     ts       = time.strftime("%Y%m%d_%H%M%S")
-    base     = f"motion_{ts}"
+    base     = f"{_cam_file_tag(camera)}_{ts}"
     clip     = cam_dir / f"{base}_part01.mp4"
     ms["clip_path"] = clip
     ms["clip_base"] = base

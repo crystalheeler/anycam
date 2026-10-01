@@ -166,7 +166,11 @@ CONTRACTS = {
     # a recording must be split, and started and stopped once each.
     "_motion_on_frame":      ["MOTION_COMPARE_S", "_motion_thumb", "_motion_feed",
                               'ms.get("detector_live")'],
-    "_motion_feed":          ["MOTION_REF_S", "_motion_judge", "_start_recording",
+    # 2.6.7: light hold, single-picture rejection, stream clock.
+    "_motion_decide":        ["_motion_judge", "MOTION_LIGHT_HOLD_S", "MOTION_CONFIRM_S",
+                              "MOTION_INSTANT_PCT", 'ms["recording"]', "repeat"],
+    "_cam_file_tag":         ['camera.get("channel")'],
+    "_motion_feed":          ["MOTION_REF_S", "_motion_decide", "_start_recording", "stream_t",
                               "_motion_tick"],
     "_motion_tick":          ["_stop_recording", "_motion_quiet"],
     # 2.6.6: live-stream detection, and the pre-roll buffer recordings start from.
@@ -190,6 +194,7 @@ CONTRACTS = {
     "_motion_cfg":           ["CFG_MOTION_GLOBAL", "_MOTION_CFG", "MOTION_DEFAULTS"],
     "_motion_validate":      ["MOTION_PATH_ROOT", "MOTION_CLIP_CHOICES"],
     "_start_recording":      ['"segment"', "_motion_cfg(camera_id)", "_part%02d.mp4",
+                              "_cam_file_tag(camera)",
                               "buf.preroll()", 'ms["rec_queue"]',
                               'ms["recording"] = True', "_drain_stderr"],
     "_stop_recording":       ['ms.get("stopping")', 'ms["stopping"] = True'],

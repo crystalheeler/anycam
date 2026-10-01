@@ -6,6 +6,49 @@ when colour returns. AnyCam also checks the switch against sunrise and
 sunset at your Home Assistant home location, and tells you when a camera
 does not switch.
 
+Also from CrystalHeeler's overnight test: insects near the lens and the
+infrared-colour switch no longer start recordings, and recording names
+start with the camera, for example LorexCH4_20261001_053358.mp4.
+
+### Insects and infrared switches (CrystalHeeler, 2026-10-01)
+
+Overnight at sensitivity 99, 11 of the 22 ch4 recordings were insects,
+and ch7 recorded two infrared-colour switches at 06:20 and 06:22.
+
+- **Insects.** Each one was a blurred streak, lit by the infrared, in a
+  single picture (1/7 s). On the live stream a recording now needs a
+  second changed picture within 0.5 s. A single picture with 3% or more
+  of the picture changed (a cat dashing past) records one picture later.
+- **Echoes.** The log showed one insect as two or three changes in a row
+  (01:48:17: 1.1%, 1.1%, 1.1%). Pictures arrive from ffmpeg in bursts,
+  and each comparison picked its reference by arrival time, so a burst
+  compared several pictures with the same insect picture. The reference
+  is now exactly 4 pictures back in the stream. Exact repeats of a
+  picture do not count.
+- **Infrared switches.** A switch spreads over about a second of
+  comparisons, and some stayed under the 75% light rule: 69%, 75%, and a
+  half-switched first picture at 19%. After a light change, nothing
+  counts for 2 s, and a light change cancels a change waiting for its
+  second picture.
+- **Result,** replaying last night's 45 recordings through the new code,
+  7 sampling offsets each: 11 of 12 insect clips never record, 1 records
+  in 1 of 7; both switches 0 of 7. Real events: the child on the bike at
+  07:01:53 7 of 7, the cat at 03:08:48 4 of 7, a person standing on the
+  porch at 06:59:10 5 of 7, the other 29 all 7 of 7. The log shows the
+  live detector saw the child in 4 pictures in a row at 1.1% to 1.2%.
+- **Snapshot cameras** (no usable live stream) compare once a second, so
+  they keep recording on one changed picture; they get the 2 s light hold.
+- **Log lines:** "changed in one picture only — not recorded"; the tuning
+  line counts single-picture changes and repeated pictures.
+
+### Recording names
+
+- Files start with a short camera tag: the first word of the camera's
+  name, then the DVR channel or the last part of the IP address.
+  Examples: LorexCH4_20261001_053358.mp4, Hikvision33_..., Camera73_...
+  "motion_" is gone (CrystalHeeler's choice A). Split events keep _part01,
+  _part02.
+
 ### Why (build plan C15)
 
 CrystalHeeler's log of 2026-10-01, 22:27 to 23:03, sensitivity 98 (1.1% of the
@@ -64,7 +107,7 @@ the minute peaks) and 0.7% (highest).
 
 ### Tests
 
-- 244 server checks (40 new) and 110 page checks (4 new) pass. The
+- 261 server checks (57 new) and 110 page checks (4 new) pass. The
   detector's frame format changed from grey (3,072 bytes) to YUV 4:2:0
   (4,608 bytes); the stand-in ffmpeg in the tests now sends that format.
 - Not tested here: a real camera's colour values under infrared. No
