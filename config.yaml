@@ -17,10 +17,11 @@ options:
   adaptive_quality: true
   fast_stream_start: false
   low_latency: false
+  global_recording_settings: false
   recordings_path: "/media/anycam"
   motion_detect_level: 63
-  motion_clip_length: "1min"
-  motion_cooldown_secs: 10
+  motion_clip_length: "30s"
+  motion_cooldown_secs: 5
   motion_clip_padding_secs: 3
   unrestricted_storage_browser: false
   log_debug: true
@@ -37,6 +38,7 @@ schema:
   adaptive_quality: bool
   fast_stream_start: bool
   low_latency: bool
+  global_recording_settings: bool
   recordings_path: str
   motion_detect_level: "int(1,100)"
   motion_clip_length: "list(10s|20s|30s|1min|2min|5min)"
