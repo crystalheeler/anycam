@@ -14,10 +14,11 @@ all day but recorded nothing after 08:24: a person barely changes the size
 of a 9 to 10 KB Lorex snapshot. The same method recorded a clip at 06:21
 when a camera switched from night to day mode.
 
-- **How it works now.** Once a second at most, each frame is shrunk to a
-  64 x 48 grey picture and compared with the last one, cell by cell. Before
-  comparing, both pictures are brought to the same brightness and contrast,
-  so a cloud, an exposure change or a night-mode switch changes nothing.
+- **How it works now.** Each frame is shrunk to a 64 x 48 grey picture and
+  compared with the picture from about a second before, cell by cell.
+  Before comparing, both pictures are brought to the same brightness and
+  contrast, so a cloud, an exposure change or a night-mode switch changes
+  nothing.
 - **Light changes.** The picture is split into 16 areas. A change that
   reaches more than 75% of them is treated as a light change: it is logged
   with its size and not recorded. A person changes a few neighbouring
@@ -25,9 +26,43 @@ when a camera switched from night to day mode.
 - **Test results** on synthetic pictures: a 30% brightness step, a 40%
   contrast step and a night-mode switch all measured 0% changed. A block
   the size of a person covering 4.7% of the picture measured 5.0%.
-- **Cost:** about 1.3 ms per comparison on a desktop PC; expect several
-  times that on a Raspberry Pi 4, once a second per armed camera.
+- **Cost:** about 0.4 ms per comparison on a desktop PC, 4 comparisons a
+  second per armed camera; expect several times that on a Raspberry Pi 4.
 - **New dependency:** Pillow 12.3.0, which decodes the JPEGs.
+
+### Motion: live detection and a 3-second pre-roll
+
+CrystalHeeler's field test on 2026-10-01: recordings caught only the end of each
+event, even at sensitivity 80 to 90. Two causes:
+
+- Detection looked at snapshots, which the Lorex channels deliver every
+  1.9 s, so it noticed motion late.
+- The recording connected to the camera only after motion was found, then
+  had to wait for a keyframe, so the start of the event was gone.
+
+An armed camera now runs two pipelines, the usual video-recorder split:
+
+- **Detection** watches the camera's smallest stream (the Lorex DVR's
+  sub-stream, `subtype=1`), decoded to 64 x 48 grey pictures, 4 a second.
+  Cameras with no small stream (only a stream wider than 1920) and cameras
+  without RTSP keep using snapshots. Snapshots also stand in while the live
+  stream starts or after it drops.
+- **Recording** copies the camera's main stream, unchanged, into memory,
+  always holding the last few seconds from a keyframe. When motion starts,
+  the file begins at a keyframe at least **3 seconds before the motion**,
+  for every event on every camera. A camera's keyframe spacing can make
+  the pre-roll a little longer than 3 s.
+
+Recordings are a direct copy of the main stream, the same full-quality
+stream Enhanced View plays: no re-encoding of the video. Audio, when the
+camera sends any, is converted to AAC, because the G.711 audio DVRs often
+send fits neither MPEG-TS nor MP4. H.265 files carry the `hvc1` tag that
+Chrome and Apple players expect.
+
+**Cost per armed camera:** two extra camera connections held open (the
+small stream and the main stream); a light decode of the small stream; and
+3 s or more of the main stream in memory, a few megabytes. For a DVR, each
+armed channel adds two connections to the DVR.
 
 ### Each camera has its own recording settings (cog on the card)
 
@@ -202,6 +237,16 @@ Recording Settings.
 
 ### Known issues carried forward
 
+- **Not checked yet: choppy recordings.** CrystalHeeler, 2026-10-01: recordings
+  play in steps of about a second. A recording copies the main stream, so
+  this should not happen; the cause is not known yet and needs a recorded
+  file to examine. 2.6.6 records through the new buffer, so test again
+  with this build.
+- **Not tested before release: the new ffmpeg commands.** No ffmpeg on
+  the PC this was built on, so the detection, buffer and writer commands
+  were checked against the ffmpeg 5.1 documentation and tested with
+  stand-in processes, not run. If motion does not start, the add-on log
+  shows ffmpeg's error on the `DET:`, `BUF:` or `REC:` lines.
 - **Not tested before release: file splitting.** No ffmpeg on the PC this
   was built on, so the segment options were checked against the ffmpeg 5.1
   documentation only. If recordings fail to start, the add-on log shows

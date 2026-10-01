@@ -28,6 +28,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 import io
+import collections
 from pathlib import Path
 from urllib.parse import urlparse, quote
 
@@ -7271,7 +7272,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # Idle check — stop if nobody has polled recently
             last   = _snap_last_access.get(camera_id, 0)
             idle_s = time.monotonic() - last
-            if state["frame_count"] > 0 and idle_s > 30 and not _motion_armed(camera_id):
+            if state["frame_count"] > 0 and idle_s > 30 and not _motion_uses_snapshots(camera_id):
                 log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s — stopping")
                 return
 
@@ -7281,7 +7282,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # which decodes nothing on the Pi; the wait would blind motion
             # detection for as long as someone watches another camera.
             if (_FOCUSED_CAMERA and _FOCUSED_CAMERA != camera_id
-                    and not (_motion_armed(camera_id) and _FOCUS_ENGINE == "go2rtc")):
+                    and not (_motion_uses_snapshots(camera_id) and _FOCUS_ENGINE == "go2rtc")):
                 await asyncio.sleep(1.0)   # ~1fps while another cam is focused
                 continue
 
@@ -7450,7 +7451,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                     # Idle check inside the read loop
                     last   = _snap_last_access.get(camera_id, 0)
                     idle_s = time.monotonic() - last
-                    if frames > 10 and idle_s > 30 and not _motion_armed(camera_id):
+                    if frames > 10 and idle_s > 30 and not _motion_uses_snapshots(camera_id):
                         log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s — stopping")
                         return
 
@@ -7697,7 +7698,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # Before restarting, check idle
             last   = _snap_last_access.get(camera_id, 0)
             idle_s = time.monotonic() - last
-            if frames > 0 and idle_s > 30 and not _motion_armed(camera_id):
+            if frames > 0 and idle_s > 30 and not _motion_uses_snapshots(camera_id):
                 log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s after exit — not restarting")
                 return
 
@@ -8194,7 +8195,7 @@ async def http_snap_loop(camera_id: str, camera: dict) -> None:
             last   = _snap_last_access.get(camera_id, 0)
             idle_s = time.monotonic() - last
             if (idle_s > 30 and state["frame"] is not None
-                    and not _motion_armed(camera_id)):
+                    and not _motion_uses_snapshots(camera_id)):
                 log.info(f"SNAP [{camera_id}]: idle {idle_s:.0f}s — stopping")
                 break
 
@@ -9023,7 +9024,9 @@ async def _focus_set_go2rtc(camera_id: str) -> web.Response:
     camera = CAMERAS[camera_id]
     state = _SNAP.get(camera_id)
     ms = _MOTION.get(camera_id)
-    if ms and ms.get("enabled"):
+    # 2.6.6: only while the snapshot path is this camera's detector; with
+    # live detection running, motion does not need the thumbnail loop.
+    if ms and ms.get("enabled") and not ms.get("detector_live"):
         running = bool(state and state.get("task") and not state["task"].done())
         if not running:
             url = build_authenticated_url(camera)
@@ -9459,7 +9462,7 @@ def _motion_state(camera_id: str) -> dict:
             "last_motion":  0.0,
             "proc":         None,
             "clip_path":    None,
-            "prev_frame":   None,   # bytes of previous JPEG for comparison
+            "refs":         collections.deque(),   # 2.6.6: (time, picture) to compare with
         }
     return _MOTION[camera_id]
 
@@ -9482,42 +9485,65 @@ def _motion_armed(camera_id: str) -> bool:
 
 
 def _motion_on_frame(camera_id: str, frame: bytes) -> None:
-    """Compare one new JPEG with the previous one; start or stop recording.
+    """A snapshot or thumbnail JPEG for motion detection (fallback path).
 
-    Uses JPEG size comparison: a scene with motion has more high-frequency
-    content and compresses to a larger file.
+    2.6.6: an armed camera normally watches its live stream instead
+    (_motion_detector); this path runs only while that is not delivering,
+    or for cameras with no RTSP stream.
+    """
+    ms = _MOTION.get(camera_id)
+    if not (ms and ms["enabled"]) or ms.get("detector_live"):
+        return
+    now_m = time.monotonic()
+    # Decode at most once per MOTION_COMPARE_S; thumbnail ffmpeg loops can
+    # deliver 10 frames a second.
+    if now_m - ms.get("snap_cmp_t", 0.0) < MOTION_COMPARE_S:
+        _motion_tick(camera_id, ms, now_m)
+        return
+    ms["snap_cmp_t"] = now_m
+    thumb = _motion_thumb(frame)
+    if thumb is None:
+        _motion_tick(camera_id, ms, now_m)
+        return
+    _motion_feed(camera_id, thumb, now_m)
+
+
+def _motion_feed(camera_id: str, thumb: tuple[bytes, float, float], now_m: float) -> None:
+    """Compare one picture with the one MOTION_REF_S before; act on the result.
+
+    Comparing with a picture about a second old, rather than the previous
+    frame, keeps a slow walker visible at 4 frames a second.
     """
     ms = _MOTION.get(camera_id)
     if not (ms and ms["enabled"]):
         return
-    now_m = time.monotonic()
-    motion = False
-    # 2.6.6: compare at most once per MOTION_COMPARE_S. At 10 fps two
-    # neighbouring frames barely differ, and a slow walker would never
-    # cross the threshold; the Lorex snapshots arrive every 1.9 s anyway.
-    if now_m - ms.get("prev_time", 0.0) >= MOTION_COMPARE_S:
-        thumb = _motion_thumb(frame)
-        if thumb is not None:
-            prev = ms.get("prev_frame")
-            ms["prev_frame"], ms["prev_time"] = thumb, now_m
-            if prev is not None:
-                motion = _motion_judge(camera_id, prev, thumb)
-    if motion:
+    refs = ms.setdefault("refs", collections.deque())
+    while len(refs) > 1 and now_m - refs[1][0] >= MOTION_REF_S:
+        refs.popleft()
+    ref = refs[0][1] if refs and now_m - refs[0][0] >= MOTION_REF_S else None
+    refs.append((now_m, thumb))
+    if ref is not None and _motion_judge(camera_id, ref, thumb):
         ms["last_motion"] = now_m
         if not ms["recording"]:
             camera = CAMERAS.get(camera_id)
             cam_url = build_authenticated_url(camera) if camera else None
             if cam_url:
                 asyncio.create_task(_start_recording(camera_id, camera, cam_url))
-    elif ms["recording"] and _motion_quiet(camera_id, ms, now_m):
+        return
+    _motion_tick(camera_id, ms, now_m)
+
+
+def _motion_tick(camera_id: str, ms: dict, now_m: float) -> None:
+    """No motion in this frame: stop a recording once quiet long enough."""
+    if ms["recording"] and _motion_quiet(camera_id, ms, now_m):
         asyncio.create_task(_stop_recording(camera_id))
 
 
 def _motion_reset_prev(camera_id: str) -> None:
     ms = _MOTION.get(camera_id)
     if ms:
-        ms["prev_frame"] = None
-        ms["prev_time"] = 0.0
+        ms.setdefault("refs", collections.deque()).clear()
+        ms["snap_cmp_t"] = 0.0
 
 
 # ── 2.6.6: pixel comparison (build plan B16, C13) ──────────────────────────
@@ -9531,7 +9557,8 @@ MOTION_PIXEL_DELTA = 24         # of 255: smaller differences are sensor noise
 MOTION_LIGHT_FRACTION = 0.75    # change spread over more of the picture = light
 MOTION_REGIONS = (4, 4)         # the picture in 16 areas, for MOTION_LIGHT_FRACTION
 MOTION_REGION_CHANGED = 0.10    # an area counts as changed at 10% of its cells
-MOTION_COMPARE_S = 1.0          # at most one comparison per second per camera
+MOTION_COMPARE_S = 1.0          # snapshot path: at most one decode per second
+MOTION_REF_S = 1.0              # compare each picture with the one this long before
 
 
 def _motion_thumb(jpeg: bytes) -> tuple[bytes, float, float] | None:
@@ -9548,6 +9575,11 @@ def _motion_thumb(jpeg: bytes) -> tuple[bytes, float, float] | None:
         pixels = img.convert("L").resize(MOTION_GRID, Image.Resampling.BOX).tobytes()
     except (OSError, ValueError, Image.DecompressionBombError):
         return None
+    return _motion_thumb_gray(pixels)
+
+
+def _motion_thumb_gray(pixels: bytes) -> tuple[bytes, float, float]:
+    """(pixels, mean, spread) for a MOTION_GRID greyscale picture."""
     mean = sum(pixels) / len(pixels)
     spread = (sum((v - mean) ** 2 for v in pixels) / len(pixels)) ** 0.5
     return pixels, mean, max(spread, 1.0)
@@ -9836,6 +9868,268 @@ def _motion_ensure_loop(camera_id: str) -> None:
              f"motion detection is armed")
 
 
+# ── 2.6.6: live-stream motion pipelines ─────────────────────────────────────
+# CrystalHeeler, 2026-10-01: recordings missed the start of each event, and
+# sensitivity 80-90 still reacted late. Detection compared snapshots, which
+# the Lorex channels deliver every 1.9 s, and the recording connected to the
+# camera only after motion was found. Now an armed camera runs two ffmpeg
+# pipelines, the usual video-recorder split:
+#   detector: its smallest stream, decoded to MOTION_GRID grey at
+#             MOTION_DETECT_FPS frames a second (_motion_detector)
+#   buffer:   its main stream, copied unchanged into MPEG-TS and held in
+#             memory from a keyframe at least MOTION_PREROLL_S old
+#             (_motion_buffer, _TsBuffer)
+# On motion, a writer ffmpeg receives the buffer and then the live packets
+# (_start_recording), so every file starts before the motion did.
+MOTION_PREROLL_S = 3.0          # every recording starts at least this early
+MOTION_DETECT_FPS = 4
+MOTION_BUF_MAX_S = 20.0         # memory bound if keyframes are far apart
+MOTION_PIPE_RETRY_S = 10.0
+TS_PACKET = 188
+TS_VIDEO_PID = 0x100            # -mpegts_start_pid in _motion_buffer
+TS_PMT_PID = 0x1000             # ffmpeg's default PMT PID
+
+
+class _TsBuffer:
+    """The recording stream's MPEG-TS packets, grouped by keyframe.
+
+    Keeps the newest keyframe that is at least MOTION_PREROLL_S old, and
+    everything after it: enough to start a file before the motion, and no
+    more. ffmpeg marks each video keyframe with the random-access flag in
+    the adaptation field of its first packet.
+    """
+
+    def __init__(self) -> None:
+        self.rest = b""
+        self.gops: collections.deque = collections.deque()   # [start time, bytearray]
+        self.psi: dict[int, bytes] = {}                       # latest PAT and PMT
+
+    def feed(self, data: bytes, now: float) -> bytes:
+        """Add stream bytes; return the complete packets among them."""
+        data = self.rest + data
+        n = len(data) // TS_PACKET * TS_PACKET
+        self.rest = data[n:]
+        out = data[:n]
+        mv = memoryview(out)
+        for i in range(0, n, TS_PACKET):
+            pkt = mv[i:i + TS_PACKET]
+            if pkt[0] != 0x47:
+                continue
+            pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+            if pid in (0, TS_PMT_PID):
+                self.psi[pid] = bytes(pkt)
+            elif (pid == TS_VIDEO_PID and pkt[1] & 0x40 and pkt[3] & 0x20
+                    and pkt[4] > 0 and pkt[5] & 0x40):
+                self.gops.append([now, bytearray()])
+            if self.gops:
+                self.gops[-1][1] += pkt
+        self._trim(now)
+        return out
+
+    def _trim(self, now: float) -> None:
+        while len(self.gops) > 1 and now - self.gops[1][0] >= MOTION_PREROLL_S:
+            self.gops.popleft()
+        while len(self.gops) > 1 and now - self.gops[0][0] > MOTION_BUF_MAX_S:
+            self.gops.popleft()
+
+    def preroll(self) -> bytes:
+        """PAT, PMT, then everything from the buffered keyframe on."""
+        if not self.gops:
+            return b""
+        head = b"".join(self.psi[pid] for pid in (0, TS_PMT_PID) if pid in self.psi)
+        return head + b"".join(bytes(g[1]) for g in self.gops)
+
+    def preroll_seconds(self, now: float) -> float:
+        return now - self.gops[0][0] if self.gops else 0.0
+
+
+def _motion_detect_source(camera: dict) -> str | None:
+    """The stream detection decodes: the smallest RTSP stream, any codec.
+
+    Like _go2rtc_card_source, but MJPEG is fine here (ffmpeg decodes it).
+    None when only a stream wider than CARD_MAX_WIDTH is known: decoding a
+    4K stream continuously would load the Pi, so that camera keeps the
+    snapshot path.
+    """
+    if camera.get("display") in ("webrtc", "wsrtsp", "info"):
+        return None
+    best: tuple[int, str] | None = None
+    for prof in _go2rtc_profiles(camera):
+        raw = prof.get("url") or camera.get(prof.get("_url_key", "stream_url"))
+        if not raw or not raw.lower().startswith(("rtsp://", "rtsps://")):
+            continue
+        url = build_authenticated_url(camera, url=raw)
+        if not url:
+            continue
+        width = prof.get("stream_width") or 0
+        if best is None or (width and (not best[0] or width < best[0])):
+            best = (width, url)
+    if best is not None and best[0] > CARD_MAX_WIDTH:
+        sub = _dahua_sub_stream(camera.get("stream_url") or "")
+        return build_authenticated_url(camera, url=sub) if sub else None
+    return best[1] if best else None
+
+
+def _motion_record_source(camera: dict) -> str | None:
+    """The stream recordings copy: the main stream, full quality."""
+    raw = camera.get("stream_url") or ""
+    if not raw.lower().startswith(("rtsp://", "rtsps://")):
+        return None
+    return build_authenticated_url(camera)
+
+
+async def _motion_throttle(camera: dict) -> None:
+    """Respect the brand's per-IP connection cooldown (Microseven)."""
+    secs = _brand_throttle_seconds(camera)
+    if secs > 0:
+        await _throttle_wait_if_needed(camera.get("ip", ""), secs, "motion")
+
+
+async def _motion_detector(camera_id: str, url: str) -> None:
+    """Watch the camera's small stream; feed each frame to _motion_feed."""
+    ms = _motion_state(camera_id)
+    w, h = MOTION_GRID
+    size = w * h
+    while _motion_armed(camera_id):
+        await _motion_throttle(CAMERAS.get(camera_id) or {})
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-nostdin", "-loglevel", "error",
+                "-rtsp_transport", "tcp", "-timeout", "8000000",
+                "-i", url, "-an",
+                "-vf", f"fps={MOTION_DETECT_FPS},scale={w}:{h}:flags=area,format=gray",
+                "-f", "rawvideo", "pipe:1",
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE)
+            err_t = asyncio.create_task(_drain_stderr(proc, f"DET:{camera_id}"))
+            frames = 0
+            try:
+                while _motion_armed(camera_id):
+                    px = await asyncio.wait_for(proc.stdout.readexactly(size), timeout=30)
+                    frames += 1
+                    if frames == 1:
+                        ms["detector_live"] = True
+                        _motion_reset_prev(camera_id)
+                        log.info(f"Motion [{camera_id}]: watching the live stream, "
+                                 f"{MOTION_DETECT_FPS} frames a second")
+                    _motion_feed(camera_id, _motion_thumb_gray(px), time.monotonic())
+            finally:
+                err_t.cancel()
+        except asyncio.IncompleteReadError:
+            pass
+        except asyncio.TimeoutError:
+            log.warning(f"Motion [{camera_id}]: no detection frame in 30 s")
+        except OSError as ex:
+            log.warning(f"Motion [{camera_id}]: could not start detection ffmpeg: {ex}")
+        finally:
+            ms["detector_live"] = False
+            if proc is not None:
+                await _stop_proc(proc, exited_grace=0.5)
+        if _motion_armed(camera_id):
+            log.warning(f"Motion [{camera_id}]: live detection stopped — snapshots "
+                        f"meanwhile, retrying in {MOTION_PIPE_RETRY_S:.0f} s")
+            await asyncio.sleep(MOTION_PIPE_RETRY_S)
+
+
+async def _motion_buffer(camera_id: str, url: str) -> None:
+    """Hold the main stream's last few seconds; feed an active recording."""
+    ms = _motion_state(camera_id)
+    while _motion_armed(camera_id):
+        await _motion_throttle(CAMERAS.get(camera_id) or {})
+        proc = None
+        buf = _TsBuffer()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-nostdin", "-loglevel", "error",
+                "-rtsp_transport", "tcp", "-timeout", "8000000",
+                "-fflags", "+genpts", "-i", url,
+                "-map", "0:v:0", "-map", "0:a:0?",
+                # Video copied unchanged. Audio to AAC: DVRs often send G.711,
+                # which neither MPEG-TS nor MP4 can carry.
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "64k",
+                "-f", "mpegts", "-mpegts_start_pid", str(TS_VIDEO_PID), "pipe:1",
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE)
+            err_t = asyncio.create_task(_drain_stderr(proc, f"BUF:{camera_id}"))
+            ms["tsbuf"] = buf
+            try:
+                while _motion_armed(camera_id):
+                    data = await asyncio.wait_for(proc.stdout.read(65536), timeout=30)
+                    if not data:
+                        break
+                    pkts = buf.feed(data, time.monotonic())
+                    if not ms.get("buffer_live") and buf.gops:
+                        ms["buffer_live"] = True
+                        log.info(f"Motion [{camera_id}]: holding the last "
+                                 f"{MOTION_PREROLL_S:.0f} s of the main stream for recordings")
+                    queue = ms.get("rec_queue")
+                    if queue is not None:
+                        queue += pkts
+                    elif (writer := ms.get("writer")) is not None and pkts:
+                        await _motion_write(camera_id, ms, writer, pkts)
+            finally:
+                err_t.cancel()
+        except asyncio.TimeoutError:
+            log.warning(f"Motion [{camera_id}]: no recording-stream data in 30 s")
+        except OSError as ex:
+            log.warning(f"Motion [{camera_id}]: could not start buffer ffmpeg: {ex}")
+        finally:
+            ms["buffer_live"] = False
+            ms["tsbuf"] = None
+            if proc is not None:
+                await _stop_proc(proc, exited_grace=0.5)
+        if _motion_armed(camera_id):
+            log.warning(f"Motion [{camera_id}]: recording stream stopped — retrying "
+                        f"in {MOTION_PIPE_RETRY_S:.0f} s")
+            await asyncio.sleep(MOTION_PIPE_RETRY_S)
+
+
+async def _motion_write(camera_id: str, ms: dict, writer, pkts: bytes) -> None:
+    """Pass packets to the recording writer; drop it if it has died."""
+    try:
+        writer.stdin.write(pkts)
+        await asyncio.wait_for(writer.stdin.drain(), timeout=5)
+    except (BrokenPipeError, ConnectionResetError, asyncio.TimeoutError) as ex:
+        log.warning(f"Motion [{camera_id}]: recording writer stopped taking data ({ex!r})")
+        if ms.get("writer") is writer:
+            ms["writer"] = None
+
+
+def _motion_ensure_pipelines(camera_id: str) -> None:
+    """Start an armed camera's detector and buffer tasks if not running."""
+    ms = _motion_state(camera_id)
+    camera = CAMERAS.get(camera_id)
+    if not camera:
+        return
+    for key, source, factory in (
+            ("det_task", _motion_detect_source, _motion_detector),
+            ("buf_task", _motion_record_source, _motion_buffer)):
+        task = ms.get(key)
+        if task and not task.done():
+            continue
+        url = source(camera)
+        if url:
+            ms[key] = asyncio.create_task(factory(camera_id, url))
+
+
+async def _motion_stop_pipelines(camera_id: str) -> None:
+    """Disarmed or shutting down: stop the detector and buffer."""
+    ms = _MOTION.get(camera_id) or {}
+    tasks = [t for t in (ms.pop("det_task", None), ms.pop("buf_task", None))
+             if t and not t.done()]
+    for t in tasks:
+        t.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _motion_uses_snapshots(camera_id: str) -> bool:
+    """Armed, and the snapshot path is its detector right now."""
+    ms = _MOTION.get(camera_id)
+    return bool(ms and ms["enabled"] and not ms.get("detector_live"))
+
+
 async def _motion_keeper() -> None:
     """Every MOTION_KEEPER_S: keep armed cameras watched, end recordings."""
     while True:
@@ -9853,8 +10147,12 @@ async def _motion_keeper() -> None:
                 elif ms["recording"] and (not ms["enabled"] or _motion_quiet(camera_id, ms, now_m)):
                     await _stop_recording(camera_id)
                 if ms["enabled"]:
-                    _motion_ensure_loop(camera_id)
+                    _motion_ensure_pipelines(camera_id)
+                    if not ms.get("detector_live"):
+                        _motion_ensure_loop(camera_id)
                     _motion_report_peak(camera_id, ms, now_m)
+                elif ms.get("det_task") or ms.get("buf_task"):
+                    await _motion_stop_pipelines(camera_id)
             except Exception as ex:
                 log.warning(f"Motion [{camera_id}]: keeper error: {ex}")
 
@@ -9947,8 +10245,46 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
     clip     = cam_dir / f"{base}_part01.mp4"
     ms["clip_path"] = clip
     ms["clip_base"] = base
-    log.info(f"Motion [{camera_id}]: recording started → {clip} "
-             f"(a new file every {cfg['clip_s']} s while motion continues)")
+    seg_args = ["-f", "segment", "-segment_time", str(cfg["clip_s"]),
+                "-segment_start_number", "1", "-reset_timestamps", "1",
+                "-segment_format", "mp4",
+                "-segment_format_options", "movflags=+faststart",
+                str(cam_dir / f"{base}_part%02d.mp4")]
+    # H.265 in MP4 needs the hvc1 tag for Chrome and Apple players.
+    tag = (["-tag:v", "hvc1"]
+           if (camera.get("stream_codec") or "").lower() in ("hevc", "h265") else [])
+    buf = ms.get("tsbuf")
+    if buf is not None and ms.get("buffer_live"):
+        # 2.6.6: start from the buffer — the file begins at a keyframe at
+        # least MOTION_PREROLL_S before the motion. Packets that arrive
+        # while the writer starts are queued, then handed over in order.
+        ms["rec_queue"] = bytearray(buf.preroll())
+        pre_s = buf.preroll_seconds(time.monotonic())
+        log.info(f"Motion [{camera_id}]: recording started → {clip} (from "
+                 f"{pre_s:.1f} s before the motion; a new file every "
+                 f"{cfg['clip_s']} s while motion continues)")
+        try:
+            writer = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-nostdin", "-loglevel", "warning",
+                "-f", "mpegts", "-i", "pipe:0", "-map", "0", "-c", "copy", *tag,
+                *seg_args,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE)
+        except OSError as ex:
+            ms["rec_queue"] = None
+            ms["recording"] = False
+            log.warning(f"Motion [{camera_id}]: failed to start recording: {ex}")
+            return
+        asyncio.create_task(_drain_stderr(writer, f"REC:{camera_id}"))
+        queued = ms.pop("rec_queue", None) or b""
+        ms["rec_queue"] = None
+        ms["proc"] = writer
+        ms["writer"] = writer
+        await _motion_write(camera_id, ms, writer, bytes(queued))
+        return
+    log.info(f"Motion [{camera_id}]: recording started → {clip} (no pre-roll: the "
+             f"recording stream is not running yet; a new file every "
+             f"{cfg['clip_s']} s while motion continues)")
     try:
         ms["proc"] = await asyncio.create_subprocess_exec(
             "ffmpeg", "-nostdin", "-loglevel", "warning",
@@ -9956,13 +10292,7 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
             "-fflags", "+genpts",   # 2.6.6: Lorex packets arrive without timestamps
             "-i", url,
             "-c", "copy",   # stream-copy: no decode/encode — nearly zero CPU
-            "-f", "segment",
-            "-segment_time", str(cfg["clip_s"]),
-            "-segment_start_number", "1",
-            "-reset_timestamps", "1",
-            "-segment_format", "mp4",
-            "-segment_format_options", "movflags=+faststart",
-            str(cam_dir / f"{base}_part%02d.mp4"),
+            *tag, *seg_args,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
@@ -9985,8 +10315,19 @@ async def _stop_recording(camera_id: str) -> None:
         return
     ms["stopping"] = True
     try:
+        writer = ms.pop("writer", None)
+        if writer is not None and writer.returncode is None:
+            # 2.6.6: end of input makes ffmpeg finish the file cleanly.
+            try:
+                writer.stdin.close()
+                await asyncio.wait_for(writer.wait(), timeout=15)
+            except (BrokenPipeError, ConnectionResetError, asyncio.TimeoutError):
+                try:
+                    writer.kill()
+                except ProcessLookupError:
+                    pass
         proc = ms.get("proc")
-        if proc and proc.returncode is None:
+        if proc and proc is not writer and proc.returncode is None:
             try:
                 proc.terminate()   # ffmpeg finishes the current file on SIGTERM
                 await asyncio.wait_for(proc.wait(), timeout=5)
@@ -10019,11 +10360,13 @@ async def api_motion_toggle(request: web.Request) -> web.Response:
         except (ValueError, AttributeError):
             want = None
     ms["enabled"] = (not ms["enabled"]) if want is None else bool(want)
-    ms["prev_frame"] = None
+    _motion_reset_prev(camera_id)
     if ms["enabled"]:
-        _motion_ensure_loop(camera_id)
+        _motion_ensure_pipelines(camera_id)
+        _motion_ensure_loop(camera_id)      # snapshots until the live stream delivers
     else:
         await _stop_recording(camera_id)
+        await _motion_stop_pipelines(camera_id)
     log.info(f"Motion [{camera_id}]: {'enabled' if ms['enabled'] else 'disabled'}")
     try:
         await asyncio.to_thread(_motion_save)
