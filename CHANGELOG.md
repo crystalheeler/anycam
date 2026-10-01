@@ -1,9 +1,11 @@
 ## 2.6.6
 
 Motion detection now compares the pictures themselves, so it sees people
-on the Lorex channels. Long motion events are split into files of a length
-you choose. Camera cards play live video. Also: four bug fixes and a
-stronger release check.
+on the Lorex channels. Each camera has its own recording settings, opened
+from a cog on its card, with a sensitivity slider and a live reading of
+how strongly movement registers. Long motion events are split into files
+of a length you choose. Camera cards play live video. Also: four bug
+fixes and a stronger release check.
 
 ### Motion detection compares pictures (build plan B16, C13)
 
@@ -27,40 +29,43 @@ when a camera switched from night to day mode.
   times that on a Raspberry Pi 4, once a second per armed camera.
 - **New dependency:** Pillow 12.3.0, which decodes the JPEGs.
 
-### New setting: Motion Sensitivity (replaces the old one)
+### Each camera has its own recording settings (cog on the card)
 
-`motion_detect_level`, 1 to 100: 1 is least sensitive, 100 is most. It
-replaces `motion_sensitivity`, whose numbers meant file-size changes. The
-default, 63, records when 5% of the picture changes. The scale runs from
-74% of the picture at 1 down to 1% at 100, with finer steps at the
-sensitive end:
+A cog at the top right of each card's lower half opens that camera's
+settings:
 
-| Setting | Share of the picture that must change |
-|---|---|
-| 1 | 74% |
-| 25 | 26% |
-| 50 | 8.8% |
-| 63 (default) | 5.0% |
-| 75 | 3.0% |
-| 90 | 1.5% |
-| 100 | 1.0% |
+- **Sensitivity**: a slider from 1 (left, least sensitive) to 100 (right,
+  most sensitive). Its value shows as it moves. The default, 63, records
+  when about 5% of the picture changes. A person walking through counts
+  roughly twice their own size, because both where they were and where
+  they are now change.
+- **Live reading** under the slider, for an armed camera: the lowest
+  setting that would have recorded the biggest movement of the last
+  minute or two, also marked on the slider in orange. Walk past the
+  camera and move the slider to the marker or beyond.
+- **Cooldown** (seconds with no motion before recording stops), **Tail**
+  (extra seconds after that), **File length**, and **Recording folder**.
+- **Defaults** returns the camera to the standard values: sensitivity 63,
+  cooldown 5 s, tail 3 s, file length 30 s, folder `/media/anycam`.
 
-A person walking through counts roughly twice their own size, because
-both where they were and where they are now change. At the default, a
-person covering about 2.5% of the picture triggers a recording.
+The Configuration tab's Motion Sensitivity was a number box: Home
+Assistant draws every whole-number add-on setting that way and cannot show
+a slider there. A setting of 5, which looked like "5%", needed 62% of the
+picture to change, and nothing recorded on 2026-09-30.
 
-After updating, the Supervisor logs one harmless warning, because the old
-setting is still saved:
+**Recording folder.** Any folder under `/media`, the only part of the
+system the add-on can write to. Each camera still gets its own sub-folder
+inside it. For a Samba or NFS share, add it in Home Assistant (Settings,
+System, Storage, Add network storage, usage Media); it appears as
+`/media/<name>`. SFTP and FTP upload are planned for 2.6.7. The Storage
+tab opens on the global recordings folder; cameras that record elsewhere
+show in Home Assistant's Media browser, or in the Storage tab with
+Unrestricted Storage Browser on.
 
-```
-Option 'motion_sensitivity' does not exist in the schema for AnyCam
-```
-
-### New setting: Recording Length (build plan C12)
-
-`motion_clip_length`: 10s, 20s, 30s, 1min (default), 2min or 5min. While
-motion continues, a new file starts this often; an event shorter than this
-is one file. Files are named so the parts of one event group together:
+**File length** (build plan C12): 10s, 20s, 30s, 1min, 2min or 5min.
+While motion continues, a new file starts this often; an event shorter
+than this is one file. Files are named so the parts of one event group
+together:
 
 ```
 motion_20260930_081151_part01.mp4   ← a new event
@@ -72,6 +77,43 @@ A file can only end on a keyframe, so lengths are approximate: within
 about 1 s on the Oak-D camera and 3 s on the Hikvision. Recording now also
 starts and stops exactly once per event; 2.6.5 logged "recording stopped"
 two or three times per clip.
+
+### Global recording settings (Configuration tab)
+
+The Configuration tab keeps five recording settings, now named Global
+Recordings Path, Global Motion Sensitivity, Global Recording Length,
+Global Motion Cooldown and Global Recording Tail. A new switch, **Use
+Global Recording Settings**, is off by default. While it is off, those
+five are ignored and each camera uses its own settings. When it is on,
+they apply to every camera, and each camera's cog menu shows them
+read-only. Home Assistant cannot grey out add-on settings, so the five
+stay editable in the Configuration tab while the switch is off.
+
+`motion_sensitivity` is replaced by `motion_detect_level`. After
+updating, the Supervisor logs one harmless warning, because the old
+setting is still saved:
+
+```
+Option 'motion_sensitivity' does not exist in the schema for AnyCam
+```
+
+### Tuning line in the log
+
+Once a minute, each armed camera logs the biggest change it saw, for
+example:
+
+```
+Motion [192.168.50.217_554_ch7]: largest change in the last 60 s: 12.3% of the picture, would record at sensitivity 43 or higher (set to 63, 5.0%; 31 comparisons)
+```
+
+At INFO when something moved, at DEBUG for a still scene, so a quiet night
+does not fill the log.
+
+### Cards
+
+- Protocol, IP address and port moved from the badges into the Identity
+  list, always at the top.
+- The Test Stream button and its server endpoint are removed.
 
 ### Live video in the camera cards (build plan C1)
 
@@ -139,7 +181,9 @@ Cards play live through go2rtc, using each camera's smallest stream:
 
 The folder inside the zip is still `local_camera_discovery`, so the
 changelog shows without extra steps. The Supervisor may log the warning
-about `motion_sensitivity` once.
+about `motion_sensitivity` once. Every camera starts on the standard
+recording settings; set each one from its cog, or turn on Use Global
+Recording Settings.
 
 ### Known issues carried forward
 
