@@ -1,6 +1,6 @@
 name: "AnyCam"
 description: "Scans the local network for IP cameras (RTSP, ONVIF, MJPEG, HLS, RTMP, WebRTC, WS-RTSP) and displays live feeds in a card grid."
-version: "2.6.6"
+version: "2.6.7"
 slug: "camera_discovery"
 init: false
 host_network: true
@@ -61,5 +61,5 @@ ingress_stream: true
 full_access: true
 panel_icon: mdi:cctv
 panel_title: AnyCam
-homeassistant_api: false
+homeassistant_api: true
 changelog: CHANGELOG.md
