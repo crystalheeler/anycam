@@ -156,8 +156,10 @@ via rpivid — the correct overlay line in `/boot/firmware/config.txt` is
   firmware). RTSP pattern `/cam/realmonitor?channel=N&subtype=M`. Digest
   realm is `Login to <32-hex>`. The DVR allocates virtual stream slots for
   all 8 channels regardless of physical camera presence. Login lockout at 10
-  failed attempts. Encoder caps around 5 fps — that ceiling is the DVR, not
-  AnyCam.
+  failed attempts. The main stream runs at about 7 fps (measured from
+  recordings, 2026-10-01; the DVR's setting tops out at about 8 fps) — that
+  ceiling is the DVR, not AnyCam. Main stream 3840x2160 H.265, keyframe
+  every second; the sub-stream is at `subtype=1`.
 - **Hipcam/Microseven**: per-IP TCP rate limiting. Two opens inside the 5s
   window draws an RST. Soft-degraded RTSP state (accepts TCP, returns
   garbage) is distinct from hard lockout (refuses TCP) — only a power cycle
