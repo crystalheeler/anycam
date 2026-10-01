@@ -171,11 +171,21 @@ CONTRACTS = {
     "_motion_tick":          ["_stop_recording", "_motion_quiet"],
     # 2.6.6: live-stream detection, and the pre-roll buffer recordings start from.
     "_motion_detector":      ["MOTION_DETECT_FPS", "rawvideo", "_motion_feed",
-                              '"detector_live"', "_stop_proc"],
+                              '"detector_live"', "_stop_proc",
+                              "format=yuv420p", "_motion_night_observe"],
     "_motion_buffer":        ['"-c:v", "copy"', "_TsBuffer()", "rec_queue",
                               "_motion_write", "_stop_proc"],
     "_motion_diff":          ["MOTION_PIXEL_DELTA", "MOTION_REGIONS", "/ sa", "/ sc"],
-    "_motion_judge":         ["MOTION_LIGHT_FRACTION", "_motion_cfg(camera_id)"],
+    "_motion_judge":         ["MOTION_LIGHT_FRACTION", "_motion_area_now(camera_id)"],
+    # 2.6.7: night boost (C15).
+    "_motion_area_now":      ["_motion_cfg(camera_id)", "_motion_boost(camera_id)"],
+    "_motion_area_pct":      ["MOTION_AREA_FLOOR"],
+    "_motion_night_observe": ["NIGHT_HOLD_S", "NIGHT_CHROMA_MAX", "DAY_CHROMA_MIN",
+                              "NIGHT_GAP_S"],
+    "_night_expectation_check": ["NIGHT_WINDOW_S", "_NIGHT_CHECKED", "_ha_notify",
+                                 "observed_since"],
+    "_ha_api":               ["SUPERVISOR_TOKEN", "http://supervisor/core/api/"],
+    "_ha_location_refresh":  ['"config"', "12 * 3600"],
     # 2.6.6: per-camera settings; the global override wins when it is on.
     "_motion_cfg":           ["CFG_MOTION_GLOBAL", "_MOTION_CFG", "MOTION_DEFAULTS"],
     "_motion_validate":      ["MOTION_PATH_ROOT", "MOTION_CLIP_CHOICES"],

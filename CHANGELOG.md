@@ -1,3 +1,81 @@
+## 2.6.7
+
+Night boost: when a camera switches to night vision (infrared, black and
+white), its motion sensitivity goes up by 15 on its own, and back down
+when colour returns. AnyCam also checks the switch against sunrise and
+sunset at your Home Assistant home location, and tells you when a camera
+does not switch.
+
+### Why (build plan C15)
+
+CrystalHeeler's log of 2026-10-01, 22:27 to 23:03, sensitivity 98 (1.1% of the
+picture): on ch4 a person walking toward the camera from far away changed
+0.6 to 0.7% of the picture for 6 to 8 s before reaching 1.1%. Even
+sensitivity 100 needs 1%. A still night scene peaked at 0.1% (median of
+the minute peaks) and 0.7% (highest).
+
+### How it works
+
+- **Night is read from the picture.** The detection stream now carries
+  colour as well as brightness. Under infrared the colour is close to
+  zero. A camera counts as at night when the colour measure stays at or
+  under 2.5 for 30 s, and at day when it stays at or over 5.0 for 30 s.
+  Values between change nothing. Snapshot-only cameras use the same
+  measure on each JPEG.
+- **It runs all the time,** not only near sunrise and sunset, so a storm
+  that turns a camera to infrared at 3 pm also gets the boost.
+- **The boost.** At night, a camera set to 80 works at 95. The scale
+  continues past 100: 105 is 0.80% of the picture, 115 is 0.52%, and
+  nothing goes under 0.4%. In daytime the slider means what it says.
+- **Readings stay in slider units.** The tuning line and the cog's live
+  reading give the setting you would need on the slider. At night a
+  0.65% change reads "records at 95 or higher". The tuning line also
+  shows the mode ("day" or "night +15") and the colour value, for
+  calibrating the 2.5 and 5.0 thresholds.
+- **The cog panel** shows "Night mode (IR): sensitivity +15" or "Day
+  mode: sensitivity as set" for an armed camera.
+
+### The sunrise and sunset check
+
+- AnyCam reads the home location from Home Assistant (Settings, System,
+  General). It asks every 5 minutes until it gets an answer, then every
+  12 hours. Sunrise and sunset come from the US Naval Observatory's
+  almanac formula; tests against London, Sydney and Denver agree with
+  published times to within 4 minutes.
+- One hour after each sunset, a camera that was watched through the
+  whole two-hour window and has not switched to infrared is reported.
+  The same applies one hour after sunrise for a camera still in
+  infrared. Possible causes: lights on the area, a camera set to stay in
+  colour or in black and white, or a fault.
+- **Reports go three ways:** a warning in the add-on log, a note in the
+  camera's cog panel, and a Home Assistant notification (the bell). One
+  report per camera per event; the note clears when the camera switches
+  or the next check finds it in the expected mode.
+- A switch outside those windows is logged as information, with "outside
+  the usual time (dark weather, or lights)".
+
+### Permissions
+
+- **New: Home Assistant API access** (`homeassistant_api: true`). AnyCam
+  uses it for two calls only: reading the home location
+  (`GET /api/config`) and creating a notification
+  (`persistent_notification.create`). Home Assistant asks you to accept
+  the new permission when you update.
+
+### Tests
+
+- 244 server checks (40 new) and 110 page checks (4 new) pass. The
+  detector's frame format changed from grey (3,072 bytes) to YUV 4:2:0
+  (4,608 bytes); the stand-in ffmpeg in the tests now sends that format.
+- Not tested here: a real camera's colour values under infrared. No
+  ffmpeg is installed on the build PC. The colour value in the tuning
+  line is there to check the thresholds in the field.
+
+### Also
+
+- The recording-folder help in the cog panel now says SFTP and FTP
+  upload are planned for 2.6.8 (it said 2.6.7).
+
 ## 2.6.6
 
 Motion detection now compares the pictures themselves, so it sees people

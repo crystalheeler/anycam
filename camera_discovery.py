@@ -112,7 +112,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.6.6"  # must match config.yaml
+CURRENT_VERSION = "2.6.7"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -9501,6 +9501,9 @@ def _motion_on_frame(camera_id: str, frame: bytes) -> None:
         _motion_tick(camera_id, ms, now_m)
         return
     ms["snap_cmp_t"] = now_m
+    chroma = _motion_jpeg_chroma(frame)
+    if chroma is not None:
+        _motion_night_observe(camera_id, chroma, now_m)
     thumb = _motion_thumb(frame)
     if thumb is None:
         _motion_tick(camera_id, ms, now_m)
@@ -9629,7 +9632,7 @@ def _motion_judge(camera_id: str, prev: tuple[bytes, float, float],
                  f"picture ({pct:.0f}% of it changed) — treated as a light "
                  f"change, not recorded")
         return False
-    area = _motion_cfg(camera_id)["area_pct"]
+    area = _motion_area_now(camera_id)
     if pct >= area:
         log.info(f"Motion [{camera_id}]: {pct:.1f}% of the picture changed "
                  f"(threshold {area:.1f}%)")
@@ -9671,15 +9674,19 @@ def _motion_report_peak(camera_id: str, ms: dict, now_m: float) -> None:
     ms["last_peak_pct"] = pct      # for the settings panel's live readout
     cfg = _motion_cfg(camera_id)
     extra = f"; {light} light change(s) ignored" if light else ""
-    needed = _motion_level_for_pct(pct)
+    boost = _motion_boost(camera_id)
+    needed = _motion_level_for_pct(pct, boost)
     at = (f"would record at sensitivity {needed} or higher" if needed <= 100
           else "too small to record at any sensitivity")
+    mode = (f"night +{boost}" if boost else "day")
+    chroma = ms.get("chroma")
+    colour = f", colour {chroma:.1f}" if chroma is not None else ""
     # INFO when something moved, DEBUG for a still scene, so a quiet night
     # does not fill the log.
     (log.info if pct >= 0.5 or light else log.debug)(
         f"Motion [{camera_id}]: largest change in the last {MOTION_PEAK_REPORT_S} s: "
-        f"{pct:.1f}% of the picture, {at} (set to {cfg['level']}, "
-        f"{cfg['area_pct']:.1f}%; {n} comparisons{extra})")
+        f"{pct:.1f}% of the picture, {at} (set to {cfg['level']}, {mode}, "
+        f"{_motion_area_now(camera_id):.2f}%{colour}; {n} comparisons{extra})")
 
 
 def _motion_finish_files(camera_id: str, ms: dict) -> None:
@@ -9732,18 +9739,35 @@ _MOTION_CFG: dict = {}          # camera_id -> settings that differ from default
 
 
 def _motion_area_pct(level: int) -> float:
-    """Sensitivity 1 to 100 -> share of the picture, 74% down to 1% (log)."""
-    return 74.0 * (1.0 / 74.0) ** ((level - 1) / 99.0)
+    """Sensitivity -> share of the picture: 74% at 1 down to 1% at 100 (log).
+
+    2.6.7: the night boost can take a camera past 100; the curve continues
+    down to MOTION_AREA_FLOOR, about 121.
+    """
+    return max(MOTION_AREA_FLOOR, 74.0 * (1.0 / 74.0) ** ((level - 1) / 99.0))
 
 
-def _motion_level_for_pct(pct: float) -> int:
-    """Lowest sensitivity that records a change of pct%; 101 = none does."""
+def _motion_level_needed(pct: float) -> float:
+    """The effective sensitivity at which a change of pct% just records."""
     import math
     if pct <= 0:
-        return 101
+        return math.inf
     if pct >= 74.0:
-        return 1
-    return min(101, math.ceil(1 + 99 * math.log(74.0 / pct) / math.log(74.0) - 1e-9))
+        return 1.0
+    return 1 + 99 * math.log(74.0 / pct) / math.log(74.0)
+
+
+def _motion_level_for_pct(pct: float, boost: int = 0) -> int:
+    """Lowest slider setting that records a change of pct%; 101 = none does.
+
+    boost: the night boost in force; the slider value is what the user set,
+    so the boost comes off the effective level.
+    """
+    import math
+    need = _motion_level_needed(pct)
+    if pct < MOTION_AREA_FLOOR:
+        return 101
+    return max(1, min(101, math.ceil(need - boost - 1e-9)))
 
 
 def _motion_cfg(camera_id: str) -> dict:
@@ -9802,7 +9826,10 @@ def _motion_settings_payload(camera_id: str) -> dict:
         "armed":    bool(ms.get("enabled")),
         # The lowest sensitivity that would have recorded the biggest
         # movement in the last minute or two; None before any comparison.
-        "peak_level": _motion_level_for_pct(peak) if peak > 0 else None,
+        "peak_level": _motion_level_for_pct(peak, _motion_boost(camera_id)) if peak > 0 else None,
+        "night":      bool(ms.get("night")),
+        "night_boost": MOTION_NIGHT_BOOST,
+        "night_note": ms.get("night_note"),
     }
 
 
@@ -9989,7 +10016,10 @@ async def _motion_detector(camera_id: str, url: str) -> None:
     """Watch the camera's small stream; feed each frame to _motion_feed."""
     ms = _motion_state(camera_id)
     w, h = MOTION_GRID
-    size = w * h
+    luma = w * h
+    # 2.6.7: yuv420p, so each frame also carries its colour planes (a
+    # quarter of the luma size each); night mode is read from those.
+    size = luma + 2 * (luma // 4)
     while _motion_armed(camera_id):
         await _motion_throttle(CAMERAS.get(camera_id) or {})
         proc = None
@@ -9998,7 +10028,7 @@ async def _motion_detector(camera_id: str, url: str) -> None:
                 "ffmpeg", "-nostdin", "-loglevel", "error",
                 "-rtsp_transport", "tcp", "-timeout", "8000000",
                 "-i", url, "-an",
-                "-vf", f"fps={MOTION_DETECT_FPS},scale={w}:{h}:flags=area,format=gray",
+                "-vf", f"fps={MOTION_DETECT_FPS},scale={w}:{h}:flags=area,format=yuv420p",
                 "-f", "rawvideo", "pipe:1",
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE)
@@ -10013,7 +10043,10 @@ async def _motion_detector(camera_id: str, url: str) -> None:
                         _motion_reset_prev(camera_id)
                         log.info(f"Motion [{camera_id}]: watching the live stream, "
                                  f"{MOTION_DETECT_FPS} frames a second")
-                    _motion_feed(camera_id, _motion_thumb_gray(px), time.monotonic())
+                    now_m = time.monotonic()
+                    if frames % MOTION_DETECT_FPS == 1:      # colour once a second
+                        _motion_night_observe(camera_id, _motion_chroma(px[luma:]), now_m)
+                    _motion_feed(camera_id, _motion_thumb_gray(px[:luma]), now_m)
             finally:
                 err_t.cancel()
         except asyncio.IncompleteReadError:
@@ -10124,6 +10157,226 @@ async def _motion_stop_pipelines(camera_id: str) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+# ── 2.6.7: night boost (build plan C15) ────────────────────────────────────
+# CrystalHeeler, 2026-10-01: at night under IR a distant walker changed 0.6-0.7% of
+# the picture for 6-8 s, under the 1% that even sensitivity 100 needs.
+# When a camera's picture turns black-and-white (IR), its setting shifts up
+# by MOTION_NIGHT_BOOST, past 100 if need be, down to MOTION_AREA_FLOOR; in
+# daytime the slider means exactly what it says. The colour check runs all
+# the time (a storm can switch a camera to IR at 3 pm). Home Assistant's
+# home location gives sunrise and sunset, so a camera that does not switch
+# within NIGHT_WINDOW_S of either is reported: log, cog panel, and a Home
+# Assistant notification.
+MOTION_NIGHT_BOOST = 15
+MOTION_AREA_FLOOR = 0.4        # % of the picture: about 4x the still-night median
+NIGHT_CHROMA_MAX = 2.5         # colour at or under this: black-and-white
+DAY_CHROMA_MIN = 5.0           # colour at or over this: day; between: no change
+NIGHT_HOLD_S = 30              # a new mode must hold this long
+NIGHT_WINDOW_S = 3600          # +/- around sunrise and sunset
+NIGHT_GAP_S = 120              # unseen longer than this: not watched through
+_HA_LOCATION: dict = {}        # latitude, longitude from Home Assistant
+_HA_LOC_STATE = {"next": 0.0}  # when to ask Home Assistant again
+_NIGHT_CHECKED: dict = {}      # (camera, kind, event time) -> event time, checked
+
+
+def _motion_boost(camera_id: str) -> int:
+    ms = _MOTION.get(camera_id) or {}
+    return MOTION_NIGHT_BOOST if ms.get("night") else 0
+
+
+def _motion_area_now(camera_id: str) -> float:
+    """The threshold in force: the camera's setting, plus the night boost."""
+    return _motion_area_pct(_motion_cfg(camera_id)["level"] + _motion_boost(camera_id))
+
+
+def _motion_chroma(uv: bytes) -> float:
+    """Mean distance of the colour planes from neutral (128): 0 = grey."""
+    return sum(abs(v - 128) for v in uv) / max(len(uv), 1)
+
+
+def _motion_jpeg_chroma(jpeg: bytes) -> float | None:
+    """The same colour measure for a JPEG (snapshot path)."""
+    try:
+        img = Image.open(io.BytesIO(jpeg))
+        img.draft("YCbCr", (64, 48))
+        ycc = img.convert("YCbCr").resize((32, 24), Image.Resampling.BOX)
+        _, cb, cr = ycc.split()
+        return _motion_chroma(cb.tobytes() + cr.tobytes())
+    except (OSError, ValueError, Image.DecompressionBombError):
+        return None
+
+
+def _motion_night_observe(camera_id: str, chroma: float, now_m: float) -> None:
+    """Track day or night from the picture's colour, with NIGHT_HOLD_S hysteresis."""
+    ms = _MOTION.get(camera_id)
+    if not ms:
+        return
+    ms["chroma"] = chroma
+    now = time.time()
+    if now - ms.get("observed_last", 0) > NIGHT_GAP_S:
+        ms["observed_since"] = now      # a gap: the window must be watched again
+    ms["observed_last"] = now
+    night = bool(ms.get("night"))
+    want = True if chroma <= NIGHT_CHROMA_MAX else False if chroma >= DAY_CHROMA_MIN else None
+    if want is None or want == night:
+        ms["night_cand_t"] = None
+        return
+    if ms.get("night_cand") is not want or not ms.get("night_cand_t"):
+        ms["night_cand"], ms["night_cand_t"] = want, now_m
+        return
+    if now_m - ms["night_cand_t"] < NIGHT_HOLD_S:
+        return
+    ms["night"], ms["night_cand_t"] = want, None
+    ms["night_switched_at"] = time.time()
+    ms["night_note"] = None
+    level = _motion_cfg(camera_id)["level"]
+    when = ("" if not _HA_LOCATION or _near_sun_event(time.time())
+            else " — outside the usual time (dark weather, or lights)")
+    if want:
+        log.info(f"Motion [{camera_id}]: night (IR, black-and-white) — sensitivity "
+                 f"{level} → {level + MOTION_NIGHT_BOOST} "
+                 f"({_motion_area_now(camera_id):.2f}% of the picture){when}")
+    else:
+        log.info(f"Motion [{camera_id}]: day (colour) — sensitivity back to {level}{when}")
+
+
+def _sun_events_utc(lat: float, lon: float, day: "datetime.date") -> dict:
+    """Sunrise and sunset for one UTC date, as epoch seconds (None if none).
+
+    The almanac algorithm (US Naval Observatory, "Almanac for Computers",
+    1990), accurate to a minute or two; zenith 90.833 degrees (refraction and
+    the sun's radius). Standard library only.
+    """
+    import math
+    n = day.timetuple().tm_yday
+    lng_hour = lon / 15.0
+    out = {}
+    for kind, hour in (("sunrise", 6), ("sunset", 18)):
+        t = n + (hour - lng_hour) / 24
+        m = 0.9856 * t - 3.289
+        sl = (m + 1.916 * math.sin(math.radians(m)) + 0.020 * math.sin(math.radians(2 * m))
+              + 282.634) % 360
+        ra = math.degrees(math.atan(0.91764 * math.tan(math.radians(sl)))) % 360
+        ra = (ra + (math.floor(sl / 90) * 90 - math.floor(ra / 90) * 90)) / 15
+        sin_dec = 0.39782 * math.sin(math.radians(sl))
+        cos_dec = math.cos(math.asin(sin_dec))
+        cos_h = ((math.cos(math.radians(90.833)) - sin_dec * math.sin(math.radians(lat)))
+                 / (cos_dec * math.cos(math.radians(lat))))
+        if not -1 <= cos_h <= 1:
+            out[kind] = None            # polar day or night
+            continue
+        h = (360 - math.degrees(math.acos(cos_h))) if kind == "sunrise" else math.degrees(math.acos(cos_h))
+        ut = (h / 15 + ra - 0.06571 * t - 6.622 - lng_hour) % 24
+        midnight = datetime.datetime(day.year, day.month, day.day,
+                                     tzinfo=datetime.timezone.utc).timestamp()
+        out[kind] = midnight + ut * 3600
+    return out
+
+
+def _sun_events_around(now: float) -> list[tuple[str, float]]:
+    """Sunrises and sunsets from yesterday to tomorrow (UTC), sorted."""
+    if not _HA_LOCATION:
+        return []
+    today = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).date()
+    ev = []
+    for d in (-1, 0, 1):
+        for kind, ts in _sun_events_utc(_HA_LOCATION["latitude"], _HA_LOCATION["longitude"],
+                                        today + datetime.timedelta(days=d)).items():
+            if ts is not None:
+                ev.append((kind, ts))
+    return sorted(ev, key=lambda e: e[1])
+
+
+def _near_sun_event(now: float) -> tuple[str, float] | None:
+    """The sunrise or sunset within NIGHT_WINDOW_S of now, if any."""
+    return next(((k, ts) for k, ts in _sun_events_around(now)
+                 if abs(now - ts) <= NIGHT_WINDOW_S), None)
+
+
+async def _night_expectation_check(camera_id: str, ms: dict, now: float) -> None:
+    """At the end of each window, report a camera that did not switch.
+
+    Decided once per camera and event, at the first keeper pass after the
+    window ends, and only for a camera watched all through the window.
+    """
+    for key in [k for k, ts in _NIGHT_CHECKED.items() if now - ts > 2 * 86400]:
+        del _NIGHT_CHECKED[key]
+    for kind, ts in _sun_events_around(now):
+        end = ts + NIGHT_WINDOW_S
+        key = (camera_id, kind, int(ts))
+        if not end <= now < end + NIGHT_WINDOW_S or key in _NIGHT_CHECKED:
+            continue
+        _NIGHT_CHECKED[key] = ts
+        if (ms.get("observed_since", now) > ts - NIGHT_WINDOW_S
+                or now - ms.get("observed_last", 0) > NIGHT_GAP_S):
+            continue
+        expect_night = kind == "sunset"
+        if bool(ms.get("night")) == expect_night:
+            ms["night_note"] = None
+            continue
+        at = time.strftime("%H:%M", time.localtime(ts))
+        if expect_night:
+            msg = (f"No switch to night mode (IR) around sunset ({at}). The area may be "
+                   f"lit, the camera may keep colour at night, or something is wrong. "
+                   f"Night boost stays off.")
+        else:
+            msg = (f"Still in night mode (IR) an hour after sunrise ({at}). The camera "
+                   f"may be forced to black-and-white, or something is wrong. Night "
+                   f"boost stays on until it shows colour.")
+        ms["night_note"] = msg
+        name = (CAMERAS.get(camera_id) or {}).get("name") or camera_id
+        log.warning(f"Motion [{camera_id}]: {msg}")
+        await _ha_notify(f"AnyCam: {name}", msg, f"anycam_night_{camera_id}_{kind}")
+
+
+async def _ha_api(method: str, path: str, payload: dict | None = None):
+    """Call Home Assistant's REST API through the Supervisor (homeassistant_api)."""
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not token:
+        return None
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.request(method, f"http://supervisor/core/api/{path}",
+                                   headers={"Authorization": f"Bearer {token}"},
+                                   json=payload) as resp:
+            if resp.status != 200:
+                log.warning(f"Home Assistant API {path}: HTTP {resp.status}")
+                return None
+            return await resp.json(content_type=None)
+
+
+async def _ha_location_refresh() -> None:
+    """Fetch Home Assistant's home location; retry every 5 min, refresh twice a day."""
+    if time.monotonic() < _HA_LOC_STATE["next"]:
+        return
+    _HA_LOC_STATE["next"] = time.monotonic() + 300
+    try:
+        cfg = await _ha_api("GET", "config")
+    except (aiohttp.ClientError, asyncio.TimeoutError) as ex:
+        log.debug(f"Night: Home Assistant location not available yet: {ex}")
+        return
+    if not cfg or cfg.get("latitude") is None or cfg.get("longitude") is None:
+        return
+    first = not _HA_LOCATION
+    _HA_LOCATION.update(latitude=float(cfg["latitude"]), longitude=float(cfg["longitude"]))
+    _HA_LOC_STATE["next"] = time.monotonic() + 12 * 3600
+    if first:
+        ev = [f"{k} {time.strftime('%H:%M', time.localtime(ts))}"
+              for k, ts in _sun_events_around(time.time())
+              if abs(ts - time.time()) < 86400]
+        log.info("Night: Home Assistant location received; next " + ", ".join(ev[:4]))
+
+
+async def _ha_notify(title: str, message: str, notification_id: str) -> None:
+    """A persistent notification in Home Assistant."""
+    try:
+        await _ha_api("POST", "services/persistent_notification/create",
+                      {"title": title, "message": message,
+                       "notification_id": notification_id})
+    except (aiohttp.ClientError, asyncio.TimeoutError) as ex:
+        log.warning(f"Home Assistant notification failed: {ex}")
+
+
 def _motion_uses_snapshots(camera_id: str) -> bool:
     """Armed, and the snapshot path is its detector right now."""
     ms = _MOTION.get(camera_id)
@@ -10134,6 +10387,7 @@ async def _motion_keeper() -> None:
     """Every MOTION_KEEPER_S: keep armed cameras watched, end recordings."""
     while True:
         await asyncio.sleep(MOTION_KEEPER_S)
+        await _ha_location_refresh()
         now_m = time.monotonic()
         for camera_id, ms in list(_MOTION.items()):
             try:
@@ -10151,6 +10405,7 @@ async def _motion_keeper() -> None:
                     if not ms.get("detector_live"):
                         _motion_ensure_loop(camera_id)
                     _motion_report_peak(camera_id, ms, now_m)
+                    await _night_expectation_check(camera_id, ms, time.time())
                 elif ms.get("det_task") or ms.get("buf_task"):
                     await _motion_stop_pipelines(camera_id)
             except Exception as ex:
@@ -13227,6 +13482,16 @@ function csLevelShow() {
 function _csPeak(d) {
   const txt  = document.getElementById('cs-peak');
   const mark = document.getElementById('cs-peak-mark');
+  const mode = document.getElementById('cs-mode');
+  // 2.6.7: night boost. The slider keeps what the user set; at night the
+  // camera works at that setting plus the boost.
+  mode.textContent = !d.armed ? '' : d.night
+    ? 'Night mode (IR): sensitivity +' + d.night_boost
+    : 'Day mode: sensitivity as set';
+  mode.classList.toggle('cs-night', !!d.night);
+  const note = document.getElementById('cs-night-note');
+  note.textContent = d.night_note || '';
+  note.style.display = d.night_note ? '' : 'none';
   mark.style.display = 'none';
   if (!d.armed) {
     txt.textContent = 'Arm this camera (Record button) to see how strongly movement registers.';
@@ -16907,6 +17172,9 @@ header h1{{cursor:pointer}}
 .cs-val{{font-weight:700;color:var(--primary);min-width:2.5em;text-align:right}}
 .cs-slider{{position:relative}}
 .cs-modal .cs-slider input[type=range]{{width:100%;padding:0;border:none;background:transparent;accent-color:var(--primary);cursor:pointer}}
+.cs-mode{{font-size:12px;color:var(--text-dim);margin-top:4px}}
+.cs-mode.cs-night{{color:var(--blue)}}
+.cs-night-note{{font-size:12px;color:var(--orange);margin-top:4px}}
 .cs-peak-mark{{position:absolute;top:-2px;width:3px;height:22px;margin-left:-1px;background:var(--orange);border-radius:2px;pointer-events:none}}
 .cs-ends{{display:flex;justify-content:space-between;font-size:.7rem;color:var(--text-dim);margin-top:-6px}}
 .cs-peak{{font-size:.78rem;color:var(--orange);min-height:1.2em}}
@@ -17113,6 +17381,8 @@ header h1{{cursor:pointer}}
     </div>
     <div class="cs-ends"><span>Less sensitive</span><span>More sensitive</span></div>
     <div class="cs-peak" id="cs-peak"></div>
+    <div class="cs-mode" id="cs-mode"></div>
+    <div class="cs-night-note" id="cs-night-note" style="display:none"></div>
     <div class="cs-section">Recording</div>
     <div class="cs-grid">
       <label>Cooldown (s)<input type="number" id="cs-cooldown" min="1" max="300"></label>
@@ -17122,7 +17392,7 @@ header h1{{cursor:pointer}}
     <label class="cs-full">Recording folder<input type="text" id="cs-path" spellcheck="false"></label>
     <div class="cs-help">Under /media. For a Samba or NFS share, add it in Home Assistant
       (Settings, System, Storage, Add network storage, usage Media); it appears as
-      /media/&lt;name&gt;. SFTP and FTP upload are planned for 2.6.7.</div>
+      /media/&lt;name&gt;. SFTP and FTP upload are planned for 2.6.8.</div>
     <div class="cs-error" id="cs-error"></div>
     <div class="modal-btns">
       <button class="btn btn-ghost btn-sm" id="cs-reset" onclick="resetCamSettings()" style="margin-right:auto">Defaults</button>

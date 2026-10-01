@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.6, published 2026-10-01.
+**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.6, published 2026-10-01. Built, not pushed: 2.6.7 (night boost).
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -26,7 +26,7 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 ## Recommended order
 
-1. **Field-test 2.6.6** (A12): motion on the Lorex channels, recording length, live cards.
+1. **Field-test 2.6.7** (A13): night boost, the Home Assistant permission, the sunset check.
 2. **Missing cameras** (B2). Logs first.
 3. **The Microseven lockout** (B6): power-cycle it, then logs if it locks up again.
 4. **The small correctness bugs**: B3, B12, and C10's plain message for Firefox, which matters more now that live view cannot be switched off.
@@ -41,6 +41,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
+| A13 | You | **Field-test 2.6.7 night boost** | Built 2026-10-01 for C15 | Accept the Home Assistant API permission when updating. After dark: the log line "night (IR, black-and-white)" per camera, the cog's "Night mode (IR): sensitivity +15", and the colour value in the tuning line (thresholds 2.5 and 5.0 are untested on real cameras). One hour after sunset: a notification only for a camera that did not switch |
 | A12 | You | Finish the 2.6.6 field test | CrystalHeeler, 2026-10-01: everything fixed and working — live detection, 3 s pre-roll, file naming, card layout and behaviour. Sensitivity 90 on two Lorex channels gave better results with the pre-roll, "still not ideal" | CrystalHeeler testing 95 and 98, then report. Carried: the classic view hiding the card thumbnail; "Stream unavailable" after 90 s; 2.6.5 or later on the Hikvision (172) system |
 
 ## B. Bugs
@@ -62,7 +63,6 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 |---|---|---|---|---|
 | C11 | Discuss | **Replace most or all of the option toggles with automatic behaviour** | CrystalHeeler, 2026-09-28. Eight toggles since 2.6.4 removed Live View, several broken or no longer relevant: Skip Non-Reference Frames never worked (B3), Fast Stream Start does nothing at 4K, and Live View makes several decode options irrelevant for the camera being watched. Low Latency Probe is the counter-example: it measurably helps the slow-starting H.264 camera (B13), so CrystalHeeler is keeping it for now. It is a candidate to switch on automatically for streams that start slowly | Separate discussion. For each toggle: remove it, make it automatic, or keep it. Pairs with C3 |
 | C14 | Ready | **Upload recordings to SFTP or FTP** | CrystalHeeler, 2026-09-30: per-camera recording destination, including SCP, SFTP, FTP or another remote share. Samba and NFS already work in 2.6.6 through Home Assistant's network storage under /media. SCP is SFTP in current OpenSSH | 2.6.8 (CrystalHeeler, 2026-10-01; was 2.6.7). Upload each finished file, then delete the local copy; keep it and retry until the upload succeeds. SFTP needs asyncssh; FTP and FTPS are in Python's standard library. Passwords stored encrypted, like camera passwords |
-| C15 | Discuss | **Night boost: automatic extra sensitivity under IR** | CrystalHeeler, 2026-10-01 log (22:27-23:03, live detection, sensitivity 98 = 1.1%): 5 of 7 recordings triggered within 1 s of the first visible change, pre-roll 3.1-4.0 s on all 12. On ch4 a distant approach held 0.6-0.7% for 6-8 s before reaching 1.1% (22:47:01 to :07; 22:49:33 to :41). Still scene: median minute peak 0.1%, highest 0.7%. The slider's sensitive end (1% at 100) is the limit at night | Version 2.6.7, not started (CrystalHeeler: "don't do anything yet"). Decided: night = the camera's picture turns black-and-white (IR); at night every camera's setting shifts +15, and the scale continues past 100 down to 0.4%. No "small changes must last" rule (CrystalHeeler: would make a person harder to catch). Open: watch for the switch only within +/-1 h of sunrise and sunset, or always with the clock as an expectation check; location from Home Assistant (needs the Home Assistant API permission) or typed in; how a missed switch is reported |
 | C3 | Discuss | Automatic quality in live view | CLAUDE.md: the Enhanced View step-down redesign "requires full discussion before any coding." 2.6.5 removed the Resolution, Frame Rate and Auto controls at CrystalHeeler's request. Correction to the 2026-09-26 research: WebRTC congestion control cannot adjust a stream that go2rtc passes through unchanged | In live view, automatic quality means switching between the camera's own streams (main to sub) when playback stalls. Discuss before coding |
 | C10 | Ready | H.265 live view depends on the browser | Confirmed 2026-09-28: Chrome plays H.265 live; Firefox 156 and LibreWolf do not. go2rtc's own compatibility table lists Desktop Firefox as H.264-only for every live method, so this is not a security setting | Three changes. (1) Check what the browser can play before trying live view, and go straight to classic with a plain message instead of a red error. (2) Replace go2rtc's raw error text with something readable. (3) Optionally offer an H.264 sub-stream in live view, which trades resolution, so CrystalHeeler's decision |
 | C4 | Discuss | Thumbnails, motion and recording through go2rtc's local stream | CrystalHeeler's long-term interest since April 2026 ("Fix B"). One camera connection instead of several, and go2rtc copes with cameras that break the RTSP rules | Discuss scope. Most useful for the rate-limited Microseven |
@@ -106,6 +106,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | Item | Where it was listed | Evidence |
 |---|---|---|
 | Recordings looked choppy | This plan, B18 | CrystalHeeler, 2026-10-01: the stutter was VLC; Media Player Classic plays the same files well. The files hold the DVR's 7 fps with steady timing (measured) |
+| Night boost: +15 sensitivity under infrared, with a sunrise and sunset check | This plan, C15; CrystalHeeler, 2026-10-01 | 2.6.7: night read from the picture's colour (30 s hold); home location from Home Assistant; missed switches reported in the log, the cog panel and a Home Assistant notification. 40 new server tests, 4 new page tests. Field check in A13 |
 | 2.6.6 field test: live detection, pre-roll, file names, cards | This plan, A12 | CrystalHeeler, 2026-10-01: "Everything is fixed and working very well." Pushed and published the same day |
 | Motion from the live stream, with a 3-second pre-roll | CrystalHeeler, 2026-10-01 | 2.6.6: detection decodes the smallest stream at 4 frames a second; recordings start from an in-memory copy of the main stream, at a keyframe at least 3 s before the motion. Tested end to end with stand-in ffmpeg processes; field check in A12 |
 | Per-camera recording settings from a cog on each card | CrystalHeeler, 2026-09-30 | 2.6.6: sensitivity slider (1 left, 100 right, value shown) with a live reading in slider units; cooldown, tail, file length, folder; defaults 63, 5 s, 3 s, 30 s, /media/anycam; global override switch in the Configuration tab |
