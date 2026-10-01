@@ -9589,6 +9589,7 @@ def _motion_judge(camera_id: str, prev: tuple[bytes, float, float],
     """True for motion; logs light changes and near misses for tuning."""
     frac, spread = _motion_diff(prev, curr)
     pct = frac * 100.0
+    _motion_note_peak(camera_id, pct, spread > MOTION_LIGHT_FRACTION)
     if spread > MOTION_LIGHT_FRACTION:
         log.info(f"Motion [{camera_id}]: change across {spread:.0%} of the "
                  f"picture ({pct:.0f}% of it changed) — treated as a light "
@@ -9602,6 +9603,43 @@ def _motion_judge(camera_id: str, prev: tuple[bytes, float, float],
         log.debug(f"Motion [{camera_id}]: {pct:.1f}% changed, under the "
                   f"{CFG_MOTION_AREA_PCT:.1f}% threshold")
     return False
+
+
+# ── 2.6.6: tuning line ──────────────────────────────────────────────────────
+# Once a minute, each armed camera logs the largest change it saw, so one
+# walk past the camera shows where to set the sensitivity. CrystalHeeler, 2026-09-30:
+# a setting of 5 needed 62% of the picture and nothing recorded, with no
+# log line to show how close a walk-past came.
+MOTION_PEAK_REPORT_S = 60
+
+
+def _motion_note_peak(camera_id: str, pct: float, light: bool) -> None:
+    ms = _MOTION.get(camera_id)
+    if not ms:
+        return
+    ms["peak_n"] = ms.get("peak_n", 0) + 1
+    if light:
+        ms["peak_light"] = ms.get("peak_light", 0) + 1
+    elif pct > ms.get("peak_pct", 0.0):
+        ms["peak_pct"] = pct
+
+
+def _motion_report_peak(camera_id: str, ms: dict, now_m: float) -> None:
+    """Log and reset the minute's largest change (called by the keeper)."""
+    start = ms.setdefault("peak_since", now_m)
+    if now_m - start < MOTION_PEAK_REPORT_S:
+        return
+    n, pct, light = ms.get("peak_n", 0), ms.get("peak_pct", 0.0), ms.get("peak_light", 0)
+    ms["peak_since"], ms["peak_n"], ms["peak_pct"], ms["peak_light"] = now_m, 0, 0.0, 0
+    if not n:
+        return
+    extra = f"; {light} light change(s) ignored" if light else ""
+    # INFO when something moved, DEBUG for a still scene, so a quiet night
+    # does not fill the log.
+    (log.info if pct >= 0.5 or light else log.debug)(
+        f"Motion [{camera_id}]: largest change in the last {MOTION_PEAK_REPORT_S} s: "
+        f"{pct:.1f}% of the picture (records at {CFG_MOTION_AREA_PCT:.1f}%; "
+        f"{n} comparisons{extra})")
 
 
 def _motion_quiet(ms: dict, now_m: float) -> bool:
@@ -9648,6 +9686,7 @@ async def _motion_keeper() -> None:
                     await _stop_recording(camera_id)
                 if ms["enabled"]:
                     _motion_ensure_loop(camera_id)
+                    _motion_report_peak(camera_id, ms, now_m)
             except Exception as ex:
                 log.warning(f"Motion [{camera_id}]: keeper error: {ex}")
 
