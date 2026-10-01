@@ -63,15 +63,19 @@ show in Home Assistant's Media browser, or in the Storage tab with
 Unrestricted Storage Browser on.
 
 **File length** (build plan C12): 10s, 20s, 30s, 1min, 2min or 5min.
-While motion continues, a new file starts this often; an event shorter
-than this is one file. Files are named so the parts of one event group
-together:
+While motion continues, a new file starts this often. An event shorter
+than this is one file with a plain name; only an event that runs longer is
+split, and its parts are numbered:
 
 ```
-motion_20260930_081151_part01.mp4   ← a new event
-motion_20260930_081151_part02.mp4   ← its continuation
-motion_20260930_093505_part01.mp4   ← the next event
+motion_20260930_081151.mp4          ← a short event: one file
+motion_20260930_093505_part01.mp4   ← a long event, first part
+motion_20260930_093505_part02.mp4   ← its continuation
 ```
+
+ffmpeg numbers every file while it records, because it cannot know an
+event will end early; when a recording stops with a single file, AnyCam
+renames it without the suffix.
 
 A file can only end on a keyframe, so lengths are approximate: within
 about 1 s on the Oak-D camera and 3 s on the Hikvision. Recording now also
@@ -111,8 +115,19 @@ does not fill the log.
 
 ### Cards
 
+- An info icon (ⓘ) right after the camera's name opens the Identity
+  panel in the same place the Identity box used to, pushing the buttons
+  down; click it again to close it. The panel stays open when the card
+  refreshes.
 - Protocol, IP address and port moved from the badges into the Identity
   list, always at the top.
+- The lock moved to the right end of the button row, the card's
+  bottom-right corner.
+- Cards are as tall as their own content. Before, every card in a row
+  stretched to the tallest one, which left an empty band above the
+  buttons of the shorter cards. The buttons are slightly tighter, so the
+  fullest card's row (Clear Creds, Not a Camera, Record, web page,
+  Remove and the lock) fits on one line from 413 px wide.
 - The Test Stream button and its server endpoint are removed.
 
 ### Live video in the camera cards (build plan C1)

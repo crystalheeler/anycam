@@ -9650,6 +9650,36 @@ def _motion_report_peak(camera_id: str, ms: dict, now_m: float) -> None:
         f"{cfg['area_pct']:.1f}%; {n} comparisons{extra})")
 
 
+def _motion_finish_files(camera_id: str, ms: dict) -> None:
+    """Name a finished recording's files and log them.
+
+    2.6.6 (CrystalHeeler, 2026-10-01): the _partNN suffix only when an event ran
+    past the file length and was split. ffmpeg's segment muxer must number
+    every file while it records, because it cannot know the event will end
+    early, so a lone motion_<date>_<time>_part01.mp4 is renamed here to
+    motion_<date>_<time>.mp4 once ffmpeg has stopped.
+    """
+    base, clip = ms.get("clip_base"), ms.get("clip_path")
+    if not (base and clip):
+        return
+    parts = sorted(clip.parent.glob(f"{base}_part*.mp4"))
+    if len(parts) == 1:
+        single = clip.parent / f"{base}.mp4"
+        try:
+            parts[0].rename(single)
+            ms["clip_path"] = single
+        except OSError as ex:
+            log.warning(f"Motion [{camera_id}]: could not rename {parts[0].name}: {ex}")
+            single = parts[0]
+        log.info(f"Motion [{camera_id}]: recording stopped → {single}")
+    elif parts:
+        log.info(f"Motion [{camera_id}]: recording stopped → {len(parts)} files, "
+                 f"{parts[0].name} to {parts[-1].name}")
+    else:
+        log.warning(f"Motion [{camera_id}]: recording stopped, but no file was "
+                    f"written in {clip.parent} — see the REC: lines above")
+
+
 def _motion_quiet(camera_id: str, ms: dict, now_m: float) -> bool:
     """True once the camera's cooldown plus tail have passed with no motion."""
     cfg = _motion_cfg(camera_id)
@@ -9817,6 +9847,7 @@ async def _motion_keeper() -> None:
                 if ms["recording"] and proc is not None and proc.returncode is not None:
                     log.warning(f"Motion [{camera_id}]: recording ffmpeg exited "
                                 f"(rc={proc.returncode}) → {ms.get('clip_path')}")
+                    _motion_finish_files(camera_id, ms)
                     ms["recording"] = False
                     ms["proc"] = None
                 elif ms["recording"] and (not ms["enabled"] or _motion_quiet(camera_id, ms, now_m)):
@@ -9964,14 +9995,7 @@ async def _stop_recording(camera_id: str) -> None:
                     proc.kill()
                 except ProcessLookupError:
                     pass
-        base = ms.get("clip_base")
-        clip = ms.get("clip_path")
-        parts = sorted(clip.parent.glob(f"{base}_part*.mp4")) if base and clip else []
-        if len(parts) > 1:
-            log.info(f"Motion [{camera_id}]: recording stopped → {len(parts)} files, "
-                     f"{parts[0].name} to {parts[-1].name}")
-        else:
-            log.info(f"Motion [{camera_id}]: recording stopped → {clip}")
+        _motion_finish_files(camera_id, ms)
     finally:
         ms["recording"] = False
         ms["proc"]      = None
@@ -12135,6 +12159,9 @@ const COG_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" str
   + ' 1.65 1.65 0 0 0 10 3.17V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06'
   + 'a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09'
   + 'a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+const INFO_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+  + ' stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9.5"/>'
+  + '<line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.6" fill="currentColor"/></svg>';
 const PROTO_ICONS = {RTSP:'📹',ONVIF:'🔭',MJPEG:'🖼️',HLS:'📡',RTMP:'📺',WebRTC:'🔗','WS-RTSP':'🔌',HTTP:'🌐',DVR:'💾'};
 const PROTO_CLR   = {
   RTSP:['1e3a5f','79b8ff'],ONVIF:['2d1e4a','c09eff'],MJPEG:['1e3a30','79ffcd'],
@@ -14015,10 +14042,28 @@ function identityHTML(cam) {
     rows.push(['Resolution', res]);
   }
   if (cam.stream_audio)   rows.push(['Audio codec',  cam.stream_audio.toUpperCase()]);
-  if (!rows.length) return '';
-  return '<details class="id-section"><summary>&#x1F50D; Identity</summary><table class="id-table">'
+  if (!rows.length) rows.push(['Identity', 'Nothing known yet']);
+  // 2.6.6: opened and closed by the info icon after the name (toggleIdentity),
+  // in the same place the Identity box used to open. _idOpen keeps it open
+  // across card redraws.
+  return '<div class="id-section" data-idp="' + esc(cam.id) + '"'
+    + (_idOpen[cam.id] ? '' : ' style="display:none"') + '><table class="id-table">'
     + rows.map(([k,v]) => '<tr><td class="id-key">' + esc(k) + '</td><td>' + esc(v) + '</td></tr>').join('')
-    + '</table></details>';
+    + '</table></div>';
+}
+
+const _idOpen = {};   // camId -> true while its Identity panel is open
+
+function toggleIdentity(camId) {
+  _idOpen[camId] = !_idOpen[camId];
+  const open = !!_idOpen[camId];
+  const panel = document.querySelector('[data-idp="' + CSS.escape(camId) + '"]');
+  const btn   = document.querySelector('[data-idbtn="' + CSS.escape(camId) + '"]');
+  if (panel) panel.style.display = open ? '' : 'none';
+  if (btn) {
+    btn.classList.toggle('open', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
 }
 
 function credFormHTML(cam) {
@@ -14277,6 +14322,11 @@ function cardHTML(cam) {
     + '<span class="card-name" title="' + name + '"'
     + ' onclick="openRename(' + jsArg(cam.id) + ',' + jsArg(displayName(cam)) + ')">'
     + name + '</span>'
+    // 2.6.6: Identity opens from an info icon right after the name.
+    + '<button class="card-info-btn' + (_idOpen[cam.id] ? ' open' : '') + '" title="Identity"'
+    + ' aria-label="Identity" aria-expanded="' + (_idOpen[cam.id] ? 'true' : 'false') + '"'
+    + ' data-idbtn="' + esc(cam.id) + '"'
+    + ' onclick="event.stopPropagation();toggleIdentity(' + jsArg(cam.id) + ')">' + INFO_SVG + '</button>'
     // 2.6.6: per-camera settings (motion and recording), top right of the
     // card's lower half.
     + (cam.status === 'ready'
@@ -14284,13 +14334,15 @@ function cardHTML(cam) {
           + ' onclick="event.stopPropagation();openCamSettings(' + jsArg(cam.id) + ')">' + COG_SVG + '</button>'
         : '')
     + '</div>'
-    + ((credBdg + uncBdg + upgradeBdg + hevcPlusBdg + lockedBdg)
-        ? '<div class="badges">' + credBdg + uncBdg + upgradeBdg + hevcPlusBdg + lockedBdg + '</div>'
+    + ((uncBdg + upgradeBdg + hevcPlusBdg + lockedBdg)
+        ? '<div class="badges">' + uncBdg + upgradeBdg + hevcPlusBdg + lockedBdg + '</div>'
         : '')
-    + '</div>'
     + identityHTML(cam)
     + credFormHTML(cam)
+    // 2.6.6: the lock sits at the right end of the button row, the card's
+    // bottom-right corner.
     + '<div class="card-actions">' + cardActions(cam, clearBtn, notCamBtn)
+    + (credBdg ? '<span class="card-lock">' + credBdg + '</span>' : '')
     + '</div>';
 }
 /* ── HLS init ──────────────────────────────────────────────────────────────── */
@@ -16312,7 +16364,7 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .scanning .progress-fill{{animation:pulse 1.2s infinite}}
 .view{{display:none;flex:1;overflow:auto}}
 .view.active{{display:flex;flex-direction:column}}
-#cam-grid{{padding:18px;display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--card-w),1fr));gap:16px;align-content:start}}
+#cam-grid{{padding:18px;display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--card-w),1fr));gap:16px;align-content:start;align-items:start}}
 #empty-state{{grid-column:1/-1;text-align:center;padding:60px 20px;color:var(--text-dim)}}
 #empty-state svg{{opacity:.2;display:block;margin:0 auto 14px}}
 .camera-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
@@ -16337,7 +16389,10 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .card-info{{padding:10px 12px 5px;display:flex;align-items:flex-start;gap:8px}}
 .card-cog{{margin-left:auto;flex-shrink:0;background:transparent;border:none;color:var(--text-dim);cursor:pointer;padding:2px;line-height:0;border-radius:6px}}
 .card-cog:hover{{color:var(--text);background:var(--surface2)}}
-.card-name{{font-size:.86rem;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}}
+.card-name{{font-size:.86rem;font-weight:600;flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}}
+.card-info-btn{{flex-shrink:0;background:transparent;border:none;color:var(--text-dim);cursor:pointer;padding:1px;line-height:0;border-radius:50%;margin-top:1px}}
+.card-info-btn:hover,.card-info-btn.open{{color:var(--primary)}}
+.card-lock{{margin-left:auto;display:inline-flex;align-items:center}}
 .card-name:hover{{color:var(--primary)}}
 .badges{{padding:0 12px 8px;display:flex;flex-wrap:wrap;gap:4px}}
 .badge{{font-size:.68rem;font-weight:600;padding:2px 6px;border-radius:20px}}
@@ -16364,11 +16419,9 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .arp-ip{{font-family:monospace;font-weight:600;color:var(--primary)}}
 .arp-host{{color:var(--text-dim)}}
 .id-section{{margin:0 12px 8px;border:1px solid var(--border);border-radius:8px;overflow:hidden}}
-.id-section summary{{padding:6px 10px;font-size:.72rem;font-weight:600;color:var(--text-dim);
-                     cursor:pointer;list-style:none;user-select:none}}
-.id-section summary:hover{{color:var(--text);background:var(--surface2)}}
 .id-table{{width:100%;border-collapse:collapse;font-size:.74rem}}
 .id-table td{{padding:4px 10px;border-top:1px solid var(--border);vertical-align:top}}
+.id-table tr:first-child td{{border-top:none}}
 .id-key{{color:var(--text-dim);font-weight:600;white-space:nowrap;width:90px}}
 .cred-form{{margin:0 12px 10px;background:var(--surface2);border:1px solid var(--border);
             border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:6px}}
@@ -16380,7 +16433,8 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .cred-row .btn{{flex:1}}
 .cred-error{{font-size:.71rem;color:var(--red);display:none}}
 .cred-error.visible{{display:block}}
-.card-actions{{padding:0 12px 10px;display:flex;gap:4px;margin-top:auto;flex-wrap:wrap}}
+.card-actions{{padding:0 12px 10px;display:flex;gap:4px;flex-wrap:wrap;align-items:center}}
+.card-actions .btn-sm{{padding:3px 7px;font-size:.72rem}}
 #pscan-view{{padding:16px 18px;gap:12px}}
 .pscan-header{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px}}
 .pscan-header .pscan-ctl{{margin-left:auto}}
