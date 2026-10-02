@@ -23,6 +23,7 @@ from aiohttp import web
 from pathlib import Path
 
 from anycam_host import H
+import anycam_focus
 from anycam_go2rtc import _go2rtc_profiles      # 3.0.0-rc1.2: it moved there
 
 log = logging.getLogger("anycam")
@@ -526,7 +527,7 @@ def _motion_ensure_loop(camera_id: str) -> None:
         return
     # The classic Enhanced View runs its own native-res loop for this
     # camera, and motion runs inside it.
-    if H._FOCUSED_CAMERA == camera_id and H._FOCUS_ENGINE == "legacy":
+    if anycam_focus._FOCUSED_CAMERA == camera_id and anycam_focus._FOCUS_ENGINE == "legacy":
         return
     state = _snap_state(camera_id)
     task = state.get("task")
