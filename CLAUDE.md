@@ -242,6 +242,7 @@ of whose items have shipped (see its Done section). Standing reminders:
 
 ## Repository notes
 
-`archive/` holds historical release zips that predate this repository.
-Do not treat anything under it as current source. When searching history,
-scope to `main`.
+The old release zips (`archive/`), the old chat transcripts and the audit
+reports that held private items were removed on 2026-10-02, and the git
+history was rewritten to remove names and addresses (rule 9). Commit
+hashes from before that date no longer exist.

@@ -65,7 +65,7 @@ def story():
             "after 30 s with no frames. The poor quality was the card thumbnail "
             "left in the buffer."),
           p("go2rtc logged no errors. The source of the stream is the Oak-D camera "
-            "add-on (version 2.4.1, on this PC at <project folder>). "
+            "add-on (version 2.4.1, on the build PC). "
             "Its ffmpeg command runs libx264 with no -g option:"),
           mono("-c:v libx264 -preset ultrafast -tune zerolatency -b:v 1000k"),
           p("x264's default is one keyframe every 250 frames. A player cannot draw "
@@ -150,7 +150,7 @@ def story():
             "changelog once; the changelog gives the one-time touch command."),
           h2("Oak-D camera add-on 2.4.2 (separate project)"),
           p("On CrystalHeeler's order: -g set to the FPS option, one keyframe per second. "
-            "Committed and tagged v2.4.2 in <project folder>; "
+            "Committed and tagged v2.4.2 in its own repository; "
             "packaged as oak_camera_app-2.4.2.zip with folder oak_camera_app, the "
             "name on the Pi. Syntax-checked only; no Oak-D tests exist."),
           h2("Held back: fix 1c"),
