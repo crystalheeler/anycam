@@ -19,6 +19,9 @@ import uuid
 import xml.etree.ElementTree as ET
 
 from anycam_host import H
+from anycam_brand import (
+    CAMERA_KEYWORDS, NON_CAMERA_KEYWORDS, lookup_oui,
+)
 from anycam_probe import (
     _onvif_media_url, _rtsp_options_fingerprint, find_rtsp_path, onvif_get_profiles,
     onvif_get_stream_uri, probe_hls, probe_hls_quick, probe_http_identity,
@@ -35,13 +38,12 @@ SCAN_CANCELLED = False
 
 # Taken from camera_discovery.py at start-up (anycam_host.bind).
 NEEDS = (
-    'BLACKLIST', 'CAMERAS', 'CAMERA_KEYWORDS', 'CURRENT_VERSION',
-    'NON_CAMERA_KEYWORDS', 'PORT', 'PSCAN', 'SCAN_OPTIONS',
-    'SCAN_STATE', '_ACD_ESCALATED', '_RST_OBSERVED', '_THREAD_POOL',
-    '_brand_throttle_seconds', '_identify_camera_brand', '_matches_feedback_fingerprint', '_publish_scan_card',
-    '_strip_creds', '_throttle_wait_if_needed', 'build_authenticated_url', 'decrypt_creds',
-    'encrypt_creds', 'load_runtime', 'lookup_oui', 'probe_stream_details',
-    'save_cameras', 'save_runtime',
+    'BLACKLIST', 'CAMERAS', 'CURRENT_VERSION', 'PORT',
+    'PSCAN', 'SCAN_OPTIONS', 'SCAN_STATE', '_ACD_ESCALATED',
+    '_RST_OBSERVED', '_THREAD_POOL', '_brand_throttle_seconds', '_identify_camera_brand',
+    '_matches_feedback_fingerprint', '_publish_scan_card', '_strip_creds', '_throttle_wait_if_needed',
+    'build_authenticated_url', 'decrypt_creds', 'encrypt_creds', 'load_runtime',
+    'probe_stream_details', 'save_cameras', 'save_runtime',
 )
 # 2.4.0-rc2.6: Pending-flush card creation buffer. During a scan, new
 # cards discovered are routed here instead of CAMERAS so they don't
