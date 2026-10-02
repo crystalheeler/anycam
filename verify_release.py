@@ -137,8 +137,22 @@ for _m in MODULES[1:]:
         if _x not in _main_top:
             fail(f"{_m}: H.{_x} is not defined in camera_discovery.py")
             _needs_ok = False
+# 3.0.0-rc1.2: the same rule between any two files. `from X import name`
+# copies the value once; if X replaces that name with `global` while it
+# runs, the importer keeps the old value. It must read X.name.
+_replaced_in = {_m[:-3]: {x for _n in ast.walk(ast.parse(_sources[_m]))
+                          if isinstance(_n, ast.Global) for x in _n.names} for _m in MODULES}
+for _m in MODULES:
+    for _n in ast.walk(ast.parse(_sources[_m])):
+        if isinstance(_n, ast.ImportFrom) and _n.module in _replaced_in:
+            for _a in _n.names:
+                if _a.name in _replaced_in[_n.module]:
+                    fail(f"{_m}: 'from {_n.module} import {_a.name}' copies a value that "
+                         f"{_n.module}.py replaces at run time; read {_n.module}.{_a.name}")
+                    _needs_ok = False
 if _needs_ok:
-    ok(f"{_needs_total} names taken from camera_discovery.py exist and are never replaced")
+    ok(f"{_needs_total} names taken from camera_discovery.py exist and are never replaced; "
+       f"no file imports a name that its owner replaces")
 _docker = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 _uncopied = [m for m in MODULES if not re.search(rf"^COPY\s+.*\b{re.escape(m)}\b", _docker, re.M)]
 if _uncopied:

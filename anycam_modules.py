@@ -4,4 +4,5 @@ The release gate, the tests and the packager read this list. The gate
 also checks it against the imports and against the Dockerfile.
 """
 MODULES = ["camera_discovery.py", "camera_db.py", "page_script.py",
-           "anycam_host.py", "anycam_motion.py", "anycam_storage.py"]
+           "anycam_host.py", "anycam_go2rtc.py", "anycam_motion.py",
+           "anycam_storage.py"]
