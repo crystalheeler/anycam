@@ -1803,7 +1803,7 @@ async def test_http_identity():
     check("S4 nothing listening: an empty result, no error",
           r3["is_camera"] is False and r3["title"] == "" and r3["manufacturer"] == "", str(r3)[:120])
     import ast as _ast
-    src = (REPO / "camera_discovery.py").read_text(encoding="utf-8")
+    src = repo_source()
     fns = {n.name: n for n in _ast.parse(src).body
            if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))}
     fp = _ast.get_source_segment(src, fns["_rtsp_options_fingerprint"])

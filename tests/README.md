@@ -21,5 +21,5 @@ In `test_server.py`, `cd` is every file of the add-on seen as one namespace:
 reading finds a name in the file that defines it, and writing replaces it in
 every file that holds it.
 
-Not covered yet: the network scan, the password entry path, and most of the
-snapshot loop.
+Not covered yet: the password entry path, most of the snapshot loop, and the
+single probers themselves (the scan tests replace them with stand-ins).
