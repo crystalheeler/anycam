@@ -20,7 +20,7 @@ class _Host:
     def __init__(self) -> None:
         object.__setattr__(self, "_globals", None)
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> object:
         g = object.__getattribute__(self, "_globals")
         if g is None:
             raise RuntimeError("anycam_host.bind() has not run yet")
@@ -29,14 +29,14 @@ class _Host:
         except KeyError:
             raise AttributeError(name) from None
 
-    def __setattr__(self, name: str, value) -> None:
+    def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("H is read-only; camera_discovery.py owns these values")
 
 
 H = _Host()
 
 
-def bind(main_globals: dict, *modules) -> None:
+def bind(main_globals: dict, *modules: object) -> None:
     """Give each module the camera_discovery.py names in its NEEDS list."""
     object.__setattr__(H, "_globals", main_globals)
     for module in modules:
