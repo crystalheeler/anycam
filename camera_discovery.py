@@ -442,20 +442,6 @@ def _acd_active(ip: str) -> bool:
     return bool(ip) and _ACD_ESCALATED.get(ip, 0.0) > time.monotonic()
 
 
-# ── 2.5.0-rc1.0: streaming_recipe consumer infrastructure ────────────
-# Two helpers used by find_rtsp_path's path-list builder and by the
-# single-socket walker's SDP-parsing branch when a brand entry's
-# streaming_recipe directs us to walk DVR/NVR channels rather than
-# the universal RTSP_PATHS list.
-
-
-
-
-
-
-
-
-
 def _parse_throttle_seconds(amount_str: str) -> float:
     """Extract seconds from a CAMERA_DB throttle_amount string. Returns
     0.0 if no parseable value. All current rate_limit_per_ip_tcp entries
@@ -591,38 +577,6 @@ RTSP_PATHS = [
     "/",   # bare root tried last — many cameras 200-OK DESCRIBE here
            # but reject SETUP because no real track lives at root
 ]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# OUI (MAC address) database
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -891,156 +845,12 @@ def _strip_creds(url: str) -> str:
     """
     return re.sub(r"(://)[^/\s]*@", r"\1", url) if url else url
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Network helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# False-positive classifier
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 1a — ARP ping scan (finds live hosts without full port scan)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 1b — SSDP / UPnP discovery
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 1c — mDNS / Bonjour discovery
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 1d — ONVIF WS-Discovery (already present, kept here for completeness)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 2 — nmap scans
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Protocol probers
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────
-# Pure-Python RTSP probe — no ffprobe dependency, no probesize limits,
-# no URL-encoding workarounds.  Implements RFC 2326 (RTSP) OPTIONS +
-# DESCRIBE with Digest and Basic auth negotiation.
-# ─────────────────────────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
-# Active camera-positive probes
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ONVIF SOAP (multi-stream NVR support)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Full-range port scanner (user-initiated, separate from camera scan)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Main scan orchestration — 4-stage pipeline
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-
+# Enhanced View adaptive quality, per camera: anycam_snap.py steps it,
+# anycam_focus.py resets it.
 _FOCUS_ADAPTIVE:         dict  = {}    # camera_id → {tier_idx, locked, run_start, ladder,
                                        #               restarts_since_lock}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Focus view endpoints
-# ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
 # go2rtc live view (2.6.3, Tier 2)
@@ -1088,28 +898,6 @@ _MOTION_TASK: asyncio.Task | None = None   # 2.6.5: _motion_keeper
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ── 2.6.6: live cards (build plan C1) ──────────────────────────────────────
 # Cards play the camera's smallest stream. A phone decoding seven 3840-wide
 # H.265 streams at once would stall, so a card whose smallest known stream
@@ -1127,22 +915,6 @@ def _dahua_sub_stream(url: str) -> str | None:
         return None
     sub, n = re.subn(r"([?&]subtype=)0(?=&|$)", r"\g<1>1", url)
     return sub if n else None
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1244,21 +1016,6 @@ async def api_scan_cancel(request: web.Request) -> web.Response:
     return web.json_response({"status": "cancelling"})
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 async def api_rename_camera(request: web.Request) -> web.Response:
 
     cid = request.match_info["camera_id"]
@@ -1339,12 +1096,6 @@ async def api_not_camera(request: web.Request) -> web.Response:
         asyncio.create_task(submit_to_community(record))
 
     return web.json_response({"status": "ok"})
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# 2.4.0-rc2.4: Deep Re-Probe handler
-# ─────────────────────────────────────────────────────────────────────────
-
 
 
 
@@ -1448,10 +1199,6 @@ async def api_pscan_resume(request: web.Request) -> web.Response:
             return web.json_response({"error": str(e)}, status=500)
     return web.json_response({"status": "ok"})
 
-# ─────────────────────────────────────────────────────────────────────────────
-# UI
-# ─────────────────────────────────────────────────────────────────────────────
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Core streaming / scan functions
@@ -1539,18 +1286,6 @@ async def probe_stream_details(url: str, proto: str) -> dict:
     except Exception as ex:
         log.debug(f"probe_stream_details: {ex}")
         return {}
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
