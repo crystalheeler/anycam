@@ -10535,7 +10535,8 @@ header h1{{cursor:pointer}}
         <path d="M15 10l4.553-2.069A1 1 0 0121 8.87v6.26a1 1 0 01-1.447.9L15 14"/>
         <rect x="1" y="7" width="14" height="10" rx="2" ry="2"/>
       </svg>
-      <p>No cameras found.<br>Click <strong>Scan Network</strong> to discover cameras on your subnet.</p>
+      <p id="empty-idle">No cameras found.<br>Click <strong>Scan Network</strong> to discover cameras on your subnet.</p>
+      <p id="empty-scanning" style="display:none">No Cameras Found Yet</p>
     </div>
   </div>
 </div>

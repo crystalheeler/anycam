@@ -1811,6 +1811,16 @@ async def test_http_identity():
           fp.rstrip().endswith("return result") and "Fetch HTTP pages" not in fp)
 
 
+# ── T. 3.0.0-rc1.4 empty-page text (B21) ────────────────────────────────────
+async def test_empty_text():
+    print("\n[T] 3.0.0-rc1.4 empty-page text")
+    html = cd.build_html()
+    check("T1 the page has both texts; the scanning one starts hidden",
+          '<p id="empty-idle">No cameras found.<br>Click <strong>Scan Network</strong>' in html
+          and '<p id="empty-scanning" style="display:none">No Cameras Found Yet</p>' in html)
+    check("T1 the scan status poll sets the text", "_setEmptyText(running);" in html)
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN = Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -1916,6 +1926,7 @@ async def main():
     await test_location_check()
     await test_redaction()
     await test_http_identity()
+    await test_empty_text()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 
