@@ -5,14 +5,19 @@ cameras on a network and presents them as a grid of live cards with an
 Enhanced View for single-camera focus.
 
 Since 3.0.0-rc1.0 the add-on is several Python files, listed in
-`anycam_modules.py`: `camera_discovery.py` (entry point and logic),
-`camera_db.py` (camera tables), `page_script.py` (the page's JavaScript),
+`anycam_modules.py`: `camera_discovery.py` (entry point: settings, stores,
+REST API, routing, start-up), `camera_db.py` (camera tables),
+`page_script.py` (the page's JavaScript), `anycam_page.py` (the page
+builder), `anycam_brand.py` (manufacturer database, keyword tables, brand
+identification), `anycam_credentials.py` (password entry, DVR channel list,
+Deep Re-Probe, manual add), `anycam_snap.py` (the snapshot loop),
+`anycam_focus.py` (the Enhanced View engine and the focus state),
 `anycam_motion.py` (motion detection, recording, night boost),
 `anycam_go2rtc.py` (go2rtc), `anycam_probe.py` (stream probers and ONVIF
 calls), `anycam_scan.py` (the network scan), `anycam_storage.py` (the
-Storage tab), `anycam_host.py` (the link between them). A new file must be added to `anycam_modules.py` and to the
-Dockerfile's COPY lines; the release gate checks both. Package with
-`python package_release.py`.
+Storage tab), `anycam_host.py` (the link between them). A new file must be
+added to `anycam_modules.py` and to the Dockerfile's COPY lines; the release
+gate checks both. Package with `python package_release.py`.
 
 **How the files connect (3.0.0-rc1.1).** `camera_discovery.py` is the entry
 point and imports the others, so they must never import it back: a second
@@ -22,14 +27,22 @@ needs from `camera_discovery.py` in two ways, both in `anycam_host.py`:
 - `NEEDS`: a list of names at the top of the file, copied in once at
   start-up. Right for functions and for objects changed in place.
 - `H.name`: read at the moment of use. Required for a value that
-  `camera_discovery.py` replaces while it runs (`_FOCUSED_CAMERA`,
-  `_FOCUS_ENGINE`, anything assigned under a `global` statement).
+  `camera_discovery.py` replaces while it runs (anything it assigns under a
+  `global` statement). Since 3.0.0-rc1.5 no file uses it: the focus state
+  moved to `anycam_focus.py`, and the values the main file still replaces
+  are read only by the main file.
 
 The same rule applies between any two files: never `from X import name`
 for a name that X assigns under a `global` statement; read `X.name`
-(`anycam_go2rtc._GO2RTC_READY`). The Enhanced View engine
-(`_focus_set_go2rtc`, `handle_focus_set`, `handle_focus_clear`) stays in
-`camera_discovery.py` because it replaces `_FOCUSED_CAMERA`.
+(`anycam_go2rtc._GO2RTC_READY`, `anycam_focus._FOCUSED_CAMERA`). A value
+that functions replace moves with those functions, into the file that owns
+it.
+
+**No import cycles (3.0.0-rc1.5).** A split file imports another split file
+only if that file does not import it back, directly or through a third. When
+a direct import would close a cycle, the name goes through the main file's
+NEEDS instead (`anycam_focus.py` takes `_MOTION` that way, because
+`anycam_motion.py` imports `anycam_focus`).
 
 The release gate fails on a NEEDS name that is replaced at run time, and
 `tests/check_names.py` fails on a name a function uses that is not there.
@@ -238,8 +251,9 @@ of whose items have shipped (see its Done section). Standing reminders:
 - `STREAM_DB` → `CAMERA_DB` consolidation and runtime use of
   `default_ports` need a plan document first (build plan D2).
 - The tests are in `tests/` since 3.0.0-rc1.0 (build plan E7). They cover
-  the scan since 3.0.0-rc1.4. They do not cover the password entry path or
-  most of the snapshot loop; add tests before changing those (build plan E1).
+  the scan since 3.0.0-rc1.4, and password entry, the snapshot loop, the
+  Enhanced View engine, brand identification and the page builder since
+  3.0.0-rc1.5. Add tests before changing code they do not cover.
 
 ## Repository notes
 

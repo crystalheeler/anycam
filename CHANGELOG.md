@@ -1,3 +1,23 @@
+## 3.0.0-rc1.5
+
+The Cancel button stops a scan, and the last large parts of the main file move to their own files, with tests.
+
+### Bugs fixed
+
+- **Cancel stops the scan.** The scan now stops probing at once and says "Scan cancelled". Before, Cancel changed the status line and the scan ran to its end.
+
+### Changes & improvements
+
+- **Tests for the rest of the add-on.** 122 new checks cover password entry, the snapshot loop, the Enhanced View engine, brand identification and the page builder. Each was written and passing before its code moved.
+- **Five new files:** `anycam_credentials.py` (password entry), `anycam_snap.py` (the snapshot loop), `anycam_focus.py` (the Enhanced View engine), `anycam_brand.py` (manufacturer database and brand identification) and `anycam_page.py` (the page builder). The main file went from 6,780 lines to 1,797.
+- **Every moved function is unchanged.** All 363 definitions were compared with the code before the move: none is missing and none differs. The built page and the list of web addresses are identical.
+- **Type hints complete.** Every function in every file now declares its argument and return types.
+
+### Known issues
+
+- **Adding a camera by hand with protocol WebRTC fails.** The form's protocol is compared in the wrong letter case. Found by the new tests. Not changed in this build.
+- **Rate-limited cameras are not paced during one password-entry step.** The check of extra stream paths from the camera table does not wait between connections. Found by the new tests. Not changed in this build.
+
 ## 3.0.0-rc1.4
 
 The scan code moves to its own files, now with tests, and the empty page has clearer text.
