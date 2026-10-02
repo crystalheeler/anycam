@@ -192,7 +192,9 @@ CONTRACTS = {
     "_night_expectation_check": ["NIGHT_WINDOW_S", "_NIGHT_CHECKED", "_ha_notify",
                                  "observed_since"],
     "_ha_api":               ["SUPERVISOR_TOKEN", "http://supervisor/core/api/"],
-    "_ha_location_refresh":  ['"config"', "12 * 3600"],
+    "_ha_location_refresh":  ['"config"', "HA_LOC_REFRESH_S", "_ha_location_plausible",
+                              '_HA_LOC_STATE["mismatch"]'],
+    "_ha_location_plausible": ["HA_LOC_MAX_LON_DIFF", "_tz_std_offset_h"],
     # 2.6.6: per-camera settings; the global override wins when it is on.
     "_motion_cfg":           ["CFG_MOTION_GLOBAL", "_MOTION_CFG", "MOTION_DEFAULTS"],
     "_motion_validate":      ["MOTION_PATH_ROOT", "MOTION_CLIP_CHOICES"],

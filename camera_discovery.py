@@ -112,7 +112,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "2.6.7"  # must match config.yaml
+CURRENT_VERSION = "2.6.8"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -9921,7 +9921,7 @@ def _motion_settings_payload(camera_id: str) -> dict:
         "peak_level": _motion_level_for_pct(peak, _motion_boost(camera_id)) if peak > 0 else None,
         "night":      bool(ms.get("night")),
         "night_boost": MOTION_NIGHT_BOOST,
-        "night_note": ms.get("night_note"),
+        "night_note": HA_LOC_NOTE if _HA_LOC_STATE["mismatch"] else ms.get("night_note"),
     }
 
 
@@ -10269,7 +10269,17 @@ NIGHT_HOLD_S = 30              # a new mode must hold this long
 NIGHT_WINDOW_S = 3600          # +/- around sunrise and sunset
 NIGHT_GAP_S = 120              # unseen longer than this: not watched through
 _HA_LOCATION: dict = {}        # latitude, longitude from Home Assistant
-_HA_LOC_STATE = {"next": 0.0}  # when to ask Home Assistant again
+_HA_LOC_STATE = {"next": 0.0, "mismatch": False}   # when to ask again; C16
+# 2.6.8 (C16). CrystalHeeler, 2026-10-02: Home Assistant still had its default
+# location, Amsterdam, with a time zone 7 hours away, so AnyCam reported "still
+# in night mode an hour after sunrise (00:42)". A time zone covers about
+# 15 degrees of longitude for each hour from UTC; a location further than
+# this from its time zone's longitude is wrong (3.5 h allows for China).
+HA_LOC_MAX_LON_DIFF = 52.5
+HA_LOC_REFRESH_S = 6 * 3600
+HA_LOC_NOTE = ("Home Assistant's home location does not match its time zone. Set "
+               "the location (Settings, System, General) to get the sunrise and "
+               "sunset check.")
 _NIGHT_CHECKED: dict = {}      # (camera, kind, event time) -> event time, checked
 
 
@@ -10439,8 +10449,24 @@ async def _ha_api(method: str, path: str, payload: dict | None = None):
             return await resp.json(content_type=None)
 
 
+def _tz_std_offset_h(tz_name: str | None) -> float:
+    """The time zone's standard (winter) offset from UTC, in hours."""
+    try:
+        import zoneinfo
+        now = datetime.datetime.now(zoneinfo.ZoneInfo(tz_name))
+        return (now.utcoffset() - (now.dst() or datetime.timedelta())).total_seconds() / 3600
+    except Exception:        # no name, an unknown name, or no time zone data
+        return -time.timezone / 3600      # the add-on's own zone, set by the Supervisor
+
+
+def _ha_location_plausible(lon: float, tz_name: str | None) -> bool:
+    """False when the longitude is too far from the time zone's own."""
+    expected = 15.0 * _tz_std_offset_h(tz_name)
+    return abs((lon - expected + 180) % 360 - 180) <= HA_LOC_MAX_LON_DIFF
+
+
 async def _ha_location_refresh() -> None:
-    """Fetch Home Assistant's home location; retry every 5 min, refresh twice a day."""
+    """Fetch Home Assistant's home location; retry every 5 min, refresh every 6 h."""
     if time.monotonic() < _HA_LOC_STATE["next"]:
         return
     _HA_LOC_STATE["next"] = time.monotonic() + 300
@@ -10451,9 +10477,20 @@ async def _ha_location_refresh() -> None:
         return
     if not cfg or cfg.get("latitude") is None or cfg.get("longitude") is None:
         return
+    _HA_LOC_STATE["next"] = time.monotonic() + HA_LOC_REFRESH_S
+    lat, lon = float(cfg["latitude"]), float(cfg["longitude"])
+    if not _ha_location_plausible(lon, cfg.get("time_zone")):
+        if not _HA_LOC_STATE["mismatch"]:
+            log.warning(f"Night: Home Assistant's home location ({lat:.1f}, {lon:.1f}) does "
+                        f"not match its time zone ({cfg.get('time_zone')}) — the sunrise "
+                        f"and sunset check is off. Set the location in Settings, System, "
+                        f"General. Night boost itself is not affected.")
+        _HA_LOC_STATE["mismatch"] = True
+        _HA_LOCATION.clear()
+        return
     first = not _HA_LOCATION
-    _HA_LOCATION.update(latitude=float(cfg["latitude"]), longitude=float(cfg["longitude"]))
-    _HA_LOC_STATE["next"] = time.monotonic() + 12 * 3600
+    _HA_LOC_STATE["mismatch"] = False
+    _HA_LOCATION.update(latitude=lat, longitude=lon)
     if first:
         ev = [f"{k} {time.strftime('%H:%M', time.localtime(ts))}"
               for k, ts in _sun_events_around(time.time())
@@ -17505,7 +17542,7 @@ header h1{{cursor:pointer}}
     <label class="cs-full">Recording folder<input type="text" id="cs-path" spellcheck="false"></label>
     <div class="cs-help">Under /media. For a Samba or NFS share, add it in Home Assistant
       (Settings, System, Storage, Add network storage, usage Media); it appears as
-      /media/&lt;name&gt;. SFTP and FTP upload are planned for 2.6.8.</div>
+      /media/&lt;name&gt;. SFTP and FTP upload are planned for a later version.</div>
     <div class="cs-error" id="cs-error"></div>
     <div class="modal-btns">
       <button class="btn btn-ghost btn-sm" id="cs-reset" onclick="resetCamSettings()" style="margin-right:auto">Defaults</button>

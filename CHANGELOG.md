@@ -1,3 +1,22 @@
+## 2.6.8
+
+The sunrise and sunset check now detects a wrong home location in Home Assistant.
+
+### Changes & improvements
+
+- **Wrong home location detected.** When Home Assistant's location does not match its time zone, AnyCam turns the sunrise and sunset check off, logs one warning and shows a note in each camera's cog panel.
+- **The location is re-read every 6 hours** (was 12), so a corrected location takes effect without a restart.
+
+### Bugs fixed
+
+- **False "still in night mode an hour after sunrise (00:42)" notifications.** Home Assistant's default location is Amsterdam; AnyCam used Amsterdam's sunrise for a home in another time zone.
+
+### Known issues
+
+- A location that is wrong but inside the right time zone is not detected.
+- The night and day colour thresholds are estimates; the tuning log line shows the colour value for checking.
+- Skip Non-Reference Frames breaks H.264 cameras.
+
 ## 2.6.7
 
 Night boost for motion detection, and insects and infrared switches no longer start recordings.
