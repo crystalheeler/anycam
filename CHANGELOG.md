@@ -15,6 +15,7 @@ Night boost for motion detection, and insects and infrared switches no longer st
 - **Insects near the lens started recordings** (11 of 22 on one camera overnight). A recording now needs a second changed picture within 0.5 s, or one picture with 3% or more changed.
 - **An infrared-colour switch started a recording.** After a light change, nothing counts for 2 s.
 - **One change counted two or three times** when pictures arrived in a burst. Each picture is now compared with the one exactly 1 s earlier in the stream.
+- **The classic view ignored a camera's cooldown.** It retried the Microseven 6 times, 5 s apart, during a 30 s cooldown. It now waits, and goes to snapshots after one failed start.
 
 ### Known issues
 

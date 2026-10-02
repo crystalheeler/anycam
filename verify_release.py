@@ -88,7 +88,10 @@ print("\n[2/7] Semantic contract checks")
 CONTRACTS = {
     "run_verification_scan": ["save_cameras", "SCAN_STATE", "run_scan"],
     "http_snap_loop":        ["asyncio.sleep", "_snap_state", "TCPConnector"],
-    "snap_loop":             ["_snap_state", "asyncio"],
+    "snap_loop":             ["_snap_state", "asyncio",
+                              # 2.6.7: the classic view honours the escalated cooldown
+                              "_acd_active(_snap_ip)", "ACD_ESCALATED_COOLDOWN",
+                              "_throttle_wait_if_needed(_snap_ip"],
     "build_html":            ["INGRESS_PATH"],
     "make_app":              ["app.router", "web.Application", "_on_shutdown"],
     "api_set_credentials":   ["save_cameras", "CAMERAS"],
