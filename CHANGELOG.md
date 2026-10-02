@@ -26,396 +26,68 @@ Night boost for motion detection, and insects and infrared switches no longer st
 
 ## 2.6.6
 
-Motion detection now compares the pictures themselves, so it sees people
-on the Lorex channels. Each camera has its own recording settings, opened
-from a cog on its card, with a sensitivity slider and a live reading of
-how strongly movement registers. Long motion events are split into files
-of a length you choose. Camera cards play live video. Also: four bug
-fixes and a stronger release check.
+Motion detection now compares the pictures themselves, records from 3 seconds before the motion, and each camera has its own recording settings.
 
-### Motion detection compares pictures (build plan B16, C13)
+### Changes & improvements
 
-2.6.5 compared JPEG file sizes. On 2026-09-30 the Lorex channels' loops ran
-all day but recorded nothing after 08:24: a person barely changes the size
-of a 9 to 10 KB Lorex snapshot. The same method recorded a clip at 06:21
-when a camera switched from night to day mode.
+- **Motion detection compares pictures.** It sees people on the Lorex channels. Brightness, contrast and whole-picture light changes are ignored.
+- **Live detection.** An armed camera's smallest stream is checked 4 times a second, not one snapshot every 1.9 s.
+- **3-second pre-roll.** Every recording starts at least 3 s before the motion, as a full-quality copy of the main stream.
+- **Per-camera settings.** A cog on each card: sensitivity slider (1 to 100, default 63), cooldown, tail, file length and recording folder.
+- **Live reading.** The cog shows the lowest sensitivity that would have recorded the latest movement. The log shows the same once a minute.
+- **File length.** Long events split into files of 10 s to 5 min, named `_part01`, `_part02`.
+- **Global recording settings.** A new switch in the Configuration tab applies one set of settings to every camera. Off by default.
+- **Live video in the camera cards,** from each camera's smallest stream. A camera with no stream 1920 wide or less stays on snapshots.
+- **Cards.** An info icon opens Identity; protocol, IP and port moved into it; the lock moved to the bottom right; Test Stream is removed.
+- **New dependency:** Pillow 12.3.0.
+- **Release check:** seven gates, up from five. `build.yaml` is removed.
 
-- **How it works now.** Each frame is shrunk to a 64 x 48 grey picture and
-  compared with the picture from about a second before, cell by cell.
-  Before comparing, both pictures are brought to the same brightness and
-  contrast, so a cloud, an exposure change or a night-mode switch changes
-  nothing.
-- **Light changes.** The picture is split into 16 areas. A change that
-  reaches more than 75% of them is treated as a light change: it is logged
-  with its size and not recorded. A person changes a few neighbouring
-  areas.
-- **Test results** on synthetic pictures: a 30% brightness step, a 40%
-  contrast step and a night-mode switch all measured 0% changed. A block
-  the size of a person covering 4.7% of the picture measured 5.0%.
-- **Cost:** about 0.4 ms per comparison on a desktop PC, 4 comparisons a
-  second per armed camera; expect several times that on a Raspberry Pi 4.
-- **New dependency:** Pillow 12.3.0, which decodes the JPEGs.
+### Bugs fixed
 
-### Motion: live detection and a 3-second pre-roll
+- **Motion recorded nothing on the Lorex channels.** 2.6.5 compared JPEG file sizes, which a person barely changes.
+- **Recordings caught only the end of an event.**
+- **"Recording stopped" was logged two or three times per clip.**
+- **Camera names and IDs could break out of the page's click handlers.**
+- **"Share with community" showed ticked and did nothing.**
+- **"Unknown child process pid" warning in the log.**
+- **"Cannot connect to host 172.30.32.1:8099" for 3 s at start.**
+- **The manufacturer database was written on the event loop,** pausing everything else.
 
-CrystalHeeler's field test on 2026-10-01: recordings caught only the end of each
-event, even at sensitivity 80 to 90. Two causes:
+### Known issues
 
-- Detection looked at snapshots, which the Lorex channels deliver every
-  1.9 s, so it noticed motion late.
-- The recording connected to the camera only after motion was found, then
-  had to wait for a keyframe, so the start of the event was gone.
-
-An armed camera now runs two pipelines, the usual video-recorder split:
-
-- **Detection** watches the camera's smallest stream (the Lorex DVR's
-  sub-stream, `subtype=1`), decoded to 64 x 48 grey pictures, 4 a second.
-  Cameras with no small stream (only a stream wider than 1920) and cameras
-  without RTSP keep using snapshots. Snapshots also stand in while the live
-  stream starts or after it drops.
-- **Recording** copies the camera's main stream, unchanged, into memory,
-  always holding the last few seconds from a keyframe. When motion starts,
-  the file begins at a keyframe at least **3 seconds before the motion**,
-  for every event on every camera. A camera's keyframe spacing can make
-  the pre-roll a little longer than 3 s.
-
-Recordings are a direct copy of the main stream, the same full-quality
-stream Enhanced View plays: no re-encoding of the video. Audio, when the
-camera sends any, is converted to AAC, because the G.711 audio DVRs often
-send fits neither MPEG-TS nor MP4. H.265 files carry the `hvc1` tag that
-Chrome and Apple players expect.
-
-**Cost per armed camera:** two extra camera connections held open (the
-small stream and the main stream); a light decode of the small stream; and
-3 s or more of the main stream in memory, a few megabytes. For a DVR, each
-armed channel adds two connections to the DVR.
-
-### Each camera has its own recording settings (cog on the card)
-
-A cog at the top right of each card's lower half opens that camera's
-settings:
-
-- **Sensitivity**: a slider from 1 (left, least sensitive) to 100 (right,
-  most sensitive). Its value shows as it moves. The default, 63, records
-  when about 5% of the picture changes. A person walking through counts
-  roughly twice their own size, because both where they were and where
-  they are now change.
-- **Live reading** under the slider, for an armed camera: the lowest
-  setting that would have recorded the biggest movement of the last
-  minute or two, also marked on the slider in orange. Walk past the
-  camera and move the slider to the marker or beyond.
-- **Cooldown** (seconds with no motion before recording stops), **Tail**
-  (extra seconds after that), **File length**, and **Recording folder**.
-- **Defaults** returns the camera to the standard values: sensitivity 63,
-  cooldown 5 s, tail 3 s, file length 30 s, folder `/media/anycam`.
-
-The Configuration tab's Motion Sensitivity was a number box: Home
-Assistant draws every whole-number add-on setting that way and cannot show
-a slider there. A setting of 5, which looked like "5%", needed 62% of the
-picture to change, and nothing recorded on 2026-09-30.
-
-**Recording folder.** Any folder under `/media`, the only part of the
-system the add-on can write to. Each camera still gets its own sub-folder
-inside it. For a Samba or NFS share, add it in Home Assistant (Settings,
-System, Storage, Add network storage, usage Media); it appears as
-`/media/<name>`. SFTP and FTP upload are planned for 2.6.7. The Storage
-tab opens on the global recordings folder; cameras that record elsewhere
-show in Home Assistant's Media browser, or in the Storage tab with
-Unrestricted Storage Browser on.
-
-**File length** (build plan C12): 10s, 20s, 30s, 1min, 2min or 5min.
-While motion continues, a new file starts this often. An event shorter
-than this is one file with a plain name; only an event that runs longer is
-split, and its parts are numbered:
-
-```
-motion_20260930_081151.mp4          ← a short event: one file
-motion_20260930_093505_part01.mp4   ← a long event, first part
-motion_20260930_093505_part02.mp4   ← its continuation
-```
-
-ffmpeg numbers every file while it records, because it cannot know an
-event will end early; when a recording stops with a single file, AnyCam
-renames it without the suffix.
-
-A file can only end on a keyframe, so lengths are approximate: within
-about 1 s on the Oak-D camera and 3 s on the Hikvision. Recording now also
-starts and stops exactly once per event; 2.6.5 logged "recording stopped"
-two or three times per clip.
-
-### Global recording settings (Configuration tab)
-
-The Configuration tab keeps five recording settings, now named Global
-Recordings Path, Global Motion Sensitivity, Global Recording Length,
-Global Motion Cooldown and Global Recording Tail. A new switch, **Use
-Global Recording Settings**, is off by default. While it is off, those
-five are ignored and each camera uses its own settings. When it is on,
-they apply to every camera, and each camera's cog menu shows them
-read-only. Home Assistant cannot grey out add-on settings, so the five
-stay editable in the Configuration tab while the switch is off.
-
-`motion_sensitivity` is replaced by `motion_detect_level`. After
-updating, the Supervisor logs one harmless warning, because the old
-setting is still saved:
-
-```
-Option 'motion_sensitivity' does not exist in the schema for AnyCam
-```
-
-### Tuning line in the log
-
-Once a minute, each armed camera logs the biggest change it saw, for
-example:
-
-```
-Motion [192.168.50.217_554_ch7]: largest change in the last 60 s: 12.3% of the picture, would record at sensitivity 43 or higher (set to 63, 5.0%; 31 comparisons)
-```
-
-At INFO when something moved, at DEBUG for a still scene, so a quiet night
-does not fill the log.
-
-### Cards
-
-- An info icon (ⓘ) right after the camera's name opens the Identity
-  panel in the same place the Identity box used to, pushing the buttons
-  down; click it again to close it. The panel stays open when the card
-  refreshes.
-- Protocol, IP address and port moved from the badges into the Identity
-  list, always at the top.
-- The lock moved to the right end of the button row, the card's
-  bottom-right corner.
-- Cards are as tall as their own content. Before, every card in a row
-  stretched to the tallest one, which left an empty band above the
-  buttons of the shorter cards. The buttons are slightly tighter, so the
-  fullest card's row (Clear Creds, Not a Camera, Record, web page,
-  Remove and the lock) fits on one line from 413 px wide.
-- The Test Stream button and its server endpoint are removed.
-
-### Live video in the camera cards (build plan C1)
-
-Cards play live through go2rtc, using each camera's smallest stream:
-
-- The Lorex channels play the DVR's sub-stream. AnyCam knows only their
-  3840-wide main stream, so it asks the DVR for the same channel with
-  `subtype=1`.
-- A camera whose smallest stream is wider than 1920 stays on snapshots, so
-  a phone never decodes several 4K streams at once. The Hikvision is one:
-  its main stream is 2560 wide and its sub-stream is MJPEG, which cannot
-  play live.
-- Only the cards on screen play. Cards pause when the page is in the
-  background, and while Enhanced View is open.
-- A card that cannot play live uses snapshots, as before: for the rest of
-  the page visit when the browser cannot play the codec (Firefox with
-  H.265), and for 5 minutes after a connection that shows no video in 30 s.
-- Motion detection does not depend on the cards, since 2.6.5.
-
-### Bug fixes
-
-- **B4: camera names and IDs in the page.** Thirteen card buttons pasted
-  the camera's ID, IP or name between quotes in their click handlers. A
-  camera ID can carry an ONVIF token from the camera itself, and names are
-  editable, so a crafted value could break out and run script. They are
-  now encoded properly, and the classic Enhanced View info bar escapes the
-  name.
-- **B5: "Share with community"** showed ticked and did nothing. A build
-  placeholder was never filled, and its own text read as a configured
-  address. The box is now hidden while no community server exists.
-- **B9: "Unknown child process pid N, will report returncode 255".**
-  AnyCam killed an ffmpeg that had already exited; Python's kill() checks
-  the process first, and that check collected it before asyncio could. It
-  now waits briefly for an exiting ffmpeg before killing it. Harmless, but
-  no longer logged.
-- **B10: "Cannot connect to host 172.30.32.1:8099"** for about 3 s at
-  start. The web server now starts before the 2-second hardware-decoder
-  check.
-- **Manufacturer database** (found by the new release check): its 40,000
-  entries were written to disk on the event loop, pausing everything else;
-  now written on a separate thread.
-- **Unrestricted Storage Browser** had no description in the Configuration
-  tab (found by the new release check).
-
-### Build and release (build plan F1 to F7)
-
-- `build.yaml` is gone. The Supervisor warned on every build that it is
-  deprecated. The Dockerfile now names the base image itself:
-  `ghcr.io/home-assistant/base-debian:bookworm`, a multi-arch image.
-- `verify_release.py` has seven gates, up from five:
-  - Gate 6 checks that `run.sh`, `config.yaml` and the translations name
-    the same settings.
-  - Gate 7 checks every Dockerfile input where the build will fetch it:
-    the Debian package versions, the pip wheels, the go2rtc digests and the
-    base image. It needs internet access.
-  - The best-practice gate also catches pathlib file I/O in async code and
-    page placeholders that are never filled.
-  - 7 new function contracts cover motion detection, live cards and the
-    ffmpeg stop.
-- The 20 older audit reports that were ZIP files are now real PDFs.
-- The full coding best-practices document (sections 1.6 to 1.18 and
-  Part 6) is restored; it had been lost from the repository.
-
-### After updating
-
-The folder inside the zip is still `local_camera_discovery`, so the
-changelog shows without extra steps. The Supervisor may log the warning
-about `motion_sensitivity` once. Every camera starts on the standard
-recording settings; set each one from its cog, or turn on Use Global
-Recording Settings.
-
-### Known issues carried forward
-
-- **Not checked yet: choppy recordings.** CrystalHeeler, 2026-10-01: recordings
-  play in steps of about a second. A recording copies the main stream, so
-  this should not happen; the cause is not known yet and needs a recorded
-  file to examine. 2.6.6 records through the new buffer, so test again
-  with this build.
-- **Not tested before release: the new ffmpeg commands.** No ffmpeg on
-  the PC this was built on, so the detection, buffer and writer commands
-  were checked against the ffmpeg 5.1 documentation and tested with
-  stand-in processes, not run. If motion does not start, the add-on log
-  shows ffmpeg's error on the `DET:`, `BUF:` or `REC:` lines.
-- **Not tested before release: file splitting.** No ffmpeg on the PC this
-  was built on, so the segment options were checked against the ffmpeg 5.1
-  documentation only. If recordings fail to start, the add-on log shows
-  ffmpeg's error on the `REC:` line.
-- **Not tested before release: the image build.** The base image changed.
-  The release check confirms it exists for both processor types, but no
-  Docker build ran here.
-- Opening the classic view still stops the card's stream (build plan B15).
-- Skip Non-Reference Frames breaks every H.264 camera (build plan B3).
+- The Supervisor logs one harmless warning about `motion_sensitivity` after the update.
+- Each armed DVR channel holds two more connections to the DVR.
+- Opening the classic view still stops the card's stream.
+- Skip Non-Reference Frames breaks H.264 cameras.
 
 ## 2.6.5
 
-Motion detection works on the Lorex channels again and no longer needs a
-viewer. Enhanced View: slow-starting cameras now play live, landscape on a
-phone fills the screen, the manual quality menus are gone, and a loading
-message replaces the blank or gray screen while a feed starts. The folder
-inside the zip no longer carries the version.
+Motion detection works on the Lorex channels again without a viewer, and Enhanced View starts slow cameras, fills a phone in landscape and shows a loading message.
 
-### Motion detection (build plan B1)
+### Changes & improvements
 
-Motion detection compared frames only on the ffmpeg thumbnail path. The
-Lorex channels poll HTTP snapshots for their cards, so on those cameras
-motion was checked only while a channel was open in the classic Enhanced
-View, which runs ffmpeg. That is how it worked on 2026-09-28. 2.6.4 made
-live view the default, so the classic view stopped running and motion
-detection on the Lorex channels stopped with it.
+- **Landscape on a phone or tablet.** In Enhanced View the picture fills the screen; the bottom bar and Home Assistant's title bar hide.
+- **Loading message.** "Loading feed, please wait…" shows until the first frame, in Enhanced View and on the cards.
+- **Menus removed.** The Resolution, Frame Rate and Auto controls are gone from Enhanced View.
+- **Motion detection runs with no one watching,** and the armed state survives a restart.
+- **The folder inside the zip is now `local_camera_discovery`,** with no version.
 
-- Motion is now checked on both paths, HTTP snapshots included.
-- An armed camera keeps its loop running with no one watching. Before,
-  every loop stopped 30 s after the last page poll, and detection stopped
-  with it.
-- A background check every 10 s restarts the loop of an armed camera that
-  has stopped, and ends a recording once the cooldown and padding have
-  passed, whether or not frames arrive. Before, a recording ended only
-  when a new frame arrived, so leaving the view left it running: the
-  "recording never stops" report.
-- The armed state is saved in `/data/motion.json` and restored at start.
-  Before, every restart or update silently disarmed every camera.
-- The Record button shows the server's state. The page never asked for
-  it: after any page load every card showed "Record", even on an armed
-  camera, and clicking it then disarmed the camera, because the button
-  flipped the state blindly (test system B log, 2026-09-30 07:20:45). The page now
-  reads every camera's state at load and every 3 s, and the button asks
-  for the state you click for.
-- A recording whose ffmpeg exits on its own is marked stopped, so the next
-  motion starts a new one. The recording's error output is now read, so
-  a full pipe cannot stall it.
-- The comparison starts afresh whenever the stream changes resolution
-  (card to Enhanced View, or an adaptive step), which read as motion.
-- An armed camera keeps detecting while you watch another camera in live
-  view. The classic view still pauses other cameras for CPU.
+### Bugs fixed
 
-Cost: each armed Lorex channel polls one HTTP snapshot every 1.8 s (measured),
-all the time. Each armed ffmpeg camera keeps one thumbnail decode running.
+- **Motion detection stopped on the Lorex channels** after 2.6.4 made live view the default.
+- **Recordings never stopped** after leaving the view.
+- **The Record button showed "Record" on an armed camera,** and a click then disarmed it.
+- **Slow-starting cameras never played live.** Live view now waits 30 s (was 12 s) and tries again on every open.
+- **Cards said "Stream unavailable" after 16 s.** Now after 90 s of failed requests.
+- **A resolution change read as motion.**
+- **"No changelog found" after each update.** Run `touch /addons/local_camera_discovery/CHANGELOG.md` once after this update.
 
-### Slow-starting cameras (build plan B13)
+### Known issues
 
-The 2026-09-29 log from the test system B showed that every new connection to
-the H.264 camera at 192.168.50.73:8765 took 19 to 28 s to deliver its first
-frame. A player cannot draw anything until the stream's first keyframe
-arrives, so a stream with keyframes far apart starts slowly for every
-viewer.
-
-- Live view now waits 30 s for the first frame, up from 12 s. In 2.6.4 it
-  gave up on this camera every time.
-- Live view now tries again every time you open Enhanced View. In 2.6.4 one
-  failure kept a camera on the classic view until the page was reloaded,
-  and the Home Assistant app keeps the page open for days. A browser that
-  cannot play the codec (Firefox with H.265) is still remembered, so it
-  does not show the red message on every open.
-
-### Landscape on a phone or tablet
-
-In Enhanced View, turn a touch-screen device to landscape. The picture
-fills the screen, keeps its aspect ratio, and has black bars at the edges.
-The bottom bar hides, and Home Assistant hides its "AnyCam" title bar
-through the kiosk-mode request its app panel accepts from an add-on page.
-The red X stays. Turn back to portrait, or close the view, and everything
-returns. Desktop browsers do not change.
-
-The phone's own status bar (clock, battery) stays: a web page cannot hide
-it, and Home Assistant's frame does not allow the browser's full-screen
-mode.
-
-### Menus removed
-
-The Resolution, Frame Rate and Auto controls are gone from Enhanced View.
-The Classic button and the stream information stay. The "decoded on this
-device, not the Pi" text is gone.
-
-The classic view still adapts its quality on its own when the Adaptive
-Quality option is on. A resolution or frame rate chosen on an older page
-was remembered by the server, with no way left to clear it, so AnyCam now
-clears it each time Enhanced View opens.
-
-### Loading message
-
-- Enhanced View shows "Loading feed, please wait…" until the first frame.
-  In the Home Assistant app on Android the live player showed a large gray
-  play icon instead.
-- The classic view hides the card's small thumbnail until the full stream
-  delivers. In 2.6.4 the thumbnail looked like a poor-quality feed. The
-  server reports frames produced since the view opened in a new
-  `X-Focus-Frames` response header.
-- Before the first frame, "Still connecting to the camera" shows under the
-  loading message instead of the separate "Connecting to RTSP stream" box.
-
-### Camera cards (build plan B14)
-
-Cards say "Loading feed, please wait…" while a stream starts, in place of
-"Connecting...". A card says "Stream unavailable" only after 90 s of
-failed requests. In 2.6.4 it said so after 3 failed requests, about 16 s,
-while the stream was still starting.
-
-### The folder inside the zip is now `local_camera_discovery`
-
-Up to 2.6.4 the folder carried the version (`camera_discovery-2.6.4`), and
-Home Assistant showed "No changelog found" after each update. On a store
-reload the Supervisor checks for `CHANGELOG.md` at the add-on's old folder
-path before it reads the new one, and the old folder was already deleted.
-The zip name still carries the version.
-
-This update is the last one with a new folder name, so the message can
-show once more. After installing, run this once in the Terminal & SSH
-add-on, then check for updates again:
-
-```
-touch /addons/local_camera_discovery/CHANGELOG.md
-```
-
-### Known issues carried forward
-
-- The camera at 192.168.50.73:8765 needs about 20 s to start until the
-  Oak-D camera add-on 2.4.2 is installed. That release sets one keyframe
-  per second; x264's default was one every 250 frames.
-- Opening the classic view still stops the card's stream and opens a new
-  full-resolution connection.
-- Recordings are single files per motion event. Fixed-length pieces
-  (30 s, 1, 2 or 5 min) are build plan C12.
-- Motion detection compares JPEG file sizes, so a sudden light change
-  counts as motion. Seen 2026-09-30 06:21 on Lorex ch7: a 9 s clip when
-  the snapshot size stepped from 8,773 to about 10,000 bytes at dawn,
-  most likely the camera's night-to-day switch. Build plan C13.
+- The camera at 192.168.50.73:8765 takes about 20 s to start until the Oak-D add-on 2.4.2 is installed.
+- Motion detection compares JPEG file sizes, so a sudden light change counts as motion.
+- Recordings are one file per motion event.
+- Opening the classic view still stops the card's stream.
 
 ## 2.6.4
 
