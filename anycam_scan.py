@@ -28,6 +28,11 @@ from anycam_probe import (
 
 log = logging.getLogger("anycam")
 
+# 3.0.0-rc1.5 (build plan B22): the scan's cancel flag. The Cancel endpoint
+# sets anycam_scan.SCAN_CANCELLED. Before, it set a different name in
+# camera_discovery.py, which the scan never read, so Cancel did nothing.
+SCAN_CANCELLED = False
+
 # Taken from camera_discovery.py at start-up (anycam_host.bind).
 NEEDS = (
     'BLACKLIST', 'CAMERAS', 'CAMERA_KEYWORDS', 'CURRENT_VERSION',
@@ -1383,6 +1388,7 @@ async def run_scan() -> None:
                           message=f"Stage 2/4 — Scanning camera ports on {len(all_live)} live host(s)…")
 
         if SCAN_CANCELLED:
+            SCAN_STATE.update(message="Scan cancelled")
             return
 
         nmap_results  = await loop.run_in_executor(_THREAD_POOL, focused_nmap_scan, sorted(all_live))
@@ -1465,6 +1471,8 @@ async def run_scan() -> None:
             # host_meta["host_skip_layer2"].
             host_has_skip_layer2 = False
             for port_info in open_ports_sorted:
+                if SCAN_CANCELLED:      # 3.0.0-rc1.5 (B22): stop between ports too
+                    break
                 port = port_info["port"]
                 cid  = f"{ip}_{port}"
                 if cid in BLACKLIST:
@@ -1681,6 +1689,8 @@ async def run_scan() -> None:
 
         # Merge multicast-only ONVIF cameras not found by nmap
         for onvif in onvif_results:
+            if SCAN_CANCELLED:          # 3.0.0-rc1.5 (B22): no new probing after Cancel
+                break
             ip = onvif["ip"]
             if ip == gateway or ip in BLACKLIST:
                 continue
@@ -2016,7 +2026,9 @@ async def run_scan() -> None:
         ready = sum(1 for c in CAMERAS.values() if c.get("status") == "ready")
         SCAN_STATE.update(
             running=False, progress=100, stage=0, stage_label="",
-            message=f"Scan complete — {len(CAMERAS)} device(s), {ready} streaming.",
+            message=(f"Scan cancelled — {len(CAMERAS)} device(s), {ready} streaming."
+                     if SCAN_CANCELLED else
+                     f"Scan complete — {len(CAMERAS)} device(s), {ready} streaming."),
         )
         log.info(SCAN_STATE["message"])
 

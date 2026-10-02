@@ -2049,6 +2049,61 @@ async def test_scan():
     finally:
         await runner.cleanup()
 
+    # ── 3.0.0-rc1.5 (B22): Cancel stops the scan ────────────────────────────
+    probed, identity_calls = [], []
+    gate = asyncio.Event()
+
+    async def slow_probe(ip, port, hostname, initial, prev, verdict, reason, loop, host_meta=None):
+        probed.append((ip, port))
+        if len(probed) == 1:
+            gate.set()                         # the test presses Cancel now
+            await asyncio.sleep(0.05)
+        return None
+
+    two_hosts = lambda ips: [
+        {"ip": "10.0.0.22", "hostname": "a", "mac_addr": "", "mac_vendor": "",
+         "open_ports": [{"port": 554, "service": "rtsp", "product": ""},
+                        {"port": 80, "service": "http", "product": ""}]},
+        {"ip": "10.0.0.33", "hostname": "b", "mac_addr": "", "mac_vendor": "",
+         "open_ports": [{"port": 554, "service": "rtsp", "product": ""}]}]
+    req = make_mocked_request("POST", "/api/scan/cancel")
+    with _Swap(get_local_subnet=lambda: "10.0.0.0/26", get_default_gateway=lambda: "10.0.0.1",
+               discover_live_hosts=lambda subnet: {"10.0.0.22", "10.0.0.33"},
+               onvif_discover=lambda t: [{"ip": "10.0.0.70", "name": "X", "onvif_scopes": "",
+                                          "xaddrs": "http://10.0.0.70/onvif/device_service"}],
+               ssdp_discover=lambda t: [], mdns_discover=lambda t: [], broad_nmap_scan=lambda i: [],
+               focused_nmap_scan=two_hosts, _probe_host_port=slow_probe,
+               probe_http_identity=lambda *a, **k: identity_calls.append(a) or {},
+               save_cameras=lambda: None):
+        cd.SCAN_STATE["running"] = True        # api_scan sets this before it starts the task
+        task = asyncio.create_task(cd.run_scan())
+        await gate.wait()
+        r = await cd.api_scan_cancel(req)
+        await task
+    check("U14 Cancel during the port probing: answered 'cancelling'",
+          r.status == 200 and json.loads(r.body)["status"] == "cancelling")
+    check("U14 ... no port is probed after it, and no ONVIF-only device",
+          probed == [("10.0.0.22", 554)] and identity_calls == [], str(probed))
+    check("U14 ... the scan ends and says it was cancelled",
+          cd.SCAN_STATE["running"] is False
+          and cd.SCAN_STATE["message"].startswith("Scan cancelled"), cd.SCAN_STATE["message"])
+    check("U14 ... and the next scan starts with the flag cleared", cd.SCAN_CANCELLED is False)
+
+    nmap_called = []
+
+    def slow_arp(subnet):
+        cd.SCAN_CANCELLED = True               # Cancel pressed during discovery
+        return {"10.0.0.22"}
+    with _Swap(get_local_subnet=lambda: "10.0.0.0/26", get_default_gateway=lambda: "10.0.0.1",
+               discover_live_hosts=slow_arp, onvif_discover=lambda t: [], ssdp_discover=lambda t: [],
+               mdns_discover=lambda t: [], focused_nmap_scan=lambda ips: nmap_called.append(ips) or [],
+               save_cameras=lambda: None):
+        await cd.run_scan()
+    check("U15 Cancel during discovery: no port scan, and the status says cancelled",
+          nmap_called == [] and cd.SCAN_STATE["message"] == "Scan cancelled"
+          and cd.SCAN_STATE["running"] is False, cd.SCAN_STATE["message"])
+    cd.SCAN_STATE.update(running=False, progress=0, message="Idle. Click Scan to begin.")
+
 
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN = Path(__file__).resolve().parent / "fake_go2rtc.py"

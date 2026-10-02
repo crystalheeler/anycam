@@ -532,7 +532,6 @@ def _snap_state(camera_id: str) -> dict:
 
 CAMERAS    = {}
 BLACKLIST  = set()
-_SCAN_CANCELLED = False   # set to True to request graceful scan abort
 SCAN_STATE = {"running": False, "progress": 0, "message": "Idle. Click Scan to begin.",
                "stage": 0, "stage_label": "",
                "started_at": 0.0, "elapsed": 0.0, "eta": ""}
@@ -3561,10 +3560,9 @@ async def api_scan_status(request) -> web.Response:
 async def api_scan_cancel(request) -> web.Response:
 
     """POST /api/scan/cancel — request graceful abort of running scan."""
-    global _SCAN_CANCELLED
     if not SCAN_STATE["running"]:
         return web.json_response({"error": "No scan running"}, status=400)
-    _SCAN_CANCELLED = True
+    anycam_scan.SCAN_CANCELLED = True       # 3.0.0-rc1.5 (B22): the flag the scan reads
     log.info("Scan cancel requested by user")
     SCAN_STATE.update(message="Cancelling scan…")
     return web.json_response({"status": "cancelling"})
