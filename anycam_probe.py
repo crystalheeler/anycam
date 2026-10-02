@@ -20,14 +20,17 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urlparse, quote
 
 from anycam_host import H
+from anycam_brand import (
+    CAMERA_KEYWORDS, _DB_MANUFACTURERS, identify_manufacturer, lookup_oui,
+    oui_is_camera,
+)
 
 log = logging.getLogger("anycam")
 
 # Taken from camera_discovery.py at start-up (anycam_host.bind).
 NEEDS = (
-    'CAMERA_KEYWORDS', 'CURRENT_VERSION', 'RTSP_PATHS', '_DB_MANUFACTURERS',
-    '_identify_camera_brand', '_match_stream_db', '_record_rst_observation', '_strip_creds',
-    'identify_manufacturer', 'lookup_oui', 'oui_is_camera',
+    'CURRENT_VERSION', 'RTSP_PATHS', '_identify_camera_brand', '_match_stream_db',
+    '_record_rst_observation', '_strip_creds',
 )
 # Codec match for the "sdp_has_video_track" populated-channel test.
 # Pattern intentionally matches both H264 and H.264 etc. by treating
