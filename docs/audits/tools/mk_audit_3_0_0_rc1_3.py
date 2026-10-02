@@ -18,7 +18,7 @@ def story():
          p("3.0.0-rc1.3 carries one change, build plan B19. Scope confirmed by CrystalHeeler "
            "on 2026-10-02: B19 alone, after 3.0.0-rc1.2 passed his field test on both "
            "systems; the unused is_camera_positive and probe_http_for_camera stay. "
-           "camera_discovery.py: 5 lines added (the def line and a 4-line comment).")]
+           "camera_discovery.py: 6 lines added, 2 removed (the def line, a 4-line comment, blank lines).")]
 
     s += [h1("The defect and the fix"),
           table([["Fact", "Detail"],
