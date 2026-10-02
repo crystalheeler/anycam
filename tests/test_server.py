@@ -1821,6 +1821,235 @@ async def test_empty_text():
     check("T1 the scan status poll sets the text", "_setEmptyText(running);" in html)
 
 
+# ── U. 3.0.0-rc1.4 the scan ──────────────────────────────────────────────────
+# The scan had no tests. These run the REAL run_scan and _probe_host_port; only
+# the functions that touch the network are stand-ins (ARP, multicast discovery,
+# nmap, and the single-port probers).
+class _Swap:
+    """Replace add-on functions for a test, and put them back after."""
+
+    def __init__(self, **stubs):
+        self.stubs = stubs
+
+    def __enter__(self):
+        self.real = {k: getattr(cd, k) for k in self.stubs}
+        for k, v in self.stubs.items():
+            setattr(cd, k, v)
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self.real.items():
+            setattr(cd, k, v)
+
+
+async def test_scan():
+    print("\n[U] 3.0.0-rc1.4 the scan")
+    calls = {"probe": [], "nmap": [], "identity": [], "fp": [], "find": [], "saved": 0}
+
+    def nmap(ips):
+        calls["nmap"].append(list(ips))
+        return [
+            {"ip": "10.0.0.22", "hostname": "cam22", "mac_addr": "", "mac_vendor": "",
+             "open_ports": [{"port": 554, "service": "rtsp", "product": ""}]},
+            {"ip": "10.0.0.33", "hostname": "cam33", "mac_addr": "", "mac_vendor": "",
+             "open_ports": [{"port": 80, "service": "http", "product": ""},
+                            {"port": 554, "service": "rtsp", "product": ""},
+                            {"port": 8000, "service": "http", "product": ""}]},
+            {"ip": "10.0.0.50", "hostname": "printer", "mac_addr": "", "mac_vendor": "",
+             "open_ports": [{"port": 80, "service": "http", "product": "HP printer httpd"}]},
+        ]
+
+    async def probe(ip, port, hostname, initial, prev, verdict, reason, loop, host_meta=None):
+        calls["probe"].append((ip, port, initial, verdict, bool(host_meta.get("host_skip_layer1_alt"))))
+
+        def card(proto, status, url=""):
+            return {"id": f"{ip}_{port}", "ip": ip, "hostname": hostname, "port": port,
+                    "protocol": proto, "stream_url": url, "name": hostname, "status": status,
+                    "user_saved": False}
+        if (ip, port) == ("10.0.0.22", 554):
+            return card("RTSP", "ready", "rtsp://10.0.0.22:554/11")
+        if (ip, port) == ("10.0.0.33", 554):
+            host_meta["rtsp_speaker_confirmed"] = True
+            return card("RTSP", "needs_credentials")
+        if ip == "10.0.0.33":
+            return card("HTTP", "needs_credentials")
+        return None
+
+    def identity(ip, port, timeout=5):
+        calls["identity"].append((ip, port))
+        return {"is_camera": True, "title": "", "server": "Hipcam RealServer/V1.0",
+                "manufacturer": "Hipcam/Microseven", "notes": ""}
+
+    def fingerprint(host, port):
+        calls["fp"].append((host, port))
+        return {"error": "refused", "looks_like_rtsp": False}
+
+    def find(ip, port, username="", password="", host_meta=None):
+        calls["find"].append((ip, port))
+        return None
+
+    def saved():
+        calls["saved"] += 1
+
+    world = _Swap(
+        get_local_subnet=lambda: "10.0.0.0/26", get_default_gateway=lambda: "10.0.0.1",
+        discover_live_hosts=lambda subnet: {"10.0.0.1", "10.0.0.22", "10.0.0.33", "10.0.0.50",
+                                            "10.0.0.60", "172.30.32.1", "169.254.1.1"},
+        onvif_discover=lambda timeout: [
+            {"ip": "10.0.0.33", "name": "CAM33", "onvif_scopes": "",
+             "xaddrs": "http://10.0.0.33/onvif/device_service"},
+            {"ip": "10.0.0.70", "name": "IPCAM", "onvif_scopes": "",
+             "xaddrs": "http://10.0.0.70:8080/onvif/device_service"}],
+        ssdp_discover=lambda timeout: [], mdns_discover=lambda timeout: [],
+        broad_nmap_scan=lambda ips: [], focused_nmap_scan=nmap, _probe_host_port=probe,
+        probe_http_identity=identity, _rtsp_options_fingerprint=fingerprint,
+        find_rtsp_path=find, save_cameras=saved)
+    keep = (dict(cd.CAMERAS), set(cd.BLACKLIST), cd.SCAN_OPTIONS.get("broad_sweep"))
+    cd.CAMERAS.clear(); cd.BLACKLIST.clear(); cd.BLACKLIST.add("10.0.0.33_8000")
+    cd.CAMERAS["manual_1"] = {"id": "manual_1", "ip": "10.0.0.99", "user_saved": True,
+                              "status": "ready", "protocol": "RTSP", "port": 554}
+    cd.CAMERAS["stale_1"] = {"id": "stale_1", "ip": "10.0.0.98", "user_saved": False,
+                             "status": "ready", "protocol": "RTSP", "port": 554}
+    cd.SCAN_OPTIONS["broad_sweep"] = False
+    try:
+        with world:
+            await cd.run_scan()
+        cams = cd.CAMERAS
+        check("U1 the port scan gets every live host, sorted; not the gateway, Docker or link-local addresses",
+              calls["nmap"] == [["10.0.0.22", "10.0.0.33", "10.0.0.50", "10.0.0.60", "10.0.0.70"]],
+              str(calls["nmap"]))
+        check("U2 each open port is probed; the RTSP port first; a blacklisted port is skipped",
+              [c[:2] for c in calls["probe"]] == [("10.0.0.22", 554), ("10.0.0.33", 554),
+                                                  ("10.0.0.33", 80), ("10.0.0.50", 80)],
+              str(calls["probe"]))
+        check("U2 after the RTSP port answers, the host's other ports skip the RTSP path walk",
+              calls["probe"][2] == ("10.0.0.33", 80, "HTTP", "camera", True)
+              and calls["probe"][1][4] is False, str(calls["probe"][1:3]))
+        check("U2 a printer is classified before it is probed",
+              calls["probe"][3][3] == "not_camera", str(calls["probe"][3]))
+        check("U3 result: saved cameras stay, unsaved old cards go, new cards arrive",
+              sorted(cams) == ["10.0.0.22_554", "10.0.0.33_554", "10.0.0.70_onvif", "manual_1"],
+              str(sorted(cams)))
+        check("U3 one card per device: the HTTP card of a device with an RTSP card is dropped",
+              "10.0.0.33_80" not in cams and cams["10.0.0.33_554"]["status"] == "needs_credentials")
+        check("U4 a device found by both the port scan and ONVIF: its card gets the ONVIF address",
+              cams["10.0.0.33_554"].get("onvif") is True
+              and cams["10.0.0.33_554"]["xaddrs"] == "http://10.0.0.33/onvif/device_service")
+        o = cams["10.0.0.70_onvif"]
+        check("U5 a device found by ONVIF only: a card that asks for a password",
+              o["protocol"] == "ONVIF" and o["status"] == "needs_credentials"
+              and o["requires_credentials"] is True and o["verdict_reason"] == "ONVIF discovered")
+        check("U5 ... its brand comes from its web page (probe_http_identity, restored in 3.0.0-rc1.3)",
+              calls["identity"] == [("10.0.0.70", 80)] and o["manufacturer"] == "Hipcam/Microseven"
+              and o["server_header"] == "Hipcam RealServer/V1.0", str(calls["identity"]))
+        check("U5 ... then one RTSP fingerprint and one path search on port 554",
+              calls["fp"] == [("10.0.0.70", 554)] and calls["find"] == [("10.0.0.70", 554)])
+        st = cd.SCAN_STATE
+        check("U6 the scan ends: not running, 100%, counts in the message, cameras saved once",
+              st["running"] is False and st["progress"] == 100 and st["stage"] == 0
+              and st["message"] == "Scan complete — 4 device(s), 2 streaming." and calls["saved"] == 1,
+              str({k: st[k] for k in ("running", "progress", "message")}))
+        check("U6 the host list for the port scanner: probed hosts, then silent ones",
+              [h["ip"] for h in cd.ARP_HOSTS] == ["10.0.0.22", "10.0.0.33", "10.0.0.50",
+                                                 "10.0.0.60", "10.0.0.70"])
+        check("U6 the waiting list of new cards is empty again", cd.PENDING_CAMERAS is None)
+
+        def boom(subnet):
+            raise RuntimeError("no network")
+        real_error = cd.log.error
+        cd.log.error = lambda *a, **k: None          # the scan logs the failure with its trace
+        try:
+            with _Swap(get_local_subnet=lambda: "10.0.0.0/26", get_default_gateway=lambda: "10.0.0.1",
+                       discover_live_hosts=boom, onvif_discover=lambda t: [], ssdp_discover=lambda t: [],
+                       mdns_discover=lambda t: [], save_cameras=saved):
+                await cd.run_scan()
+        finally:
+            cd.log.error = real_error
+        check("U7 a failure inside the scan: reported in the status, the scan is not left running",
+              cd.SCAN_STATE["running"] is False and cd.SCAN_STATE["message"] == "Scan error: no network"
+              and cd.PENDING_CAMERAS is None, cd.SCAN_STATE["message"])
+        check("U7 ... and the saved camera is still there", "manual_1" in cd.CAMERAS)
+    finally:
+        cd.CAMERAS.clear(); cd.CAMERAS.update(keep[0])
+        cd.BLACKLIST.clear(); cd.BLACKLIST.update(keep[1])
+        cd.SCAN_OPTIONS["broad_sweep"] = keep[2]
+        cd.SCAN_STATE.update(running=False, progress=0, message="Idle. Click Scan to begin.")
+
+    # ── the port prober ──────────────────────────────────────────────────────
+    fp_ok = {"looks_like_rtsp": True, "status": 401, "server_header": "", "auth_realm": "Login",
+             "auth_scheme": "Digest", "public_methods": ["OPTIONS", "DESCRIBE"], "elapsed_ms": 5}
+
+    async def port(port_no, initial, verdict, w, ip="10.0.0.22"):
+        order = []
+
+        async def details(url, *a, **k):
+            order.append("details")
+            return {}
+        meta = {"ip": ip, "hostname": "cam"}
+        with _Swap(
+                find_rtsp_path=lambda i, p, username="", password="", host_meta=None:
+                    (order.append("find") or w.get("rtsp")),
+                probe_rtmp=lambda i, p: (order.append("rtmp") or w.get("rtmp", False)),
+                probe_mjpeg_http=lambda i, p, u, pw: (order.append("mjpeg") or w.get("mjpeg")),
+                probe_hls=lambda i, p, u, pw: (order.append("hls") or w.get("hls")),
+                probe_webrtc=lambda i, p: (order.append("webrtc") or w.get("webrtc")),
+                probe_ws_rtsp=lambda i, p: (order.append("ws") or w.get("ws")),
+                _rtsp_options_fingerprint=lambda h, p: (order.append("fp") or w.get("fp", {"error": "refused"})),
+                get_local_ip=lambda: "10.0.0.24", probe_stream_details=details):
+            cam = await cd._probe_host_port(ip, port_no, "cam", initial, {}, verdict, "",
+                                            asyncio.get_running_loop(), host_meta=meta)
+        return cam, order, meta
+
+    cam, order, meta = await port(554, "RTSP", "camera", {"rtsp": "rtsp://10.0.0.22:554/11", "fp": fp_ok})
+    check("U8 RTSP port, a stream opens without a password: a ready card",
+          cam["id"] == "10.0.0.22_554" and cam["protocol"] == "RTSP" and cam["status"] == "ready"
+          and cam["stream_url"] == "rtsp://10.0.0.22:554/11" and cam["requires_credentials"] is False
+          and order == ["fp", "find", "details"], f"{cam and cam.get('status')} {order}")
+    check("U8 ... the fingerprint marks the host as an RTSP speaker for its other ports",
+          meta.get("rtsp_speaker_confirmed") is True and meta.get("rtsp_auth_realm") == "Login"
+          and meta.get("rtsp_public_methods") == "OPTIONS,DESCRIBE", str(meta))
+    cam, order, meta = await port(554, "RTSP", "camera", {"rtsp": None, "fp": fp_ok})
+    check("U9 RTSP port, no stream without a password: a card that asks for one",
+          cam["status"] == "needs_credentials" and cam["requires_credentials"] is True
+          and cam["stream_url"] == "" and order == ["fp", "find"], f"{cam and cam.get('status')} {order}")
+    cam, order, _ = await port(80, "HTTP", "camera", {"mjpeg": "http://10.0.0.22:80/video.mjpg"})
+    check("U10 web port with an MJPEG stream: a ready MJPEG card, found first",
+          cam["protocol"] == "MJPEG" and cam["status"] == "ready" and cam["display"] == "mjpeg"
+          and order == ["mjpeg", "details"], f"{cam and cam.get('protocol')} {order}")
+    cam, order, _ = await port(8080, "HTTP", "unknown", {"hls": "http://10.0.0.22:8080/live.m3u8"})
+    check("U10 web port with an HLS stream: a ready HLS card",
+          cam["protocol"] == "HLS" and cam["display"] == "hls" and order == ["mjpeg", "hls", "details"])
+    cam, order, _ = await port(80, "HTTP", "camera", {})
+    check("U11 web port of a camera, no stream found: every prober tried in order, then a password card",
+          cam["protocol"] == "HTTP" and cam["status"] == "needs_credentials"
+          and order == ["mjpeg", "hls", "find", "webrtc", "ws"], f"{cam and cam.get('status')} {order}")
+    cam, order, _ = await port(80, "HTTP", "not_camera", {})
+    check("U11 the same on a device that is not a camera: no card", cam is None, str(cam))
+    cam, order, _ = await port(1935, "RTMP", "camera", {"rtmp": True})
+    check("U12 RTMP port: a ready RTMP card", cam["protocol"] == "RTMP" and cam["status"] == "ready"
+          and cam["stream_url"] == "rtmp://10.0.0.22:1935/live/stream" and order == ["rtmp"])
+
+    # ── the scan API ─────────────────────────────────────────────────────────
+    app = web.Application()
+    app.router.add_post("/api/scan/cancel", cd.api_scan_cancel)
+    app.router.add_get("/api/scan/status", cd.api_scan_status)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    base = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(base + "/api/scan/status") as r:
+                body = await r.json()
+            check("U13 status: the scan state as JSON", r.status == 200 and body["running"] is False
+                  and "message" in body and "progress" in body, str(body)[:120])
+            async with sess.post(base + "/api/scan/cancel") as r:
+                check("U13 cancel with no scan running: refused", r.status == 400)
+    finally:
+        await runner.cleanup()
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN = Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -1927,6 +2156,7 @@ async def main():
     await test_redaction()
     await test_http_identity()
     await test_empty_text()
+    await test_scan()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 
