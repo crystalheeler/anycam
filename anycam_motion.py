@@ -764,7 +764,8 @@ async def _motion_buffer(camera_id: str, url: str) -> None:
             await asyncio.sleep(MOTION_PIPE_RETRY_S)
 
 
-async def _motion_write(camera_id: str, ms: dict, writer, pkts: bytes) -> None:
+async def _motion_write(camera_id: str, ms: dict, writer: asyncio.subprocess.Process,
+                        pkts: bytes) -> None:
     """Pass packets to the recording writer; drop it if it has died."""
     try:
         writer.stdin.write(pkts)
@@ -983,7 +984,7 @@ async def _night_expectation_check(camera_id: str, ms: dict, now: float) -> None
         await _ha_notify(f"AnyCam: {name}", msg, f"anycam_night_{camera_id}_{kind}")
 
 
-async def _ha_api(method: str, path: str, payload: dict | None = None):
+async def _ha_api(method: str, path: str, payload: dict | None = None) -> dict | list | None:
     """Call Home Assistant's REST API through the Supervisor (homeassistant_api)."""
     token = os.environ.get("SUPERVISOR_TOKEN", "")
     if not token:

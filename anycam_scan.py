@@ -784,7 +784,7 @@ async def _rerun_onvif_auth(camera_id: str, camera: dict,
         return False
 
     # Rank by resolution descending
-    def _res(c) -> int:
+    def _res(c: dict) -> int:
 
         return (c.get("stream_width") or 0) * (c.get("stream_height") or 0)
     stream_candidates.sort(key=_res, reverse=True)
@@ -1017,7 +1017,7 @@ async def run_verification_scan(prev_version: str = "unknown") -> None:
 
 async def _probe_host_port(ip: str, port: int, hostname: str,
                             initial_protocol: str, prev: dict,
-                            verdict: str, reason: str, loop,
+                            verdict: str, reason: str, loop: asyncio.AbstractEventLoop,
                             host_meta: dict | None = None) -> dict | None:
     """
     Probe a single host:port and return a camera dict if a stream is found,

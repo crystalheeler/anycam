@@ -323,7 +323,7 @@ _THREAD_POOL: concurrent.futures.ThreadPoolExecutor = (
 _LOG_BUFFER: list = []
 
 class _BufHandler(logging.Handler):
-    def emit(self, record) -> None:
+    def emit(self, record: logging.LogRecord) -> None:
 
         if record.levelno >= logging.WARNING:
             _LOG_BUFFER.append({
@@ -3536,11 +3536,11 @@ def _safe_cam(cam: dict) -> dict:
     return s
 
 
-async def api_cameras(request) -> web.Response:
+async def api_cameras(request: web.Request) -> web.Response:
 
     return web.json_response([_safe_cam(c) for c in CAMERAS.values()])
 
-async def api_scan(request) -> web.Response:
+async def api_scan(request: web.Request) -> web.Response:
 
     if SCAN_STATE["running"]:
         return web.json_response({"error": "Scan already running"}, status=409)
@@ -3552,12 +3552,12 @@ async def api_scan(request) -> web.Response:
     asyncio.create_task(run_scan())
     return web.json_response({"status": "started"})
 
-async def api_scan_status(request) -> web.Response:
+async def api_scan_status(request: web.Request) -> web.Response:
 
     return web.json_response(SCAN_STATE)
 
 
-async def api_scan_cancel(request) -> web.Response:
+async def api_scan_cancel(request: web.Request) -> web.Response:
 
     """POST /api/scan/cancel — request graceful abort of running scan."""
     if not SCAN_STATE["running"]:
@@ -3959,7 +3959,7 @@ async def _enumerate_dvr_channels_after_auth(camera_id: str) -> None:
              f"(populated channels: {cam['_dvr_populated_channels']})")
 
 
-async def api_dvr_enum_status(request) -> web.Response:
+async def api_dvr_enum_status(request: web.Request) -> web.Response:
     """2.5.0-rc1.8: lightweight polling endpoint that lets the post-cred-
     auth UI flow detect channel-enumeration completion deterministically
     instead of waiting a fixed wallclock budget.
@@ -4000,7 +4000,7 @@ async def api_dvr_enum_status(request) -> web.Response:
     })
 
 
-async def api_set_credentials(request) -> web.Response:
+async def api_set_credentials(request: web.Request) -> web.Response:
 
     try:
         data      = await request.json()
@@ -4229,7 +4229,7 @@ async def api_set_credentials(request) -> web.Response:
 
             if stream_candidates:
                 # ── Rank by resolution: highest first, lowest last ─────────────
-                def _res(c) -> int:
+                def _res(c: dict) -> int:
 
                     return (c.get("stream_width") or 0) * (c.get("stream_height") or 0)
                 stream_candidates.sort(key=_res, reverse=True)
@@ -4378,8 +4378,8 @@ async def api_set_credentials(request) -> web.Response:
                     # Run ffprobe to detect the real codec — ONVIF often reports
                     # "h264" when the camera actually streams HEVC.
                     cam_url = build_authenticated_url(cam) or ""
-                    async def _fix_codec(cam_id=cid, auth_url=cam_url,
-                                         cam_ip=ip, throttle_s=throttle_s) -> None:
+                    async def _fix_codec(cam_id: str = cid, auth_url: str = cam_url,
+                                         cam_ip: str = ip, throttle_s: float = throttle_s) -> None:
 
                         # rc2.6: retry with backoff. The original single-shot
                         # 1s sleep + ffprobe could fail when the camera was
@@ -4867,7 +4867,7 @@ async def api_set_credentials(request) -> web.Response:
                               **details})
 
 
-async def api_clear_credentials(request) -> web.Response:
+async def api_clear_credentials(request: web.Request) -> web.Response:
 
     cid    = request.match_info["camera_id"]
     camera = CAMERAS.get(cid)
@@ -4879,7 +4879,7 @@ async def api_clear_credentials(request) -> web.Response:
     save_cameras()
     return web.json_response({"status": "ok"})
 
-async def api_rename_camera(request) -> web.Response:
+async def api_rename_camera(request: web.Request) -> web.Response:
 
     cid = request.match_info["camera_id"]
     try:
@@ -4892,14 +4892,14 @@ async def api_rename_camera(request) -> web.Response:
         save_cameras()
     return web.json_response({"status": "ok"})
 
-async def api_delete_camera(request) -> web.Response:
+async def api_delete_camera(request: web.Request) -> web.Response:
 
     cid = request.match_info["camera_id"]
     CAMERAS.pop(cid, None)
     save_cameras()
     return web.json_response({"status": "ok"})
 
-async def api_confirm_camera(request) -> web.Response:
+async def api_confirm_camera(request: web.Request) -> web.Response:
 
     """User confirmed a post-upgrade missing camera — clear the flag."""
     cid    = request.match_info["camera_id"]
@@ -4913,7 +4913,7 @@ async def api_confirm_camera(request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
-async def api_not_camera(request) -> web.Response:
+async def api_not_camera(request: web.Request) -> web.Response:
 
     cid = request.match_info["camera_id"]
     cam = CAMERAS.get(cid)
@@ -4964,7 +4964,7 @@ async def api_not_camera(request) -> web.Response:
 # ─────────────────────────────────────────────────────────────────────────
 # 2.4.0-rc2.4: Deep Re-Probe handler
 # ─────────────────────────────────────────────────────────────────────────
-async def api_deep_reprobe(request) -> web.Response:
+async def api_deep_reprobe(request: web.Request) -> web.Response:
     """User-invoked deep re-probe of a single camera card.
 
     Resumes Layer 1 from where rc2.4's early-bail left off, then runs
@@ -5267,7 +5267,7 @@ async def api_deep_reprobe(request) -> web.Response:
     })
 
 
-async def api_add_camera(request) -> web.Response:
+async def api_add_camera(request: web.Request) -> web.Response:
 
     try:
         data = await request.json()
@@ -5322,13 +5322,13 @@ async def api_add_camera(request) -> web.Response:
     return web.json_response({"status": "ok", "camera_id": cid})
 
 
-async def api_arp_hosts(request) -> web.Response:
+async def api_arp_hosts(request: web.Request) -> web.Response:
 
     """Return the last ARP-discovered host list for the Port Scan UI."""
     return web.json_response(anycam_scan.ARP_HOSTS)
 
 
-async def api_pscan_start(request) -> web.Response:
+async def api_pscan_start(request: web.Request) -> web.Response:
 
     try:
         data = await request.json()
@@ -5377,7 +5377,7 @@ async def run_batch_port_scan() -> None:
     )
     PSCAN_QUEUE.clear()
 
-async def api_pscan_status(request) -> web.Response:
+async def api_pscan_status(request: web.Request) -> web.Response:
 
     # Add current elapsed so JS can compute drift between polls
     resp = dict(PSCAN)
@@ -5387,7 +5387,7 @@ async def api_pscan_status(request) -> web.Response:
     resp["live_ports"] = PSCAN.get("live_ports", [])
     return web.json_response(resp)
 
-async def api_pscan_cancel(request) -> web.Response:
+async def api_pscan_cancel(request: web.Request) -> web.Response:
 
     pid = PSCAN.get("proc_pid")
     if pid:
@@ -5398,7 +5398,7 @@ async def api_pscan_cancel(request) -> web.Response:
     PSCAN.update(running=False, paused=False, message="Cancelled.", proc_pid=None)
     return web.json_response({"status": "ok"})
 
-async def api_pscan_pause(request) -> web.Response:
+async def api_pscan_pause(request: web.Request) -> web.Response:
 
     pid = PSCAN.get("proc_pid")
     if pid and PSCAN["running"] and not PSCAN["paused"]:
@@ -5410,7 +5410,7 @@ async def api_pscan_pause(request) -> web.Response:
             return web.json_response({"error": str(e)}, status=500)
     return web.json_response({"status": "ok"})
 
-async def api_pscan_resume(request) -> web.Response:
+async def api_pscan_resume(request: web.Request) -> web.Response:
 
     pid = PSCAN.get("proc_pid")
     if pid and PSCAN["paused"]:

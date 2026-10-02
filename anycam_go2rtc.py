@@ -386,7 +386,8 @@ async def handle_go2rtc_ws(request: web.Request) -> web.StreamResponse:
             await client_ws.close()
             return client_ws
 
-        async def _relay(reader, writer) -> None:
+        async def _relay(reader: "web.WebSocketResponse | aiohttp.ClientWebSocketResponse",
+                         writer: "web.WebSocketResponse | aiohttp.ClientWebSocketResponse") -> None:
             async for msg in reader:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     await writer.send_str(msg.data)
