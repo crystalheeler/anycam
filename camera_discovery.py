@@ -171,7 +171,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.0.0-rc1.2"  # must match config.yaml
+CURRENT_VERSION = "3.0.0-rc1.3"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -3972,7 +3972,11 @@ def _rtsp_options_fingerprint(
     return result
 
 
-
+# 3.0.0-rc1.3 (build plan B19): the line below was lost in 2.4.0-rc1.0, when
+# _rtsp_options_fingerprint was added directly above it. The body stayed,
+# unreachable, as the tail of that function, and both callers raised a name
+# error. The body is unchanged from 2.3.x (117 lines, compared).
+def probe_http_identity(ip: str, port: int, timeout: int = 5) -> dict:
     """
     Fetch HTTP pages from a device and extract identity info:
       - Page title, Server header

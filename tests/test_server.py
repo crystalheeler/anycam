@@ -1758,6 +1758,59 @@ async def test_redaction():
           str([(type(h).__name__, len(h.filters)) for h in root.handlers]))
 
 
+# ── S. 3.0.0-rc1.3 probe_http_identity restored (B19) ───────────────────────
+async def test_http_identity():
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    print("\n[S] 3.0.0-rc1.3 HTTP identity check restored")
+
+    def serve(server_header, body):
+        class Handler(BaseHTTPRequestHandler):
+            server_version, sys_version = server_header, ""
+
+            def do_GET(self):
+                data = body.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+        srv = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+
+    loop = asyncio.get_running_loop()
+    cam = serve("Hipcam RealServer/V1.0", "<html><head><title>Microseven Cameras</title></head></html>")
+    plain = serve("nginx", "<html><head><title>Welcome</title></head><body>It works.</body></html>")
+    try:
+        r = await loop.run_in_executor(None, cd.probe_http_identity, "127.0.0.1", cam.server_port, 2)
+        check("S1 a Microseven web page: identified as a camera, brand from CAMERA_DB",
+              r["is_camera"] is True and "Hipcam" in r["manufacturer"]
+              and "Hipcam" in r["server"] and "Microseven" in r["title"], str(r)[:200])
+        r2 = await loop.run_in_executor(None, cd.probe_http_identity, "127.0.0.1", plain.server_port, 2)
+        check("S2 an ordinary web page: not a camera, no brand",
+              r2["is_camera"] is False and r2["manufacturer"] == "" and r2["server"].startswith("nginx"),
+              str(r2)[:200])
+        check("S3 the wrapper probe_http_for_camera works again",
+              cd.probe_http_for_camera("127.0.0.1", cam.server_port, 2) is True
+              and cd.probe_http_for_camera("127.0.0.1", plain.server_port, 2) is False)
+    finally:
+        cam.shutdown(); plain.shutdown()
+    r3 = await loop.run_in_executor(None, cd.probe_http_identity, "127.0.0.1", 9, 1)
+    check("S4 nothing listening: an empty result, no error",
+          r3["is_camera"] is False and r3["title"] == "" and r3["manufacturer"] == "", str(r3)[:120])
+    import ast as _ast
+    src = (REPO / "camera_discovery.py").read_text(encoding="utf-8")
+    fns = {n.name: n for n in _ast.parse(src).body
+           if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))}
+    fp = _ast.get_source_segment(src, fns["_rtsp_options_fingerprint"])
+    check("S5 _rtsp_options_fingerprint ends at its return; no unreachable code after it",
+          fp.rstrip().endswith("return result") and "Fetch HTTP pages" not in fp)
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN = Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -1862,6 +1915,7 @@ async def main():
     await test_acd_classic()
     await test_location_check()
     await test_redaction()
+    await test_http_identity()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

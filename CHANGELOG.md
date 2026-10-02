@@ -1,3 +1,21 @@
+## 3.0.0-rc1.3
+
+One bug fix: a scan function that lost its first line in 2.4.0-rc1.0 works again.
+
+### Bugs fixed
+
+- **`probe_http_identity` restored.** The function reads a device's web page to find its brand. Its first line was lost in 2.4.0-rc1.0, so the one scan step that calls it failed quietly. The restored function is identical to the one in 2.3.x.
+
+### Changes & improvements
+
+- **When the scan uses it:** only for a device that answers ONVIF discovery and has no card from the port scan. For that device the scan now requests its web page on port 80.
+
+### Known issues
+
+- On the two test networks this scan step did not run in 8 logged scans, so no change is expected there.
+- Two unused functions that call it (`is_camera_positive`, `probe_http_for_camera`) are still in the code.
+- The scan, the password entry path, the snapshot loop and the Enhanced View engine are still in the main file, and the tests do not cover them.
+
 ## 3.0.0-rc1.2
 
 Code structure release, third step. AnyCam does the same things.

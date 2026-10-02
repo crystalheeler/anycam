@@ -19,12 +19,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from anycam_modules import MODULES      # the files that make up the add-on
-# Known defects, reported and waiting for a decision (build plan B19). The
-# line `def probe_http_identity(ip, port, timeout)` was lost in 2.4.0-rc1.0;
-# its body sits, unreachable, at the end of _rtsp_options_fingerprint.
-KNOWN = {("_rtsp_options_fingerprint", "ip"), ("_extract", "ip"),
-         ("probe_http_for_camera", "probe_http_identity"),
-         ("run_scan", "probe_http_identity")}
+# (function, name) pairs that are known defects waiting for a decision.
+# Empty since 3.0.0-rc1.3, which restored probe_http_identity (build plan B19).
+KNOWN: set = set()
 
 
 def _load(path: Path):
@@ -76,7 +73,7 @@ def main() -> int:
             print(f"  FAIL  {name}:{line} {func}() uses undefined name {missing!r}")
             bad += 1
     print(f"  names: {len(MODULES)} module(s), {bad} new undefined name(s), "
-          f"{known} known (build plan B19)")
+          f"{known} known")
     print(f"{0 if bad else 1}/1 passed")
     return 1 if bad else 0
 
