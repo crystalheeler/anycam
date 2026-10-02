@@ -1,13 +1,22 @@
 ## 3.0.0-rc1.0
 
-Code structure release. No change to what AnyCam does.
+Code structure release. AnyCam does the same things; the code is split into files, tested from the repository, and three unused endpoints are gone.
 
 ### Changes & improvements
 
-- **The tests are in the repository** (`tests/`), and the release check runs them: 278 server checks and 110 page checks.
+- **The tests are in the repository** (`tests/`). The release check runs them: 289 server checks, 110 page checks and an undefined-name check.
+- **The code is three files, not one.** The camera database tables are in `camera_db.py` and the page's script is in `page_script.py`. The main file went from 18,198 lines to 13,125. The moved data is identical.
+- **No credentials in any log line.** A filter on the log removes `user:password@` and password values in addresses from every line, including lines from ffmpeg, go2rtc and libraries.
+- **Removed: the old `/stream/{camera_id}` endpoint,** unused since 1.6.0. It started one ffmpeg for each request.
+- **Removed: the manual quality endpoints** (`/snap/focus/tier`, `/snap/focus/profiles`). The page has had no control for them since 2.6.5.
+
+### Bugs fixed
+
+- **A password that contains "@" was only partly removed** from stored and logged stream addresses.
 
 ### Known issues
 
+- **HTTP identity check not working since 2.4.0-rc1.0.** The function `probe_http_identity` lost its first line, so the scan's brand detection from a camera's web page fails. Found by the new undefined-name check. Not changed in this build.
 - The tests do not cover the network scan, the password entry path or most of the snapshot loop.
 - Skip Non-Reference Frames breaks H.264 cameras.
 

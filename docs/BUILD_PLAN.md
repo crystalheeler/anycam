@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.8, published 2026-10-02. Next: 3.0.0-rc1.0 (section E).
+**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.8, published 2026-10-02. Built, not pushed: 3.0.0-rc1.0 (tests in the repository, module split stage 1, E4, E6, E8).
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -26,12 +26,12 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 ## Recommended order
 
-1. **Field-test 2.6.7** (A13): night boost, the Home Assistant permission, the sunset check, insects, infrared switches, file names.
+1. **Field-test 3.0.0-rc1.0** (A14), and finish the 2.6.7 field test (A13).
 2. **Missing cameras** (B2). Logs first.
 3. **The Microseven lockout** (B6): power-cycle it, then logs if it locks up again.
 4. **The small correctness bugs**: B3, B12, and C10's plain message for Firefox, which matters more now that live view cannot be switched off.
 5. **The automatic-behaviour discussion** (C11, C3).
-6. **3.0.0-rc1.0** (CrystalHeeler, 2026-10-02): E7, then E6, E8 and E4, then the module split (E1) in three stages.
+6. **Decide B19** (the HTTP identity check), then **module split stages 2 and 3** (E1).
 
 Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
@@ -41,6 +41,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
+| A14 | You | **Field-test 3.0.0-rc1.0** | Built 2026-10-02. Same behaviour expected; the code moved | Install on one system. Check: the add-on starts and the page loads; a scan finds the same cameras; live view, cards, recording and night boost work as in 2.6.8; the classic view still steps its quality on its own; the log shows no password |
 | A13 | You | **Field-test 2.6.7 night boost** | Built 2026-10-01 for C15, then insects and infrared switches after CrystalHeeler's overnight test | Overnight: count insect recordings (11 of 22 on ch4 with 2.6.6) and look for "changed in one picture only" lines; dawn and dusk: no recording from the switch; names start LorexCH4_. Accept the Home Assistant API permission when updating. After dark: the log line "night (IR, black-and-white)" per camera, the cog's "Night mode (IR): sensitivity +15", and the colour value in the tuning line (thresholds 2.5 and 5.0 are untested on real cameras). One hour after sunset: a notification only for a camera that did not switch |
 | A12 | You | Finish the 2.6.6 field test | CrystalHeeler, 2026-10-01: everything fixed and working — live detection, 3 s pre-roll, file naming, card layout and behaviour. Sensitivity 90 on two Lorex channels gave better results with the pre-roll, "still not ideal" | CrystalHeeler testing 95 and 98, then report. Carried: the classic view hiding the card thumbnail; "Stream unavailable" after 90 s; 2.6.5 or later on the Hikvision (172) system |
 
@@ -51,6 +52,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | B2 | Logs | **One or two cameras are not discovered** | CrystalHeeler, 2026-09-28 | Logs first: the scan log, plus the IP and brand of each missing camera |
 | B3 | Ready | Skip Non-Reference Frames breaks every camera it touches | ffmpeg rejects `nonref`; its valid value is `noref`. Confirmed in Log1: every launch of the H.264 camera at 192.168.50.73:8765 fails. The "~40% less CPU" in its description never happened, because the setting never applied | Fix the value and field-test, or remove the option (see C11). Until then, turning it off restores that camera |
 | B12 | Ready | VAAPI reported as available on a Pi 4 | Log1 startup. The Pi has no VAAPI device; the check only confirms ffmpeg was built with VAAPI | Check for a real device before reporting it available |
+| B19 | You | **HTTP identity check has not worked since 2.4.0-rc1.0** | Found 2026-10-02 by the new undefined-name check. The line `def probe_http_identity(ip, port, timeout)` was lost when `_rtsp_options_fingerprint` was added above it; its body sits unreachable inside that function. Both callers fail with a name error: the scan's HTTP identity step (the error is caught and logged at DEBUG) and step 8 of the camera check, the web-page content scan. May be part of the missing cameras (B2) | CrystalHeeler decides: restore the line (the scan then again reads each device's web page for its brand, which changes scan results), or delete the dead body and both calls |
 | B6 | You | **The Microseven is stuck in its rate-limit lockout** | CrystalHeeler, 2026-09-29: the Microseven at 10.0.0.22 is recognized and authenticates, but serves MJPEG only, with no RTSP stream. That matches the lockout CLAUDE.md describes, which only a power cycle reliably clears. It may be the same fault as the "Invalid data found" regression open since 2.4.0-rc3.3. It also blocks the last Tier 1 check: that the 2.6.1 ONVIF fix stops AnyCam opening connections inside the Microseven's 5 s cooldown | Power-cycle the camera. If RTSP comes back and stays, check the log for connection resets while re-entering its credentials. If it locks up again, something is still hitting it too often: send the log from the test system A (rule 2) |
 | B15 | Discuss | Opening the classic view stops the card's working stream | test system B log, 12:19:35 on 2026-09-29: entering the classic view cancelled a card stream at frame 38,450 and opened a new full-resolution connection, which timed out after 30 s with no frames. Proposed for 2.6.5 as fix 1c and held back: keeping the old stream until the new one delivers needs two connections to one camera at once, through per-camera state that assumes one. Rate-limited cameras (Microseven) cannot take two connections | Discuss. Live view now covers this camera in Chrome, so the classic view is the fallback path only |
 | B8 | Ready | Scan progress bar jumps and is inaccurate | `MoreToDo.txt`; changelog 2.2.9 and 2.3.0 | Base progress on work completed, not time elapsed |
@@ -83,11 +85,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| E7 | Ready | **Automated tests in the repo** | 265 server checks and 110 page checks exist only in a session scratch folder (2,293 lines), which CrystalHeeler ordered deleted after calibration | 3.0.0-rc1.0, first. Move them into `tests/`, remove the paths that point to the build PC, and run them from the release gate |
-| E1 | Ready | Split the 18,162-line file into modules | The 2.0.7 review called this the single change with the largest positive impact. Evaluated 2026-10-02: 208 top-level definitions, 66 module-level state objects, 15 names replaced with `global`; no effect on speed. The tests do not cover the scan, the password path or most of the snapshot loop | 3.0.0-rc1.0, after E7, E6, E8 and E4. Three stages: (1) the camera database tables and the page, about 5,800 lines; (2) motion and night boost, go2rtc, storage; (3) scan, password entry, snapshot loop, after new tests. One shared state module (this replaces E2). Finish the last 27 type hints on the way (this replaces E5) |
-| E4 | Ready | Strip credentials from every log line | 2.0.7 list. Evaluated 2026-10-02: 21 log calls carry a URL; 30 places already strip credentials | 3.0.0-rc1.0. Check each of the 21 |
-| E6 | Ready | Remove the old `/stream/{camera_id}` endpoint | Unused since 1.6.0. Evaluated 2026-10-02: the route and a 117-line handler exist; nothing in the page calls it; it starts one ffmpeg per request | 3.0.0-rc1.0. Delete the route and its handler |
-| E8 | Ready | Remove the manual-tier server endpoints | 2.6.5 removed the page controls. `/snap/focus/tier` and `/snap/focus/profiles` have no caller, and the snap loop still carries `tier_change_kill` handling | 3.0.0-rc1.0. Remove the routes, the handlers and the flag together; the classic view's automatic ladder must keep working |
+| E1 | You | Split the main file into modules: stages 2 and 3 | Stage 1 is built in 3.0.0-rc1.0: the camera tables and the page script moved, 18,198 lines down to 13,125, moved data identical | Waits for CrystalHeeler's field test of 3.0.0-rc1.0 (A14). Stage 2: motion and night boost, go2rtc, storage (the tests cover these); needs one shared state module, because 15 names are replaced with `global`. Stage 3: scan, password entry, snapshot loop, after new tests for them. Finish the last 27 type hints on the way |
 
 ## F. Release engineering
 
@@ -106,6 +104,11 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | Classic view ignored a camera's escalated cooldown | CrystalHeeler's test system A log, 2026-10-01 23:22: 6 ffmpeg starts 5 s apart at the Microseven during a 30 s cooldown | 2.6.7: every ffmpeg start waits out the cooldown; a camera in cooldown goes to HTTP snapshots after one failed start. Not changed, CrystalHeeler's decision: the scan's fingerprint and path walk within 1 s |
 | Recording names start with the camera | CrystalHeeler, 2026-10-01 | 2.6.7: LorexCH4_20261001_053358.mp4 (choice A) |
 | Live video in the camera cards works in Chrome | This plan, B17 | CrystalHeeler, 2026-10-01: noticed working, on 2.6.6 |
+| Automated tests in the repository (E7) | This plan | 3.0.0-rc1.0: `tests/` with 289 server checks, 110 page checks and an undefined-name check; gate 8 runs them (21 s); confirmed by breaking a value on purpose |
+| Module split, stage 1 (E1) | This plan | 3.0.0-rc1.0: `camera_db.py` (1,939 lines) and `page_script.py` (2,782 lines); the gate, tests, Dockerfile and packager handle several files; `package_release.py` is in the repository |
+| Credentials stripped from every log line (E4) | This plan | 3.0.0-rc1.0: one filter on the log handlers; `_strip_creds` bounded to the host part |
+| Old `/stream/{camera_id}` endpoint removed (E6) | This plan | 3.0.0-rc1.0: 137 lines |
+| Manual-tier endpoints removed (E8) | This plan | 3.0.0-rc1.0: two handlers, their routes, `tier_change_kill` and `manual_override` |
 | Sunrise check: a wrong home location is detected | This plan, C16; CrystalHeeler, 2026-10-02 | 2.6.8: a location more than 52.5 degrees of longitude from its time zone turns the check off, with one log warning and a cog note; the location is re-read every 6 hours |
 | 2.6.7 pushed and published | CrystalHeeler, 2026-10-02 | Night boost, insects, infrared switches, file names, classic-view cooldown |
 | Reduce shared global state (E2) | This plan | Dropped 2026-10-02 (CrystalHeeler agreed): rewriting 66 state objects is the riskiest change in section E and gives no user benefit. The split (E1) adds one shared state module |
