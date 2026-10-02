@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.6, published 2026-10-01. Built, not pushed: 2.6.7 (night boost).
+**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.7, published 2026-10-02. Next: 2.6.8 (C16 only), then 3.0.0-rc1.0 (section E).
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -31,7 +31,7 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 3. **The Microseven lockout** (B6): power-cycle it, then logs if it locks up again.
 4. **The small correctness bugs**: B3, B12, and C10's plain message for Firefox, which matters more now that live view cannot be switched off.
 5. **The automatic-behaviour discussion** (C11, C3).
-6. **Tests into the repo** (E7), then **the module split** (E1). The tests are the safety net the split needs.
+6. **3.0.0-rc1.0** (CrystalHeeler, 2026-10-02): E7, then E6, E8 and E4, then the module split (E1) in three stages.
 
 Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
@@ -61,7 +61,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
 | C11 | Discuss | **Replace most or all of the option toggles with automatic behaviour** | CrystalHeeler, 2026-09-28. Eight toggles since 2.6.4 removed Live View, several broken or no longer relevant: Skip Non-Reference Frames never worked (B3), Fast Stream Start does nothing at 4K, and Live View makes several decode options irrelevant for the camera being watched. Low Latency Probe is the counter-example: it measurably helps the slow-starting H.264 camera (B13), so CrystalHeeler is keeping it for now. It is a candidate to switch on automatically for streams that start slowly | Separate discussion. For each toggle: remove it, make it automatic, or keep it. Pairs with C3 |
-| C14 | Ready | **Upload recordings to SFTP or FTP** | CrystalHeeler, 2026-09-30: per-camera recording destination, including SCP, SFTP, FTP or another remote share. Samba and NFS already work in 2.6.6 through Home Assistant's network storage under /media. SCP is SFTP in current OpenSSH | 2.6.8 (CrystalHeeler, 2026-10-01; was 2.6.7). Upload each finished file, then delete the local copy; keep it and retry until the upload succeeds. SFTP needs asyncssh; FTP and FTPS are in Python's standard library. Passwords stored encrypted, like camera passwords |
+| C14 | Ready | **Upload recordings to SFTP or FTP** | CrystalHeeler, 2026-09-30: per-camera recording destination, including SCP, SFTP, FTP or another remote share. Samba and NFS already work in 2.6.6 through Home Assistant's network storage under /media. SCP is SFTP in current OpenSSH | Version to confirm (CrystalHeeler, 2026-10-02: 2.6.8 is C16 only; was 2.6.8). Upload each finished file, then delete the local copy; keep it and retry until the upload succeeds. SFTP needs asyncssh; FTP and FTPS are in Python's standard library. Passwords stored encrypted, like camera passwords |
 | C16 | Ready | **Sunrise check: catch a wrong home location** | CrystalHeeler, 2026-10-02: Home Assistant's location was the Amsterdam default with a time zone 7 hours away, so AnyCam reported "still in night mode an hour after sunrise (00:42)". The time zone alone cannot give sunrise: across the Central zone it differs by 1 h 42 min in December | 2.6.8 (CrystalHeeler, 2026-10-02). When the location's longitude is more than 52.5 degrees (3.5 h) from the time zone's expected longitude (15 degrees per hour from UTC): no sunrise or sunset check, one log warning, and a cog note to set the home location. Re-read the location every 6 hours (now 12) |
 | C3 | Discuss | Automatic quality in live view | CLAUDE.md: the Enhanced View step-down redesign "requires full discussion before any coding." 2.6.5 removed the Resolution, Frame Rate and Auto controls at CrystalHeeler's request. Correction to the 2026-09-26 research: WebRTC congestion control cannot adjust a stream that go2rtc passes through unchanged | In live view, automatic quality means switching between the camera's own streams (main to sub) when playback stalls. Discuss before coding |
 | C10 | Ready | H.265 live view depends on the browser | Confirmed 2026-09-28: Chrome plays H.265 live; Firefox 156 and LibreWolf do not. go2rtc's own compatibility table lists Desktop Firefox as H.264-only for every live method, so this is not a security setting | Three changes. (1) Check what the browser can play before trying live view, and go straight to classic with a plain message instead of a red error. (2) Replace go2rtc's raw error text with something readable. (3) Optionally offer an H.264 sub-stream in live view, which trades resolution, so CrystalHeeler's decision |
@@ -84,14 +84,11 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| E7 | Ready | **Automated tests in the repo** | CLAUDE.md calls them "aspirational". 2.6.3 produced 79 Python and 46 JavaScript tests, which live only in a session scratchpad | Move them into `tests/` and run them from the release gate |
-| E1 | Blocked | Split the 16,000-line file into modules | The 2.0.7 review called this the single change with the largest positive impact; confirmed feasible under HAOS then. The file has more than doubled since | Blocked on E7. Suggested modules: scan, stream, onvif, go2rtc, storage, web handlers, config |
-| E2 | Blocked | Reduce shared global state | CLAUDE.md queued (SigRev-3 Issue 2). 2.6.3 added 7 more, following the existing pattern | Blocked on E1: do it during the split |
-| E3 | Ready | One shared HTTP client session | aiohttp's own guidance; on the 2.0.7 list. 2.6.3 added three more short-lived sessions | Create one at startup and close it at shutdown |
-| E4 | Ready | Strip credentials from every log line | 2.0.7 list: applied in some places, not all | Check every log call that can carry a URL |
-| E6 | Ready | Remove the old `/stream/{camera_id}` endpoint | Unused since 1.6.0 | Delete the route and its handler |
-| E8 | Ready | Remove the manual-tier server endpoints | 2.6.5 removed the page controls. `/snap/focus/tier` and `/snap/focus/profiles` have no caller now, and the snap loop still carries `tier_change_kill` handling for them | Remove the routes, the handlers and the flag together; the classic view's automatic ladder must keep working. Do it with C3 or C11 |
-| E5 | Later | Complete type hints | 2.0.7 list | Do it alongside E1 |
+| E7 | Ready | **Automated tests in the repo** | 265 server checks and 110 page checks exist only in a session scratch folder (2,293 lines), which CrystalHeeler ordered deleted after calibration | 3.0.0-rc1.0, first. Move them into `tests/`, remove the paths that point to the build PC, and run them from the release gate |
+| E1 | Ready | Split the 18,162-line file into modules | The 2.0.7 review called this the single change with the largest positive impact. Evaluated 2026-10-02: 208 top-level definitions, 66 module-level state objects, 15 names replaced with `global`; no effect on speed. The tests do not cover the scan, the password path or most of the snapshot loop | 3.0.0-rc1.0, after E7, E6, E8 and E4. Three stages: (1) the camera database tables and the page, about 5,800 lines; (2) motion and night boost, go2rtc, storage; (3) scan, password entry, snapshot loop, after new tests. One shared state module (this replaces E2). Finish the last 27 type hints on the way (this replaces E5) |
+| E4 | Ready | Strip credentials from every log line | 2.0.7 list. Evaluated 2026-10-02: 21 log calls carry a URL; 30 places already strip credentials | 3.0.0-rc1.0. Check each of the 21 |
+| E6 | Ready | Remove the old `/stream/{camera_id}` endpoint | Unused since 1.6.0. Evaluated 2026-10-02: the route and a 117-line handler exist; nothing in the page calls it; it starts one ffmpeg per request | 3.0.0-rc1.0. Delete the route and its handler |
+| E8 | Ready | Remove the manual-tier server endpoints | 2.6.5 removed the page controls. `/snap/focus/tier` and `/snap/focus/profiles` have no caller, and the snap loop still carries `tier_change_kill` handling | 3.0.0-rc1.0. Remove the routes, the handlers and the flag together; the classic view's automatic ladder must keep working |
 
 ## F. Release engineering
 
@@ -110,6 +107,10 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | Classic view ignored a camera's escalated cooldown | CrystalHeeler's test system A log, 2026-10-01 23:22: 6 ffmpeg starts 5 s apart at the Microseven during a 30 s cooldown | 2.6.7: every ffmpeg start waits out the cooldown; a camera in cooldown goes to HTTP snapshots after one failed start. Not changed, CrystalHeeler's decision: the scan's fingerprint and path walk within 1 s |
 | Recording names start with the camera | CrystalHeeler, 2026-10-01 | 2.6.7: LorexCH4_20261001_053358.mp4 (choice A) |
 | Live video in the camera cards works in Chrome | This plan, B17 | CrystalHeeler, 2026-10-01: noticed working, on 2.6.6 |
+| 2.6.7 pushed and published | CrystalHeeler, 2026-10-02 | Night boost, insects, infrared switches, file names, classic-view cooldown |
+| Reduce shared global state (E2) | This plan | Dropped 2026-10-02 (CrystalHeeler agreed): rewriting 66 state objects is the riskiest change in section E and gives no user benefit. The split (E1) adds one shared state module |
+| One shared HTTP client session (E3) | This plan | Dropped 2026-10-02 (CrystalHeeler agreed): 5 sessions, one per snapshot loop with its own connection settings and four rare calls; no measurable gain |
+| Complete type hints (E5) | This plan | Dropped as a task 2026-10-02: 241 of 242 functions have a return type, 215 are fully typed; the last 27 are done in E1 |
 | Night boost: +15 sensitivity under infrared, with a sunrise and sunset check | This plan, C15; CrystalHeeler, 2026-10-01 | 2.6.7: night read from the picture's colour (30 s hold); home location from Home Assistant; missed switches reported in the log, the cog panel and a Home Assistant notification. 40 new server tests, 4 new page tests. Field check in A13 |
 | 2.6.6 field test: live detection, pre-roll, file names, cards | This plan, A12 | CrystalHeeler, 2026-10-01: "Everything is fixed and working very well." Pushed and published the same day |
 | Motion from the live stream, with a 3-second pre-roll | CrystalHeeler, 2026-10-01 | 2.6.6: detection decodes the smallest stream at 4 frames a second; recordings start from an in-memory copy of the main stream, at a keyframe at least 3 s before the motion. Tested end to end with stand-in ffmpeg processes; field check in A12 |
