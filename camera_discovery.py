@@ -670,6 +670,11 @@ def _record_rst_observation(ip: str) -> None:
                 f"{ACD_ESCALATION_TTL_S:.0f}s")
 
 
+def _acd_active(ip: str) -> bool:
+    """True while the escalated cooldown is in force for this address."""
+    return bool(ip) and _ACD_ESCALATED.get(ip, 0.0) > time.monotonic()
+
+
 # ── 2.5.0-rc1.0: streaming_recipe consumer infrastructure ────────────
 # Two helpers used by find_rtsp_path's path-list builder and by the
 # single-socket walker's SDP-parsing branch when a brand entry's
@@ -7083,6 +7088,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     # up once here, then floor backoff at this value below so ffmpeg
     # restart cycles never violate the firmware's per-IP TCP rate-limit.
     _snap_throttle_s = _brand_throttle_seconds(camera)
+    _snap_ip = camera.get("ip", "")
     if _snap_throttle_s > 0:
         log.info(f"SNAP [{camera_id}]: rate_limit_per_ip_tcp brand — "
                  f"flooring ffmpeg backoff at {_snap_throttle_s:.0f}s")
@@ -7268,6 +7274,16 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             if native_res and _FOCUSED_CAMERA != camera_id:
                 log.info(f"SNAP [{camera_id}]: focus cleared — exiting native-res task")
                 return
+
+            # 2.6.7: every ffmpeg start waits out the camera's cooldown,
+            # as every other connection to it does. On 2026-10-01 the first
+            # start came 1 s after go2rtc's attempt, and five more 5 s apart,
+            # while a 30 s cooldown was in force for the Microseven.
+            if _snap_throttle_s > 0 or _acd_active(_snap_ip):
+                await _throttle_wait_if_needed(_snap_ip, _snap_throttle_s,
+                                               f"ffmpeg {camera_id}")
+                if native_res and _FOCUSED_CAMERA != camera_id:
+                    return
 
             # Idle check — stop if nobody has polled recently
             last   = _snap_last_access.get(camera_id, 0)
@@ -7785,6 +7801,11 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                     backoff = max(_snap_throttle_s, _raw_backoff)
                 else:
                     backoff = _raw_backoff
+                # 2.6.7: a camera that is resetting connections gets the
+                # escalated cooldown between restarts, not the 5 s floor.
+                _resetting = _acd_active(_snap_ip)
+                if _resetting:
+                    backoff = max(backoff, ACD_ESCALATED_COOLDOWN)
 
                 # After 3 consecutive 0-frame failures, try flipping the
                 # RTSP transport.  Many cheap/generic ONVIF cameras (Sricam,
@@ -7867,15 +7888,18 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 # fallback only fires AFTER UDP has also failed. This is
                 # the second half of the Microseven fix — we want to
                 # exhaust both transports before giving up on RTSP.
-                if (streak >= 3 and native_res
-                        and state.get("transport_flip_fired")
-                        and not state.get("http_snap_fired")):
+                # 2.6.7: at once, without more RTSP attempts, when the
+                # camera is resetting connections (escalated cooldown).
+                if (native_res and not state.get("http_snap_fired")
+                        and (_resetting or (streak >= 3
+                                            and state.get("transport_flip_fired")))):
                     cam_now = CAMERAS.get(camera_id, camera)
                     if cam_now.get("http_snap_url"):
+                        why = ("the camera is resetting RTSP connections" if _resetting
+                               else "3 consecutive 0-frame failures in enhanced view")
                         log.warning(
-                            f"SNAP [{camera_id}]: 3 consecutive 0-frame failures in "
-                            f"enhanced view — RTSP non-functional, falling back to "
-                            f"HTTP snap loop for this focus session"
+                            f"SNAP [{camera_id}]: {why} — RTSP non-functional, "
+                            f"falling back to HTTP snap loop for this focus session"
                         )
                         # Mark state so JS can disable resolution/fps controls
                         _snap_state(camera_id)["http_snap_active"] = True
