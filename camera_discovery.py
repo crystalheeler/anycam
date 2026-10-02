@@ -1764,7 +1764,7 @@ CAMERA_RELEVANT_PORTS: list[int] = [
     # NAS with only a web admin page falls through as a "camera
     # candidate" and gets RTSP-probed unnecessarily. rc1.0's top-1000
     # scan caught these incidentally; rc2.1's narrow port list lost
-    # them, surfacing a regression where the an HP printer (gSOAP
+    # them, surfacing a regression where an HP printer (gSOAP
     # 2.7 web admin) re-appeared as a camera. Cost: 3 extra ports per
     # host = ~50ms total in our SYN-only scan.
     22,     # SSH — IoT device, NAS, embedded Linux non-cameras
