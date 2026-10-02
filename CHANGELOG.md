@@ -1,3 +1,16 @@
+## 3.0.0-rc1.0
+
+Code structure release. No change to what AnyCam does.
+
+### Changes & improvements
+
+- **The tests are in the repository** (`tests/`), and the release check runs them: 278 server checks and 110 page checks.
+
+### Known issues
+
+- The tests do not cover the network scan, the password entry path or most of the snapshot loop.
+- Skip Non-Reference Frames breaks H.264 cameras.
+
 ## 2.6.8
 
 The sunrise and sunset check now detects a wrong home location in Home Assistant.
