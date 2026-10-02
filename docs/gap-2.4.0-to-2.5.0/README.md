@@ -22,3 +22,6 @@ enumeration.
 
 If the missing zips ever surface, they can be grafted in as commits dated
 between the surrounding builds.
+
+**2026-10-02:** the audit reports that were in this folder were removed. They
+held names and addresses that must not be in the repository (CLAUDE.md, rule 9).

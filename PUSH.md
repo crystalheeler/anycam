@@ -1,3 +1,6 @@
+> **2026-10-02:** this page records how the repository was first created. The
+> `archive/` zips it names were removed from the repository on this date.
+
 # Pushing to GitHub
 
 Run from inside `anycam-repo` after `build_repo.ps1` has completed.
