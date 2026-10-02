@@ -3,7 +3,7 @@
     python tests/run_tests.py
 
 The page checks need Node.js. The page's script is taken from the real
-page, as camera_discovery.build_html() builds it. Exit code 0 = all passed.
+page, as build_html() in anycam_page.py builds it. Exit code 0 = all passed.
 The release gate (verify_release.py, gate 8) runs this file.
 """
 import importlib.util
@@ -39,7 +39,7 @@ def build_page_js(out: Path) -> None:
     spec = importlib.util.spec_from_file_location("cd", REPO / "camera_discovery.py")
     cd = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cd)
-    html = cd.build_html()
+    html = sys.modules["anycam_page"].build_html()     # 3.0.0-rc1.5: the page builder's file
     out.write_text(re.search(r"<script>\n(.*?)\n</script>", html, re.S).group(1),
                    encoding="utf-8")
 
