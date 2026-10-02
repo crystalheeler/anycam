@@ -59,14 +59,19 @@ def story():
                   "above probe_http_identity and lost the line 'def "
                   "probe_http_identity(ip, port, timeout)'. The body remains, after a "
                   "return statement, unreachable. Present in every release since."],
-                 ["Effect 1", "run_scan's HTTP identity step raises a name error on "
-                  "every device. A broad except catches it and logs at DEBUG. The brand "
-                  "is then not read from the device's web page title or Server header."],
-                 ["Effect 2", "probe_http_for_camera, step 8 of the camera check (the "
-                  "web-page content scan), raises a name error when a device reaches "
-                  "that step."],
-                 ["Possible link", "Build plan B2, one or two cameras not discovered. "
-                  "Not shown; no log examined for it."],
+                 ["Effect 1", "run_scan's HTTP identity step raises a name error. A "
+                  "broad except catches it and logs at DEBUG. The step runs only for a "
+                  "device that answers ONVIF discovery and has no card from the port "
+                  "scan. CORRECTED 2026-10-02: this report first said 'on every "
+                  "device'. CrystalHeeler's logs from both systems hold 8 scans and 2,849 DEBUG "
+                  "lines; the step ran 0 times."],
+                 ["Effect 2", "None. probe_http_for_camera calls the missing function, "
+                  "but its only caller, is_camera_positive, has no caller. CORRECTED "
+                  "2026-10-02: this report first said step 8 of the camera check "
+                  "fails."],
+                 ["Possible link", "Build plan B2, one or two cameras not discovered: "
+                  "only if such a camera answers ONVIF discovery with no open scanned "
+                  "port. Not shown."],
                  ["This build", "Not fixed. Restoring the line changes scan results, and "
                   "this release is meant to change no behaviour. The four names are "
                   "listed as known in tests/check_names.py; any new one fails the "
@@ -114,9 +119,9 @@ def story():
                   "Unchanged: 66 module-level state objects. Stage 2 needs one shared "
                   "state module."],
                  ["1.10 Exceptions", "Catches", verdict("NOTED"),
-                  "The broad except around the HTTP identity step hid B19 for seven "
-                  "months of releases. The log filter catches only TypeError and "
-                  "ValueError."],
+                  "The broad except around the HTTP identity step would hide B19's "
+                  "name error at DEBUG level. The log filter catches only TypeError "
+                  "and ValueError."],
                  ["1.12 Logging", "Credentials", verdict("PASS"),
                   "E4: every handler filtered; tested."],
                  ["1.16 Refactoring", "Dead code", verdict("PASS"),
