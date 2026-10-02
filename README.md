@@ -12,7 +12,8 @@ config.yaml             Addon manifest and options schema
 run.sh                  Addon entrypoint; exports config as env vars
 Dockerfile              Addon image (base image set here since 2.6.6)
 translations/en.yaml    Option help text
-verify_release.py       Seven-gate pre-packaging check
+verify_release.py       Eight-gate pre-packaging check
+tests/                  Behaviour tests; `python tests/run_tests.py`
 CHANGELOG.md            Full release history
 
 docs/                   Plan documents, RTSP database, research
@@ -25,7 +26,7 @@ archive/                Release zips for milestone versions
 
 1. Confirm version number and scope before starting (see `CLAUDE.md`)
 2. Make changes
-3. `python verify_release.py` — all five gates must pass
+3. `python verify_release.py` — all eight gates must pass
 4. Stage under `camera_discovery-<version>/`, zip from the staging parent
 5. Produce an audit report PDF including a best-practices compliance section
 6. Tag, and create a Release if the version is a milestone

@@ -115,7 +115,7 @@ Structure:
 
 ## Release gate
 
-`verify_release.py` is a seven-gate check that must pass before packaging:
+`verify_release.py` is an eight-gate check that must pass before packaging:
 
 1. AST/compile clean, no duplicate top-level definitions
 2. Semantic function contracts satisfied
@@ -128,6 +128,8 @@ Structure:
 7. Every Dockerfile input exists where the build fetches it: apt pins,
    pip wheels, go2rtc digests, base image platforms (2.6.6; needs internet
    access, and fails without it)
+8. The behaviour tests in `tests/` all pass (3.0.0-rc1.0; `python
+   tests/run_tests.py`; needs Node.js for the page checks)
 
 ---
 
@@ -180,8 +182,9 @@ of whose items have shipped (see its Done section). Standing reminders:
   before any coding** (build plan C3).
 - `STREAM_DB` → `CAMERA_DB` consolidation and runtime use of
   `default_ports` need a plan document first (build plan D2).
-- Splitting the single file into modules waits on tests in the repo
-  (build plan E7, then E1 and E2).
+- The tests are in `tests/` since 3.0.0-rc1.0 (build plan E7). They do not
+  cover the scan, the password entry path or most of the snapshot loop;
+  add tests before changing those (build plan E1, stage 3).
 
 ## Repository notes
 

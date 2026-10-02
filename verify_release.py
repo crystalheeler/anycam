@@ -48,7 +48,7 @@ src   = src_path.read_text(encoding="utf-8")
 lines = src.splitlines()
 
 # ── 1. Syntax ─────────────────────────────────────────────────────────────────
-print("\n[1/7] Syntax check")
+print("\n[1/8] Syntax check")
 try:
     tree = ast.parse(src)
     ok("ast.parse() passed")
@@ -84,7 +84,7 @@ else:
     ok(f"{len(top_names)} top-level definitions, no duplicates")
 
 # ── 2. Semantic contracts ─────────────────────────────────────────────────────
-print("\n[2/7] Semantic contract checks")
+print("\n[2/8] Semantic contract checks")
 CONTRACTS = {
     "run_verification_scan": ["save_cameras", "SCAN_STATE", "run_scan"],
     "http_snap_loop":        ["asyncio.sleep", "_snap_state", "TCPConnector"],
@@ -248,7 +248,7 @@ else:
 # ── 2b. rc2 CAMERA_DB structure contracts ─────────────────────────────────────
 # These checks pull CAMERA_DB out of the AST (not by importing) so they don't
 # need any runtime deps installed.
-print("\n[2b/7] rc2 CAMERA_DB throttle field validation")
+print("\n[2b/8] rc2 CAMERA_DB throttle field validation")
 
 VALID_THROTTLE_TYPES = {
     "rate_limit_per_ip_tcp",
@@ -389,7 +389,7 @@ else:
            f"in {{HIGH,MED,LOW}}")
 
 # ── 3. Best-practice audit ────────────────────────────────────────────────────
-print("\n[3/7] Best-practice audit")
+print("\n[3/8] Best-practice audit")
 audit_ok = True
 
 # P6: mutable default arguments (skip inner closures — they're intentional)
@@ -448,7 +448,7 @@ if audit_ok:
     ok("No best-practice violations found")
 
 # ── 4. Version consistency ────────────────────────────────────────────────────
-print("\n[4/7] Version consistency")
+print("\n[4/8] Version consistency")
 cv_match = re.search(r'CURRENT_VERSION\s*=\s*"(.+?)"', src)
 _cfg_text = cfg_path.read_text(encoding="utf-8")
 cfg_match = re.search(r'^version:\s*"(.+?)"', _cfg_text, re.MULTILINE)
@@ -465,7 +465,7 @@ else:
         fail(f"Version mismatch: CURRENT_VERSION={cv} vs config.yaml={cfg_v}")
 
 # ── 5. Changelog ─────────────────────────────────────────────────────────────
-print("\n[5/7] Changelog check")
+print("\n[5/8] Changelog check")
 if cv_match:
     version = cv_match.group(1)
     cl_text = cl_path.read_text(encoding="utf-8")
@@ -480,7 +480,7 @@ if cv_match:
 # config.yaml does not define, bashio returns the text "null", which the code
 # reads as off: removing the Live View option in 2.6.4 nearly shipped exactly
 # that. The four lists must name the same settings.
-print("\n[6/7] Settings consistency (run.sh, config.yaml, translations)")
+print("\n[6/8] Settings consistency (run.sh, config.yaml, translations)")
 
 
 def _yaml_block_keys(text: str, block: str) -> set:
@@ -531,7 +531,7 @@ if settings_ok:
 # rotated out of the archive. Every pinned input the Dockerfile fetches is
 # looked up where the build will fetch it. Needs internet access; with none,
 # this gate fails rather than pass unchecked.
-print("\n[7/7] Build inputs (network)")
+print("\n[7/8] Build inputs (network)")
 import json as _json
 import urllib.error
 import urllib.request
@@ -619,6 +619,31 @@ try:
     _check_build_inputs()
 except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError) as e:
     fail(f"F1 could not check the build inputs ({e}) — needs internet access")
+
+# ── 8. Tests ─────────────────────────────────────────────────────────────────
+# 3.0.0-rc1.0 (build plan E7): the behaviour tests live in tests/ and must
+# pass before a release. They need Node.js for the page checks; a missing
+# Node.js fails the gate (CLAUDE.md rule 4: a missing tool means stop).
+print("\n[8/8] Tests (tests/run_tests.py)")
+import subprocess as _subprocess
+_tests = pathlib.Path(__file__).parent / "tests" / "run_tests.py"
+if not _tests.exists():
+    fail("E7 tests/run_tests.py is missing")
+else:
+    try:
+        _run = _subprocess.run([sys.executable, str(_tests)], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=1500)
+        _lines = [l.strip() for l in (_run.stdout + _run.stderr).splitlines() if l.strip()]
+        for _l in _lines:
+            if _l.endswith("passed"):
+                ok(_l)
+        if _run.returncode != 0:
+            for _l in _lines:
+                if "FAIL" in _l or "Traceback" in _l or "Error" in _l:
+                    print(f"    {_l}")
+            fail("E7 the tests did not all pass")
+    except _subprocess.TimeoutExpired:
+        fail("E7 the tests did not finish in 25 minutes")
 
 # ── Result ────────────────────────────────────────────────────────────────────
 print()
