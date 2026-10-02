@@ -1,0 +1,6 @@
+"""The Python files that make up the AnyCam add-on, entry point first.
+
+The release gate, the tests and the packager read this list. The gate
+also checks it against the imports and against the Dockerfile.
+"""
+MODULES = ["camera_discovery.py", "camera_db.py", "page_script.py"]
