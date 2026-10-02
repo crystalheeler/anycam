@@ -2,7 +2,7 @@
 
 | File | What it checks |
 |---|---|
-| `test_server.py` | The real functions and handlers in `camera_discovery.py`, against stand-ins for go2rtc, ffmpeg and Home Assistant |
+| `test_server.py` | The real functions and handlers of every add-on file, against stand-ins for go2rtc, ffmpeg, cameras and Home Assistant (448 checks) |
 | `test_page.mjs` | The real page script, in Node.js, with a fake clock and a stub page |
 | `fake_go2rtc.py` | Stand-in for the go2rtc binary |
 | `check_names.py` | Every function's global names exist in its module (catches a moved or deleted function) |
@@ -21,5 +21,11 @@ In `test_server.py`, `cd` is every file of the add-on seen as one namespace:
 reading finds a name in the file that defines it, and writing replaces it in
 every file that holds it.
 
-Not covered yet: the password entry path, most of the snapshot loop, and the
-single probers themselves (the scan tests replace them with stand-ins).
+Since 3.0.0-rc1.5, sections V to Z cover the parts that left the main file
+in that build: the manufacturer database and brand identification (V), the
+page builder (W), the Enhanced View engine (X, with C, E and G), the snapshot
+loop (Y) and password entry (Z). They were written and passing before each
+move.
+
+Not covered yet: the single probers themselves (the scan and password tests
+replace them with stand-ins), and ffmpeg and ffprobe themselves.

@@ -8,7 +8,9 @@ separate cameras and state. Two mechanisms connect them the other way:
          those names on the module once, at start-up. Right for functions and
          for objects that are changed in place (CAMERAS, the logger).
   H      reads a camera_discovery.py value at the moment of use. Needed for
-         the few values that file replaces while it runs (the focused camera).
+         a value that file replaces while it runs. Since 3.0.0-rc1.5 no
+         module uses it: the focused camera moved to anycam_focus.py. Every
+         split file still imports H, for the next value that needs it.
 
 The release gate fails if a NEEDS name is one that is replaced at run time.
 """

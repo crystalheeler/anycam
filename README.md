@@ -7,9 +7,14 @@ for single-camera focus, hardware-accelerated decode, and PTZ control.
 ## Repository layout
 
 ```
-camera_discovery.py     Main application: entry point and logic
+camera_discovery.py     Entry point: settings, stores, REST API, routing, start-up
 camera_db.py            Camera tables (brands, stream paths, known behaviour)
 page_script.py          The page's JavaScript
+anycam_page.py          The page builder: HTML, CSS, the index handler
+anycam_brand.py         Manufacturer (OUI) database, keyword tables, brand identification
+anycam_credentials.py   Password entry, the DVR channel list, Deep Re-Probe, manual add
+anycam_snap.py          The snapshot loop and the snapshot endpoints
+anycam_focus.py         The Enhanced View engine and the focus state
 anycam_motion.py        Motion detection, motion recording, night boost
 anycam_go2rtc.py        go2rtc: supervisor, streams, live-view proxy
 anycam_probe.py         Stream probers, the RTSP fingerprint, ONVIF calls
