@@ -40,12 +40,29 @@ def fail(msg: str) -> None:
 def ok(msg: str) -> None:
     print(f"  ✓ {msg}")
 
-src_path = pathlib.Path(__file__).parent / "camera_discovery.py"
-cfg_path = pathlib.Path(__file__).parent / "config.yaml"
-cl_path  = pathlib.Path(__file__).parent / "CHANGELOG.md"
+ROOT     = pathlib.Path(__file__).parent
+src_path = ROOT / "camera_discovery.py"
+cfg_path = ROOT / "config.yaml"
+cl_path  = ROOT / "CHANGELOG.md"
 
-src   = src_path.read_text(encoding="utf-8")
+# 3.0.0-rc1.0 (build plan E1): the add-on is several files, listed in
+# anycam_modules.py. Each is compiled on its own; every other check reads
+# them joined together, so a function is found whichever file holds it.
+sys.path.insert(0, str(ROOT))
+from anycam_modules import MODULES
+_sources = {m: (ROOT / m).read_text(encoding="utf-8") for m in MODULES}
+src   = "\n".join(_sources[m] for m in MODULES)
 lines = src.splitlines()
+
+
+def where(lineno: int) -> str:
+    """file:line for a line number in the joined source."""
+    for m in MODULES:
+        n = _sources[m].count("\n") + 1
+        if lineno <= n:
+            return f"{m}:{lineno}"
+        lineno -= n
+    return f"line {lineno}"
 
 # ── 1. Syntax ─────────────────────────────────────────────────────────────────
 print("\n[1/8] Syntax check")
@@ -67,11 +84,32 @@ except SyntaxError as e:
 # compile() means any future repro of this class lands at gate-time
 # instead of HAOS-install-time.
 try:
-    compile(src, str(src_path), "exec")
-    ok("compile() passed")
+    for _m in MODULES:
+        compile(_sources[_m], str(ROOT / _m), "exec")
+    ok(f"compile() passed for {len(MODULES)} file(s): {', '.join(MODULES)}")
 except SyntaxError as e:
     fail(f"compile-time SyntaxError: {e}")
     sys.exit(1)
+
+# 3.0.0-rc1.0: the module list must match what the code imports and what the
+# image copies. A file missing from the Dockerfile fails only on the device.
+_local = {p.name for p in ROOT.glob("*.py")}
+_imported = {"camera_discovery.py"}
+for _m in MODULES:
+    for _n in ast.walk(ast.parse(_sources[_m])):
+        _names = ([a.name for a in _n.names] if isinstance(_n, ast.Import)
+                  else [_n.module] if isinstance(_n, ast.ImportFrom) and _n.module else [])
+        _imported |= {f"{x.split('.')[0]}.py" for x in _names} & _local
+if _imported == set(MODULES):
+    ok("anycam_modules.py matches the imports")
+else:
+    fail(f"anycam_modules.py lists {sorted(MODULES)} but the code imports {sorted(_imported)}")
+_docker = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+_uncopied = [m for m in MODULES if not re.search(rf"^COPY\s+.*\b{re.escape(m)}\b", _docker, re.M)]
+if _uncopied:
+    fail(f"Dockerfile does not COPY: {_uncopied}")
+else:
+    ok("Dockerfile copies every module")
 
 # Duplicate top-level definitions
 import collections
@@ -400,7 +438,7 @@ for node in ast.walk(tree):
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         for default in node.args.defaults + node.args.kw_defaults:
             if default and isinstance(default, (ast.List, ast.Dict, ast.Set)):
-                fail(f"P6 Mutable default arg in {node.name}() at line {default.lineno}")
+                fail(f"P6 Mutable default arg in {node.name}() at {where(default.lineno)}")
                 audit_ok = False
 
 # P4: blocking file I/O in async functions (top-level only, not closures).
@@ -422,7 +460,7 @@ for node in ast.walk(tree):
                     # Check it's not already wrapped in an executor on the same line
                     line_txt = lines[child.lineno - 1] if child.lineno <= len(lines) else ""
                     if not any(w in line_txt for w in ("run_in_executor", "to_thread", "lambda")):
-                        fail(f"P4 Blocking {what} in async def {node.name}() at line {child.lineno}")
+                        fail(f"P4 Blocking {what} in async def {node.name}() at {where(child.lineno)}")
                         audit_ok = False
 
 # P7: every ___NAME___ placeholder in the page script is filled by build_html.
@@ -439,7 +477,7 @@ css_start = next((i for i, l in enumerate(lines) if "css = f\"\"\"" in l or "<st
 if css_start:
     for i in range(css_start, min(css_start + 800, len(lines))):
         if lines[i].strip().startswith("//") and "http" not in lines[i]:
-            fail(f"J3 CSS '//' comment at line {i+1} — use /* */ instead")
+            fail(f"J3 CSS '//' comment at {where(i+1)} — use /* */ instead")
             audit_ok = False
 
 # C1: display: flexbox typo

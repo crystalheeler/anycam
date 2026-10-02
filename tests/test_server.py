@@ -26,6 +26,15 @@ REPO = Path(__file__).resolve().parent.parent
 SCRATCH = Path(tempfile.mkdtemp(prefix="anycam-tests-"))   # files the tests write
 os.environ["INGRESS_PATH"] = "/api/hassio_ingress/TESTTOKEN"
 
+sys.path.insert(0, str(REPO))            # camera_discovery imports its sibling files
+from anycam_modules import MODULES
+
+
+def repo_source() -> str:
+    """The add-on's Python source, every file joined."""
+    return "\n".join((REPO / m).read_text(encoding="utf-8") for m in MODULES)
+
+
 spec = importlib.util.spec_from_file_location("cd", REPO / "camera_discovery.py")
 cd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cd)
@@ -482,7 +491,7 @@ async def test_265():
         check("G1 entry keeps a learned adaptive lock and resets its restart count",
               ada["tier_idx"] == 3 and ada["locked"] is True
               and ada["restarts_since_lock"] == 0 and ada["run_start"] is None, str(ada))
-        _src = (REPO / "camera_discovery.py").read_text(encoding="utf-8")
+        _src = repo_source()
         check("G1 3.0.0-rc1.0: manual-tier endpoints, their flag and the old stream endpoint are gone",
               not any(x in _src for x in ("handle_focus_set_tier", "handle_focus_profiles",
                                           "/snap/focus/tier", "/snap/focus/profiles",
@@ -778,7 +787,7 @@ async def test_motion():
         cd.snap_loop = real_loop
         cd.MOTION_FILE = real[3]
 
-    src = (REPO / "camera_discovery.py").read_text(encoding="utf-8")
+    src = repo_source()
     check("H5 recording ffmpeg stderr is drained", 'asyncio.create_task(_drain_stderr(ms["proc"], f"REC:{camera_id}"))' in src)
     check("H5 all four idle stops keep the loop while it is the motion detector",
           src.count("and not _motion_uses_snapshots(camera_id)") == 4,
@@ -873,7 +882,7 @@ async def test_tuning_line():
         cd.log.debug, cd.log.info = real_debug, real_info
     check("K4 a still scene reports at DEBUG, not INFO", level and level[0][0] == "debug", str(level))
     check("K5 the keeper calls the report for armed cameras",
-          "_motion_report_peak(camera_id, ms, now_m)" in (REPO / "camera_discovery.py").read_text(encoding="utf-8"))
+          "_motion_report_peak(camera_id, ms, now_m)" in repo_source())
 
 
 # ── L. 2.6.6 per-camera recording settings ──────────────────────────────────
@@ -948,7 +957,7 @@ async def test_cam_settings():
     ms["last_motion"] = now - 26
     check("L9 ... quiet at 26 s", cd._motion_quiet("ch7", ms, now))
     cd._MOTION_CFG.clear()
-    src = (REPO / "camera_discovery.py").read_text(encoding="utf-8")
+    src = repo_source()
     check("L10 recording uses the camera's folder and file length",
           'cam_dir  = await _ensure_cam_dir(camera, Path(cfg["path"]))' in src
           and '"-segment_time", str(cfg["clip_s"]),' in src)
@@ -1423,7 +1432,7 @@ async def test_night():
     os.environ.pop("SUPERVISOR_TOKEN", None)
     check("N9 no Supervisor token: no call", await cd._ha_api("GET", "config") is None)
 
-    src = (REPO / "camera_discovery.py").read_text(encoding="utf-8")
+    src = repo_source()
     cfg = (REPO / "config.yaml").read_text(encoding="utf-8")
     check("N10 config: homeassistant_api true", "homeassistant_api: true" in cfg)
     check("N10 page: cog shows mode and note", 'id="cs-mode"' in src and 'id="cs-night-note"' in src)
@@ -1548,7 +1557,7 @@ async def test_confirm():
           cd._cam_file_tag({"name": "Generic IP Camera (192.168.50.73)", "ip": "192.168.50.73"}))
     check("O9 name tag: no name -> Camera",
           cd._cam_file_tag({}) == "Camera")
-    src = (REPO / "camera_discovery.py").read_text(encoding="utf-8")
+    src = repo_source()
     check("O10 recordings start with the tag", 'base     = f"{_cam_file_tag(camera)}_{ts}"' in src)
     check("O10 live detector passes the stream clock", "stream_t=frames / MOTION_DETECT_FPS" in src)
     cd._MOTION.clear(); cd._MOTION_CFG.clear(); cd.CAMERAS.clear()
@@ -1673,7 +1682,7 @@ async def test_location_check():
         cd._ha_api = real_api
         cd._HA_LOCATION.clear(); cd._HA_LOC_STATE.update(next=0.0, mismatch=False)
         cd._MOTION.clear()
-    src = (REPO / "camera_discovery.py").read_text(encoding="utf-8")
+    src = repo_source()
     check("Q4 cog help no longer promises SFTP for 2.6.8",
           "planned for a later version" in src and "planned for 2.6.8" not in src)
 

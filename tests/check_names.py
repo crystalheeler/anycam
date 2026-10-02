@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-# The modules that make up the add-on. camera_discovery.py is the entry point.
-MODULES = ["camera_discovery.py"]
+sys.path.insert(0, str(REPO))
+from anycam_modules import MODULES      # the files that make up the add-on
 # Known defects, reported and waiting for a decision (build plan B19). The
 # line `def probe_http_identity(ip, port, timeout)` was lost in 2.4.0-rc1.0;
 # its body sits, unreachable, at the end of _rtsp_options_fingerprint.

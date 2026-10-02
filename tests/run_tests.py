@@ -35,6 +35,7 @@ def run_server() -> bool:
 
 def build_page_js(out: Path) -> None:
     os.environ.setdefault("INGRESS_PATH", "/api/hassio_ingress/TOKEN")
+    sys.path.insert(0, str(REPO))
     spec = importlib.util.spec_from_file_location("cd", REPO / "camera_discovery.py")
     cd = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cd)

@@ -158,6 +158,9 @@ RUN case "${BUILD_ARCH}" in \
 
 COPY run.sh /
 COPY camera_discovery.py /
+# 3.0.0-rc1.0: the add-on is several files (anycam_modules.py lists them;
+# the release gate fails if one is missing here).
+COPY camera_db.py page_script.py /
 COPY www/video-rtc.js /www/video-rtc.js
 
 RUN chmod +x /run.sh
