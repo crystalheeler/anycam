@@ -1,3 +1,19 @@
+## 3.0.0-rc1.1
+
+Code structure release, second step. AnyCam does the same things.
+
+### Changes & improvements
+
+- **Motion detection, recording and night boost are in their own file** (`anycam_motion.py`, 1,354 lines), and the Storage tab's code is in `anycam_storage.py`. The main file went from 13,125 lines to 11,667.
+- **Every moved function is unchanged.** All 357 definitions were compared with 3.0.0-rc1.0: none is missing and none differs, apart from two values that are now read through a live link.
+- **Two new release checks** stop a moved function from losing a name it needs, and stop a file from keeping a stale copy of a value that changes while AnyCam runs.
+
+### Known issues
+
+- **HTTP identity check not working since 2.4.0-rc1.0** (`probe_http_identity` lost its first line). The fix is planned for the build right after 3.0.0.
+- The go2rtc code, the scan, the password entry path and the snapshot loop are still in the main file.
+- The tests do not cover the network scan, the password entry path or most of the snapshot loop.
+
 ## 3.0.0-rc1.0
 
 Code structure release. AnyCam does the same things; the code is split into files, tested from the repository, and three unused endpoints are gone.

@@ -6,10 +6,27 @@ Enhanced View for single-camera focus.
 
 Since 3.0.0-rc1.0 the add-on is several Python files, listed in
 `anycam_modules.py`: `camera_discovery.py` (entry point and logic),
-`camera_db.py` (camera tables), `page_script.py` (the page's JavaScript).
-A new file must be added to `anycam_modules.py` and to the Dockerfile's
-COPY lines; the release gate checks both. Package with
+`camera_db.py` (camera tables), `page_script.py` (the page's JavaScript),
+`anycam_motion.py` (motion detection, recording, night boost),
+`anycam_storage.py` (the Storage tab), `anycam_host.py` (the link between
+them). A new file must be added to `anycam_modules.py` and to the
+Dockerfile's COPY lines; the release gate checks both. Package with
 `python package_release.py`.
+
+**How the files connect (3.0.0-rc1.1).** `camera_discovery.py` is the entry
+point and imports the others, so they must never import it back: a second
+copy would load with its own cameras and state. A split file takes what it
+needs from `camera_discovery.py` in two ways, both in `anycam_host.py`:
+
+- `NEEDS`: a list of names at the top of the file, copied in once at
+  start-up. Right for functions and for objects changed in place.
+- `H.name`: read at the moment of use. Required for a value that
+  `camera_discovery.py` replaces while it runs (`_FOCUSED_CAMERA`,
+  `_FOCUS_ENGINE`, anything assigned under a `global` statement).
+
+The release gate fails on a NEEDS name that is replaced at run time, and
+`tests/check_names.py` fails on a name a function uses that is not there.
+In the tests, `cd` is all the files seen as one namespace.
 
 The rules below are **binding**. They were established over the life of the
 project and are not suggestions. Read this file before doing anything.

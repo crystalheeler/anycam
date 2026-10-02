@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.8, published 2026-10-02. Built, not pushed: 3.0.0-rc1.0 (tests in the repository, module split stage 1, E4, E6, E8).
+**Compiled:** 28 September 2026; updated 29 September 2026. Current release: 2.6.8, published 2026-10-02. Built, not pushed: 3.0.0-rc1.0 (field-tested stable) and 3.0.0-rc1.1 (module split stage 2).
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -26,7 +26,7 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 ## Recommended order
 
-1. **Field-test 3.0.0-rc1.0** (A14), and finish the 2.6.7 field test (A13).
+1. **Field-test 3.0.0-rc1.1** (A15), and finish the 2.6.7 field test (A13).
 2. **Missing cameras** (B2). Logs first.
 3. **The small correctness bugs**: B3, B12, and C10's plain message for Firefox, which matters more now that live view cannot be switched off.
 4. **The automatic-behaviour discussion** (C11, C3).
@@ -40,7 +40,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| A14 | You | **Field-test 3.0.0-rc1.0** | Built 2026-10-02. Same behaviour expected; the code moved | Install on one system. Check: the add-on starts and the page loads; a scan finds the same cameras; live view, cards, recording and night boost work as in 2.6.8; the classic view still steps its quality on its own; the log shows no password |
+| A15 | You | **Field-test 3.0.0-rc1.1** | Built 2026-10-02. Same behaviour expected; motion, recording, night boost and storage code moved to their own files | Install on the test system B (it has the armed cameras). Check: the add-on starts; arming, the cog settings, a motion recording with its 3 s pre-roll, the night-mode line in the cog, and the Storage tab (list, download, rename, delete) work as in 3.0.0-rc1.0 |
 | A13 | You | **Field-test 2.6.7 night boost** | Built 2026-10-01 for C15, then insects and infrared switches after CrystalHeeler's overnight test | Overnight: count insect recordings (11 of 22 on ch4 with 2.6.6) and look for "changed in one picture only" lines; dawn and dusk: no recording from the switch; names start LorexCH4_. Accept the Home Assistant API permission when updating. After dark: the log line "night (IR, black-and-white)" per camera, the cog's "Night mode (IR): sensitivity +15", and the colour value in the tuning line (thresholds 2.5 and 5.0 are untested on real cameras). One hour after sunset: a notification only for a camera that did not switch |
 | A12 | You | Finish the 2.6.6 field test | CrystalHeeler, 2026-10-01: everything fixed and working — live detection, 3 s pre-roll, file naming, card layout and behaviour. Sensitivity 90 on two Lorex channels gave better results with the pre-roll, "still not ideal" | CrystalHeeler testing 95 and 98, then report. Carried: the classic view hiding the card thumbnail; "Stream unavailable" after 90 s; 2.6.5 or later on the Hikvision (172) system |
 
@@ -85,7 +85,7 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| E1 | You | Split the main file into modules: stages 2 and 3 | Stage 1 is built in 3.0.0-rc1.0: the camera tables and the page script moved, 18,198 lines down to 13,125, moved data identical | Waits for CrystalHeeler's field test of 3.0.0-rc1.0 (A14). Stage 2: motion and night boost, go2rtc, storage (the tests cover these); needs one shared state module, because 15 names are replaced with `global`. Stage 3: scan, password entry, snapshot loop, after new tests for them. Finish the last 27 type hints on the way |
+| E1 | You | Split the main file into modules: what is left | Stage 1 (3.0.0-rc1.0, field-tested stable) moved the camera tables and the page script. Stage 2 (3.0.0-rc1.1) moved motion, recording, night boost and storage: the main file is 11,667 lines, from 18,198 | Waits for CrystalHeeler's field test of 3.0.0-rc1.1 (A15). Left: go2rtc (459 lines; it replaces the focused-camera values, so it needs a writable link first); then the scan, password entry and the snapshot loop, after new tests for them. The last 27 type hints on the way |
 
 ## F. Release engineering
 
@@ -104,6 +104,8 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | Classic view ignored a camera's escalated cooldown | CrystalHeeler's test system A log, 2026-10-01 23:22: 6 ffmpeg starts 5 s apart at the Microseven during a 30 s cooldown | 2.6.7: every ffmpeg start waits out the cooldown; a camera in cooldown goes to HTTP snapshots after one failed start. Not changed, CrystalHeeler's decision: the scan's fingerprint and path walk within 1 s |
 | Recording names start with the camera | CrystalHeeler, 2026-10-01 | 2.6.7: LorexCH4_20261001_053358.mp4 (choice A) |
 | Live video in the camera cards works in Chrome | This plan, B17 | CrystalHeeler, 2026-10-01: noticed working, on 2.6.6 |
+| 3.0.0-rc1.0 field test | This plan, A14 | CrystalHeeler, 2026-10-02: "3.0.0-rc1.0 is stable" |
+| Module split, stage 2 (E1) | This plan | 3.0.0-rc1.1: `anycam_motion.py` (58 functions, 37 constants and state objects) and `anycam_storage.py` (5 functions); `anycam_host.py` links them to the main file. All 357 definitions compared with 3.0.0-rc1.0: none missing, none changed. Two new gate checks, each confirmed by a deliberate mistake |
 | Automated tests in the repository (E7) | This plan | 3.0.0-rc1.0: `tests/` with 289 server checks, 110 page checks and an undefined-name check; gate 8 runs them (21 s); confirmed by breaking a value on purpose |
 | Module split, stage 1 (E1) | This plan | 3.0.0-rc1.0: `camera_db.py` (1,939 lines) and `page_script.py` (2,782 lines); the gate, tests, Dockerfile and packager handle several files; `package_release.py` is in the repository |
 | Credentials stripped from every log line (E4) | This plan | 3.0.0-rc1.0: one filter on the log handlers; `_strip_creds` bounded to the host part |

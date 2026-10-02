@@ -104,6 +104,41 @@ if _imported == set(MODULES):
     ok("anycam_modules.py matches the imports")
 else:
     fail(f"anycam_modules.py lists {sorted(MODULES)} but the code imports {sorted(_imported)}")
+# 3.0.0-rc1.1: a split module takes names from camera_discovery.py through
+# its NEEDS list, copied once at start-up (anycam_host.bind). A copied name
+# must exist, and must not be one that a function replaces with `global`:
+# the copy would go stale. Such a value has to be read through H.
+_main_tree = ast.parse(_sources["camera_discovery.py"])
+_main_top = set()
+for _n in _main_tree.body:
+    if isinstance(_n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        _main_top.add(_n.name)
+    elif isinstance(_n, (ast.Assign, ast.AnnAssign)):
+        for _t in (_n.targets if isinstance(_n, ast.Assign) else [_n.target]):
+            _main_top |= {e.id for e in ast.walk(_t) if isinstance(e, ast.Name)}
+    elif isinstance(_n, (ast.Import, ast.ImportFrom)):
+        _main_top |= {(a.asname or a.name).split(".")[0] for a in _n.names}
+_replaced = {x for _n in ast.walk(_main_tree) if isinstance(_n, ast.Global) for x in _n.names}
+_needs_ok, _needs_total = True, 0
+for _m in MODULES[1:]:
+    for _n in ast.parse(_sources[_m]).body:
+        if (isinstance(_n, ast.Assign) and isinstance(_n.targets[0], ast.Name)
+                and _n.targets[0].id == "NEEDS"):
+            _names = ast.literal_eval(_n.value)
+            _needs_total += len(_names)
+            for _x in _names:
+                if _x not in _main_top:
+                    fail(f"{_m}: NEEDS name {_x!r} is not defined in camera_discovery.py")
+                    _needs_ok = False
+                elif _x in _replaced:
+                    fail(f"{_m}: NEEDS name {_x!r} is replaced at run time; read it through H")
+                    _needs_ok = False
+    for _x in set(re.findall(r"(?<![\w.])H\.([A-Za-z_]\w*)", _sources[_m])):
+        if _x not in _main_top:
+            fail(f"{_m}: H.{_x} is not defined in camera_discovery.py")
+            _needs_ok = False
+if _needs_ok:
+    ok(f"{_needs_total} names taken from camera_discovery.py exist and are never replaced")
 _docker = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 _uncopied = [m for m in MODULES if not re.search(rf"^COPY\s+.*\b{re.escape(m)}\b", _docker, re.M)]
 if _uncopied:
