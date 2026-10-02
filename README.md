@@ -7,7 +7,11 @@ for single-camera focus, hardware-accelerated decode, and PTZ control.
 ## Repository layout
 
 ```
-camera_discovery.py     Main application (single file, ~15k lines)
+camera_discovery.py     Main application: entry point and logic
+camera_db.py            Camera tables (brands, stream paths, known behaviour)
+page_script.py          The page's JavaScript
+anycam_modules.py       The list of the files above
+package_release.py      Builds _build/camera_discovery-<version>.zip
 config.yaml             Addon manifest and options schema
 run.sh                  Addon entrypoint; exports config as env vars
 Dockerfile              Addon image (base image set here since 2.6.6)

@@ -4,6 +4,13 @@ AnyCam is a Home Assistant addon (`local_camera_discovery`) that discovers
 cameras on a network and presents them as a grid of live cards with an
 Enhanced View for single-camera focus.
 
+Since 3.0.0-rc1.0 the add-on is several Python files, listed in
+`anycam_modules.py`: `camera_discovery.py` (entry point and logic),
+`camera_db.py` (camera tables), `page_script.py` (the page's JavaScript).
+A new file must be added to `anycam_modules.py` and to the Dockerfile's
+COPY lines; the release gate checks both. Package with
+`python package_release.py`.
+
 The rules below are **binding**. They were established over the life of the
 project and are not suggestions. Read this file before doing anything.
 
@@ -117,7 +124,8 @@ Structure:
 
 `verify_release.py` is an eight-gate check that must pass before packaging:
 
-1. AST/compile clean, no duplicate top-level definitions
+1. AST/compile clean for every module, no duplicate top-level definitions;
+   `anycam_modules.py` matches the imports and the Dockerfile
 2. Semantic function contracts satisfied
 3. Best-practice audit clean (includes blocking file I/O in async code and
    unfilled page placeholders)
@@ -128,8 +136,10 @@ Structure:
 7. Every Dockerfile input exists where the build fetches it: apt pins,
    pip wheels, go2rtc digests, base image platforms (2.6.6; needs internet
    access, and fails without it)
-8. The behaviour tests in `tests/` all pass (3.0.0-rc1.0; `python
-   tests/run_tests.py`; needs Node.js for the page checks)
+8. The tests in `tests/` all pass (3.0.0-rc1.0; `python
+   tests/run_tests.py`; needs Node.js for the page checks). They include
+   an undefined-name check, which catches a function that was moved or
+   deleted while something still uses it
 
 ---
 
