@@ -2105,8 +2105,929 @@ async def test_scan():
     cd.SCAN_STATE.update(running=False, progress=0, message="Idle. Click Scan to begin.")
 
 
+# ── V. 3.0.0-rc1.5 the manufacturer database and brand identification ───────
+# Written before these functions left camera_discovery.py (build plan E1).
+async def test_brand():
+    print("\n[V] 3.0.0-rc1.5 manufacturer database and brand identification")
+    check("V1 a MAC address in any form gives its OUI key",
+          cd._oui_key("1c-c3-16-aa-bb-cc") == "1C:C3:16" and cd._oui_key("1C:C3:16:AA:BB:CC") == "1C:C3:16"
+          and cd._oui_key("") == "" and cd._oui_key("1c:c3") == "")
+    saved_db = dict(cd._OUI_DB)
+    cd._OUI_DB.clear()
+    cd._OUI_DB.update({"AA:00:01": "Microseven Inc", "AA:00:02": "Cisco Systems, Inc",
+                       "AA:00:03": "Acme Widgets"})
+    try:
+        check("V2 lookup_oui: the downloaded table first",
+              cd.lookup_oui("aa:00:01:12:34:56") == "Microseven Inc")
+        check("V2 ... then the built-in camera and non-camera lists",
+              cd.lookup_oui("1C:C3:16:00:00:01") == "(known camera manufacturer)"
+              and cd.lookup_oui("00:00:0C:00:00:01") == "(known non-camera device)")
+        check("V2 ... an unknown or bad address gives nothing",
+              cd.lookup_oui("02:00:00:00:00:01") == "" and cd.lookup_oui("x") == "")
+        check("V3 oui_is_camera: a vendor that matches a camera alias",
+              cd.oui_is_camera("AA:00:01:00:00:00") is True)
+        check("V3 ... a vendor with a non-camera word", cd.oui_is_camera("AA:00:02:00:00:00") is False)
+        check("V3 ... the built-in lists when the vendor is unknown",
+              cd.oui_is_camera("1C:C3:16:00:00:01") is True and cd.oui_is_camera("00:00:0C:00:00:01") is False)
+        check("V3 ... nothing known: None",
+              cd.oui_is_camera("AA:00:03:00:00:00") is None and cd.oui_is_camera("") is None)
+    finally:
+        cd._OUI_DB.clear(); cd._OUI_DB.update(saved_db)
+
+    cache = SCRATCH / "oui_cache.json"
+    cache.write_text(json.dumps({"AB:CD:EF": "Test Vendor"}))
+    import urllib.request as _ur
+    real = (cd.OUI_CACHE_FILE, cd.DATA_DIR, cd._OUI_DB_LOADED, dict(cd._OUI_DB), _ur.urlopen)
+    cd.OUI_CACHE_FILE, cd.DATA_DIR, cd._OUI_DB_LOADED = cache, SCRATCH, False
+    cd._OUI_DB.clear()
+    fetched = []
+
+    class _Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+    csv_text = ("Registry,Assignment,Organization Name,Organization Address\n"
+                "MA-L,0A0B0C,Example Cameras Ltd,Somewhere\nMA-L,bad,Short,x\nMA-L\n")
+    _ur.urlopen = lambda req, timeout=30: (fetched.append(req.full_url), _Resp(csv_text.encode()))[1]
+    try:
+        cd.load_oui_db()
+        check("V4 load_oui_db reads the cache file",
+              cd._OUI_DB.get("AB:CD:EF") == "Test Vendor" and cd._OUI_DB_LOADED is True)
+        cache.write_text(json.dumps({"AB:CD:EF": "Changed"}))
+        cd.load_oui_db()
+        check("V4 ... once only", cd._OUI_DB["AB:CD:EF"] == "Test Vendor")
+        await cd.refresh_oui_db()
+        check("V5 refresh_oui_db: a cache under 30 days old is not downloaded again", fetched == [])
+        os.utime(cache, (time.time() - 40 * 86400,) * 2)
+        await cd.refresh_oui_db()
+        check("V5 ... an old cache is downloaded from the IEEE address, parsed and saved",
+              fetched == [cd.OUI_CSV_URL]
+              and json.loads(cache.read_text()) == {"0A:0B:0C": "Example Cameras Ltd"}
+              and cd._OUI_DB.get("0A:0B:0C") == "Example Cameras Ltd", f"{fetched} {cache.read_text()[:80]}")
+        os.utime(cache, (time.time() - 40 * 86400,) * 2)
+
+        def broken(req, timeout=30):
+            raise OSError("test: offline")
+        _ur.urlopen = broken
+        CAP.lines.clear()
+        await cd.refresh_oui_db()
+        check("V5 ... a failed download keeps the old cache and says so",
+              json.loads(cache.read_text()) == {"0A:0B:0C": "Example Cameras Ltd"}
+              and any("OUI DB download failed" in l for l in CAP.lines))
+    finally:
+        cd.OUI_CACHE_FILE, cd.DATA_DIR, cd._OUI_DB_LOADED = real[0], real[1], real[2]
+        cd._OUI_DB.clear(); cd._OUI_DB.update(real[3])
+        _ur.urlopen = real[4]
+
+    check("V6 identify_manufacturer: the bare brand name picks the camera entry, not the NVR",
+          (cd.identify_manufacturer("Hikvision web") or {}).get("name") == "Hikvision")
+    check("V6 ... a series name picks the NVR entry",
+          (cd.identify_manufacturer("hikvision DS-7608 turbo hd") or {}).get("name") == "Hikvision NVR")
+    check("V6 ... a short keyword needs word boundaries",
+          cd._kw_matches("acti", "interactive printer") is False and cd._kw_matches("acti", "acti camera") is True)
+    check("V6 ... nothing known: None", cd.identify_manufacturer("hp laserjet") is None)
+    check("V6 the keyword table holds each entry once per keyword",
+          [e["name"] for e in cd._DB_ENTRIES_BY_KEY["hikvision"]] == ["Hikvision", "Hikvision NVR"]
+          and "microseven" in cd._DB_MANUFACTURERS)
+
+    cam = {"manufacturer": "Hikvision", "mac_vendor": "Microseven Inc"}
+    e = cd._identify_camera_brand(cam)
+    check("V7 _identify_camera_brand: a brand already set is kept",
+          e["name"] == "Hikvision" and cam["manufacturer"] == "Hikvision")
+    e = cd._identify_camera_brand(cam, force=True)
+    check("V7 ... force=True identifies it again, from the OUI vendor",
+          e["name"] == "Hipcam/Microseven" and cam["manufacturer"] == "Hipcam/Microseven")
+    cam = {"rtsp_auth_realm": "Login to " + "0123456789abcdef" * 2, "page_title": "Hikvision"}
+    check("V7 ... an RTSP realm match wins over the page text",
+          cd._identify_camera_brand(cam)["name"] == "Lorex / Dahua DVR-NVR Family"
+          and cam["manufacturer"] == "Lorex / Dahua DVR-NVR Family")
+    cam = {"name": "webcam"}
+    check("V7 ... the generic entry sets no brand",
+          cd._identify_camera_brand(cam) is None and "manufacturer" not in cam, str(cam))
+    check("V7 ... nothing to go on: None", cd._identify_camera_brand({}) is None)
+    check("V7 the throttle comes from the brand",
+          cd._brand_throttle_seconds({"mac_vendor": "Microseven Inc"}) == 5.0
+          and cd._brand_throttle_seconds({"name": "Hikvision"}) == 0.0)
+
+
+# ── W. 3.0.0-rc1.5 the page builder ─────────────────────────────────────────
+async def test_page_builder():
+    print("\n[W] 3.0.0-rc1.5 the page builder")
+    html = cd.build_html()
+    check("W1 a complete document", html.startswith("<!DOCTYPE html>") and html.rstrip().endswith("</html>"))
+    check("W1 every placeholder filled",
+          not any(p in html for p in ("___BASE___", "___UNRESTRICTED___",
+                                      "___ADAPTIVE_QUALITY___", "___COMMUNITY___")))
+    check("W1 the page script is in the page, with the ingress path",
+          f"const BASE = '{os.environ['INGRESS_PATH']}';" in html
+          and cd._JS[-300:] in html and cd._JS[2000:2300] in html)
+    check("W1 CSS braces are single", "*,*::before,*::after{box-sizing:border-box" in html
+          and "{{" not in html)
+    real = (cd.CFG_UNRESTRICTED_BROWSER, cd.CFG_ADAPTIVE_QUALITY, cd.COMMUNITY_ENDPOINT, cd.HTML, cd.build_html)
+    try:
+        cd.CFG_UNRESTRICTED_BROWSER, cd.CFG_ADAPTIVE_QUALITY = True, True
+        cd.COMMUNITY_ENDPOINT = "https://x.example/</script>"
+        h2 = cd.build_html()
+        check("W2 the settings reach the script",
+              "const CFG_UNRESTRICTED_BROWSER = true;" in h2 and "const CFG_ADAPTIVE_QUALITY     = true;" in h2
+              and "const STORAGE_UNRESTRICTED = true;" in h2)
+        check("W2 the community address is a JSON string with < escaped",
+              'const COMMUNITY_ENDPOINT = "https://x.example/\\u003c/script>";' in h2)
+        builds = []
+
+        def counting():
+            builds.append(1)
+            return "<html>built</html>"
+        cd.build_html, cd.HTML = counting, None
+        r1 = await cd.handle_index(make_mocked_request("GET", "/"))
+        r2 = await cd.handle_index(make_mocked_request("GET", "/"))
+        check("W3 handle_index builds the page once and serves it as HTML",
+              builds == [1] and r1.text == r2.text == "<html>built</html>"
+              and r1.content_type == "text/html")
+    finally:
+        (cd.CFG_UNRESTRICTED_BROWSER, cd.CFG_ADAPTIVE_QUALITY, cd.COMMUNITY_ENDPOINT,
+         cd.HTML, cd.build_html) = real
+        cd.HTML = None
+
+
+# ── X. 3.0.0-rc1.5 the Enhanced View engine (more than C, E and G) ──────────
+async def test_focus_more():
+    print("\n[X] 3.0.0-rc1.5 Enhanced View engine")
+    started = []
+
+    async def fake_snap_loop(camera_id, url, camera_, native_res=False):
+        started.append((camera_id, native_res))
+        await asyncio.sleep(1000)
+    with _Swap(snap_loop=fake_snap_loop):
+        cd.CAMERAS.clear(); cd.CAMERAS["cam1"] = camera()
+        cd._SNAP.clear(); cd._MOTION.clear(); cd._FOCUS_ADAPTIVE.clear()
+        cd._FOCUSED_CAMERA = None; cd._FOCUS_ENGINE = None
+        r = await cd.handle_focus_set(make_mocked_request(
+            "POST", "/snap/focus/nope", match_info={"camera_id": "nope"}))
+        check("X1 unknown camera: 404 and no focus", r.status == 404 and cd._FOCUSED_CAMERA is None)
+        st = cd._snap_state("cam1")
+        st.update(focus_leave_kill=True, hw_session_fails={"hevc_drm": 2})
+        await cd.handle_focus_set(make_mocked_request(
+            "POST", "/snap/focus/cam1", match_info={"camera_id": "cam1"}))
+        await asyncio.sleep(0)
+        check("X2 classic entry clears a stale leave flag and the hardware failure count",
+              "focus_leave_kill" not in st and "hw_session_fails" not in st)
+        check("X2 ... and starts the full-resolution loop on the main stream",
+              started == [("cam1", True)] and st["task"] is not None)
+
+        # The motion file reads the focus state, which this engine owns.
+        cd._MOTION["cam1"] = {"enabled": True}
+        st["task"].cancel(); await asyncio.sleep(0)
+        started.clear()
+        cd._motion_ensure_loop("cam1")
+        check("X3 classic view on: motion starts no second loop", started == [])
+        await cd.handle_focus_clear(make_mocked_request("DELETE", "/snap/focus"))
+        await cd.handle_focus_set(make_mocked_request(
+            "POST", "/snap/focus/cam1?engine=go2rtc", match_info={"camera_id": "cam1"}))
+        await asyncio.sleep(0)
+        cd._SNAP["cam1"]["task"].cancel(); await asyncio.sleep(0)
+        started.clear()
+        cd._motion_ensure_loop("cam1")
+        await asyncio.sleep(0)
+        check("X3 live view on: motion restarts the armed camera's thumbnail loop",
+              started == [("cam1", False)], str(started))
+        for s in cd._SNAP.values():
+            if s.get("task"):
+                s["task"].cancel()
+        await cd.handle_focus_clear(make_mocked_request("DELETE", "/snap/focus"))
+        cd._MOTION.clear()
+
+        # Classic leave: the preheater goes, the learned tier stays.
+        cd._SNAP.clear(); started.clear()
+        await cd.handle_focus_set(make_mocked_request(
+            "POST", "/snap/focus/cam1", match_info={"camera_id": "cam1"}))
+        await asyncio.sleep(0)
+        st = cd._SNAP["cam1"]
+        hw = FakeProc(); st["proc_hw"] = hw; st["hw_ready"] = True
+        cd._FOCUS_ADAPTIVE["cam1"] = {"tier_idx": 4, "locked": True, "run_start": 9.0}
+        await cd.handle_focus_clear(make_mocked_request("DELETE", "/snap/focus"))
+        await asyncio.sleep(0); await asyncio.sleep(0)
+        check("X4 classic leave: hardware preheater stopped, its state gone",
+              hw.killed and "proc_hw" not in st and "hw_ready" not in st)
+        ada = cd._FOCUS_ADAPTIVE["cam1"]
+        check("X4 ... the learned tier kept, its run timer reset",
+              ada["tier_idx"] == 4 and ada["locked"] is True and ada["run_start"] is None)
+        check("X4 ... focus cleared and the loop cancelled",
+              cd._FOCUSED_CAMERA is None and cd._FOCUS_ENGINE is None and st["task"].cancelled())
+        r = await cd.handle_focus_clear(make_mocked_request("DELETE", "/snap/focus"))
+        check("X5 leaving with nothing in focus is harmless", r.status == 200)
+
+
+# ── Y. 3.0.0-rc1.5 the snapshot loop ────────────────────────────────────────
+# The real snap_loop, http_snap_loop and handle_snapshot, with stand-in ffmpeg
+# processes and a local HTTP camera. Written before the move (build plan E1).
+class FakeFfmpeg:
+    """A stand-in ffmpeg: writes its chunks to stdout, then ends."""
+
+    def __init__(self, chunks=(), stderr=b"", rc=1):
+        self.stdout, self.stderr = asyncio.StreamReader(), asyncio.StreamReader()
+        for c in chunks:
+            self.stdout.feed_data(c)
+        self.stdout.feed_eof()
+        if stderr:
+            self.stderr.feed_data(stderr)
+        self.stderr.feed_eof()
+        self.returncode, self.pid, self.killed, self._rc = None, 4321, False, rc
+
+    def kill(self):
+        self.killed, self.returncode = True, -9
+
+    async def wait(self):
+        if self.returncode is None:
+            self.returncode = self._rc
+        return self.returncode
+
+
+def jpeg(tag: bytes) -> bytes:
+    return b"\xff\xd8" + tag + b"\xff\xd9"
+
+
+def opt(args, flag):
+    """The value after a flag in an ffmpeg argument list, or None."""
+    return args[args.index(flag) + 1] if flag in args else None
+
+
+async def run_snap(cid, cam, makers, native_res=False, timeout=15):
+    """Run the real snap_loop. makers[i]() gives the i-th ffmpeg (the last
+    one repeats). Returns the argument list of every ffmpeg start."""
+    import random as _rnd
+    launches, seen = [], []
+
+    async def fake_exec(*a, **k):
+        launches.append(a)
+        return makers[min(len(launches), len(makers)) - 1]()
+    real = (cd.asyncio.create_subprocess_exec, _rnd.uniform, cd._motion_on_frame)
+    cd.asyncio.create_subprocess_exec = fake_exec
+    _rnd.uniform = lambda a, b: 0.0                     # no waiting between restarts
+    cd._motion_on_frame = lambda c, f: seen.append(f)
+    cd._HW_PROBED.set()
+    try:
+        state = cd._snap_state(cid)
+        task = asyncio.create_task(cd.snap_loop(cid, cd.build_authenticated_url(cam), cam,
+                                                native_res=native_res))
+        state["task"] = task
+        await asyncio.wait_for(task, timeout=timeout)
+    finally:
+        cd.asyncio.create_subprocess_exec, _rnd.uniform, cd._motion_on_frame = real
+    return launches, seen
+
+
+async def test_snapshot_loop():
+    print("\n[Y] 3.0.0-rc1.5 the snapshot loop")
+    cd._FOCUSED_CAMERA = None; cd._FOCUS_ENGINE = None
+    cd._MOTION.clear(); cd._SNAP.clear(); cd._FOCUS_ADAPTIVE.clear()
+    cid = "cam1"
+    nobody = lambda: cd._snap_last_access.__setitem__(cid, time.monotonic() - 100)
+
+    # Y1 card view: arguments, frames, the idle stop
+    cam = camera(stream_codec="h264", stream_width=1920)
+    cd.CAMERAS.clear(); cd.CAMERAS[cid] = cam
+    nobody()
+    CAP.lines.clear()
+    launches, seen = await run_snap(cid, cam, [
+        lambda: FakeFfmpeg([b"junk" + jpeg(b"one")[:3], jpeg(b"one")[3:] + jpeg(b"two")])])
+    a, st = launches[0], cd._SNAP[cid]
+    check("Y1 card view: one ffmpeg, RTSP over TCP, the camera URL with its password",
+          len(launches) == 1 and a[0] == "ffmpeg" and opt(a, "-rtsp_transport") == "tcp"
+          and opt(a, "-i") == cd.build_authenticated_url(cam), str(a))
+    check("Y1 ... thumbnail filter for H.264, JPEG quality 5, to a pipe",
+          opt(a, "-vf") == "fps=10,scale=640:-2,format=yuvj420p" and opt(a, "-q:v") == "5"
+          and a[-1] == "pipe:1" and opt(a, "-fflags") == "+nobuffer" and opt(a, "-flags") == "low_delay"
+          and "-threads" not in a and "-skip_frame" not in a and "-probesize" not in a)
+    check("Y1 ... JPEGs split across reads are joined; every frame is stored and checked for motion",
+          st["frame"] == jpeg(b"two") and st["frame_count"] == 2 and st["current_run_frames"] == 2
+          and seen == [jpeg(b"one"), jpeg(b"two")])
+    check("Y1 ... nobody watching: no restart, and the loop clears its state",
+          st["task"] is None and st["proc"] is None
+          and any("after exit — not restarting" in l for l in CAP.lines))
+
+    # Y2 the settings that change the arguments
+    real_cfg = (cd.CFG_LIMIT_THREADS, cd.CFG_SKIP_NONREF, cd.CFG_LOW_LATENCY, cd.CFG_LOW_FPS)
+    try:
+        cd.CFG_LIMIT_THREADS = cd.CFG_SKIP_NONREF = cd.CFG_LOW_LATENCY = True
+        cam = camera(stream_codec="hevc", stream_width=3840, preferred_transport="udp",
+                     needs_fflags_discardcorrupt=True)
+        cd.CAMERAS[cid] = cam; cd._SNAP.clear(); nobody()
+        launches, _ = await run_snap(cid, cam, [lambda: FakeFfmpeg([jpeg(b"a")])])
+        a = launches[0]
+        check("Y2 4K H.265: 4 fps at 480 wide", opt(a, "-vf") == "fps=4,scale=480:-2,format=yuvj420p")
+        check("Y2 thread limit, non-reference skip, low latency, UDP, discard corrupt",
+              opt(a, "-threads") == "2" and opt(a, "-skip_frame") == "nonref"
+              and opt(a, "-probesize") == "32" and opt(a, "-rtsp_transport") == "udp"
+              and opt(a, "-fflags") == "+nobuffer+discardcorrupt", str(a))
+        cd.CFG_LIMIT_THREADS = cd.CFG_SKIP_NONREF = cd.CFG_LOW_LATENCY = False
+        cd.CFG_LOW_FPS = True
+        cam = camera(stream_codec="hevc", stream_width=1920)
+        cd.CAMERAS[cid] = cam; cd._SNAP.clear(); nobody()
+        launches, _ = await run_snap(cid, cam, [lambda: FakeFfmpeg([jpeg(b"a")])])
+        check("Y2 low-fps mode on H.265: 2 fps", opt(launches[0], "-vf") == "fps=2,scale=640:-2,format=yuvj420p")
+    finally:
+        cd.CFG_LIMIT_THREADS, cd.CFG_SKIP_NONREF, cd.CFG_LOW_LATENCY, cd.CFG_LOW_FPS = real_cfg
+
+    # Y3 Enhanced View (classic): the ladder's first rung, full quality
+    real_cfg = cd.CFG_LIMIT_THREADS
+    cd.CFG_LIMIT_THREADS = True
+    try:
+        cam = camera(stream_width=2560, stream_height=1440)
+        cam["stream_profiles"][0].update(stream_width=2560, stream_height=1440)
+        cd.CAMERAS[cid] = cam; cd._SNAP.clear(); cd._FOCUS_ADAPTIVE.clear(); nobody()
+        cd._FOCUSED_CAMERA, cd._FOCUS_ENGINE = cid, "legacy"
+        launches, _ = await run_snap(cid, cam, [lambda: FakeFfmpeg([jpeg(b"f")])], native_res=True)
+        a = launches[0]
+        check("Y3 classic view: profile 0 uncapped, no scaling, JPEG quality 2, no thread limit",
+              opt(a, "-i") == cd.build_authenticated_url(cam, url=cam["stream_profiles"][0]["url"])
+              and opt(a, "-vf") == "format=yuvj420p" and opt(a, "-q:v") == "2" and "-threads" not in a, str(a))
+        ada = cd._FOCUS_ADAPTIVE[cid]
+        check("Y3 ... the adaptive state is created with its ladder",
+              ada["tier_idx"] == 0 and len(ada["ladder"]) == 62 and ada["run_start"] is not None)
+    finally:
+        cd.CFG_LIMIT_THREADS = real_cfg
+        cd._FOCUSED_CAMERA = cd._FOCUS_ENGINE = None
+
+    # Y4 a camera that sends nothing: transport flip at 3, codec cleared at 5
+    cam = camera(stream_codec="h264")
+    cd.CAMERAS[cid] = cam; cd._SNAP.clear(); nobody()
+    CAP.lines.clear()
+    launches, _ = await run_snap(cid, cam, [FakeFfmpeg] * 8 + [lambda: FakeFfmpeg([jpeg(b"z")])])
+    tr = [opt(a, "-rtsp_transport") for a in launches]
+    check("Y4 three empty runs on TCP, then UDP, once per session",
+          tr == ["tcp"] * 3 + ["udp"] * 6 and cam["preferred_transport"] == "udp", str(tr))
+    check("Y4 five more empty runs clear the stored codec", cam["stream_codec"] == ""
+          and cam["stream_profiles"][0]["stream_codec"] == "")
+    check("Y4 restarts counted", cd._SNAP[cid]["restart_count"] == 8)
+
+    # Y5 the focus-leave flag ends the loop without a restart
+    cam = camera(stream_codec="h264")
+    cd.CAMERAS[cid] = cam; cd._SNAP.clear()
+    cd._snap_last_access[cid] = time.monotonic()
+    cd._snap_state(cid)["focus_leave_kill"] = True
+    launches, _ = await run_snap(cid, cam, [lambda: FakeFfmpeg([jpeg(b"k")])])
+    check("Y5 focus-leave kill: no restart, flag consumed",
+          len(launches) == 1 and "focus_leave_kill" not in cd._SNAP[cid])
+
+    # Y6 which path: HTTP snapshots or ffmpeg
+    http_calls = []
+
+    async def fake_http(c, cam_):
+        http_calls.append(c)
+    with _Swap(http_snap_loop=fake_http):
+        cam = camera(stream_codec="h264", http_snap_url="http://10.0.0.33/snap.jpg")
+        cd.CAMERAS[cid] = cam; cd._SNAP.clear(); nobody()
+        launches, _ = await run_snap(cid, cam, [lambda: FakeFfmpeg([jpeg(b"h")])])
+        check("Y6 a snapshot URL and an unconfirmed RTSP stream: HTTP snapshots",
+              http_calls == [cid] and launches == [])
+        cam["rtsp_probe_ok"] = True; cd._SNAP.clear(); nobody()
+        launches, _ = await run_snap(cid, cam, [lambda: FakeFfmpeg([jpeg(b"h")])])
+        check("Y6 ... a confirmed RTSP stream: ffmpeg", http_calls == [cid] and len(launches) == 1)
+
+    # Y7 hardware decode: tried first, software after a failed start
+    real_hw = (cd.CFG_HW_DECODE, list(cd._HW_DECODER_CANDIDATES))
+    cd.CFG_HW_DECODE = True
+    try:
+        cam = camera()
+        cd.CAMERAS[cid] = cam; cd._SNAP.clear(); nobody()
+        cd._HW_UNAVAILABLE.discard("hevc_drm")
+        launches, _ = await run_snap(cid, cam, [FakeFfmpeg, lambda: FakeFfmpeg([jpeg(b"s")])])
+        check("Y7 H.265 starts on the hardware decoder",
+              opt(launches[0], "-hwaccel") == "drm"
+              and launches[0].index("-hwaccel") < launches[0].index("-i"), str(launches[0]))
+        check("Y7 ... no picture from it: software at once, failure counted",
+              len(launches) == 2 and "-hwaccel" not in launches[1]
+              and cd._SNAP[cid]["hw_session_fails"] == {"hevc_drm": 1})
+    finally:
+        cd.CFG_HW_DECODE = real_hw[0]
+
+    # Y8 the quality ladder
+    lad = cd._build_focus_ladder(camera())
+    check("Y8 ladder: each profile uncapped, then 30 down to 1 fps",
+          len(lad) == 62 and lad[0] == (0, None) and lad[1] == (0, 30) and lad[30] == (0, 1)
+          and lad[31] == (1, None) and lad[-1] == (1, 1))
+    old = {"stream_url": "rtsp://a/1", "sub_stream_url": "rtsp://a/2",
+           "additional_streams": [{"url": "rtsp://a/3"}, {"url": "rtsp://a/1"}]}
+    check("Y8 no profiles: built from the stream URLs, duplicates dropped",
+          len(cd._build_focus_ladder(old)) == 93)
+
+    # Y9 the hardware preheater
+    st = {}
+    await cd._hw_preheater(cid, st, "hevc_drm")
+    check("Y9 preheater with no process: failed", st.get("hw_preheater_failed") is True)
+    st = {"proc_hw": FakeFfmpeg()}
+    await cd._hw_preheater(cid, st, "hevc_drm")
+    check("Y9 ... process ends before a picture: failed", st.get("hw_preheater_failed") is True)
+
+    class Live(FakeFfmpeg):
+        def __init__(self):
+            super().__init__()
+            self.stdout = asyncio.StreamReader()
+    p = Live()
+    st = {"proc_hw": p}
+    t = asyncio.create_task(cd._hw_preheater(cid, st, "hevc_drm"))
+    p.stdout.feed_data(jpeg(b"hw"))
+    await asyncio.sleep(0.05)
+    check("Y9 ... first hardware picture: ready to swap", st.get("hw_ready") is True and not t.done())
+    st["hw_swapped"] = True
+    p.stdout.feed_data(b"more")
+    await asyncio.wait_for(t, 3)
+    check("Y9 ... after the swap it stops", t.done() and not p.killed)
+    hold = asyncio.create_task(asyncio.sleep(1000))
+    hw = FakeProc()
+    st = {"hw_preheater_task": hold, "proc_hw": hw, "hw_ready": True, "hw_swapped": False,
+          "hw_preheater_failed": False, "hw_preheat_elapsed": 1.0, "frame": b"x"}
+    cd._kill_hw_preheater(st)
+    await asyncio.sleep(0)
+    check("Y9 _kill_hw_preheater: task cancelled, process killed, only its keys removed",
+          hold.cancelled() and hw.killed and st == {"frame": b"x"})
+
+    # Y10 ffmpeg's error output
+    cd.CAMERAS.clear(); cd.CAMERAS[cid] = camera()
+    saves = []
+    with _Swap(save_cameras=lambda: saves.append(1)):
+        CAP.lines.clear()
+        err = (b"deprecated pixel format used\n"
+               b"[rtsp] rtsp://admin:hunter2@10.0.0.33/x: Multi-layer HEVC coding is not implemented\n")
+        await cd._drain_stderr(FakeFfmpeg(stderr=err), f"SNAP:{cid}")
+        line = next((l for l in CAP.lines if "ffmpeg stderr" in l), "")
+        check("Y10 stderr logged without the password or the pixel-format noise",
+              "Multi-layer HEVC" in line and "hunter2" not in line and "deprecated" not in line, line)
+        c = cd.CAMERAS[cid]
+        check("Y10 H.265+ seen: badge, discard-corrupt flag, saved",
+              c.get("hevc_plus_warning") is True and c.get("needs_fflags_discardcorrupt") is True
+              and c.get("clean_runs_since_fflags") == 0 and saves == [1])
+        c.update(hevc_plus_warning=False, hevc_plus_noise_confirmed=True, clean_runs_since_fflags=4)
+        await cd._drain_stderr(FakeFfmpeg(stderr=err), f"SNAP:{cid}")
+        check("Y10 ... known noise: no badge, the clean-run count restarts",
+              c["hevc_plus_warning"] is False and c["clean_runs_since_fflags"] == 0 and saves == [1])
+        await cd._drain_stderr(FakeFfmpeg(stderr=b"hevc_drm: Could not find a valid device\n"), "SNAP:x")
+        check("Y10 a missing hardware device is marked unavailable", "hevc_drm" in cd._HW_UNAVAILABLE)
+        cd._HW_UNAVAILABLE.discard("hevc_drm")
+
+    # Y11 the H.265+ fallback
+    probed = []
+
+    def fake_probe(url, u="", p="", timeout=6, label=""):
+        probed.append((url, u, p))
+        return url.endswith("/Streaming/Channels/102")
+    with _Swap(probe_rtsp=fake_probe):
+        cam = camera(sub_stream_url=None)
+        got = await cd._try_hevc_plus_fallback(cid, cam, cam["stream_url"])
+        check("Y11 H.265+ fallback: the Hikvision sub-stream path, with the password",
+              got == cd.build_authenticated_url(cam).replace("/101", "/102")
+              and probed[-1][1:] == ("admin", TRICKY_PASS), str(got))
+        cam = camera(stream_url="rtsp://10.0.0.33:554/other")
+        check("Y11 ... no known path: None",
+              await cd._try_hevc_plus_fallback(cid, cam, cam["stream_url"]) is None)
+
+    # Y12 handle_snapshot
+    started = []
+
+    async def frame_loop(camera_id, url, camera_, native_res=False):
+        started.append(url)
+        await asyncio.sleep(0.05)
+        s = cd._snap_state(camera_id)
+        s["frame"], s["frame_time"] = jpeg(b"card"), time.monotonic()
+        await asyncio.sleep(1000)
+
+    def snap_req(c):
+        return make_mocked_request("GET", f"/snapshot/{c}", match_info={"camera_id": c})
+    with _Swap(snap_loop=frame_loop):
+        cd.CAMERAS.clear(); cd._SNAP.clear()
+        cd.CAMERAS[cid] = camera()
+        cd.CAMERAS["info"] = camera(id="info", display="info")
+        cd.CAMERAS["nourl"] = camera(id="nourl", stream_url="")
+        check("Y12 unknown camera 404, not streamable 400, no URL 503",
+              (await cd.handle_snapshot(snap_req("nope"))).status == 404
+              and (await cd.handle_snapshot(snap_req("info"))).status == 400
+              and (await cd.handle_snapshot(snap_req("nourl"))).status == 503)
+        r = await cd.handle_snapshot(snap_req(cid))
+        check("Y12 first poll starts the loop and waits for its first picture",
+              r.status == 200 and r.body == jpeg(b"card") and r.content_type == "image/jpeg"
+              and started == [cd.build_authenticated_url(cd.CAMERAS[cid])]
+              and r.headers["Cache-Control"] == "no-cache, no-store, must-revalidate")
+        await cd.handle_snapshot(snap_req(cid))
+        check("Y12 a running loop is not started twice", len(started) == 1)
+        cd._SNAP[cid]["task"].cancel()
+
+        st = cd._snap_state(cid)
+        cd._FOCUSED_CAMERA = cid
+        try:
+            st["frame"] = None
+            check("Y12 in focus, no picture yet: 204", (await cd.handle_snapshot(snap_req(cid))).status == 204)
+            st.update(frame=jpeg(b"f"), frame_count=7, focus_frame_base=5, zero_frame_streak=1,
+                      current_run_frames=0)
+            cd._FOCUS_ADAPTIVE[cid] = {"tier_idx": 0, "ladder": cd._build_focus_ladder(cd.CAMERAS[cid])}
+            cd.CAMERAS[cid]["stream_profiles"][0].update(stream_width=2560, stream_height=1440)
+            h = (await cd.handle_snapshot(snap_req(cid))).headers
+            check("Y12 in focus: frame source, step and frame counts in the headers",
+                  h["X-Frame-Source"] == "focus" and h["X-Step-Res"] == "2560x1440"
+                  and h["X-Step-FPS"] == "uncapped" and h["X-Focus-Frames"] == "2"
+                  and h["X-Stream-Status"] == "connecting" and h["X-Snap-Mode"] == "rtsp", str(dict(h)))
+            st["transport_flip_fired"] = True
+            h = (await cd.handle_snapshot(snap_req(cid))).headers
+            check("Y12 ... after the transport flip: switching_transport",
+                  h["X-Stream-Status"] == "switching_transport")
+            st["http_snap_active"] = True
+            h = (await cd.handle_snapshot(snap_req(cid))).headers
+            check("Y12 ... on HTTP snapshots: http_fallback", h["X-Stream-Status"] == "http_fallback"
+                  and h["X-Snap-Mode"] == "http")
+        finally:
+            cd._FOCUSED_CAMERA = None
+            cd._FOCUS_ADAPTIVE.clear()
+
+    # Y13 status and log endpoints
+    cd._SNAP.clear()
+    st = cd._snap_state(cid)
+    st.update(frame=b"12345", frame_time=time.monotonic(), frame_count=9, restart_count=2,
+              proc=FakeProc())
+    st["proc"].pid = 99
+    body = json.loads((await cd.handle_snap_status(make_mocked_request("GET", "/snap/status"))).body)
+    check("Y13 /snap/status: one entry per camera",
+          body[cid]["running"] is True and body[cid]["pid"] == 99 and body[cid]["frame_count"] == 9
+          and body[cid]["frame_bytes"] == 5 and body[cid]["restarts"] == 2, str(body))
+    saved_buf = list(cd._LOG_BUFFER)
+    cd._LOG_BUFFER.clear()
+    cd._LOG_BUFFER.extend([{"level": "warning", "msg": "w", "t": 10.0},
+                           {"level": "error", "msg": "e", "t": 20.0}])
+    try:
+        body = json.loads((await cd.api_logs(make_mocked_request("GET", "/api/logs?since=15"))).body)
+        check("Y13 /api/logs: entries after 'since', worst level of the last 50",
+              body["status"] == "error" and [e["msg"] for e in body["entries"]] == ["e"])
+        cd._LOG_BUFFER[:] = [{"level": "warning", "msg": "w", "t": 10.0}]
+        body = json.loads((await cd.api_logs(make_mocked_request("GET", "/api/logs"))).body)
+        check("Y13 ... warnings only: warning", body["status"] == "warning" and len(body["entries"]) == 1)
+    finally:
+        cd._LOG_BUFFER[:] = saved_buf
+
+    # Y14 http_snap_loop: Digest login and Reolink query-string login
+    big = jpeg(b"P" * 400)
+    hits = []
+
+    async def digest(request):
+        auth = request.headers.get("Authorization", "")
+        hits.append(auth.split(" ", 1)[0])
+        if not auth.startswith("Digest "):
+            return web.Response(status=401, headers={
+                "WWW-Authenticate": 'Digest realm="cam", nonce="n1", qop="auth", opaque="o1"'})
+        f = dict(x.split("=", 1) for x in auth[7:].replace('"', "").split(", "))
+        ha1 = hashlib.md5(f"admin:cam:{TRICKY_PASS}".encode()).hexdigest()
+        ha2 = hashlib.md5(f"GET:{f['uri']}".encode()).hexdigest()
+        want = hashlib.md5(f"{ha1}:n1:{f['nc']}:{f['cnonce']}:auth:{ha2}".encode()).hexdigest()
+        ok = f["response"] == want and f["uri"] == "/snap.jpg" and f["opaque"] == "o1"
+        return web.Response(body=big if ok else b"", status=200 if ok else 403)
+
+    async def query(request):
+        hits.append(dict(request.query))
+        ok = request.query.get("user") == "admin" and request.query.get("password") == "pw1"
+        return web.Response(body=big if ok else b"", status=200 if ok else 401)
+    app = web.Application()
+    app.router.add_get("/snap.jpg", digest)
+    app.router.add_get("/cgi-bin/api.cgi", query)
+    runner = web.AppRunner(app); await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0); await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        cd._SNAP.clear(); cd._MOTION.clear()
+        cam = camera(http_snap_url=f"http://127.0.0.1:{port}/snap.jpg")
+        cd.CAMERAS[cid] = cam; nobody()
+        await asyncio.wait_for(cd.http_snap_loop(cid, cam), 10)
+        check("Y14 Digest camera: Basic first, then a correct Digest answer; the picture stored",
+              hits[-2:] == ["Basic", "Digest"] and cd._SNAP[cid]["frame"] == big, str(hits))
+        hits.clear(); cd._SNAP.clear()
+        cam = camera(http_snap_url=f"http://127.0.0.1:{port}/cgi-bin/api.cgi?cmd=Snap&channel=0",
+                     http_snap_auth_mode="query_params", credentials=cd.encrypt_creds("admin", "pw1"))
+        cd.CAMERAS[cid] = cam; nobody()
+        await asyncio.wait_for(cd.http_snap_loop(cid, cam), 10)
+        check("Y14 query-string camera: user and password in the address",
+              hits and hits[0].get("cmd") == "Snap" and cd._SNAP[cid]["frame"] == big, str(hits))
+    finally:
+        await runner.cleanup()
+        cd.CAMERAS.clear(); cd._SNAP.clear()
+
+
+# ── Z. 3.0.0-rc1.5 password entry ───────────────────────────────────────────
+# The real api_set_credentials and its helpers. Stand-ins replace only the
+# functions that touch the network: ONVIF calls, the RTSP walkers, ffprobe.
+class JsonReq:
+    """A request whose body is the given value (an exception: unreadable)."""
+
+    def __init__(self, data=None, match=None):
+        self.data, self.match_info = data, match or {}
+
+    async def json(self):
+        if isinstance(self.data, Exception):
+            raise self.data
+        return self.data
+
+
+async def test_credentials():
+    print("\n[Z] 3.0.0-rc1.5 password entry")
+    import re as _re
+    calls = {"validate": [], "find": [], "probe": [], "waits": [], "onvif_snap": []}
+
+    def validate(ip, port, urls, user, pw, timeout, meta=None, label=""):
+        calls["validate"].append((port, list(urls), label))
+        return {u: (bool(_re.search(r"channel=[23]&subtype=0", u)) if "realmonitor" in u
+                    else not u.endswith(("/13", "/h264major", "/h264minor", "/11")))
+                for u in urls}
+
+    details = {}
+
+    async def ffprobe(url, proto):
+        calls["probe"].append(url)
+        for key, d in details.items():
+            if key in url:
+                return dict(d)
+        return {}
+
+    async def wait(ip, secs, label=""):
+        calls["waits"].append((secs, label))
+
+    def find(ip, port, user, pw, cam=None):
+        calls["find"].append((ip, port))
+        return find.result.get(port)
+    find.result = {}
+
+    profiles = [{"token": "P1", "name": "main", "onvif_width": 2560, "onvif_height": 1440,
+                 "onvif_encoding": "H264"},
+                {"token": "P2", "name": "sub", "onvif_width": 640, "onvif_height": 360,
+                 "onvif_encoding": "H264"},
+                {"token": "P3", "name": "dup", "onvif_width": 640, "onvif_height": 360,
+                 "onvif_encoding": "H264"}]
+    stubs = dict(
+        onvif_get_profiles=lambda media, u, p: [dict(x) for x in onvif_get_profiles.ret],
+        onvif_get_stream_uri=lambda media, tok, u, p: f"rtsp://10.0.0.40:554/{tok}",
+        onvif_get_snapshot_uri=lambda *a: calls["onvif_snap"].append(a) or "",
+        _validate_rtsp_urls_single_socket=validate, probe_stream_details=ffprobe,
+        _throttle_wait_if_needed=wait, find_rtsp_path=find, save_cameras=lambda: None,
+        probe_mjpeg_http=lambda ip, port, u, p: f"http://{ip}:{port}/video",
+        probe_hls=lambda ip, port, u, p: None,
+        probe_rtsp=lambda url, u="", p="", timeout=6.0, label="": url.endswith("/13"),
+        probe_rtmp=lambda ip, port: True)
+
+    class onvif_get_profiles:
+        ret = profiles
+
+    async def set_creds(data):
+        r = await cd.api_set_credentials(JsonReq(data))
+        return r.status, json.loads(r.body)
+
+    with _Swap(**stubs):
+        cd.CAMERAS.clear()
+        st, _ = await set_creds(ValueError("bad"))
+        st2, _ = await set_creds({"camera_id": "nope", "username": "u", "password": "p"})
+        check("Z1 unreadable body 400, unknown camera 404", st == 400 and st2 == 404)
+
+        # Z2 ONVIF: profiles, one-socket check, ranking, the codec correction
+        old_id = "10.0.0.40_onvif"
+        cd.CAMERAS[old_id] = {"id": old_id, "ip": "10.0.0.40", "port": 80, "protocol": "ONVIF",
+                              "onvif": True, "xaddrs": "http://10.0.0.40:80/onvif/device_service",
+                              "name": "Front", "manufacturer": "Hikvision", "mac_addr": "02:00:00:00:00:40"}
+        details.clear()
+        details.update({"P2": {"stream_codec": "h264", "stream_width": 640, "stream_height": 360},
+                        "P3": {"stream_codec": "h264", "stream_width": 640, "stream_height": 360},
+                        "@10.0.0.40:554/P1": {"stream_codec": "hevc"}})
+        st, body = await set_creds({"camera_id": old_id, "username": "admin", "password": TRICKY_PASS})
+        new_id = "10.0.0.40_onvif_P1"
+        c = cd.CAMERAS.get(new_id, {})
+        check("Z2 ONVIF: accepted; the card moves to the main profile's id",
+              st == 200 and body == {"status": "ok", "channels": 1} and old_id not in cd.CAMERAS and c, str(body))
+        check("Z2 ... all profile addresses checked on one socket at the RTSP port, not port 80",
+              calls["validate"][0][0] == 554 and len(calls["validate"][0][1]) == 3)
+        check("Z2 ... largest first; the duplicate sub-stream dropped",
+              c.get("stream_url") == "rtsp://10.0.0.40:554/P1" and c.get("sub_stream_url") == "rtsp://10.0.0.40:554/P2"
+              and [p["_url_key"] for p in c.get("stream_profiles", [])] == ["stream_url", "sub_stream_url"])
+        check("Z2 ... ONVIF size used where ffprobe had none; identity kept; password stored encrypted",
+              c.get("stream_width") == 2560 and c.get("manufacturer") == "Hikvision"
+              and c.get("mac_addr") == "02:00:00:00:00:40"
+              and cd.decrypt_creds(c["credentials"]) == ("admin", TRICKY_PASS)
+              and TRICKY_PASS not in json.dumps(c))
+        check("Z2 ... snapshot address from the camera table, no ONVIF call for it",
+              c.get("http_snap_url") == "http://10.0.0.40/ISAPI/Streaming/channels/101/picture"
+              and calls["onvif_snap"] == [])
+        check("Z2 ... before the correction: the codec ONVIF reported", c.get("stream_codec") == "H264")
+        await asyncio.sleep(1.4)
+        check("Z2 ... ffprobe with the password corrects it", c.get("stream_codec") == "hevc"
+              and c["stream_profiles"][0]["stream_codec"] == "hevc", str(c.get("stream_codec")))
+
+        # Z3 ONVIF with no profiles: direct RTSP, port 554 before the stored port
+        onvif_get_profiles.ret = []
+        cid = "10.0.0.41_onvif"
+        cd.CAMERAS[cid] = {"id": cid, "ip": "10.0.0.41", "port": 80, "protocol": "ONVIF", "onvif": True,
+                           "xaddrs": "http://10.0.0.41:80/onvif/device_service", "name": "Side"}
+        calls["find"].clear()
+        find.result = {554: "rtsp://10.0.0.41:554/Streaming/Channels/101"}
+        details.clear(); details["10.0.0.41"] = {"stream_codec": "h264", "stream_width": 1920,
+                                                 "stream_height": 1080}
+        st, body = await set_creds({"camera_id": cid, "username": "admin", "password": "pw"})
+        c = cd.CAMERAS[cid]
+        check("Z3 no ONVIF profiles: direct RTSP on 554 first",
+              st == 200 and calls["find"] == [("10.0.0.41", 554)], str(calls["find"]))
+        check("Z3 ... card ready with one profile and the probed details",
+              c["status"] == "ready" and c["stream_url"] == "rtsp://10.0.0.41:554/Streaming/Channels/101"
+              and len(c["stream_profiles"]) == 1 and c["stream_width"] == 1920
+              and body["stream_url"] == c["stream_url"] and body["dvr_enumeration_pending"] is False)
+        check("Z3 ... ffprobe got the address with the password", "admin:pw@10.0.0.41" in calls["probe"][-1])
+
+        # Z4 rate-limited camera: table probe, locked streams, pacing
+        cid = "10.0.0.42_554"
+        cd.CAMERAS[cid] = {"id": cid, "ip": "10.0.0.42", "port": 554, "protocol": "RTSP",
+                           "name": "Garage", "mac_vendor": "Microseven Inc",
+                           "locked_streams": [{"path": "/13", "realm": "r"}, {"path": "/11"}, {"path": "/14"}]}
+        find.result = {554: "rtsp://10.0.0.42:554/11"}
+        details.clear()
+        details.update({"/12": {"stream_codec": "h264", "stream_width": 640, "stream_height": 352},
+                        "/13": {"stream_codec": "h264", "stream_width": 1280, "stream_height": 720},
+                        "/11": {"stream_codec": "hevc", "stream_width": 2560, "stream_height": 1440}})
+        calls["waits"].clear(); calls["validate"].clear()
+        st, body = await set_creds({"camera_id": cid, "username": "admin", "password": TRICKY_PASS})
+        c = cd.CAMERAS[cid]
+        check("Z4 rate-limited camera: the card says it is waiting, then ready",
+              st == 200 and c["status"] == "ready" and "Camera rate-limited" in c.get("status_text", ""))
+        # The stream-table check is not in this list: its pacing never runs
+        # (build plan B24). No check here pins that.
+        labels = [l for _, l in calls["waits"]]
+        check("Z4 ... the main ffprobe and each locked-stream check wait out the 5 s cooldown",
+              all(s == 5.0 for s, _ in calls["waits"]) and labels[0] == "non-ONVIF ffprobe"
+              and {"locked-stream-validate 1", "locked-stream-details 1",
+                   "locked-stream-validate 3"} <= set(labels), str(calls["waits"]))
+        check("Z4 ... table paths checked with the password percent-encoded, the main path skipped",
+              all("admin:p%40ss&w+rd%20%2350%25%20x@10.0.0.42:554/" in u for u in calls["validate"][0][1])
+              and not any(u.endswith("/11") for u in calls["validate"][0][1]))
+        check("Z4 ... main kept, the table's sub-stream added, one locked stream confirmed",
+              c["stream_url"] == "rtsp://10.0.0.42:554/11" and c["sub_stream_url"].endswith("10.0.0.42:554/12")
+              and [a["path"] for a in c["additional_streams"]] == ["/13"]
+              and [p.get("stream_width") for p in c["stream_profiles"]] == [2560, 640, 1280])
+        check("Z4 ... locked list kept when not entered from its badge",
+              len(c["locked_streams"]) == 3)
+        cd.CAMERAS[cid]["locked_streams"] = [{"path": "/14"}]
+        st, _ = await set_creds({"camera_id": cid, "username": "admin", "password": TRICKY_PASS,
+                                 "from_locked_streams_modal": True})
+        check("Z4 ... entered from the badge: locked list cleared", cd.CAMERAS[cid]["locked_streams"] == [])
+
+        # Z5 wrong password
+        find.result = {}
+        cd.CAMERAS[cid].update(status="needs_credentials", locked_streams=[])
+        cd.CAMERAS[cid].pop("status_text", None)
+        st, body = await set_creds({"camera_id": cid, "username": "admin", "password": "wrong"})
+        check("Z5 wrong password: 401, and the card back to its login form",
+              st == 401 and body["error"] == "Could not connect with those credentials."
+              and cd.CAMERAS[cid]["status"] == "needs_credentials" and "status_text" not in cd.CAMERAS[cid])
+
+        # Z6 MJPEG
+        cd.CAMERAS["m"] = {"id": "m", "ip": "10.0.0.43", "port": 8080, "protocol": "MJPEG", "name": "m"}
+        st, body = await set_creds({"camera_id": "m", "username": "u", "password": "p"})
+        check("Z6 MJPEG camera: the HTTP stream found", st == 200
+              and cd.CAMERAS["m"]["stream_url"] == "http://10.0.0.43:8080/video")
+
+        # Z7 DVR: one card per populated channel, in the background
+        started = []
+
+        async def fake_snap_loop(camera_id, url, camera_, native_res=False):
+            started.append(camera_id)
+        cd.CAMERAS.clear(); cd._DVR_ENUM_DONE.clear()
+        cid = "10.0.0.50_554"
+        cd.CAMERAS[cid] = {"id": cid, "ip": "10.0.0.50", "port": 554, "protocol": "RTSP",
+                           "name": "IP Camera", "rtsp_auth_realm": "Login to " + "ab" * 16}
+        find.result = {554: "rtsp://10.0.0.50:554/cam/realmonitor?channel=1&subtype=0"}
+        details.clear(); calls["validate"].clear()
+        with _Swap(snap_loop=fake_snap_loop):
+            st, body = await set_creds({"camera_id": cid, "username": "admin", "password": "pw"})
+            check("Z7 DVR: accepted, and the page told the channel list is coming",
+                  st == 200 and body["dvr_enumeration_pending"] is True)
+            req = JsonReq(match={"camera_id": cid})
+            for _ in range(80):
+                s = json.loads((await cd.api_dvr_enum_status(req)).body)
+                if s["done"]:
+                    break
+                await asyncio.sleep(0.1)
+            check("Z7 ... the status endpoint reports the populated channels",
+                  s == {"done": True, "populated_channels": ["1", "2", "3"]}, str(s))
+            enum_urls = [u for _, urls, label in calls["validate"] if label.startswith("channel-enum")
+                         for u in urls]
+            check("Z7 ... channels 2 to 16 walked, one address per socket",
+                  len(enum_urls) == 15 and all(len(urls) == 1 for _, urls, l in calls["validate"]
+                                               if l.startswith("channel-enum")))
+            ch2 = cd.CAMERAS.get("10.0.0.50_554_ch2", {})
+            check("Z7 ... a card per channel: its own snapshot, the parent's password, no password in the address",
+                  ch2.get("http_snap_url") == "http://10.0.0.50/cgi-bin/snapshot.cgi?channel=2"
+                  and ch2.get("credentials") == cd.CAMERAS[cid]["credentials"]
+                  and ch2.get("stream_url") == "rtsp://10.0.0.50:554/cam/realmonitor?channel=2&subtype=0"
+                  and ch2.get("name") == "Lorex / Dahua DVR-NVR Family ch2"
+                  and "10.0.0.50_554_ch3" in cd.CAMERAS, str(ch2)[:200])
+            check("Z7 ... each new card starts its thumbnail loop; the parent is renamed for its channel",
+                  sorted(started) == ["10.0.0.50_554_ch2", "10.0.0.50_554_ch3"]
+                  and cd.CAMERAS[cid]["name"] == "Lorex / Dahua DVR-NVR Family ch1", str(started))
+            n = len(cd.CAMERAS)
+            await cd._enumerate_dvr_channels_after_auth(cid)
+            check("Z7 ... a second run does nothing", len(cd.CAMERAS) == n)
+            await cd._enumerate_dvr_channels_after_auth("gone")
+            check("Z7 ... a deleted camera is marked done", "gone" in cd._DVR_ENUM_DONE)
+
+        # Z8 clear credentials
+        r = await cd.api_clear_credentials(JsonReq(match={"camera_id": "nope"}))
+        check("Z8 clear credentials: unknown camera 404", r.status == 404)
+        cd.CAMERAS["x"] = {"id": "x", "credentials": "c", "stream_url": "rtsp://u:p@10.0.0.9/1"}
+        await cd.api_clear_credentials(JsonReq(match={"camera_id": "x"}))
+        check("Z8 ... password and address password gone, card asks again",
+              cd.CAMERAS["x"] == {"id": "x", "credentials": None, "stream_url": "rtsp://10.0.0.9/1",
+                                  "requires_credentials": True, "status": "needs_credentials"})
+
+        # Z9 add a camera by hand
+        add = lambda d: cd.api_add_camera(JsonReq(d))
+        r1, r2 = await add(ValueError()), await add({"ip": " "})
+        check("Z9 add camera: unreadable 400, no address 400", r1.status == 400 and r2.status == 400)
+        r = await add({"ip": "10.0.0.60", "port": 554, "rtsp_path": "/13", "username": "u", "password": "p"})
+        c = cd.CAMERAS.get("10.0.0.60_554_manual", {})
+        check("Z9 ... a given RTSP path that answers: saved ready, password encrypted",
+              json.loads(r.body)["camera_id"] == "10.0.0.60_554_manual" and c.get("status") == "ready"
+              and c.get("stream_url") == "rtsp://10.0.0.60:554/13" and cd.decrypt_creds(c["credentials"]) == ("u", "p"))
+        find.result = {}
+        r = await add({"ip": "10.0.0.61", "port": 554})
+        check("Z9 ... nothing answers: 400 with the reason", r.status == 400
+              and "Could not connect to 10.0.0.61:554 via RTSP" in json.loads(r.body)["error"])
+        await add({"ip": "10.0.0.62", "port": 1935, "protocol": "rtmp"})
+        await add({"ip": "10.0.0.63", "port": 8443, "protocol": "ws-rtsp"})
+        check("Z9 ... RTMP gets its default path; WS-RTSP is an information card",
+              cd.CAMERAS["10.0.0.62_1935_manual"]["stream_url"] == "rtmp://10.0.0.62:1935/live/stream"
+              and cd.CAMERAS["10.0.0.63_8443_manual"]["status"] == "info"
+              and cd.CAMERAS["10.0.0.63_8443_manual"]["display"] == "ws-rtsp")
+
+        # Z10 Deep Re-Probe
+        rp = lambda c: cd.api_deep_reprobe(JsonReq(match={"camera_id": c}))
+        check("Z10 Deep Re-Probe: unknown camera 404", (await rp("nope")).status == 404)
+        cd.CAMERAS["d"] = {"id": "d", "ip": "10.0.0.70", "port": 554, "deep_reprobe_in_progress": True}
+        check("Z10 ... one at a time: 409", (await rp("d")).status == 409)
+
+        def find_locked(ip, port, u, p, meta):
+            meta["locked_streams"] = [{"path": "/a"}]
+            return "rtsp://10.0.0.70:554/live"
+        cd.CAMERAS["d"] = {"id": "d", "ip": "10.0.0.70", "port": 554, "early_bail_reason": "x"}
+        with _Swap(find_rtsp_path=find_locked):
+            body = json.loads((await rp("d")).body)
+        c = cd.CAMERAS["d"]
+        check("Z10 ... no saved walk: a fresh full probe; the card ready, the walk state cleared",
+              body["found_stream"] and body["outcome"] == "ready" and c["status"] == "ready"
+              and c["locked_streams"] == [{"path": "/a"}] and "early_bail_reason" not in c
+              and c["deep_reprobe_in_progress"] is False and c["deep_reprobe_attempts"] == 1, str(body))
+        resumed = []
+
+        def walk(ip, port, paths, u, p, t, *rest):
+            resumed.append(list(paths))
+            rest[2]["locked_streams"] = [{"path": "/b"}]
+            return None, True
+        cd.CAMERAS["d"] = {"id": "d", "ip": "10.0.0.70", "port": 554, "locked_streams": [{"path": "/a"}],
+                           "early_bail_reason": "layer1_consecutive_401s",
+                           "early_bail_paths_remaining": ["/b", "/c"],
+                           "early_bail_at": datetime_now_iso()}
+        with _Swap(_probe_rtsp_paths_single_socket=walk):
+            body = json.loads((await rp("d")).body)
+        check("Z10 ... a recent early stop: the walk resumes on the paths left; locked streams merged",
+              resumed == [["/b", "/c"]] and body["outcome"] == "locked_streams:2"
+              and [l["path"] for l in cd.CAMERAS["d"]["locked_streams"]] == ["/a", "/b"], str(body))
+        cd.CAMERAS["d"] = {"id": "d", "ip": "10.0.0.70", "port": 554,
+                           "early_bail_reason": "layer1_then_layer2_skipped_401s",
+                           "early_bail_paths_remaining": [], "early_bail_at": datetime_now_iso()}
+        with _Swap(probe_rtsp=lambda url, u="", p="", timeout=6.0: True):
+            body = json.loads((await rp("d")).body)
+        check("Z10 ... the skipped second stage runs: first address that answers",
+              body["found_stream"] and body["stream_url"] == "rtsp://10.0.0.70:554" + cd.RTSP_PATHS[0])
+        cd.CAMERAS["d"] = {"id": "d", "ip": "10.0.0.70", "port": 554,
+                           "early_bail_reason": "layer1_consecutive_401s",
+                           "early_bail_paths_remaining": ["/b"], "early_bail_at": "2000-01-01T00:00:00"}
+        calls["find"].clear()
+        await rp("d")
+        check("Z10 ... an old early stop: a fresh probe instead", calls["find"] == [("10.0.0.70", 554)])
+
+    # Z11 the stream table
+    check("Z11 stream table: the OUI vendor finds the recipe",
+          cd._match_stream_db_slug({"mac_vendor": "Microseven Inc"}) == "microseven"
+          and cd._match_stream_db({"mac_vendor": "Microseven Inc"})["snap"] == "/tmpfs/snap.jpg")
+    check("Z11 ... the longest keyword wins; nothing: None",
+          cd._match_stream_db_slug({"server_header": "Hipcam RealServer/V1.0"}) == "microseven"
+          and cd._match_stream_db_slug({"name": "Hikvision DS-2DE"}) == "hikvision"
+          and cd._match_stream_db_slug({}) is None and cd._match_stream_db({}) is None)
+    cd.CAMERAS.clear(); cd._DVR_ENUM_DONE.clear()
+
+
+def datetime_now_iso():
+    import datetime as _dt
+    return _dt.datetime.utcnow().isoformat()
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
-FAKE_BIN = Path(__file__).resolve().parent / "fake_go2rtc.py"
+FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
     import json, os, sys, threading, time
     from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -2212,6 +3133,11 @@ async def main():
     await test_http_identity()
     await test_empty_text()
     await test_scan()
+    await test_brand()
+    await test_page_builder()
+    await test_focus_more()
+    await test_snapshot_loop()
+    await test_credentials()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 
