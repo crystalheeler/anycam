@@ -128,7 +128,8 @@ Never write a real name, a screen name, a location, an IP address, a
 hostname, a MAC address or a device serial number of the owner's networks
 into the repository: not in the changelog, the code, comments, tests,
 documents, audit reports, commit messages or release notes. This is for
-privacy, and because a user cannot know what "the test system B" means.
+privacy, and because a user cannot know what a nickname for a private
+network means.
 
 - The owner is **CrystalHeeler**. Use no other name.
 - The two test networks are **test system A** and **test system B**.
