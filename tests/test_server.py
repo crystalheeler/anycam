@@ -1678,6 +1678,54 @@ async def test_location_check():
           "planned for a later version" in src and "planned for 2.6.8" not in src)
 
 
+# ── R. 3.0.0-rc1.0 no credentials in any log line (E4) ──────────────────────
+async def test_redaction():
+    print("\n[R] 3.0.0-rc1.0 credentials never reach the log")
+    r = cd._redact
+    check("R1 user:password@ removed",
+          r("open rtsp://admin:hunter2@10.0.0.33:554/ch1 ok") == "open rtsp://***@10.0.0.33:554/ch1 ok")
+    check("R1 a password with @ and : in it leaves nothing behind",
+          "p@ss" not in r("rtsp://admin:p@ss:w0rd@10.0.0.33/x") and "w0rd" not in r("rtsp://admin:p@ss:w0rd@10.0.0.33/x"))
+    check("R1 query credentials removed, the rest kept",
+          r("GET http://10.0.0.22/snap.jpg?chn=1&user=admin&password=hunter2&q=5")
+          == "GET http://10.0.0.22/snap.jpg?chn=1&user=***&password=***&q=5")
+    check("R1 usr= and pwd= (Hipcam style) removed",
+          r("http://10.0.0.22/tmpfs/snap.jpg?usr=admin&pwd=s3cret") == "http://10.0.0.22/tmpfs/snap.jpg?usr=***&pwd=***")
+    check("R1 two URLs on one line, and text after them, handled separately",
+          r("a rtsp://u:p@h1/x | b rtsp://h2/y mail me@example.com")
+          == "a rtsp://***@h1/x | b rtsp://h2/y mail me@example.com")
+    check("R1 nothing to remove: unchanged",
+          r("Motion [192.168.50.217_554_ch4]: 1.3% changed (threshold 1.0%)")
+          == "Motion [192.168.50.217_554_ch4]: 1.3% changed (threshold 1.0%)")
+    check("R2 _strip_creds: bounded to the host part",
+          cd._strip_creds("rtsp://admin:p@ss@10.0.0.33/ch1") == "rtsp://10.0.0.33/ch1"
+          and cd._strip_creds("rtsp://10.0.0.33/ch1 | note me@example.com") == "rtsp://10.0.0.33/ch1 | note me@example.com")
+
+    import io as _io
+    import logging as _logging
+    stream = _io.StringIO()
+    handler = _logging.StreamHandler(stream)
+    handler.addFilter(cd._credential_filter)
+    root = _logging.getLogger()
+    root.addHandler(handler)
+    cd._LOG_BUFFER.clear()
+    try:
+        cd.log.warning("ffmpeg: rtsp://admin:hunter2@10.0.0.33:554/ch1: Invalid data")
+        cd.log.warning("snap %s failed", "http://10.0.0.22/s.jpg?user=admin&password=hunter2")
+        _logging.getLogger("aiohttp.client").warning("Cannot connect to rtsp://root:hunter2@10.0.0.9/")
+    finally:
+        root.removeHandler(handler)
+    out = stream.getvalue()
+    check("R3 the filter covers AnyCam's lines, %-style arguments and library loggers",
+          "hunter2" not in out and out.count("***") == 4, out)
+    check("R3 the page's log panel (_LOG_BUFFER) is covered too",
+          cd._LOG_BUFFER and not any("hunter2" in e["msg"] for e in cd._LOG_BUFFER))
+    check("R3 every root handler carries the filter",
+          all(cd._credential_filter in h.filters for h in root.handlers
+              if type(h).__name__ in ("StreamHandler", "_BufHandler")),
+          str([(type(h).__name__, len(h.filters)) for h in root.handlers]))
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN = Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -1781,6 +1829,7 @@ async def main():
     await test_confirm()
     await test_acd_classic()
     await test_location_check()
+    await test_redaction()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

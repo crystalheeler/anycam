@@ -66,6 +66,41 @@ class _LevelFilter(logging.Filter):
 
 _level_filter = _LevelFilter()
 log.addFilter(_level_filter)
+
+
+# 3.0.0-rc1.0 (build plan E4): no credentials in any log line. Call sites
+# strip them where they know a URL carries them; this filter sits on the
+# handlers, so it also covers what they miss: library messages, exception
+# text, and lines copied from ffmpeg and go2rtc. Logs get sent for support.
+_CRED_USERINFO = re.compile(r"(?<=://)[^/\s]*@")
+_CRED_QUERY = re.compile(
+    r"(?i)([?&;](?:user|usr|username|login|pass|pwd|passwd|password|token|auth)=)[^&\s\"'<>|]*")
+
+
+def _redact(text: str) -> str:
+    """Remove user:password@ and password-style query values from text."""
+    if "@" in text:
+        text = _CRED_USERINFO.sub("***@", text)
+    if "=" in text:
+        text = _CRED_QUERY.sub(r"\1***", text)
+    return text
+
+
+class _CredentialFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except (TypeError, ValueError):      # bad format arguments: leave as is
+            return True
+        clean = _redact(message)
+        if clean != message:
+            record.msg, record.args = clean, None
+        return True
+
+
+_credential_filter = _CredentialFilter()
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_credential_filter)
 log.setLevel(logging.DEBUG)   # pass all to the filter; filter decides what shows
 logging.getLogger("aiohttp").setLevel(logging.WARNING)
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
@@ -587,6 +622,7 @@ class _BufHandler(logging.Handler):
                 _LOG_BUFFER.pop(0)
 
 _buf_handler = _BufHandler()
+_buf_handler.addFilter(_credential_filter)      # E4: the page's log panel too
 _buf_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
                                              datefmt="%H:%M:%S"))
 logging.getLogger().addHandler(_buf_handler)
@@ -3268,7 +3304,14 @@ def get_startup_mode() -> str:
     return "post_upgrade"
 
 def _strip_creds(url: str) -> str:
-    return re.sub(r"(://)[^@]+@", r"\1", url) if url else url
+    """Remove user:password@ from every URL in the text.
+
+    3.0.0-rc1.0 (E4): bounded to the URL's own host part. The old pattern
+    ran to the first "@" anywhere, so it kept the tail of a password that
+    holds "@", and in multi-line ffmpeg text it could remove unrelated
+    text up to a later "@".
+    """
+    return re.sub(r"(://)[^/\s]*@", r"\1", url) if url else url
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Network helpers
