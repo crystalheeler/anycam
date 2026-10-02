@@ -176,7 +176,7 @@ Motion detection works on the Lorex channels again without a viewer, and Enhance
 
 ### Known issues
 
-- The camera at 192.168.50.73:8765 takes about 20 s to start until the Oak-D add-on 2.4.2 is installed.
+- A camera that sends a keyframe only every 250 frames takes about 20 s to start.
 - Motion detection compares JPEG file sizes, so a sudden light change counts as motion.
 - Recordings are one file per motion event.
 - Opening the classic view still stops the card's stream.
@@ -239,7 +239,7 @@ disabling live view.
   planned (build plan C10).
 - A camera whose stream takes longer than 12 s to deliver its first
   complete frame falls back to the classic view with the same red message.
-  Seen on the H.264 camera at 192.168.50.73:8765 (build plan B13).
+  Seen on an H.264 camera with keyframes far apart (build plan B13).
 
 ## 2.6.3
 
@@ -6973,7 +6973,7 @@ Best-practice audit (required on this release):
   already use ffmpeg directly. go2rtc was running as a sidecar process that
   held the camera's single RTSP connection indefinitely, preventing snap_loop's
   ffmpeg from connecting and producing "Invalid data found when processing
-  input" on cameras with a one-session limit (confirmed: 10.1.1the Microseven).
+  input" on cameras with a one-session limit (confirmed: 10.0.0the Microseven).
   The camera was working in v1.8.0–v1.8.3 precisely because go2rtc was
   absent in that session — snap_loop was the only RTSP client.
 - Removed from Dockerfile: go2rtc binary download, BUILD_ARCH arg, wget

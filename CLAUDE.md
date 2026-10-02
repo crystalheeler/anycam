@@ -122,6 +122,22 @@ is in AnyCam's code — not the camera, the network, the OS, or a brand quirk.
 Search prior conversation logs for the working behavior before treating an
 external system as the cause.
 
+## 9. No real names, locations or addresses
+
+Never write a real name, a screen name, a location, an IP address, a
+hostname, a MAC address or a device serial number of the owner's networks
+into the repository: not in the changelog, the code, comments, tests,
+documents, audit reports, commit messages or release notes. This is for
+privacy, and because a user cannot know what "the test system B" means.
+
+- The owner is **CrystalHeeler**. Use no other name.
+- The two test networks are **test system A** and **test system B**.
+- Name a device by what it is: "the Lorex DVR", "the Hikvision PTZ", "the
+  Microseven", "the Oak-D camera". Not by its address or part of it.
+- Examples and tests use made-up addresses (`10.0.0.x`, `192.168.50.x`).
+- A log line quoted in a document gets the same treatment before it is
+  pasted.
+
 ---
 
 ## Coding standards
@@ -168,22 +184,26 @@ Structure:
 
 ## Test environment
 
-**HAOS** at `172.16.0.35:8123`, Raspberry Pi 4 (aarch64). Hardware decode
+**Home Assistant OS** on a Raspberry Pi 4 (aarch64). Hardware decode
 via rpivid — the correct overlay line in `/boot/firmware/config.txt` is
 `dtoverlay=rpivid-v4l2`, with the `-v4l2` suffix.
 
-**test system A** (`10.0.0.0/26`)
-- `.12` TP-Link Tapo (OUI-only, card suppressed)
-- `.13` / `.14` UniFi (OUI-only, suppressed)
-- `.22` Microseven Hipcam — HTTP-polled at ~1 fps historically; per-IP TCP
+The real addresses of the test devices are not written in this repository
+(rule 9). Logs show them; the session's private notes map them to the
+names below.
+
+**Test system A**
+- TP-Link Tapo (OUI-only, card suppressed)
+- Two UniFi devices (OUI-only, suppressed)
+- Microseven Hipcam — HTTP-polled at ~1 fps historically; per-IP TCP
   rate limit, 5s brand cooldown; prone to firmware lockout
-- `.33` Hikvision DS-2DE4A425IW-DE PTZ — HEVC main, MJPEG sub, ONVIF
+- Hikvision DS-2DE4A425IW-DE PTZ — HEVC main, MJPEG sub, ONVIF
   returns 0 profiles
 
-**test system B** (`192.168.1.0/24`)
-- `.217` Lorex/Dahua DVR-NVR (D861A8B-Z, 8ch), channels ch2–ch8 populated
-- `.73:8765` H.264 stream from CrystalHeeler's own Oak-D camera add-on
-  (`<project folder>`), not a third-party camera
+**Test system B**
+- Lorex/Dahua DVR-NVR (D861A8B-Z, 8ch), channels ch2–ch8 populated
+- An H.264 stream on port 8765 from CrystalHeeler's own Oak-D camera
+  add-on, not a third-party camera
 
 ## Known device behavior
 

@@ -495,8 +495,7 @@ def story_262():
              "acceptance list from that audit still applies in full."]),
          h1("Acceptance"),
          *bullets([
-             "The image builds and the addon starts on HAOS at "
-             "172.16.0.35:8123.",
+             "The image builds and the addon starts on Home Assistant OS.",
              "The build log carries 'ffmpeg resolved to:' followed by "
              "8:5.1.9-0+deb12u1+rpt1 or later, from the rpt archive.",
              "Hardware decode still works. The rpt suffix confirms the Pi "

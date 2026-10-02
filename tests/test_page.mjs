@@ -202,7 +202,7 @@ check('timeout is NOT remembered: next open tries live view again', !declined()[
 s = mount();
 advance(23000);
 ev('playing');
-check('the .73 case: first frame at 23 s plays live', live() && live().played === true);
+check('the Oak-D camera case: first frame at 23 s plays live', live() && live().played === true);
 check('loading message hidden on the first frame', loading() === 'none');
 
 s = mount();

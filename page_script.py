@@ -147,7 +147,7 @@ const _snapErrors  = {};   // camId → consecutive error count
 const _snapErrSince = {};  // camId → time of the first error in the run
 // 2.6.5 (B14): the server answers 503 while a camera's stream is still
 // starting, so errors alone do not mean the stream failed. The H.264 camera
-// at 192.168.50.73:8765 took up to 28 s to its first frame (2026-09-29 log),
+// with keyframes far apart took up to 28 s to its first frame (2026-09-29 log),
 // and one 30 s read timeout plus a retry takes about 60 s. Say "Stream
 // unavailable" only after 90 s of errors.
 const SNAP_UNAVAILABLE_MS = 90000;
@@ -824,7 +824,7 @@ async function resetCamSettings() {
  * After the first frame it never falls back on its own.
  *
  * 2.6.5: 30 s, up from 12 s. A player cannot draw until the stream's first
- * keyframe. The H.264 camera at 192.168.50.73:8765 took 19 to 28 s to its
+ * keyframe. An H.264 camera with keyframes far apart took 19 to 28 s to its
  * first frame on every connection in the 2026-09-29 log, so 12 s always
  * failed there.
  */
