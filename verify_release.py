@@ -173,6 +173,9 @@ CONTRACTS = {
     "_motion_decide":        ["_motion_judge", "MOTION_LIGHT_HOLD_S", "MOTION_CONFIRM_S",
                               "MOTION_INSTANT_PCT", 'ms["recording"]', "repeat"],
     "_cam_file_tag":         ['camera.get("channel")'],
+    # 3.0.0-rc1.0 (E4): credentials never reach a log line.
+    "_redact":               ["_CRED_USERINFO", "_CRED_QUERY"],
+    "_strip_creds":          ["[^/"],
     "_motion_feed":          ["MOTION_REF_S", "_motion_decide", "_start_recording", "stream_t",
                               "_motion_tick"],
     "_motion_tick":          ["_stop_recording", "_motion_quiet"],
