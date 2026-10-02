@@ -1,3 +1,19 @@
+## 3.0.0-rc1.2
+
+Code structure release, third step. AnyCam does the same things.
+
+### Changes & improvements
+
+- **The go2rtc code is in its own file** (`anycam_go2rtc.py`, 434 lines): the supervisor, stream registration, the live-view proxy and the card stream. The main file went from 11,667 lines to 11,299.
+- **Every moved function is unchanged.** All 362 definitions were compared with 3.0.0-rc1.1: none is missing and none differs. The built page and the list of web addresses are identical.
+- **One new release check** stops a file from importing a value that its owner replaces while AnyCam runs.
+
+### Known issues
+
+- **HTTP identity check not working since 2.4.0-rc1.0** (`probe_http_identity` lost its first line). The fix is the next build, 3.0.0-rc1.3.
+- The scan, the password entry path, the snapshot loop and the Enhanced View engine are still in the main file.
+- The tests do not cover the network scan, the password entry path or most of the snapshot loop.
+
 ## 3.0.0-rc1.1
 
 Code structure release, second step. AnyCam does the same things.

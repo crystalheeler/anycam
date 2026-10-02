@@ -8,8 +8,8 @@ Since 3.0.0-rc1.0 the add-on is several Python files, listed in
 `anycam_modules.py`: `camera_discovery.py` (entry point and logic),
 `camera_db.py` (camera tables), `page_script.py` (the page's JavaScript),
 `anycam_motion.py` (motion detection, recording, night boost),
-`anycam_storage.py` (the Storage tab), `anycam_host.py` (the link between
-them). A new file must be added to `anycam_modules.py` and to the
+`anycam_go2rtc.py` (go2rtc), `anycam_storage.py` (the Storage tab),
+`anycam_host.py` (the link between them). A new file must be added to `anycam_modules.py` and to the
 Dockerfile's COPY lines; the release gate checks both. Package with
 `python package_release.py`.
 
@@ -23,6 +23,12 @@ needs from `camera_discovery.py` in two ways, both in `anycam_host.py`:
 - `H.name`: read at the moment of use. Required for a value that
   `camera_discovery.py` replaces while it runs (`_FOCUSED_CAMERA`,
   `_FOCUS_ENGINE`, anything assigned under a `global` statement).
+
+The same rule applies between any two files: never `from X import name`
+for a name that X assigns under a `global` statement; read `X.name`
+(`anycam_go2rtc._GO2RTC_READY`). The Enhanced View engine
+(`_focus_set_go2rtc`, `handle_focus_set`, `handle_focus_clear`) stays in
+`camera_discovery.py` because it replaces `_FOCUSED_CAMERA`.
 
 The release gate fails on a NEEDS name that is replaced at run time, and
 `tests/check_names.py` fails on a name a function uses that is not there.

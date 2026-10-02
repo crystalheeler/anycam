@@ -23,6 +23,7 @@ from aiohttp import web
 from pathlib import Path
 
 from anycam_host import H
+from anycam_go2rtc import _go2rtc_profiles      # 3.0.0-rc1.2: it moved there
 
 log = logging.getLogger("anycam")
 
@@ -31,7 +32,7 @@ NEEDS = (
     'CAMERAS', 'CARD_MAX_WIDTH', 'CFG_MOTION_CLIP_S', 'CFG_MOTION_COOL',
     'CFG_MOTION_GLOBAL', 'CFG_MOTION_LEVEL', 'CFG_MOTION_PAD', 'CFG_RECORDINGS',
     'DATA_DIR', 'MEDIA_DIR', 'MOTION_FILE', '_brand_throttle_seconds',
-    '_dahua_sub_stream', '_drain_stderr', '_go2rtc_profiles', '_snap_last_access',
+    '_dahua_sub_stream', '_drain_stderr', '_snap_last_access',
     '_snap_state', '_stop_proc', '_throttle_wait_if_needed', 'build_authenticated_url',
     'snap_loop',
 )
