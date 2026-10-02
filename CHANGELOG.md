@@ -10,7 +10,7 @@ Code structure release, third step. AnyCam does the same things.
 
 ### Known issues
 
-- **HTTP identity check not working since 2.4.0-rc1.0** (`probe_http_identity` lost its first line). The fix is the next build, 3.0.0-rc1.3.
+- **`probe_http_identity` lost its first line in 2.4.0-rc1.0**; the one scan step that calls it fails quietly. The fix is the next build, 3.0.0-rc1.3.
 - The scan, the password entry path, the snapshot loop and the Enhanced View engine are still in the main file.
 - The tests do not cover the network scan, the password entry path or most of the snapshot loop.
 
@@ -26,7 +26,7 @@ Code structure release, second step. AnyCam does the same things.
 
 ### Known issues
 
-- **HTTP identity check not working since 2.4.0-rc1.0** (`probe_http_identity` lost its first line). The fix is planned for the build right after 3.0.0.
+- **`probe_http_identity` lost its first line in 2.4.0-rc1.0**; the one scan step that calls it fails quietly. The fix is planned.
 - The go2rtc code, the scan, the password entry path and the snapshot loop are still in the main file.
 - The tests do not cover the network scan, the password entry path or most of the snapshot loop.
 
@@ -48,7 +48,7 @@ Code structure release. AnyCam does the same things; the code is split into file
 
 ### Known issues
 
-- **HTTP identity check not working since 2.4.0-rc1.0.** The function `probe_http_identity` lost its first line, so the scan's brand detection from a camera's web page fails. Found by the new undefined-name check. Not changed in this build.
+- **`probe_http_identity` lost its first line in 2.4.0-rc1.0.** The scan calls it only for a device that answers ONVIF discovery and has no card from the port scan; that call then fails quietly. Found by the new undefined-name check. Not changed in this build.
 - The tests do not cover the network scan, the password entry path or most of the snapshot loop.
 - Skip Non-Reference Frames breaks H.264 cameras.
 
