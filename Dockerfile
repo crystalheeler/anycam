@@ -162,8 +162,9 @@ COPY camera_discovery.py /
 # the release gate fails if one is missing here).
 COPY camera_db.py page_script.py /
 COPY anycam_brand.py anycam_focus.py anycam_go2rtc.py /
+COPY anycam_probe.py anycam_scan.py anycam_snap.py /
+COPY anycam_storage.py /
 COPY anycam_host.py anycam_motion.py anycam_page.py /
-COPY anycam_probe.py anycam_scan.py anycam_storage.py /
 COPY www/video-rtc.js /www/video-rtc.js
 
 RUN chmod +x /run.sh
