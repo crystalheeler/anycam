@@ -548,5 +548,29 @@ console.log('\n[R] motion state mirrored from the server');
         && DOM['cs-global'].style.display === 'none');
 }
 
+// 3.0.0-rc1.4 (B21): the empty page's text while a scan runs
+{
+  const src = name => {
+    const m = page.match(new RegExp('function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?\\n\\}'));
+    return m ? m[0] : null;
+  };
+  const fnText = [src('_updateCancelBtn'), src('_setEmptyText')];
+  check('empty page: both functions are in the page script', fnText.every(Boolean));
+  ['scan-cancel-btn', 'empty-idle', 'empty-scanning'].forEach(id => { DOM[id] = el(id); });
+  g(fnText.join('\n'));
+  g('_updateCancelBtn(true)');
+  check('empty page: a scan is running -> "No Cameras Found Yet", no "Click Scan Network"',
+        DOM['empty-idle'].style.display === 'none' && DOM['empty-scanning'].style.display === ''
+        && DOM['scan-cancel-btn'].style.display === '');
+  g('_updateCancelBtn(false)');
+  check('empty page: no scan running -> the "Click Scan Network" text',
+        DOM['empty-idle'].style.display === '' && DOM['empty-scanning'].style.display === 'none'
+        && DOM['scan-cancel-btn'].style.display === 'none');
+  delete DOM['empty-idle']; delete DOM['empty-scanning'];
+  let threw = false;
+  try { g('_setEmptyText(true)'); } catch (e) { threw = true; }
+  check('empty page: no error when the elements are not on the page', !threw);
+}
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

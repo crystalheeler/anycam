@@ -329,6 +329,17 @@ const _origPollScan = typeof pollScan !== 'undefined' ? pollScan : null;
 function _updateCancelBtn(running) {
   const btn = document.getElementById('scan-cancel-btn');
   if (btn) btn.style.display = running ? '' : 'none';
+  _setEmptyText(running);
+}
+
+// 3.0.0-rc1.4 (B21): while a scan runs, the empty page says "No Cameras
+// Found Yet". "Click Scan Network" shows only when no scan is running, for
+// example after every camera is removed.
+function _setEmptyText(scanning) {
+  const idle = document.getElementById('empty-idle');
+  const busy = document.getElementById('empty-scanning');
+  if (idle) idle.style.display = scanning ? 'none' : '';
+  if (busy) busy.style.display = scanning ? '' : 'none';
 }
 
 /* ── Log view ──────────────────────────────────────────────────────────────── */
