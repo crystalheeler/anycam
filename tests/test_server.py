@@ -36,8 +36,31 @@ def repo_source() -> str:
 
 
 spec = importlib.util.spec_from_file_location("cd", REPO / "camera_discovery.py")
-cd = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(cd)
+_main = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(_main)
+_PARTS = [_main] + [sys.modules[Path(m).stem] for m in MODULES[1:] if Path(m).stem in sys.modules]
+
+
+class _AddOn:
+    """The add-on's files seen as one namespace, as before the module split.
+
+    Reading finds a name in whichever file defines it. Writing replaces it in
+    every file that holds it, so a test's stand-in reaches every caller: a
+    function that moved to another file looks the name up in that file.
+    """
+
+    def __getattr__(self, name):
+        for part in _PARTS:
+            if name in vars(part):
+                return vars(part)[name]
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        for part in [p for p in _PARTS if name in vars(p)] or [_main]:
+            setattr(part, name, value)
+
+
+cd = _AddOn()
 
 import aiohttp
 from aiohttp import web, WSMsgType

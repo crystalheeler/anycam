@@ -46,7 +46,9 @@ def _tables(table):
 def undefined_names(path: Path) -> list[tuple[str, int, str]]:
     """(function, line, name) for each global name with no definition."""
     source = path.read_text(encoding="utf-8")
-    module = _load(path)
+    # camera_discovery.py is checked first; loading it loads the other files
+    # and gives them the names they take from it (anycam_host.bind).
+    module = sys.modules.get(path.stem) or _load(path)
     top = symtable.symtable(source, str(path), "exec")
     known = set(vars(module)) | set(dir(builtins))
     # A name some function creates with `global X; X = ...` exists at run time.

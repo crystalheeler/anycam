@@ -10,6 +10,9 @@ for single-camera focus, hardware-accelerated decode, and PTZ control.
 camera_discovery.py     Main application: entry point and logic
 camera_db.py            Camera tables (brands, stream paths, known behaviour)
 page_script.py          The page's JavaScript
+anycam_motion.py        Motion detection, motion recording, night boost
+anycam_storage.py       The Storage tab
+anycam_host.py          Connects the files above to camera_discovery.py
 anycam_modules.py       The list of the files above
 package_release.py      Builds _build/camera_discovery-<version>.zip
 config.yaml             Addon manifest and options schema
