@@ -1,123 +1,28 @@
 ## 2.6.7
 
-Night boost: when a camera switches to night vision (infrared, black and
-white), its motion sensitivity goes up by 15 on its own, and back down
-when colour returns. AnyCam also checks the switch against sunrise and
-sunset at your Home Assistant home location, and tells you when a camera
-does not switch.
+Night boost for motion detection, and insects and infrared switches no longer start recordings.
 
-Also from CrystalHeeler's overnight test: insects near the lens and the
-infrared-colour switch no longer start recordings, and recording names
-start with the camera, for example LorexCH4_20261001_053358.mp4.
+### Changes & improvements
 
-### Insects and infrared switches (CrystalHeeler, 2026-10-01)
+- **Night boost.** When a camera switches to infrared, its motion sensitivity rises by 15 (a camera set to 80 works at 95), and returns when colour returns.
+- **Sunrise and sunset check.** A camera that has not switched within 1 hour of sunset or sunrise is reported in the log, in its cog panel and as a Home Assistant notification.
+- **Cog panel shows the mode:** "Night mode (IR): sensitivity +15" or "Day mode".
+- **Recording names start with the camera:** `LorexCH4_20261001_053358.mp4`.
+- **New permission: Home Assistant API.** Used to read the home location and to create the notification. Home Assistant asks you to accept it on update.
 
-Overnight at sensitivity 99, 11 of the 22 ch4 recordings were insects,
-and ch7 recorded two infrared-colour switches at 06:20 and 06:22.
+### Bugs fixed
 
-- **Insects.** Each one was a blurred streak, lit by the infrared, in a
-  single picture (1/7 s). On the live stream a recording now needs a
-  second changed picture within 0.5 s. A single picture with 3% or more
-  of the picture changed (a cat dashing past) records one picture later.
-- **Echoes.** The log showed one insect as two or three changes in a row
-  (01:48:17: 1.1%, 1.1%, 1.1%). Pictures arrive from ffmpeg in bursts,
-  and each comparison picked its reference by arrival time, so a burst
-  compared several pictures with the same insect picture. The reference
-  is now exactly 4 pictures back in the stream. Exact repeats of a
-  picture do not count.
-- **Infrared switches.** A switch spreads over about a second of
-  comparisons, and some stayed under the 75% light rule: 69%, 75%, and a
-  half-switched first picture at 19%. After a light change, nothing
-  counts for 2 s, and a light change cancels a change waiting for its
-  second picture.
-- **Result,** replaying last night's 45 recordings through the new code,
-  7 sampling offsets each: 11 of 12 insect clips never record, 1 records
-  in 1 of 7; both switches 0 of 7. Real events: the child on the bike at
-  07:01:53 7 of 7, the cat at 03:08:48 4 of 7, a person standing on the
-  porch at 06:59:10 5 of 7, the other 29 all 7 of 7. The log shows the
-  live detector saw the child in 4 pictures in a row at 1.1% to 1.2%.
-- **Snapshot cameras** (no usable live stream) compare once a second, so
-  they keep recording on one changed picture; they get the 2 s light hold.
-- **Log lines:** "changed in one picture only — not recorded"; the tuning
-  line counts single-picture changes and repeated pictures.
+- **Insects near the lens started recordings** (11 of 22 on one camera overnight). A recording now needs a second changed picture within 0.5 s, or one picture with 3% or more changed.
+- **An infrared-colour switch started a recording.** After a light change, nothing counts for 2 s.
+- **One change counted two or three times** when pictures arrived in a burst. Each picture is now compared with the one exactly 1 s earlier in the stream.
 
-### Recording names
+### Known issues
 
-- Files start with a short camera tag: the first word of the camera's
-  name, then the DVR channel or the last part of the IP address.
-  Examples: LorexCH4_20261001_053358.mp4, Hikvision33_..., Camera73_...
-  "motion_" is gone (CrystalHeeler's choice A). Split events keep _part01,
-  _part02.
-
-### Why (build plan C15)
-
-CrystalHeeler's log of 2026-10-01, 22:27 to 23:03, sensitivity 98 (1.1% of the
-picture): on ch4 a person walking toward the camera from far away changed
-0.6 to 0.7% of the picture for 6 to 8 s before reaching 1.1%. Even
-sensitivity 100 needs 1%. A still night scene peaked at 0.1% (median of
-the minute peaks) and 0.7% (highest).
-
-### How it works
-
-- **Night is read from the picture.** The detection stream now carries
-  colour as well as brightness. Under infrared the colour is close to
-  zero. A camera counts as at night when the colour measure stays at or
-  under 2.5 for 30 s, and at day when it stays at or over 5.0 for 30 s.
-  Values between change nothing. Snapshot-only cameras use the same
-  measure on each JPEG.
-- **It runs all the time,** not only near sunrise and sunset, so a storm
-  that turns a camera to infrared at 3 pm also gets the boost.
-- **The boost.** At night, a camera set to 80 works at 95. The scale
-  continues past 100: 105 is 0.80% of the picture, 115 is 0.52%, and
-  nothing goes under 0.4%. In daytime the slider means what it says.
-- **Readings stay in slider units.** The tuning line and the cog's live
-  reading give the setting you would need on the slider. At night a
-  0.65% change reads "records at 95 or higher". The tuning line also
-  shows the mode ("day" or "night +15") and the colour value, for
-  calibrating the 2.5 and 5.0 thresholds.
-- **The cog panel** shows "Night mode (IR): sensitivity +15" or "Day
-  mode: sensitivity as set" for an armed camera.
-
-### The sunrise and sunset check
-
-- AnyCam reads the home location from Home Assistant (Settings, System,
-  General). It asks every 5 minutes until it gets an answer, then every
-  12 hours. Sunrise and sunset come from the US Naval Observatory's
-  almanac formula; tests against London, Sydney and Denver agree with
-  published times to within 4 minutes.
-- One hour after each sunset, a camera that was watched through the
-  whole two-hour window and has not switched to infrared is reported.
-  The same applies one hour after sunrise for a camera still in
-  infrared. Possible causes: lights on the area, a camera set to stay in
-  colour or in black and white, or a fault.
-- **Reports go three ways:** a warning in the add-on log, a note in the
-  camera's cog panel, and a Home Assistant notification (the bell). One
-  report per camera per event; the note clears when the camera switches
-  or the next check finds it in the expected mode.
-- A switch outside those windows is logged as information, with "outside
-  the usual time (dark weather, or lights)".
-
-### Permissions
-
-- **New: Home Assistant API access** (`homeassistant_api: true`). AnyCam
-  uses it for two calls only: reading the home location
-  (`GET /api/config`) and creating a notification
-  (`persistent_notification.create`). Home Assistant asks you to accept
-  the new permission when you update.
-
-### Tests
-
-- 261 server checks (57 new) and 110 page checks (4 new) pass. The
-  detector's frame format changed from grey (3,072 bytes) to YUV 4:2:0
-  (4,608 bytes); the stand-in ffmpeg in the tests now sends that format.
-- Not tested here: a real camera's colour values under infrared. No
-  ffmpeg is installed on the build PC. The colour value in the tuning
-  line is there to check the thresholds in the field.
-
-### Also
-
-- The recording-folder help in the cog panel now says SFTP and FTP
-  upload are planned for 2.6.8 (it said 2.6.7).
+- The night and day colour thresholds are estimates; the tuning log line shows the colour value for checking.
+- A fast animal in view for under 0.5 s and under 3% of the picture is not recorded.
+- Several insects at once can still start a recording.
+- Snapshot-only cameras still record on one changed picture.
+- Skip Non-Reference Frames breaks H.264 cameras.
 
 ## 2.6.6
 
