@@ -1,3 +1,19 @@
+## 3.0.0-rc1.4
+
+The scan code moves to its own files, now with tests, and the empty page has clearer text.
+
+### Changes & improvements
+
+- **Empty page text.** While a scan runs and no camera is found yet, the page says "No Cameras Found Yet". "Click Scan Network" shows only when no scan is running.
+- **The scan has tests.** 25 new checks run the real scan against a made-up network: which hosts it probes and in what order, one card for each device, a device found by ONVIF only, and what happens when the scan fails.
+- **The scan is in its own file** (`anycam_scan.py`, 2,040 lines) and the stream probers are in `anycam_probe.py` (2,657 lines). The main file went from 11,303 lines to 6,780.
+- **Every moved function is unchanged.** All 363 definitions were compared with the code before the move: none is missing and none differs. The built page and the list of web addresses are identical.
+
+### Known issues
+
+- **The Cancel button does not stop a scan.** It sets one flag, and the scan reads another. Found while writing the scan tests. Not changed in this build.
+- The password entry path, the snapshot loop and the Enhanced View engine are still in the main file, and the tests do not cover them.
+
 ## 3.0.0-rc1.3
 
 One bug fix: a scan function that lost its first line in 2.4.0-rc1.0 works again.

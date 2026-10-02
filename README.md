@@ -12,6 +12,8 @@ camera_db.py            Camera tables (brands, stream paths, known behaviour)
 page_script.py          The page's JavaScript
 anycam_motion.py        Motion detection, motion recording, night boost
 anycam_go2rtc.py        go2rtc: supervisor, streams, live-view proxy
+anycam_probe.py         Stream probers, the RTSP fingerprint, ONVIF calls
+anycam_scan.py          The network scan
 anycam_storage.py       The Storage tab
 anycam_host.py          Connects the files above to camera_discovery.py
 anycam_modules.py       The list of the files above

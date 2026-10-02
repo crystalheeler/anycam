@@ -8,8 +8,9 @@ Since 3.0.0-rc1.0 the add-on is several Python files, listed in
 `anycam_modules.py`: `camera_discovery.py` (entry point and logic),
 `camera_db.py` (camera tables), `page_script.py` (the page's JavaScript),
 `anycam_motion.py` (motion detection, recording, night boost),
-`anycam_go2rtc.py` (go2rtc), `anycam_storage.py` (the Storage tab),
-`anycam_host.py` (the link between them). A new file must be added to `anycam_modules.py` and to the
+`anycam_go2rtc.py` (go2rtc), `anycam_probe.py` (stream probers and ONVIF
+calls), `anycam_scan.py` (the network scan), `anycam_storage.py` (the
+Storage tab), `anycam_host.py` (the link between them). A new file must be added to `anycam_modules.py` and to the
 Dockerfile's COPY lines; the release gate checks both. Package with
 `python package_release.py`.
 
@@ -236,9 +237,9 @@ of whose items have shipped (see its Done section). Standing reminders:
   before any coding** (build plan C3).
 - `STREAM_DB` → `CAMERA_DB` consolidation and runtime use of
   `default_ports` need a plan document first (build plan D2).
-- The tests are in `tests/` since 3.0.0-rc1.0 (build plan E7). They do not
-  cover the scan, the password entry path or most of the snapshot loop;
-  add tests before changing those (build plan E1, stage 3).
+- The tests are in `tests/` since 3.0.0-rc1.0 (build plan E7). They cover
+  the scan since 3.0.0-rc1.4. They do not cover the password entry path or
+  most of the snapshot loop; add tests before changing those (build plan E1).
 
 ## Repository notes
 
