@@ -474,13 +474,20 @@ async def test_265():
         cd._FOCUSED_CAMERA = None; cd._FOCUS_ENGINE = None
         st = cd._snap_state("cam1")
         st["frame"], st["frame_time"], st["frame_count"] = b"\xff\xd8thumb\xff\xd9", time.monotonic(), 500
-        cd._FOCUS_ADAPTIVE["cam1"] = {"tier_idx": 3, "locked": True, "manual_override": True,
+        cd._FOCUS_ADAPTIVE["cam1"] = {"tier_idx": 3, "locked": True,
                                       "restarts_since_lock": 2, "run_start": 1.0}
         await cd.handle_focus_set(make_mocked_request(
             "POST", "/snap/focus/cam1", match_info={"camera_id": "cam1"}))
         ada = cd._FOCUS_ADAPTIVE["cam1"]
-        check("G1 legacy entry drops a manual tier from an older page",
-              "manual_override" not in ada and ada["tier_idx"] == 0 and ada["locked"] is False, str(ada))
+        check("G1 entry keeps a learned adaptive lock and resets its restart count",
+              ada["tier_idx"] == 3 and ada["locked"] is True
+              and ada["restarts_since_lock"] == 0 and ada["run_start"] is None, str(ada))
+        _src = (REPO / "camera_discovery.py").read_text(encoding="utf-8")
+        check("G1 3.0.0-rc1.0: manual-tier endpoints, their flag and the old stream endpoint are gone",
+              not any(x in _src for x in ("handle_focus_set_tier", "handle_focus_profiles",
+                                          "/snap/focus/tier", "/snap/focus/profiles",
+                                          "tier_change_kill", "manual_override",
+                                          "def handle_stream(", '"/stream/{camera_id}"')))
         check("G1 frame base recorded at entry", st.get("focus_frame_base") == 500)
 
         async def snap_headers():

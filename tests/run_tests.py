@@ -65,7 +65,17 @@ def run_page() -> bool:
     return r.returncode == 0
 
 
+def run_names() -> bool:
+    print("== undefined names (tests/check_names.py)", flush=True)
+    r = subprocess.run([sys.executable, str(HERE / "check_names.py")], cwd=REPO,
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       env={**os.environ, "PYTHONUTF8": "1"}, timeout=300)
+    for line in _tail(r.stdout + r.stderr, r"FAIL|names:|Traceback|Error:"):
+        print("  " + line.strip())
+    return r.returncode == 0
+
+
 if __name__ == "__main__":
-    results = [run_server(), run_page()]
+    results = [run_names(), run_server(), run_page()]
     print("ALL TESTS PASSED" if all(results) else "TESTS FAILED")
     sys.exit(0 if all(results) else 1)

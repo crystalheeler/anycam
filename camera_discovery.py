@@ -6966,7 +6966,6 @@ def _kill_hw_preheater(state: dict) -> None:
     Called from:
       - snap_loop outer restart loop, before launching a new proc pair
         (clears stale state from a prior iteration that exited)
-      - handle_focus_set_tier, alongside the existing primary proc kill
       - handle_focus_clear (focus-leave), same
       - snap_loop end-of-function cleanup
 
@@ -7541,29 +7540,6 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
                     if not chunk:
                         rc = proc.returncode
-                        # 2.6.0-rc2.6 — intentional-kill gate. proc.kill()
-                        # called by handle_focus_set_tier produces an EOF
-                        # on stdout that looks identical to ffmpeg dying
-                        # on its own. Without this check, the HW EOF
-                        # fallback below treated tier-change kills as HW
-                        # failures, counted them against the per-session
-                        # skip budget, and silently relaunched in SW
-                        # (preserving the new tier's fps/profile but
-                        # losing HW decode). rc2.5 elapsed-time logs
-                        # exposed it: "hw EOF (rc=None, elapsed=2.2s) →
-                        # sw" right after "killed ffmpeg to apply manual
-                        # tier change" — 2.2s is too fast to be a real
-                        # HW death, the kill came from the tier handler.
-                        # Break out of the inner read loop on an
-                        # intentional kill; the outer restart loop picks
-                        # up the new tier from _FOCUS_ADAPTIVE and
-                        # launches it with a fresh HW attempt.
-                        if state.pop("tier_change_kill", None):
-                            log.info(f"SNAP [{camera_id}]: ffmpeg killed "
-                                     f"by tier change after {frames} "
-                                     f"frames (rc={rc}) — outer loop "
-                                     f"will relaunch with new tier")
-                            break
                         if hw_tried and frames == 0:
                             # 2.6.6 (B9): EOF, so ffmpeg is exiting; see _stop_proc.
                             await _stop_proc(proc, exited_grace=1.0, timeout=2)
@@ -7968,11 +7944,10 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 run_dur   = time.monotonic() - run_start
                 locked    = ada.get("locked", False)
 
-                # Skip adaptive stepping if:
-                # (a) user manually pinned the tier (manual_override), or
-                # (b) Adaptive Quality is disabled in config — in that case the
-                #     ladder exists for manual use only; the system never auto-steps.
-                if ada.get("manual_override") or not CFG_ADAPTIVE_QUALITY:
+                # Skip adaptive stepping when Adaptive Quality is disabled in
+                # config: the system never auto-steps then. (3.0.0-rc1.0: the
+                # manual tier pin went with its endpoints, build plan E8.)
+                if not CFG_ADAPTIVE_QUALITY:
                     fast_death       = False
                     restart_overflow = False
                 else:
@@ -7984,18 +7959,9 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 # Count restarts at locked tier
                 if locked:
                     ada["restarts_since_lock"] = ada.get("restarts_since_lock", 0) + 1
-                # Never step down if the user manually pinned the tier —
-                # the adaptive system must not override an explicit user choice
-                # (e.g. HEVC firmware bug causes repeated crashes but user wants
-                # this tier regardless).
-                # 2.4.0-rc3.1: Block B parallels Block A's gating. Previously
-                # this only checked manual_override and would set
-                # restart_overflow=True even when CFG_ADAPTIVE_QUALITY was
-                # off — meaning the system auto-stepped on repeated restarts
-                # despite the user disabling Adaptive Quality. The fast-death
-                # path in Block A correctly respected the toggle; this path
-                # didn't. Now both paths use the same gate.
-                if ada.get("manual_override") or not CFG_ADAPTIVE_QUALITY:
+                # 2.4.0-rc3.1: Block B parallels Block A's gating, so repeated
+                # restarts never auto-step while Adaptive Quality is off.
+                if not CFG_ADAPTIVE_QUALITY:
                     restart_overflow = False
                 else:
                     restart_overflow = (locked and
@@ -8081,7 +8047,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         # the "manual tier change silently no-ops" bug. Without this guard, an
         # OLD snap_loop task whose cancellation finalises AFTER the NEW task
         # has already written `state["proc"] = new_proc` would overwrite that
-        # reference back to None on its way out. handle_focus_set_tier then
+        # reference back to None on its way out. A later kill of the process then
         # reads `state.get("proc")` → None → skips the kill path → the new
         # ffmpeg keeps running its old profile/fps forever despite the manual
         # tier change being recorded server-side.
@@ -9144,14 +9110,6 @@ async def handle_focus_set(request: web.Request) -> web.Response:
     if ada:
         ada["restarts_since_lock"] = 0
         ada["run_start"]           = None
-        # 2.6.5: the page no longer offers Resolution, Frame Rate or Auto,
-        # so a manual tier pinned from an older page could never be
-        # cleared. Drop it on every entry; learned adaptive locks stay.
-        if ada.pop("manual_override", None):
-            ada["locked"]   = False
-            ada["tier_idx"] = 0
-            log.info(f"Focus [{camera_id}]: cleared a manual tier "
-                     f"pinned by an older page")
     # Always cancel any existing task (likely a low-fps sub-stream thumbnail task)
     # and start a fresh native_res=True task on the main high-res stream_url.
     # Without this, a running thumbnail task would block the focus task from starting.
@@ -9240,235 +9198,6 @@ async def handle_focus_clear(request: web.Request) -> web.Response:
         if ada:
             ada["run_start"] = None
     return web.json_response({"status": "ok"})
-
-
-async def handle_focus_set_tier(request: web.Request) -> web.Response:
-    """POST /snap/focus/tier — manually pin the enhanced view to a specific
-    profile index and fps cap.  Adaptive stepping is paused while a manual
-    override is active.  Send profile_idx=null to resume auto mode."""
-    camera_id = _FOCUSED_CAMERA
-    if not camera_id:
-        return web.json_response({"error": "No camera in focus"}, status=400)
-    try:
-        data     = await request.json()
-        prof_idx = data.get("profile_idx")   # int or None = reset
-        fps_cap  = data.get("fps")            # int, None, or "uncapped"
-    except Exception:
-        return web.json_response({"error": "Invalid JSON"}, status=400)
-
-    camera = CAMERAS.get(camera_id)
-    if not camera:
-        return web.json_response({"error": "Camera not found"}, status=404)
-
-    ladder = _build_focus_ladder(camera)
-
-    if prof_idx is None:
-        # Reset to automatic
-        ada = _FOCUS_ADAPTIVE.get(camera_id, {})
-        ada.pop("manual_override", None)
-        ada["locked"]             = False
-        ada["restarts_since_lock"] = 0
-        ada["tier_idx"]           = 0
-        _FOCUS_ADAPTIVE[camera_id] = ada
-        log.info(f"Focus [{camera_id}]: manual override cleared")
-        return web.json_response({"status": "ok", "mode": "auto"})
-
-    fps_val = None if (fps_cap is None or fps_cap == "uncapped") else int(fps_cap)
-
-    # Find the best matching tier
-    best_idx = 0
-    matched  = False
-    for i, (p, f) in enumerate(ladder):
-        if p == prof_idx and f == fps_val:
-            best_idx = i
-            matched  = True
-            break
-        if p == prof_idx:   # right profile, any fps — keep as fallback
-            best_idx = i
-            matched  = True
-
-    # 2.6.0-rc2.4 — fix #3: dropdown ↔ ladder desync defense.
-    # If the user picks a profile_idx that doesn't appear in the ladder,
-    # the old code silently fell through to best_idx=0 (= ladder's first
-    # entry, typically profile[0] uncapped). Result: dropdown shows the
-    # selection, server returns "ok", but ffmpeg launches profile[0] —
-    # the manual override becomes a UI lie.
-    #
-    # This was reproducible in the rc2.3 field test on the Hikvision: session
-    # 1 had stream_profiles loaded from cameras.json (rc2.2-era shape)
-    # where the dropdown source and the ladder source diverged.
-    # Picking "704x480 HEVC" set best_idx=0 → launched profile[0] at
-    # 2560x1440. Selecting profile[2] worked the same call, picking
-    # profile[1] silently didn't.
-    #
-    # Fix: when prof_idx is not in the ladder, honor the user's explicit
-    # selection by appending a one-off (prof_idx, fps_val) entry and
-    # targeting it. Log a warning so we can diagnose if/when the
-    # divergence happens — it shouldn't, but defensive code stops the
-    # silent failure either way.
-    if not matched:
-        log.warning(f"Focus [{camera_id}]: prof_idx={prof_idx} fps={fps_val} "
-                    f"not in ladder (len={len(ladder)}) — appending one-off "
-                    f"entry to honor manual selection")
-        ladder.append((prof_idx, fps_val))
-        best_idx = len(ladder) - 1
-
-    ada = _FOCUS_ADAPTIVE.setdefault(camera_id, {
-        "tier_idx": 0, "locked": False,
-        "restarts_since_lock": 0, "run_start": None,
-        "ladder": ladder,
-    })
-    prev_tier_idx = ada.get("tier_idx", 0)
-    ada["tier_idx"]            = best_idx
-    ada["locked"]              = True
-    ada["restarts_since_lock"] = 0
-    ada["manual_override"]     = True
-    ada["ladder"]              = ladder
-    log.info(f"Focus [{camera_id}]: manual tier [{best_idx}] "
-             f"profile[{prof_idx}] fps={fps_val}")
-
-    # If the new tier crosses a profile or fps boundary, the running ffmpeg is
-    # decoding the OLD profile/fps — kill it so snap_loop's outer restart loop
-    # picks up the new ada state and relaunches with the new URL+vf filter.
-    # Without this, the dropdown changes but the actual stream stays the same.
-    if best_idx != prev_tier_idx:
-        state  = _snap_state(camera_id)
-        proc   = state.get("proc")
-        if proc is not None:
-            try:
-                # 2.6.0-rc2.6 — mark this proc.kill() as intentional BEFORE
-                # killing so snap_loop's EOF branch can distinguish "user
-                # changed the tier" from "ffmpeg died on its own". Without
-                # this flag, an EOF arriving while hw_tried=True and
-                # frames=0 (typical during the 5-6s HW warmup window) gets
-                # misclassified as a HW failure: rc2.5 elapsed-time logs
-                # showed "hw EOF (rc=None, elapsed=2.2s) → sw" right after
-                # a tier change, the new tier launched in SW even though
-                # HW would have worked, and the spurious failure counted
-                # against the per-session HW skip budget. Mirrors the
-                # existing focus_leave_kill flag pattern.
-                state["tier_change_kill"] = True
-                proc.kill()
-                # 2.6.0-rc3.0 Items 2+3 — if fast_stream_start has a HW
-                # preheater running for the old tier, tear it down here.
-                # Without this, the preheater might signal hw_ready mid-
-                # restart and the next iteration's swap logic could pick
-                # up a stale HW proc bound to the old tier's URL/vf.
-                _kill_hw_preheater(state)
-                log.info(f"Focus [{camera_id}]: killed ffmpeg to apply manual tier change")
-            except Exception as ex:
-                # Kill failed (proc already dead). Clear the flag so it
-                # doesn't linger and consume a real EOF later.
-                state.pop("tier_change_kill", None)
-                _kill_hw_preheater(state)
-                log.debug(f"Focus [{camera_id}]: ffmpeg kill failed (probably already dead): {ex}")
-
-    return web.json_response({"status": "ok", "tier_idx": best_idx,
-                              "profile_idx": prof_idx, "fps": fps_val})
-
-
-async def handle_focus_profiles(request: web.Request) -> web.Response:
-    """GET /snap/focus/profiles — return the stream profiles for the focused
-    camera, so the JS can populate the resolution dropdown.
-
-    rc2.3: response shape changed from a bare profile array to an object
-    that also includes the server's current adaptive-tier state. The JS
-    uses `current_tier` to seed the Resolution / FPS dropdowns and the
-    `_manualTierActive` flag so that the controls reflect what's actually
-    streaming — not just the dropdowns' default `selected` option.
-
-    Without this, when a user closes Enhanced view and re-opens it, the
-    server may have a preserved `manual_override` (e.g. tier 31 = profile[1])
-    while the dropdowns reset to profile[0]. The result is a UI lie:
-    Resolution shows "3840x2160" while the actual stream is "1280x720".
-
-    Response shape:
-        {
-          "profiles": [{"idx": 0, "label": "...", "width": ..., ...}, ...],
-          "current_tier": {
-              "manual_override": true|false,
-              "profile_idx":     int,
-              "fps":             int|null   # null == uncapped
-          }
-        }
-    """
-    camera_id = _FOCUSED_CAMERA
-    if not camera_id:
-        return web.json_response({"profiles": [], "current_tier": None})
-    camera = CAMERAS.get(camera_id)
-    if not camera:
-        return web.json_response({"profiles": [], "current_tier": None})
-    profiles = camera.get("stream_profiles") or []
-    if not profiles:
-        # Synthesise from legacy stream_url / sub_stream_url
-        profiles = [{
-            "_url_key": "stream_url",
-            "stream_width":  camera.get("stream_width"),
-            "stream_height": camera.get("stream_height"),
-            "stream_codec":  camera.get("stream_codec"),
-        }]
-        if camera.get("sub_stream_url"):
-            profiles.append({
-                "_url_key": "sub_stream_url",
-                "stream_width":  camera.get("sub_stream_width"),
-                "stream_height": camera.get("sub_stream_height"),
-                "stream_codec":  camera.get("sub_stream_codec"),
-            })
-        # 2.4.0-rc2.8: include validated locked-stream candidates
-        # ("additional_streams") in the synth fallback. rc2.8's
-        # api_set_credentials builds stream_profiles directly so this
-        # fallback is rarely needed for fresh cred-accepts — but
-        # cameras saved by earlier builds (rc2.6/rc2.7) have
-        # additional_streams populated without stream_profiles. This
-        # branch covers them so the dropdown shows all entries on
-        # reload without requiring the user to re-auth.
-        _seen_urls = {camera.get("stream_url", ""),
-                      camera.get("sub_stream_url", "")}
-        for add in (camera.get("additional_streams") or []):
-            au = add.get("url", "")
-            if au and au not in _seen_urls:
-                profiles.append({
-                    "url": au,  # explicit URL — dropdown uses this
-                                # over _url_key when present
-                    "stream_width":  add.get("stream_width"),
-                    "stream_height": add.get("stream_height"),
-                    "stream_codec":  add.get("stream_codec"),
-                })
-                _seen_urls.add(au)
-    result = []
-    for i, p in enumerate(profiles):
-        w = p.get("stream_width")  or 0
-        h = p.get("stream_height") or 0
-        c = (p.get("stream_codec") or "").upper()
-        if w and h and c:
-            label = f"{w}x{h} {c}"
-        elif w and h:
-            label = f"{w}x{h}"
-        elif c:
-            label = f"Stream {i+1} ({c})"
-        else:
-            label = f"Stream {i+1}"
-        result.append({"idx": i, "label": label, "width": w, "height": h,
-                       "codec": c or "?"})
-
-    # rc2.3: read the server's current adaptive-tier state so the JS can
-    # seed the Resolution / FPS dropdowns to match what's actually streaming.
-    # _FOCUS_ADAPTIVE may be empty (camera just entered focus and hasn't
-    # locked yet) — return None in that case so the JS uses its defaults.
-    ada = _FOCUS_ADAPTIVE.get(camera_id)
-    current_tier = None
-    if ada and ada.get("ladder"):
-        ladder    = ada["ladder"]
-        tier_idx  = ada.get("tier_idx", 0)
-        if 0 <= tier_idx < len(ladder):
-            prof_idx, fps_val = ladder[tier_idx]
-            current_tier = {
-                "manual_override": bool(ada.get("manual_override", False)),
-                "profile_idx":     prof_idx,
-                "fps":             fps_val,   # None == uncapped
-            }
-
-    return web.json_response({"profiles": result, "current_tier": current_tier})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -16937,143 +16666,6 @@ async def run_scan() -> None:
 
 
 
-async def handle_stream(request: web.Request) -> web.StreamResponse:
-    """
-    GET /stream/{camera_id} — live MJPEG stream via ffmpeg pipe.
-    Frames are extracted from the camera's RTSP/MJPEG/HLS source and
-    served as multipart/x-mixed-replace. The snap_loop (used for card
-    thumbnails) is separate; this endpoint is for the focus/full view.
-    """
-    camera_id = request.match_info["camera_id"]
-    camera    = CAMERAS.get(camera_id)
-    if not camera:
-        return web.Response(status=404)
-    if camera.get("display") in ("webrtc", "wsrtsp", "info"):
-        return web.Response(status=400, text="Not proxy-streamable")
-
-    url = build_authenticated_url(camera)
-    if not url:
-        return web.Response(status=503, text="No stream URL")
-
-    proto = camera.get("protocol", "RTSP")
-    flags = (["-rtsp_transport", "tcp"] if proto in ("RTSP", "DVR", "ONVIF")
-             else ["-re"] if proto == "HLS" else [])
-    # rc1 (Item B1): -fflags +discardcorrupt for H.265+ cameras (see snap_loop
-    # for full explanation). Same flag, same persistence, applied here too
-    # so the live MJPEG endpoint also benefits.
-    if camera.get("needs_fflags_discardcorrupt"):
-        flags = flags + ["-fflags", "+discardcorrupt"]
-
-    stream_codec = (camera.get("stream_codec") or "").lower()
-    stream_w     = camera.get("stream_width") or 0
-    is_hevc      = stream_codec in ("hevc", "h265")
-
-    # 2.6.0-rc2.3: walk _HW_DECODER_CANDIDATES (label, codec, ffmpeg_args)
-    # in preference order — hevc_drm (Pi 4/5 rpivid via -hwaccel drm),
-    # then h264_v4l2m2m (Pi 4/5 bcm2835-codec via -c:v), then vaapi —
-    # and splice the first match's ffmpeg_args verbatim into the
-    # ffmpeg command line. Mirrors snap_loop's selection. CFG_HW_DECODE
-    # gate stays in place: when off, hw_args is empty and ffmpeg runs
-    # software-only as before.
-    hw_label = ""
-    hw_args: list[str] = []
-    if CFG_HW_DECODE and stream_codec in ("hevc", "h265", "h264"):
-        target_codec = "hevc" if is_hevc else "h264"
-        for cand_label, cand_codec, cand_args in _HW_DECODER_CANDIDATES:
-            if cand_codec != target_codec:
-                continue
-            if cand_label in _HW_UNAVAILABLE:
-                continue
-            hw_label = cand_label
-            hw_args  = list(cand_args)
-            break
-    thread_args = ["-threads", "2"] if CFG_LIMIT_THREADS else []
-
-    if is_hevc and stream_w >= 3840:
-        vf = "fps=4,scale=640:-2,format=yuvj420p"
-    elif is_hevc:
-        vf = "fps=8,scale=640:-2,format=yuvj420p"
-    else:
-        vf = "fps=10,scale=640:-2,format=yuvj420p"
-
-    response = web.StreamResponse(headers={
-        "Content-Type":      "multipart/x-mixed-replace; boundary=frame",
-        "Cache-Control":     "no-cache",
-        "Pragma":            "no-cache",
-        "Connection":        "keep-alive",
-        "X-Accel-Buffering": "no",
-    })
-    await response.prepare(request)
-
-    proc = drain_t = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-nostdin", "-loglevel", "warning",
-            *flags, *hw_args,
-            "-i", url,
-            "-an", "-vf", vf, *thread_args,
-            "-vcodec", "mjpeg", "-pix_fmt", "yuvj420p",
-            "-q:v", "5", "-f", "mpjpeg", "-boundary_tag", "frame",
-            "pipe:1",
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        drain_t = asyncio.create_task(_drain_stderr(proc, camera_id))
-        log.info(f"handle_stream [{camera_id}]: ffmpeg started")
-
-        buf = b""
-        SOI, EOI = bytes([0xFF, 0xD8]), bytes([0xFF, 0xD9])
-        while True:
-            chunk = await asyncio.wait_for(proc.stdout.read(65536), timeout=20)
-            if not chunk:
-                break
-            buf += chunk
-            if len(buf) > 4_000_000:
-                buf = b""
-                continue
-            while True:
-                s = buf.find(SOI)
-                if s < 0:
-                    buf = b""
-                    break
-                e = buf.find(EOI, s + 2)
-                if e < 0:
-                    if s > 0:
-                        buf = buf[s:]
-                    break
-                frame = buf[s:e + 2]
-                buf   = buf[e + 2:]
-                await response.write(
-                    b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                    + str(len(frame)).encode()
-                    + b"\r\n\r\n" + frame + b"\r\n"
-                )
-
-    except (asyncio.TimeoutError, ConnectionResetError, asyncio.CancelledError):
-        pass
-    except Exception as ex:
-        log.debug(f"handle_stream [{camera_id}]: {ex}")
-    finally:
-        if drain_t:
-            drain_t.cancel()
-        if proc and proc.returncode is None:
-            try:
-                proc.kill()
-                await asyncio.wait_for(proc.wait(), timeout=3)
-            except Exception:
-                pass
-        if drain_t:
-            try:
-                await asyncio.wait_for(drain_t, timeout=2)
-            except Exception:
-                pass
-
-    return response
-
-
-
-
 def build_html() -> str:
     js_code = _JS.replace('___BASE___', INGRESS_PATH)
     js_code = js_code.replace('___UNRESTRICTED___',
@@ -17736,7 +17328,6 @@ def make_app() -> web.Application:
     app.router.add_post(  "/api/cameras/{camera_id}/deep_reprobe", api_deep_reprobe)
     app.router.add_delete("/api/cameras/{camera_id}",             api_delete_camera)
     app.router.add_post(  "/api/cameras/add",                     api_add_camera)
-    app.router.add_get(   "/stream/{camera_id}",                  handle_stream)
     app.router.add_get(   "/snapshot/{camera_id}",                handle_snapshot)
     app.router.add_get(   "/snap/status",                         handle_snap_status)
     # 2.6.3 — Tier 2 go2rtc live view. Each handler answers "not available"
@@ -17749,8 +17340,6 @@ def make_app() -> web.Application:
     app.router.add_get(   "/api/logs",                            api_logs)
     app.router.add_post(  "/snap/focus/{camera_id}",              handle_focus_set)
     app.router.add_delete("/snap/focus",                          handle_focus_clear)
-    app.router.add_post(  "/snap/focus/tier",                     handle_focus_set_tier)
-    app.router.add_get(   "/snap/focus/profiles",                 handle_focus_profiles)
     app.router.add_post(  "/api/cameras/{camera_id}/motion",      api_motion_toggle)
     app.router.add_get(   "/api/cameras/{camera_id}/motion",      api_motion_status)
     app.router.add_get(   "/api/motion",                          api_motion_all)
