@@ -25,9 +25,8 @@ tests/                  Behaviour tests; `python tests/run_tests.py`
 CHANGELOG.md            Full release history
 
 docs/                   Plan documents, RTSP database, research
-docs/audits/            Audit report PDFs, one per release
+docs/audits/            Audit report PDFs (from 2.6.4; a few older ones)
 docs/legacy/            Pre-repository working documents
-archive/                Release zips for milestone versions
 ```
 
 ## Release process
