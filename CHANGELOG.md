@@ -1,3 +1,28 @@
+## 3.0.0
+
+AnyCam's code is split into 14 files with tests, and the scan's Cancel button works. Everything else works as in 2.6.8. Same code as 3.0.0-rc1.5, field-tested on both test systems.
+
+### Changes & improvements
+
+- **The code is in 14 files.** The main file went from 18,198 lines to 1,797. Every moved function is unchanged.
+- **Tests in the repository.** 448 server checks and 114 page checks run before every release.
+- **No credentials in any log line.** A log filter removes passwords from every line, including lines from ffmpeg, go2rtc and libraries.
+- **Clearer empty page.** While a scan runs and no camera is found yet, the page says "No Cameras Found Yet".
+- **Removed: three unused endpoints:** the old `/stream/{camera_id}` and the two manual quality endpoints.
+
+### Bugs fixed
+
+- **Cancel stops a scan.** Before, Cancel changed the status line and the scan ran to its end.
+- **Brand lookup from a device's web page works again.** A scan function had lost its first line in 2.4.0-rc1.0.
+- **A password that contains "@" was only partly removed** from stored and logged stream addresses.
+
+### Known issues
+
+- **Adding a camera by hand with protocol WebRTC fails.**
+- **One password-entry step does not pace rate-limited cameras** such as the Microseven.
+- **A camera's streams are read only when its password is entered.** After you change a camera's stream settings, enter its password again.
+- Skip Non-Reference Frames breaks H.264 cameras.
+
 ## 3.0.0-rc1.5
 
 The Cancel button stops a scan, and the last large parts of the main file move to their own files, with tests.

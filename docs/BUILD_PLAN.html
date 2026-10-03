@@ -156,19 +156,18 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <p class="eyebrow">AnyCam · Home Assistant add-on</p>
 <h1>AnyCam Build Plan</h1>
 <p class="meta">the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.</p>
-<p class="meta"><span class="mono">28 September 2026; updated 2 October 2026. Current release: 2.6.8, published 2026-10-02. Pushed, not published: 3.0.0-rc1.0 to 3.0.0-rc1.4 (all field-tested). Built, not pushed: 3.0.0-rc1.5. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist. · 29 open · 89 done</span></p>
+<p class="meta"><span class="mono">28 September 2026; updated 2 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist. · 27 open · 92 done</span></p>
 </header>
 <nav class="bars" aria-label="Open items per group">
-<a class="bar g-a" style="--n:1" href="#group-a" title="Field tests: 1 open"><b>A · 1</b><span>Field tests</span></a>
+<a class="bar g-a" style="--n:0" href="#group-a" title="Field tests: 0 open"><b>A · 0</b><span>Field tests</span></a>
 <a class="bar g-b" style="--n:11" href="#group-b" title="Bugs: 11 open"><b>B · 11</b><span>Bugs</span></a>
 <a class="bar g-c" style="--n:11" href="#group-c" title="Video and recording: 11 open"><b>C · 11</b><span>Video and recording</span></a>
 <a class="bar g-d" style="--n:3" href="#group-d" title="Discovery and device support: 3 open"><b>D · 3</b><span>Discovery and device support</span></a>
-<a class="bar g-e" style="--n:1" href="#group-e" title="Code health: 1 open"><b>E · 1</b><span>Code health</span></a>
+<a class="bar g-e" style="--n:0" href="#group-e" title="Code health: 0 open"><b>E · 0</b><span>Code health</span></a>
 <a class="bar g-f" style="--n:2" href="#group-f" title="Release engineering: 2 open"><b>F · 2</b><span>Release engineering</span></a>
 </nav><p class="bars-cap">Each bar is one group; its width is the number of open items.</p>
 <div class="filters" role="group" aria-label="Filter by status">
-<button type="button" class="chip" data-filter="all" aria-pressed="true">All <span class="n">29</span></button>
-<button type="button" class="chip st-You" data-filter="You" aria-pressed="false"><span class="dot"></span>Waiting on you <span class="n">2</span></button>
+<button type="button" class="chip" data-filter="all" aria-pressed="true">All <span class="n">27</span></button>
 <button type="button" class="chip st-Logs" data-filter="Logs" aria-pressed="false"><span class="dot"></span>Logs first <span class="n">1</span></button>
 <button type="button" class="chip st-Discuss" data-filter="Discuss" aria-pressed="false"><span class="dot"></span>Discuss first <span class="n">6</span></button>
 <button type="button" class="chip st-Ready" data-filter="Ready" aria-pressed="false"><span class="dot"></span>Ready to build <span class="n">11</span></button>
@@ -176,21 +175,17 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 </div>
 <div class="top" data-all-only>
 <div class="panel you"><h2>Waiting on you</h2><ul class="you-list">
-<li class="g-a"><span class="id">A19</span><span class="t"><a href="#A19">Field test of 3.0.0-rc1.5</a></span><span class="x">On both systems: the add-on starts; the start-up scan finds the same cameras; Cancel during a scan stops it and says "Scan cancelled"; a camera password is accepted (system B: the DVR channel cards appear); cards show pictures; Enhanced View opens in live and classic view; motion still records; the log has no "not defined" or "has not run yet" line. Progress 2026-10-02 evening, from CrystalHeeler's logs: both systems 0 "not defined", 0 "has not run yet", 0 tracebacks, 0 ERROR lines. System A: scan as before (2 devices); the PTZ password accepted; its card plays live. System B: the DVR password accepted, 7 channel cards in 3 s; after the DVR fix, live detection on ch2 and ch7 from 20:45; the Oak-D missed the first scan because its own stream refused connections (169 times, 18:20 to 19:09, before the install) and was found by the next scan. Still to show: Cancel during a scan</span></li>
-<li class="g-e"><span class="id">E1</span><span class="t"><a href="#E1">Split the main file into modules: the last step</a></span><span class="x">Field test of 3.0.0-rc1.5 (A19). No further split is planned</span></li>
 </ul></div>
 <div class="panel"><h2>Recommended order</h2><ol class="order">
-<li><span><strong>Field test of 3.0.0-rc1.5</strong> (A19).</span></li>
+<li><span><strong>Plan the phases after 3.0.0 with CrystalHeeler</strong> (CrystalHeeler, 2026-10-02: "Once 3.0.0 is out, we will discuss and arrange the plan into version phases"). Candidates: B20 (late pictures), F10 (sidebar and auto update), C11 (toggles), B23, B24, B25, detection zones (C17).</span></li>
 <li><span><strong>Missing cameras</strong> (B2). Logs first.</span></li>
 <li><span><strong>The small correctness bugs</strong>: B3, B12, and C10's plain message for Firefox, which matters more now that live view cannot be switched off.</span></li>
-<li><span><strong>The automatic-behaviour discussion</strong> (C11, C3).</span></li>
-<li><span><strong>Right after 3.0.0</strong>: B20 (late pictures). <strong>Design discussion</strong>: detection zones (C17). <strong>Found by the 3.0.0-rc1.5 tests</strong>: B23 and B24; version to confirm.</span></li>
+<li><span><strong>The automatic-behaviour discussion</strong> (C3).</span></li>
 </ol>
 <p class="order-note">Hardware decode (B11) is parked for later, at CrystalHeeler's request.</p>
 </div></div>
 <section class="group g-a" id="group-a">
-<div class="ghead"><span class="gl">A</span><h2>Field tests</h2><span class="gcount">1 open</span></div><div class="cards">
-<article class="card" id="A19" data-status="You"><div class="ctop"><span class="id">A19</span><span class="pill st-You">Waiting on you</span><span class="prio">Priority</span></div><h3>Field test of 3.0.0-rc1.5</h3><dl><dt>Why</dt><dd>Five parts left the main file (E1), and the scan's Cancel button was fixed (B22). The moved code is unchanged and tested, but this is the first run of it on the device</dd><dt>Next step</dt><dd>On both systems: the add-on starts; the start-up scan finds the same cameras; Cancel during a scan stops it and says "Scan cancelled"; a camera password is accepted (system B: the DVR channel cards appear); cards show pictures; Enhanced View opens in live and classic view; motion still records; the log has no "not defined" or "has not run yet" line. Progress 2026-10-02 evening, from CrystalHeeler's logs: both systems 0 "not defined", 0 "has not run yet", 0 tracebacks, 0 ERROR lines. System A: scan as before (2 devices); the PTZ password accepted; its card plays live. System B: the DVR password accepted, 7 channel cards in 3 s; after the DVR fix, live detection on ch2 and ch7 from 20:45; the Oak-D missed the first scan because its own stream refused connections (169 times, 18:20 to 19:09, before the install) and was found by the next scan. Still to show: Cancel during a scan</dd></dl></article>
+<div class="ghead"><span class="gl">A</span><h2>Field tests</h2><span class="gcount">0 open</span></div><div class="cards">
 </div></section>
 <section class="group g-b" id="group-b">
 <div class="ghead"><span class="gl">B</span><h2>Bugs</h2><span class="gcount">11 open</span></div><div class="cards">
@@ -227,15 +222,14 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <article class="card" id="D3" data-status="Later"><div class="ctop"><span class="id">D3</span><span class="pill st-Later">Later</span></div><h3>Drag to reorder cards</h3><dl><dt>Why</dt><dd>Changelog 2.4.0-rc3.3: the groundwork is in place</dd><dt>Next step</dt><dd>Build when wanted</dd></dl></article>
 </div></section>
 <section class="group g-e" id="group-e">
-<div class="ghead"><span class="gl">E</span><h2>Code health</h2><span class="gcount">1 open</span></div><div class="cards">
-<article class="card" id="E1" data-status="You"><div class="ctop"><span class="id">E1</span><span class="pill st-You">Waiting on you</span></div><h3>Split the main file into modules: the last step</h3><dl><dt>Why</dt><dd>Done and field-tested: the camera tables and page script (3.0.0-rc1.0), motion, recording, night boost, storage (3.0.0-rc1.1), go2rtc (3.0.0-rc1.2), the scan and the probers (3.0.0-rc1.4). Built: password entry, the snapshot loop, the Enhanced View engine, the manufacturer database and brand identification, the page builder (3.0.0-rc1.5). The main file is 1,797 lines, from 18,198. It keeps the settings, the stores, the REST API handlers, routing and start-up</dd><dt>Next step</dt><dd>Field test of 3.0.0-rc1.5 (A19). No further split is planned</dd></dl></article>
+<div class="ghead"><span class="gl">E</span><h2>Code health</h2><span class="gcount">0 open</span></div><div class="cards">
 </div></section>
 <section class="group g-f" id="group-f">
 <div class="ghead"><span class="gl">F</span><h2>Release engineering</h2><span class="gcount">2 open</span></div><div class="cards">
 <article class="card" id="F10" data-status="Ready"><div class="ctop"><span class="id">F10</span><span class="pill st-Ready">Ready to build</span><span class="prio">Priority</span></div><h3>Show in Sidebar and Auto update on by default</h3><dl><dt>Why</dt><dd>CrystalHeeler, 2026-10-02. The add-on manifest cannot set them: the Supervisor stores both as user settings with default off (<code>apps/validate.py</code>, SCHEMA_APP_USER). An add-on may change its own options without <code>hassio_api</code> (<code>/addons/self/</code> is on the Supervisor's bypass list)</dd><dt>Next step</dt><dd>Approved 2026-10-02: on its first start AnyCam calls <code>POST /addons/self/options</code> with <code>ingress_panel</code> and <code>auto_update</code> true, once, and saves a marker in <code>/data</code>, so a later change by the user holds. Limits: on at first start, not at install; auto update waits 1 day after a new version. No version: phases are planned after 3.0.0</dd></dl></article>
 <article class="card" id="F9" data-status="Ready"><div class="ctop"><span class="id">F9</span><span class="pill st-Ready">Ready to build</span></div><h3>The packager lives outside the repo</h3><dl><dt>Why</dt><dd><code>/tmp/mkzip.py</code> in Git Bash builds every release zip, including the rule 3 folder change in 2.6.5. A cleared temp folder loses it</dd><dt>Next step</dt><dd>Move it into the repo, for example <code>tools/mkzip.py</code>, and have the release notes name it</dd></dl></article>
 </div></section>
-<section data-all-only id="done"><div class="ghead" style="--g:var(--st-ready-fg)"><h2>Done</h2><span class="gcount">89 items off the older lists</span></div>
+<section data-all-only id="done"><div class="ghead" style="--g:var(--st-ready-fg)"><h2>Done</h2><span class="gcount">92 items off the older lists</span></div>
 <div class="done-wrap"><table><thead><tr><th>Item</th><th>Where it was listed</th><th>Evidence</th></tr></thead><tbody>
 <tr><td><span class="tick">✓</span>Recordings looked choppy</td><td>This plan, B18</td><td>CrystalHeeler, 2026-10-01: the stutter was VLC; Media Player Classic plays the same files well. The files hold the DVR's 7 fps with steady timing (measured)</td></tr>
 <tr><td><span class="tick">✓</span>Insects and infrared switches no longer record</td><td>CrystalHeeler, 2026-10-01 overnight test</td><td>2.6.7: a second changed picture within 0.5 s (or one picture of 3% or more); reference by stream position, so no echoes; 2 s hold after a light change. Replay of 45 recordings: insects 11 of 12 never record, switches 0, real events kept. Field check in A13</td></tr>
@@ -246,6 +240,9 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <tr><td><span class="tick">✓</span>Tests for the rest of the add-on</td><td>This plan, E1</td><td>3.0.0-rc1.5: 122 checks, sections V to Z: brand identification and the OUI database, the page builder, the Enhanced View engine, the snapshot loop, password entry. Written and passing before each move. They found B23 and B24</td></tr>
 <tr><td><span class="tick">✓</span>Module split: password entry, snapshot loop, Enhanced View engine, brand identification, page builder (E1)</td><td>This plan</td><td>3.0.0-rc1.5: <code>anycam_credentials.py</code>, <code>anycam_snap.py</code>, <code>anycam_focus.py</code>, <code>anycam_brand.py</code>, <code>anycam_page.py</code>. All 363 definitions compared with the code before each move: none missing, none changed; page and routes identical. No import cycles</td></tr>
 <tr><td><span class="tick">✓</span>The last type hints</td><td>This plan, E5</td><td>3.0.0-rc1.5: 30 functions; every function in every file is now fully typed. The code is unchanged apart from the annotations (compared with the annotations removed)</td></tr>
+<tr><td><span class="tick">✓</span>3.0.0 published</td><td>CrystalHeeler, 2026-10-02</td><td>The code of 3.0.0-rc1.5 with the version changed; GitHub Release 3.0.0</td></tr>
+<tr><td><span class="tick">✓</span>3.0.0-rc1.5 field test</td><td>This plan, A19</td><td>CrystalHeeler, 2026-10-02: "rc1.5 testing is complete. it works", and Cancel is good. Logs from both systems: 0 "not defined", 0 "has not run yet", 0 tracebacks, 0 ERROR lines; password entry on both; the DVR's 7 channel cards; the PTZ card live after its password was entered again (B25)</td></tr>
+<tr><td><span class="tick">✓</span>Module split complete (E1)</td><td>This plan</td><td>3.0.0-rc1.0 to 3.0.0-rc1.5: 14 files; the main file 1,797 lines, from 18,198. No further split planned</td></tr>
 <tr><td><span class="tick">✓</span>3.0.0-rc1.4 field test</td><td>This plan, A18</td><td>CrystalHeeler, 2026-10-02: working on both systems. Logs: start-up scans as before (system A 2 devices, system B 2 devices, 1 streaming); password entry on system B found the DVR stream and 7 channel cards; on system A the Hikvision password was accepted; no error lines</td></tr>
 <tr><td><span class="tick">✓</span>Empty page text during a scan (B21)</td><td>CrystalHeeler, 2026-10-02</td><td>3.0.0-rc1.4: "No Cameras Found Yet" while a scan runs; "Click Scan Network" only when no scan is running</td></tr>
 <tr><td><span class="tick">✓</span>Tests for the scan</td><td>This plan, E1</td><td>3.0.0-rc1.4: 25 checks with the real <code>run_scan</code> and <code>_probe_host_port</code> against a made-up network</td></tr>
