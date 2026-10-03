@@ -4,7 +4,7 @@
 
 The zip name carries the full version; the single top-level folder is always
 anycam. Entries use POSIX separators: HAOS extracts on Linux.
-Run verify_release.py first. Writes _build/camera_discovery-<version>.zip.
+Run verify_release.py first. Writes _build/anycam-<version>.zip.
 """
 import pathlib
 import re
@@ -23,7 +23,7 @@ FILES = ["run.sh", *MODULES, "Dockerfile", "CHANGELOG.md", "config.yaml",
 def main() -> int:
     version = re.search(r'^version:\s*"(.+?)"',
                         (ROOT / "config.yaml").read_text(encoding="utf-8"), re.MULTILINE).group(1)
-    out = ROOT / "_build" / f"camera_discovery-{version}.zip"
+    out = ROOT / "_build" / f"anycam-{version}.zip"
     out.parent.mkdir(exist_ok=True)
     if out.exists():
         out.unlink()

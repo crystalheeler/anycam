@@ -79,7 +79,7 @@ The zip filename carries the full version string. The top-level folder
 inside it is always `anycam`, with no version:
 
 ```
-camera_discovery-3.0.1.zip
+anycam-3.0.0.zip
 └── anycam/
 ```
 
@@ -94,8 +94,10 @@ one (`supervisor/store/__init__.py`, `reload()`), and the old folder had
 been deleted. A folder name that never changes avoids it. The version stays
 visible in the zip name, `config.yaml` and the changelog.
 
-**Why the folder is `anycam` (changed 2026-10-02, CrystalHeeler's order).**
-Up to 3.0.0 it was `local_camera_discovery`. The add-on store repository
+**Why the zip and the folder are named `anycam` (changed 2026-10-02,
+CrystalHeeler's order).** Before, the zip was `camera_discovery-<version>.zip`
+and the folder `local_camera_discovery`. The 3.0.0 release zip was replaced
+the same day with `anycam-3.0.0.zip`. The add-on store repository
 (github.com/crystalheeler/crystalheeler) holds AnyCam in `anycam/`, and the
 zip now matches it. The Supervisor names a local add-on from the slug in
 `config.yaml` (`local_` + `camera_discovery`), not from its folder
