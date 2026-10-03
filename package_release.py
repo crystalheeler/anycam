@@ -3,7 +3,7 @@
     python package_release.py
 
 The zip name carries the full version; the single top-level folder is always
-local_camera_discovery. Entries use POSIX separators: HAOS extracts on Linux.
+anycam. Entries use POSIX separators: HAOS extracts on Linux.
 Run verify_release.py first. Writes _build/camera_discovery-<version>.zip.
 """
 import pathlib
@@ -14,7 +14,7 @@ import zipfile
 from anycam_modules import MODULES
 
 ROOT = pathlib.Path(__file__).resolve().parent
-TOP = "local_camera_discovery"      # CLAUDE.md rule 3: fixed, no version
+TOP = "anycam"      # CLAUDE.md rule 3: fixed, no version
 FILES = ["run.sh", *MODULES, "Dockerfile", "CHANGELOG.md", "config.yaml",
          "verify_release.py", "anycam_modules.py", "translations/en.yaml",
          "www/video-rtc.js"]

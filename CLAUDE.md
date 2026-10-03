@@ -76,12 +76,11 @@ older log.
 ## 3. Release packaging
 
 The zip filename carries the full version string. The top-level folder
-inside it is always `local_camera_discovery`, the add-on's slug, with no
-version:
+inside it is always `anycam`, with no version:
 
 ```
-camera_discovery-2.6.5.zip
-└── local_camera_discovery/
+camera_discovery-3.0.1.zip
+└── anycam/
 ```
 
 Stage the source under that folder, then zip from the staging parent.
@@ -94,6 +93,17 @@ for CHANGELOG.md at the add-on's *old* folder path before it reads the new
 one (`supervisor/store/__init__.py`, `reload()`), and the old folder had
 been deleted. A folder name that never changes avoids it. The version stays
 visible in the zip name, `config.yaml` and the changelog.
+
+**Why the folder is `anycam` (changed 2026-10-02, CrystalHeeler's order).**
+Up to 3.0.0 it was `local_camera_discovery`. The add-on store repository
+(github.com/crystalheeler/crystalheeler) holds AnyCam in `anycam/`, and the
+zip now matches it. The Supervisor names a local add-on from the slug in
+`config.yaml` (`local_` + `camera_discovery`), not from its folder
+(`supervisor/store/data.py`), so the rename keeps the same add-on and its
+saved cameras. The first update after the rename may show "No changelog
+found" one time, for the reason above, and the old
+`/addons/local_camera_discovery` folder must be deleted: two folders with
+the same slug leave the Supervisor with only one of them.
 
 ## 4. Missing tools means stop
 
