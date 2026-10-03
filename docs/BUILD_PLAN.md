@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 2 October 2026. Current release: 2.6.8, published 2026-10-02. Pushed, not published: 3.0.0-rc1.0 to 3.0.0-rc1.4 (all field-tested). Built, not pushed: 3.0.0-rc1.5. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
+**Compiled:** 28 September 2026; updated 2 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -26,11 +26,10 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 ## Recommended order
 
-1. **Field test of 3.0.0-rc1.5** (A19).
+1. **Plan the phases after 3.0.0 with CrystalHeeler** (CrystalHeeler, 2026-10-02: "Once 3.0.0 is out, we will discuss and arrange the plan into version phases"). Candidates: B20 (late pictures), F10 (sidebar and auto update), C11 (toggles), B23, B24, B25, detection zones (C17).
 2. **Missing cameras** (B2). Logs first.
 3. **The small correctness bugs**: B3, B12, and C10's plain message for Firefox, which matters more now that live view cannot be switched off.
-4. **The automatic-behaviour discussion** (C11, C3).
-5. **Right after 3.0.0**: B20 (late pictures). **Design discussion**: detection zones (C17). **Found by the 3.0.0-rc1.5 tests**: B23 and B24; version to confirm.
+4. **The automatic-behaviour discussion** (C3).
 
 Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
@@ -40,7 +39,6 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| A19 | You | **Field test of 3.0.0-rc1.5** | Five parts left the main file (E1), and the scan's Cancel button was fixed (B22). The moved code is unchanged and tested, but this is the first run of it on the device | On both systems: the add-on starts; the start-up scan finds the same cameras; Cancel during a scan stops it and says "Scan cancelled"; a camera password is accepted (system B: the DVR channel cards appear); cards show pictures; Enhanced View opens in live and classic view; motion still records; the log has no "not defined" or "has not run yet" line. Progress 2026-10-02 evening, from CrystalHeeler's logs: both systems 0 "not defined", 0 "has not run yet", 0 tracebacks, 0 ERROR lines. System A: scan as before (2 devices); the PTZ password accepted; its card plays live. System B: the DVR password accepted, 7 channel cards in 3 s; after the DVR fix, live detection on ch2 and ch7 from 20:45; the Oak-D missed the first scan because its own stream refused connections (169 times, 18:20 to 19:09, before the install) and was found by the next scan. Still to show: Cancel during a scan |
 
 ## B. Bugs
 
@@ -86,7 +84,6 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| E1 | You | Split the main file into modules: the last step | Done and field-tested: the camera tables and page script (3.0.0-rc1.0), motion, recording, night boost, storage (3.0.0-rc1.1), go2rtc (3.0.0-rc1.2), the scan and the probers (3.0.0-rc1.4). Built: password entry, the snapshot loop, the Enhanced View engine, the manufacturer database and brand identification, the page builder (3.0.0-rc1.5). The main file is 1,797 lines, from 18,198. It keeps the settings, the stores, the REST API handlers, routing and start-up | Field test of 3.0.0-rc1.5 (A19). No further split is planned |
 
 ## F. Release engineering
 
@@ -110,6 +107,9 @@ Hardware decode (B11) is parked for later, at CrystalHeeler's request.
 | Tests for the rest of the add-on | This plan, E1 | 3.0.0-rc1.5: 122 checks, sections V to Z: brand identification and the OUI database, the page builder, the Enhanced View engine, the snapshot loop, password entry. Written and passing before each move. They found B23 and B24 |
 | Module split: password entry, snapshot loop, Enhanced View engine, brand identification, page builder (E1) | This plan | 3.0.0-rc1.5: `anycam_credentials.py`, `anycam_snap.py`, `anycam_focus.py`, `anycam_brand.py`, `anycam_page.py`. All 363 definitions compared with the code before each move: none missing, none changed; page and routes identical. No import cycles |
 | The last type hints | This plan, E5 | 3.0.0-rc1.5: 30 functions; every function in every file is now fully typed. The code is unchanged apart from the annotations (compared with the annotations removed) |
+| 3.0.0 published | CrystalHeeler, 2026-10-02 | The code of 3.0.0-rc1.5 with the version changed; GitHub Release 3.0.0 |
+| 3.0.0-rc1.5 field test | This plan, A19 | CrystalHeeler, 2026-10-02: "rc1.5 testing is complete. it works", and Cancel is good. Logs from both systems: 0 "not defined", 0 "has not run yet", 0 tracebacks, 0 ERROR lines; password entry on both; the DVR's 7 channel cards; the PTZ card live after its password was entered again (B25) |
+| Module split complete (E1) | This plan | 3.0.0-rc1.0 to 3.0.0-rc1.5: 14 files; the main file 1,797 lines, from 18,198. No further split planned |
 | 3.0.0-rc1.4 field test | This plan, A18 | CrystalHeeler, 2026-10-02: working on both systems. Logs: start-up scans as before (system A 2 devices, system B 2 devices, 1 streaming); password entry on system B found the DVR stream and 7 channel cards; on system A the Hikvision password was accepted; no error lines |
 | Empty page text during a scan (B21) | CrystalHeeler, 2026-10-02 | 3.0.0-rc1.4: "No Cameras Found Yet" while a scan runs; "Click Scan Network" only when no scan is running |
 | Tests for the scan | This plan, E1 | 3.0.0-rc1.4: 25 checks with the real `run_scan` and `_probe_host_port` against a made-up network |
