@@ -212,8 +212,11 @@ names below.
 - Two UniFi devices (OUI-only, suppressed)
 - Microseven Hipcam — HTTP-polled at ~1 fps historically; per-IP TCP
   rate limit, 5s brand cooldown; prone to firmware lockout
-- Hikvision DS-2DE4A425IW-DE PTZ — HEVC main, MJPEG sub, ONVIF
-  returns 0 profiles
+- Hikvision DS-2DE4A425IW-DE PTZ — HEVC main 2560x1440; sub-stream H.265
+  704x480 at 20 fps (camera settings, 2026-10-02; older notes said MJPEG);
+  ONVIF returns 0 profiles. AnyCam stores the streams it found at password
+  entry, so a camera setting changed later is not seen until the password
+  is entered again
 
 **Test system B**
 - Lorex/Dahua DVR-NVR (D861A8B-Z, 8ch), channels ch2–ch8 populated
