@@ -22,7 +22,7 @@ anycam_scan.py          The network scan
 anycam_storage.py       The Storage tab
 anycam_host.py          Connects the files above to camera_discovery.py
 anycam_modules.py       The list of the files above
-package_release.py      Builds _build/camera_discovery-<version>.zip
+package_release.py      Builds _build/anycam-<version>.zip
 config.yaml             Addon manifest and options schema
 run.sh                  Addon entrypoint; exports config as env vars
 Dockerfile              Addon image (base image set here since 2.6.6)
@@ -41,9 +41,11 @@ docs/legacy/            Pre-repository working documents
 1. Confirm version number and scope before starting (see `CLAUDE.md`)
 2. Make changes
 3. `python verify_release.py` — all eight gates must pass
-4. Stage under `camera_discovery-<version>/`, zip from the staging parent
+4. `python package_release.py` — `_build/anycam-<version>.zip`, folder `anycam/` inside
 5. Produce an audit report PDF including a best-practices compliance section
 6. Tag, and create a Release if the version is a milestone
+7. On a publish, copy the zip's `anycam/` folder into the add-on store repository
+   (github.com/crystalheeler/crystalheeler)
 
 ## History note
 
