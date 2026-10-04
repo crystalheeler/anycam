@@ -1,13 +1,23 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 2 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
+**Compiled:** 28 September 2026; updated 3 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
 
-No version numbers are assigned here. Rule 7: version and scope are confirmed with CrystalHeeler at build time.
+Since 2026-10-03 the open items are arranged into version phases (see Phases after 3.0.0). Rule 7 still applies: the version and scope are confirmed with CrystalHeeler before each build.
 
 A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this file by `docs/render_build_plan.py`. Regenerate it after every change to this file.
+
+---
+
+## Next up: 3.0.1, in work order
+
+Agreed with CrystalHeeler on 2026-10-03.
+
+1. **B2, missing cameras.** Waits on CrystalHeeler: the scan log from the system with the missing camera, and the brand and address of each missing camera.
+2. **C10, Firefox and H.265 live view.** (1) Check what the browser can play before trying live view; if it cannot play the stream, go straight to the classic view with a plain message, not a red error. (2) Replace go2rtc's raw error text with readable text. (3) Optionally offer an H.264 sub-stream in live view, which gives up resolution: CrystalHeeler decides at the start of C10.
+3. **The rest of the phase:** B20, B23, B24, B26, B12, B8, F10, C11 (also closes B3), C20.
 
 ---
 
