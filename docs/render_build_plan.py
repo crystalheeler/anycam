@@ -55,13 +55,19 @@ def inline(md: str) -> str:
                                                    quote=False) + "</code>", s)
 
 
+def links(rendered: str) -> str:
+    """Make item IDs (B2, C10) in rendered text link to their cards."""
+    return re.sub(r"(?<![\w#/\"-])([A-F]\d{1,2})\b(?![^<]*</a>)", r'<a href="#\1">\1</a>', rendered)
+
+
 def cells(line: str) -> list[str]:
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
 def parse(text: str) -> dict:
     plan = {"title": "", "compiled": "", "purpose": "", "order": [],
-            "order_notes": [], "groups": [], "done": [], "not_ours": []}
+            "order_title": "Recommended order", "order_notes": [], "phases": [],
+            "phases_title": "", "phase_notes": [], "groups": [], "done": [], "not_ours": []}
     section = None
     group = None
     for n, raw in enumerate(text.splitlines(), 1):
@@ -76,8 +82,12 @@ def parse(text: str) -> dict:
                 group = {"letter": m.group(1), "title": m.group(2), "items": []}
                 plan["groups"].append(group)
                 section = "group"
-            elif head.startswith("Recommended order"):
+            elif head.startswith(("Recommended order", "Next up")):
                 section = "order"
+                plan["order_title"] = head
+            elif head.startswith("Phases"):
+                section = "phases"
+                plan["phases_title"] = head
             elif head.startswith("Done"):
                 section = "done"
             elif head.startswith("Not AnyCam"):
@@ -98,6 +108,16 @@ def parse(text: str) -> dict:
                 plan["order"].append(m.group(1))
             else:
                 plan["order_notes"].append(line)
+        elif section == "phases":
+            if line.startswith("|"):
+                c = cells(line)
+                if c[0] == "Version":
+                    continue
+                if len(c) != 3:
+                    raise PlanError(f"line {n}: expected 3 cells, found {len(c)}")
+                plan["phases"].append(c)
+            else:
+                plan["phase_notes"].append(line)
         elif section == "group" and line.startswith("|"):
             c = cells(line)
             if c[0] == "#":
@@ -339,13 +359,30 @@ def render(plan: dict) -> str:
                    f'<span class="t"><a href="#{html.escape(i["id"])}">{e(i["item"])}</a></span>'
                    f'<span class="x">{e(i["next"])}</span></li>')
     out.append('</ul></div>')
-    out.append('<div class="panel"><h2>Recommended order</h2><ol class="order">')
+    out.append(f'<div class="panel"><h2>{html.escape(plan["order_title"])}</h2><ol class="order">')
     for o in plan["order"]:
-        out.append(f'<li><span>{e(o)}</span></li>')
+        out.append(f'<li><span>{links(e(o))}</span></li>')
     out.append('</ol>')
     for note in plan["order_notes"]:
         out.append(f'<p class="order-note">{e(note)}</p>')
     out.append('</div></div>')
+
+    # 2026-10-03: the version phases, between the top panels and the groups.
+    if plan["phases"]:
+        out.append(f'<section data-all-only id="phases"><div class="ghead" style="--g:var(--st-you-fg)">'
+                   f'<h2>{html.escape(plan["phases_title"])}</h2>'
+                   f'<span class="gcount">{len(plan["phases"])} versions</span></div>')
+        for note in plan["phase_notes"][:1]:
+            out.append(f'<p class="order-note">{e(note)}</p>')
+        out.append('<div class="done-wrap"><table><thead><tr><th>Version</th><th>Theme</th>'
+                   '<th>Items</th></tr></thead><tbody>')
+        for ver, theme, its in plan["phases"]:
+            out.append(f'<tr><td><span class="mono">{e(ver)}</span></td><td>{e(theme)}</td>'
+                       f'<td>{links(e(its))}</td></tr>')
+        out.append('</tbody></table></div>')
+        for note in plan["phase_notes"][1:]:
+            out.append(f'<p class="aside">{links(e(note))}</p>')
+        out.append('</section>')
 
     for g in plan["groups"]:
         gl = g["letter"].lower()

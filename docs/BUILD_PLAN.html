@@ -156,7 +156,7 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <p class="eyebrow">AnyCam · Home Assistant add-on</p>
 <h1>AnyCam Build Plan</h1>
 <p class="meta">the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.</p>
-<p class="meta"><span class="mono">28 September 2026; updated 2 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist. · 27 open · 95 done</span></p>
+<p class="meta"><span class="mono">28 September 2026; updated 3 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist. · 27 open · 95 done</span></p>
 </header>
 <nav class="bars" aria-label="Open items per group">
 <a class="bar g-a" style="--n:0" href="#group-a" title="Field tests: 0 open"><b>A · 0</b><span>Field tests</span></a>
@@ -178,9 +178,27 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <div class="panel you"><h2>Waiting on you</h2><ul class="you-list">
 <li class="g-b"><span class="id">B6</span><span class="t"><a href="#B6">Test the Microseven once it is unlocked, and make AnyCam robust to cameras that lock out</a></span><span class="x">Retitled by CrystalHeeler, 2026-10-03. When CrystalHeeler has unlocked the camera: field-test that it behaves as expected (scan, password entry with the 5 s pacing, card, Enhanced View, no new lockout over a day). Then review the code: detect the locked state (accepts the connection, returns no valid answer), stop connecting to it, and tell the user on the card to power-cycle the camera. No phase until it is unlocked</span></li>
 </ul></div>
-<div class="panel"><h2>Recommended order</h2><ol class="order">
+<div class="panel"><h2>Next up: 3.0.1, in work order</h2><ol class="order">
+<li><span><strong><a href="#B2">B2</a>, missing cameras.</strong> Waits on CrystalHeeler: the scan log from the system with the missing camera, and the brand and address of each missing camera.</span></li>
+<li><span><strong><a href="#C10">C10</a>, Firefox and H.265 live view.</strong> (1) Check what the browser can play before trying live view; if it cannot play the stream, go straight to the classic view with a plain message, not a red error. (2) Replace go2rtc's raw error text with readable text. (3) Optionally offer an H.264 sub-stream in live view, which gives up resolution: CrystalHeeler decides at the start of <a href="#C10">C10</a>.</span></li>
+<li><span><strong>The rest of the phase:</strong> <a href="#B20">B20</a>, <a href="#B23">B23</a>, <a href="#B24">B24</a>, <a href="#B26">B26</a>, <a href="#B12">B12</a>, <a href="#B8">B8</a>, <a href="#F10">F10</a>, <a href="#C11">C11</a> (also closes <a href="#B3">B3</a>), <a href="#C20">C20</a>.</span></li>
 </ol>
+<p class="order-note">Agreed with CrystalHeeler on 2026-10-03.</p>
 </div></div>
+<section data-all-only id="phases"><div class="ghead" style="--g:var(--st-you-fg)"><h2>Phases after 3.0.0</h2><span class="gcount">8 versions</span></div>
+<p class="order-note">Agreed with CrystalHeeler on 2026-10-03. Each phase runs as 3.0.0 did: release candidates, a field test, then a publish. An item marked Discuss gets its design discussion at the start of its phase. Rule 7 still applies: the version and scope are confirmed before each build.</p>
+<div class="done-wrap"><table><thead><tr><th>Version</th><th>Theme</th><th>Items</th></tr></thead><tbody>
+<tr><td><span class="mono">3.0.1</span></td><td>Fixes, then the Firefox message</td><td><strong><a href="#B2">B2</a> first</strong> (CrystalHeeler, 2026-10-03: "the first thing we work on"), <strong><a href="#C10">C10</a> second</strong> (CrystalHeeler, 2026-10-03), then <a href="#B20">B20</a>, <a href="#B23">B23</a>, <a href="#B24">B24</a>, <a href="#B26">B26</a>, <a href="#B12">B12</a>, <a href="#B8">B8</a>, <a href="#F10">F10</a>, <a href="#C11">C11</a> (also closes <a href="#B3">B3</a>), <a href="#C20">C20</a></td></tr>
+<tr><td><span class="mono">3.1.0</span></td><td>Cards</td><td><a href="#B25">B25</a>, <a href="#C19">C19</a>, <a href="#D3">D3</a></td></tr>
+<tr><td><span class="mono">3.2.0</span></td><td>Live view</td><td><a href="#C5">C5</a>, <a href="#C3">C3</a>, <a href="#C6">C6</a></td></tr>
+<tr><td><span class="mono">3.3.0</span></td><td>One connection per camera</td><td><a href="#C4">C4</a>, <a href="#B15">B15</a></td></tr>
+<tr><td><span class="mono">3.4.0</span></td><td>Detection zones</td><td><a href="#C17">C17</a></td></tr>
+<tr><td><span class="mono">3.5.0</span></td><td>Discovery and DVRs</td><td><a href="#D1">D1</a>, <a href="#D2">D2</a></td></tr>
+<tr><td><span class="mono">3.6.0</span></td><td>Recording upload</td><td><a href="#C14">C14</a></td></tr>
+<tr><td><span class="mono">3.7.0</span></td><td>Hardware decode</td><td><a href="#B11">B11</a>, <a href="#C9">C9</a></td></tr>
+</tbody></table></div>
+<p class="aside">Outside the phases: <a href="#B6">B6</a> waits until CrystalHeeler unlocks the Microseven.</p>
+</section>
 <section class="group g-a" id="group-a">
 <div class="ghead"><span class="gl">A</span><h2>Field tests</h2><span class="gcount">0 open</span></div><div class="cards">
 </div></section>
