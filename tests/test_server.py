@@ -2889,7 +2889,10 @@ async def test_credentials():
                            "name": "IP Camera", "rtsp_auth_realm": "Login to " + "ab" * 16}
         find.result = {554: "rtsp://10.0.0.50:554/cam/realmonitor?channel=1&subtype=0"}
         details.clear(); calls["validate"].clear()
-        with _Swap(snap_loop=fake_snap_loop):
+
+        async def no_count(cam, u, p):     # 3.5.0 (D1): the DVR does not say
+            return None
+        with _Swap(snap_loop=fake_snap_loop, _dvr_channel_count=no_count):
             st, body = await set_creds({"camera_id": cid, "username": "admin", "password": "pw"})
             check("Z7 DVR: accepted, and the page told the channel list is coming",
                   st == 200 and body["dvr_enumeration_pending"] is True)
@@ -2921,6 +2924,19 @@ async def test_credentials():
             check("Z7 ... a second run does nothing", len(cd.CAMERAS) == n)
             await cd._enumerate_dvr_channels_after_auth("gone")
             check("Z7 ... a deleted camera is marked done", "gone" in cd._DVR_ENUM_DONE)
+
+        # AF1 3.5.0 (D1): the channels the DVR reports, not 16
+        async def four(cam, u, p):
+            return 4
+        for k in [k for k in cd.CAMERAS if "_ch" in k]:
+            del cd.CAMERAS[k]
+        cd._DVR_ENUM_DONE.clear(); calls["validate"].clear()
+        with _Swap(snap_loop=fake_snap_loop, _dvr_channel_count=four):
+            await cd._enumerate_dvr_channels_after_auth(cid)
+        enum_urls = [u for _, urls, label in calls["validate"] if label.startswith("channel-enum")
+                     for u in urls]
+        check("AF1 D1: a DVR that reports 4 channels: channels 2 to 4 walked, not 2 to 16",
+              len(enum_urls) == 3 and cd.CAMERAS[cid].get("dvr_channels") == 4, str(len(enum_urls)))
 
         # Z8 clear credentials
         r = await cd.api_clear_credentials(JsonReq(match={"camera_id": "nope"}))
@@ -3765,6 +3781,71 @@ async def test_340():
         cd.CAMERAS.clear(); cd._MOTION.clear()
 
 
+
+# ── AF. 3.5.0 ────────────────────────────────────────────────────────────────
+async def test_350():
+    print("\n[AF] 3.5.0")
+    from aiohttp.test_utils import TestServer
+    # D1: what a Dahua or Lorex DVR answers
+    check("AF2 D1: the channel count is read from either answer",
+          cd._dvr_parse_count("result=8\r\n") == 8
+          and cd._dvr_parse_count("table.MaxRemoteInputChannels=32\n") == 32
+          and cd._dvr_parse_count("Error\r\nBad Request!") is None
+          and cd._dvr_parse_count("result=0") is None and cd._dvr_parse_count("result=999") is None)
+    seen = []
+
+    async def collect(request):
+        seen.append((request.path, request.headers.get("Authorization", "")[:6]))
+        if not request.headers.get("Authorization", "").startswith("Digest "):
+            return web.Response(status=401, headers={
+                "WWW-Authenticate": 'Digest realm="Login to x", qop="auth", nonce="n1", opaque="o"'})
+        return web.Response(text="result=8\r\n" if "devVideoInput" in request.path_qs
+                            else "table.MaxRemoteInputChannels=0\r\n")
+    app = web.Application()
+    app.router.add_get("/cgi-bin/devVideoInput.cgi", collect)
+    app.router.add_get("/cgi-bin/magicBox.cgi", collect)
+    srv = TestServer(app); await srv.start_server()
+    try:
+        cam = {"ip": "127.0.0.1", "http_snap_url": f"http://127.0.0.1:{srv.port}/cgi-bin/snapshot.cgi"}
+        n = await cd._dvr_channel_count(cam, "admin", "pw")
+    finally:
+        await srv.close()
+    check("AF3 D1: the DVR is asked with Digest login, and its 8 inputs are the count",
+          n == 8 and ("/cgi-bin/devVideoInput.cgi", "Digest") in seen, f"{n} {seen}")
+    n2 = await cd._dvr_channel_count({"ip": "127.0.0.1", "http_snap_url": "http://127.0.0.1:9/x"}, "a", "b")
+    check("AF3 ... no answer: None, so AnyCam walks 16 channels", n2 is None)
+
+    # D2: one database, the same lookups
+    import hashlib as _h
+    check("AF4 D2: STREAM_DB, built from CAMERA_DB, is byte for byte the table of 3.4.0",
+          _h.sha256(json.dumps(cd.STREAM_DB).encode()).hexdigest()
+          == "e14a73dedbc300b8dcdc6dab9a5f290ab5ed4d2b590149455acd4f40c178a8dc")
+    import camera_db as _db
+    src = Path(_db.__file__).read_text(encoding="utf-8")
+    check("AF4 ... the stream paths are written once, on the brands", "STREAM_DB: dict = {" not in src
+          and sum(len(e.get("streams", [])) for e in _db.CAMERA_DB) == len(cd.STREAM_DB) == 40)
+    ranks = [s["rank"] for e in _db.CAMERA_DB for s in e.get("streams", [])]
+    check("AF4 ... every stream entry has its own rank", sorted(ranks) == list(range(40)))
+    picks = {kw: cd._match_stream_db_slug({"name": kw}) for e in cd.STREAM_DB.values() for kw in e["match"]}
+    check("AF5 D2: each keyword still finds its stream entry",
+          picks["hikvision"] == "hikvision" and picks["lorex"] == "lorex" and picks["ezviz"] == "ezviz"
+          and picks["imou"] == "imou" and picks.get("dh-ipc") == "dahua" and None not in picks.values())
+    check("AF6 D2: the scan's ports come from the database too: the same 54 ports",
+          len(cd.CAMERA_RELEVANT_PORTS) == 54 and cd.CAMERA_RELEVANT_PORTS[:3] == [22, 631, 9100]
+          and cd.CAMERA_RELEVANT_PORTS[3:] == sorted(cd.CAMERA_RELEVANT_PORTS[3:])
+          and {p for e in _db.CAMERA_DB for p in e.get("default_ports", [])} <= set(cd.CAMERA_RELEVANT_PORTS))
+    real = list(_db.CAMERA_DB)
+    try:
+        _db.CAMERA_DB.append({"name": "Test brand", "default_ports": [12345]})
+        import importlib, anycam_scan as _sc
+        ports = list(_sc._PORTS_CLASSIFIER) + sorted(
+            (set(_sc._PORTS_DOCUMENTED) | {p for e in _db.CAMERA_DB for p in e.get("default_ports", [])})
+            - set(_sc._PORTS_CLASSIFIER))
+        check("AF6 ... a brand added with a new port is scanned on it", 12345 in ports)
+    finally:
+        _db.CAMERA_DB[:] = real
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -3885,6 +3966,7 @@ async def main():
     await test_320()
     await test_330()
     await test_340()
+    await test_350()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

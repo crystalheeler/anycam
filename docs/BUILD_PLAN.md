@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 4 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
+**Compiled:** 28 September 2026; updated 4 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -11,12 +11,11 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 ---
 
-## Next up: 3.5.0, in work order
+## Next up: 3.6.0
 
-3.0.1-rc1.0 to 3.4.0-rc1.0 are built (2026-10-04), not field-tested. Next, in the untested run CrystalHeeler ordered on 2026-10-04:
+3.0.1-rc1.0 to 3.5.0-rc1.0 are built (2026-10-04), not field-tested. Next, in the untested run CrystalHeeler ordered on 2026-10-04:
 
-1. **D1, Lorex and Dahua: the channel limit from what the DVR reports.**
-2. **D2, one camera database:** the plan document, tests, then the merge.
+1. **C14, upload recordings** by SFTP, FTPS or FTP, for each camera and for all; upload, delete the local copy, retry; passwords encrypted.
 
 ---
 
@@ -44,7 +43,7 @@ Agreed with CrystalHeeler on 2026-10-03. Mode, CrystalHeeler 2026-10-04: every p
 | 3.2.0 | Live view. Built: 3.2.0-rc1.0, 2026-10-04, not field-tested | C5, C6 |
 | 3.3.0 | One connection per camera. Built: 3.3.0-rc1.0, 2026-10-04, not field-tested | C4, B15 |
 | 3.4.0 | Detection zones. Built: 3.4.0-rc1.0, 2026-10-04, not field-tested | C17 |
-| 3.5.0 | Discovery and DVRs | D1, D2 |
+| 3.5.0 | Discovery and DVRs. Built: 3.5.0-rc1.0, 2026-10-04, not field-tested | D1, D2 |
 | 3.6.0 | Recording upload | C14 |
 | 3.7.0 | Hardware decode | B11, C9 |
 
@@ -76,8 +75,6 @@ Outside the phases: B6 waits until CrystalHeeler unlocks the Microseven.
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
-| D1 | Later | Lorex / Dahua: remaining pieces | Channel enumeration and per-channel cards shipped in 2.5.0. Still open: no sample of what a known-empty channel sends, and a fixed 16-channel limit | Watch for phantom or missing channel cards; make the limit a per-device setting |
-| D2 | Discuss | Merge the two camera databases, and use each camera's default ports | CLAUDE.md queued work | Write a plan document first |
 
 ## E. Code health
 
@@ -95,6 +92,8 @@ Outside the phases: B6 waits until CrystalHeeler unlocks the Microseven.
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
+| DVR channel limit from the DVR (D1) | This plan, D1 | 3.5.0-rc1.0: after the password, `devVideoInput.cgi?action=getCollect` and `MaxRemoteInputChannels` (Basic, then Digest); the larger count, 1 to 256, sets the channels walked; 16 when the DVR does not answer. Tests AF1 to AF3. Open from D1: a sample of what a known-empty channel sends. Not field-tested |
+| One camera database; default ports used (D2) | This plan, D2; CLAUDE.md | 3.5.0-rc1.0, plan `docs/Camera_DB_Merge_Plan.md`: stream paths on the brands (`"streams"`, with `rank`), `STREAM_DB` built from them and byte for byte the old table; the scan's port list built from the database (same 54 ports). Tests AF4 to AF6 |
 | Detection zones (C17) | This plan, C17 | 3.4.0-rc1.0, to the 23 answers in `docs/Detection_Zones_Plan.md`: drawing window over Enhanced View (Zones button, Edit zones in the cog panel), up to 6 polygons, own sensitivity with Off, zones only, 128 x 96 grid with zones, per-zone confirmation, slow comparison over 5 s, tuning line and cog reading per zone, Show zones with the recording's zone, zone in the log and the Storage tab, zones in motion.json. New file `anycam_zones.py`. Tests AE1 to AE11, page section C17. Open: answer 8's re-check of the whole-picture levels at 128 x 96 (needs field data). Not field-tested |
 | One camera connection through go2rtc (C4) | This plan, C4 | 3.3.0-rc1.0: go2rtc's RTSP server on 127.0.0.1:28554 with a password new at each start (CrystalHeeler's approval, 2026-10-04); the snapshot loop, the classic view, the motion detector, the recording buffer and the direct recording read go2rtc's copy; one go2rtc stream per source, named from the address without its password, shared with the live card and Enhanced View; back to direct after 3 failed runs. The recording buffer stays, for the 3 s pre-event video. Tests AD1 to AD6; the release gate pins the RTSP listen address and password. Not field-tested |
 | The classic view kept the card's camera stream (B15) | This plan, B15 | 3.3.0-rc1.0: the classic view's ffmpeg reads go2rtc's copy, so it opens no second camera connection, and go2rtc keeps the camera stream while the live card or motion detection use it. Test AD5. Not field-tested |

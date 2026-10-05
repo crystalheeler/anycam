@@ -156,31 +156,29 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <p class="eyebrow">AnyCam · Home Assistant add-on</p>
 <h1>AnyCam Build Plan</h1>
 <p class="meta">the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.</p>
-<p class="meta"><span class="mono">28 September 2026; updated 4 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist. · 7 open · 114 done</span></p>
+<p class="meta"><span class="mono">28 September 2026; updated 4 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist. · 5 open · 116 done</span></p>
 </header>
 <nav class="bars" aria-label="Open items per group">
 <a class="bar g-a" style="--n:0" href="#group-a" title="Field tests: 0 open"><b>A · 0</b><span>Field tests</span></a>
 <a class="bar g-b" style="--n:2" href="#group-b" title="Bugs: 2 open"><b>B · 2</b><span>Bugs</span></a>
 <a class="bar g-c" style="--n:3" href="#group-c" title="Video and recording: 3 open"><b>C · 3</b><span>Video and recording</span></a>
-<a class="bar g-d" style="--n:2" href="#group-d" title="Discovery and device support: 2 open"><b>D · 2</b><span>Discovery and device support</span></a>
+<a class="bar g-d" style="--n:0" href="#group-d" title="Discovery and device support: 0 open"><b>D · 0</b><span>Discovery and device support</span></a>
 <a class="bar g-e" style="--n:0" href="#group-e" title="Code health: 0 open"><b>E · 0</b><span>Code health</span></a>
 <a class="bar g-f" style="--n:0" href="#group-f" title="Release engineering: 0 open"><b>F · 0</b><span>Release engineering</span></a>
 </nav><p class="bars-cap">Each bar is one group; its width is the number of open items.</p>
 <div class="filters" role="group" aria-label="Filter by status">
-<button type="button" class="chip" data-filter="all" aria-pressed="true">All <span class="n">7</span></button>
+<button type="button" class="chip" data-filter="all" aria-pressed="true">All <span class="n">5</span></button>
 <button type="button" class="chip st-You" data-filter="You" aria-pressed="false"><span class="dot"></span>Waiting on you <span class="n">1</span></button>
-<button type="button" class="chip st-Discuss" data-filter="Discuss" aria-pressed="false"><span class="dot"></span>Discuss first <span class="n">1</span></button>
-<button type="button" class="chip st-Later" data-filter="Later" aria-pressed="false"><span class="dot"></span>Later <span class="n">5</span></button>
+<button type="button" class="chip st-Later" data-filter="Later" aria-pressed="false"><span class="dot"></span>Later <span class="n">4</span></button>
 </div>
 <div class="top" data-all-only>
 <div class="panel you"><h2>Waiting on you</h2><ul class="you-list">
 <li class="g-b"><span class="id">B6</span><span class="t"><a href="#B6">Test the Microseven once it is unlocked, and make AnyCam robust to cameras that lock out</a></span><span class="x">Retitled by CrystalHeeler, 2026-10-03. When CrystalHeeler has unlocked the camera: field-test that it behaves as expected (scan, password entry with the 5 s pacing, card, Enhanced View, no new lockout over a day). Then review the code: detect the locked state (accepts the connection, returns no valid answer), stop connecting to it, and tell the user on the card to power-cycle the camera. No phase until it is unlocked</span></li>
 </ul></div>
-<div class="panel"><h2>Next up: 3.5.0, in work order</h2><ol class="order">
-<li><span><strong><a href="#D1">D1</a>, Lorex and Dahua: the channel limit from what the DVR reports.</strong></span></li>
-<li><span><strong><a href="#D2">D2</a>, one camera database:</strong> the plan document, tests, then the merge.</span></li>
+<div class="panel"><h2>Next up: 3.6.0</h2><ol class="order">
+<li><span><strong><a href="#C14">C14</a>, upload recordings</strong> by SFTP, FTPS or FTP, for each camera and for all; upload, delete the local copy, retry; passwords encrypted.</span></li>
 </ol>
-<p class="order-note">3.0.1-rc1.0 to 3.4.0-rc1.0 are built (2026-10-04), not field-tested. Next, in the untested run CrystalHeeler ordered on 2026-10-04:</p>
+<p class="order-note">3.0.1-rc1.0 to 3.5.0-rc1.0 are built (2026-10-04), not field-tested. Next, in the untested run CrystalHeeler ordered on 2026-10-04:</p>
 </div></div>
 <section data-all-only id="phases"><div class="ghead" style="--g:var(--st-you-fg)"><h2>Phases after 3.0.0</h2><span class="gcount">8 versions</span></div>
 <p class="order-note">Agreed with CrystalHeeler on 2026-10-03. Mode, CrystalHeeler 2026-10-04: every phase is built untested, one after another, each as its own release candidate with its own local commit, tag and zip; nothing is pushed or published without an order. CrystalHeeler tests the latest and installs an earlier one to narrow down a fault. An item marked Discuss gets its design discussion at the start of its phase. Rule 7 still applies: the version and scope are confirmed before each build.</p>
@@ -190,7 +188,7 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <tr><td><span class="mono">3.2.0</span></td><td>Live view. Built: 3.2.0-rc1.0, 2026-10-04, not field-tested</td><td><a href="#C5">C5</a>, <a href="#C6">C6</a></td></tr>
 <tr><td><span class="mono">3.3.0</span></td><td>One connection per camera. Built: 3.3.0-rc1.0, 2026-10-04, not field-tested</td><td><a href="#C4">C4</a>, <a href="#B15">B15</a></td></tr>
 <tr><td><span class="mono">3.4.0</span></td><td>Detection zones. Built: 3.4.0-rc1.0, 2026-10-04, not field-tested</td><td><a href="#C17">C17</a></td></tr>
-<tr><td><span class="mono">3.5.0</span></td><td>Discovery and DVRs</td><td><a href="#D1">D1</a>, <a href="#D2">D2</a></td></tr>
+<tr><td><span class="mono">3.5.0</span></td><td>Discovery and DVRs. Built: 3.5.0-rc1.0, 2026-10-04, not field-tested</td><td><a href="#D1">D1</a>, <a href="#D2">D2</a></td></tr>
 <tr><td><span class="mono">3.6.0</span></td><td>Recording upload</td><td><a href="#C14">C14</a></td></tr>
 <tr><td><span class="mono">3.7.0</span></td><td>Hardware decode</td><td><a href="#B11">B11</a>, <a href="#C9">C9</a></td></tr>
 </tbody></table></div>
@@ -211,9 +209,7 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <article class="card" id="C9" data-status="Later"><div class="ctop"><span class="id">C9</span><span class="pill st-Later">Later</span></div><h3>Pi 4 decoder overlay check or toggle</h3><dl><dt>Why</dt><dd>Deferred since 2.2.8</dd><dt>Next step</dt><dd>Lower priority now that live view does no decoding on the Pi</dd></dl></article>
 </div></section>
 <section class="group g-d" id="group-d">
-<div class="ghead"><span class="gl">D</span><h2>Discovery and device support</h2><span class="gcount">2 open</span></div><div class="cards">
-<article class="card" id="D1" data-status="Later"><div class="ctop"><span class="id">D1</span><span class="pill st-Later">Later</span></div><h3>Lorex / Dahua: remaining pieces</h3><dl><dt>Why</dt><dd>Channel enumeration and per-channel cards shipped in 2.5.0. Still open: no sample of what a known-empty channel sends, and a fixed 16-channel limit</dd><dt>Next step</dt><dd>Watch for phantom or missing channel cards; make the limit a per-device setting</dd></dl></article>
-<article class="card" id="D2" data-status="Discuss"><div class="ctop"><span class="id">D2</span><span class="pill st-Discuss">Discuss first</span></div><h3>Merge the two camera databases, and use each camera's default ports</h3><dl><dt>Why</dt><dd>CLAUDE.md queued work</dd><dt>Next step</dt><dd>Write a plan document first</dd></dl></article>
+<div class="ghead"><span class="gl">D</span><h2>Discovery and device support</h2><span class="gcount">0 open</span></div><div class="cards">
 </div></section>
 <section class="group g-e" id="group-e">
 <div class="ghead"><span class="gl">E</span><h2>Code health</h2><span class="gcount">0 open</span></div><div class="cards">
@@ -221,8 +217,10 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <section class="group g-f" id="group-f">
 <div class="ghead"><span class="gl">F</span><h2>Release engineering</h2><span class="gcount">0 open</span></div><div class="cards">
 </div></section>
-<section data-all-only id="done"><div class="ghead" style="--g:var(--st-ready-fg)"><h2>Done</h2><span class="gcount">114 items off the older lists</span></div>
+<section data-all-only id="done"><div class="ghead" style="--g:var(--st-ready-fg)"><h2>Done</h2><span class="gcount">116 items off the older lists</span></div>
 <div class="done-wrap"><table><thead><tr><th>Item</th><th>Where it was listed</th><th>Evidence</th></tr></thead><tbody>
+<tr><td><span class="tick">✓</span>DVR channel limit from the DVR (D1)</td><td>This plan, D1</td><td>3.5.0-rc1.0: after the password, <code>devVideoInput.cgi?action=getCollect</code> and <code>MaxRemoteInputChannels</code> (Basic, then Digest); the larger count, 1 to 256, sets the channels walked; 16 when the DVR does not answer. Tests AF1 to AF3. Open from D1: a sample of what a known-empty channel sends. Not field-tested</td></tr>
+<tr><td><span class="tick">✓</span>One camera database; default ports used (D2)</td><td>This plan, D2; CLAUDE.md</td><td>3.5.0-rc1.0, plan <code>docs/Camera_DB_Merge_Plan.md</code>: stream paths on the brands (<code>"streams"</code>, with <code>rank</code>), <code>STREAM_DB</code> built from them and byte for byte the old table; the scan's port list built from the database (same 54 ports). Tests AF4 to AF6</td></tr>
 <tr><td><span class="tick">✓</span>Detection zones (C17)</td><td>This plan, C17</td><td>3.4.0-rc1.0, to the 23 answers in <code>docs/Detection_Zones_Plan.md</code>: drawing window over Enhanced View (Zones button, Edit zones in the cog panel), up to 6 polygons, own sensitivity with Off, zones only, 128 x 96 grid with zones, per-zone confirmation, slow comparison over 5 s, tuning line and cog reading per zone, Show zones with the recording's zone, zone in the log and the Storage tab, zones in motion.json. New file <code>anycam_zones.py</code>. Tests AE1 to AE11, page section C17. Open: answer 8's re-check of the whole-picture levels at 128 x 96 (needs field data). Not field-tested</td></tr>
 <tr><td><span class="tick">✓</span>One camera connection through go2rtc (C4)</td><td>This plan, C4</td><td>3.3.0-rc1.0: go2rtc's RTSP server on 127.0.0.1:28554 with a password new at each start (CrystalHeeler's approval, 2026-10-04); the snapshot loop, the classic view, the motion detector, the recording buffer and the direct recording read go2rtc's copy; one go2rtc stream per source, named from the address without its password, shared with the live card and Enhanced View; back to direct after 3 failed runs. The recording buffer stays, for the 3 s pre-event video. Tests AD1 to AD6; the release gate pins the RTSP listen address and password. Not field-tested</td></tr>
 <tr><td><span class="tick">✓</span>The classic view kept the card's camera stream (B15)</td><td>This plan, B15</td><td>3.3.0-rc1.0: the classic view's ffmpeg reads go2rtc's copy, so it opens no second camera connection, and go2rtc keeps the camera stream while the live card or motion detection use it. Test AD5. Not field-tested</td></tr>

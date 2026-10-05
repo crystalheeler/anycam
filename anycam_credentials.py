@@ -10,6 +10,7 @@ value at the moment of use.
 import asyncio
 import datetime
 import logging
+import re
 import time
 from aiohttp import web
 from urllib.parse import urlparse, quote
@@ -24,7 +25,7 @@ from anycam_probe import (
     probe_hls, probe_mjpeg_http, probe_rtmp, probe_rtsp,
 )
 from anycam_snap import (
-    snap_loop,
+    _http_digest_header, snap_loop,
 )
 from camera_db import (
     STREAM_DB,
@@ -178,6 +179,57 @@ async def _probe_db_streams(ip: str, port: int, creds: str | None,
 _DVR_ENUM_DONE: set = set()
 
 
+# ── 3.5.0 (D1): the channel count the DVR reports ──────────────────────────
+# Before 3.5.0 AnyCam walked channels 1 to 16 on every Lorex/Dahua DVR: an
+# 8-channel DVR got 7 needless probes, and a 32-channel NVR lost half its
+# cameras. Dahua's HTTP API (also on Lorex, which is Dahua inside) answers
+# the number of video inputs. Both answers are read, and the larger counts
+# (an NVR reports its IP channels as remote inputs).
+DVR_CHANNEL_PATHS = ("/cgi-bin/devVideoInput.cgi?action=getCollect",
+                     "/cgi-bin/magicBox.cgi?action=getProductDefinition&name=MaxRemoteInputChannels")
+DVR_CHANNEL_DEFAULT = 16       # when the DVR does not say
+DVR_CHANNEL_MAX = 256          # a larger answer is not believed
+
+
+def _dvr_parse_count(text: str) -> int | None:
+    """The number in "result=8" or "table.MaxRemoteInputChannels=32"."""
+    m = re.search(r"(?im)^\s*(?:result|table\.MaxRemoteInputChannels)\s*=\s*(\d+)\s*$", text or "")
+    if not m:
+        return None
+    n = int(m.group(1))
+    return n if 1 <= n <= DVR_CHANNEL_MAX else None
+
+
+async def _dvr_channel_count(cam: dict, username: str, password: str) -> int | None:
+    """Ask the DVR how many channels it has; None when it does not answer."""
+    import aiohttp
+    host = urlparse(cam.get("http_snap_url") or "").netloc.split("@")[-1] or cam.get("ip", "")
+    counts = []
+    timeout = aiohttp.ClientTimeout(total=5)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout,
+                                         connector=aiohttp.TCPConnector(ssl=False)) as session:
+            for path in DVR_CHANNEL_PATHS:
+                url = f"http://{host}{path}"
+                try:
+                    async with session.get(url, auth=aiohttp.BasicAuth(username, password)) as resp:
+                        status, www, body = (resp.status, resp.headers.get("WWW-Authenticate", ""),
+                                             await resp.text(errors="replace"))
+                    if status == 401 and www.startswith("Digest"):
+                        hdr = _http_digest_header(www, "GET", path, username, password)
+                        async with session.get(url, headers={"Authorization": hdr}) as resp:
+                            status, body = resp.status, await resp.text(errors="replace")
+                except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as ex:
+                    log.debug(f"  channel count: {path.split('?')[0]} failed: {ex}")
+                    continue
+                n = _dvr_parse_count(body) if status == 200 else None
+                if n:
+                    counts.append(n)
+    except (aiohttp.ClientError, OSError) as ex:
+        log.debug(f"  channel count: {ex}")
+    return max(counts) if counts else None
+
+
 async def _enumerate_dvr_channels_after_auth(camera_id: str) -> None:
     """2.5.0-rc1.2: when cred-auth succeeds on a `channel_iterate`
     brand (Lorex/Dahua DVR-NVR Family etc.), walk the remaining
@@ -277,9 +329,19 @@ async def _enumerate_dvr_channels_after_auth(camera_id: str) -> None:
     # sub-stream variant. Sub-streams for each populated channel can be
     # discovered later by the per-card cred-auth flow.
     template = recipe.get("path_template", "")
-    raw_channels = recipe.get("channels") or list(range(1, 17))
     main_subtype = recipe.get("subtype_main", 0)
-    channel_cap  = 16
+    # 3.5.0 (D1): the DVR says how many channels it has
+    reported = await _dvr_channel_count(cam, username, password)
+    if reported:
+        channel_cap = reported
+        raw_channels = list(range(1, reported + 1))
+        log.info(f"  Channel enumeration: the DVR reports {reported} channel(s)")
+    else:
+        channel_cap = DVR_CHANNEL_DEFAULT
+        raw_channels = recipe.get("channels") or list(range(1, DVR_CHANNEL_DEFAULT + 1))
+        log.info(f"  Channel enumeration: the DVR did not report its channel count — "
+                 f"walking channels 1 to {DVR_CHANNEL_DEFAULT}")
+    cam["dvr_channels"] = reported
     candidate_paths: list[str] = []
     for ch in raw_channels:
         if ch > channel_cap:

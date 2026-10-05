@@ -19,6 +19,7 @@ import uuid
 import xml.etree.ElementTree as ET
 
 from anycam_host import H
+from camera_db import CAMERA_DB       # 3.5.0 (D2): the scan's port list
 from anycam_brand import (
     CAMERA_KEYWORDS, NON_CAMERA_KEYWORDS, appliance_camera, lookup_oui,
 )
@@ -386,7 +387,12 @@ def onvif_discover(timeout: int = 5) -> list[dict]:
 # almost always picks ports in HTTP-adjacent or RTSP-adjacent ranges.
 # Devices on weird ports that ARE on the network still appear in the
 # ARP-discovered live-hosts list; they just have no service info.
-CAMERA_RELEVANT_PORTS: list[int] = [
+# 3.5.0 (D2): the list below is (b), the documented ports, plus the
+# classifier ports; (a) is now read from CAMERA_DB at start-up, so a brand
+# added there is scanned on its ports without a change here. On 2026-10-04
+# every CAMERA_DB port was already in this list, so the result is the same
+# 54 ports.
+_PORTS_DOCUMENTED: list[int] = [
     # ── Classifier-only ports (rc2.2) ────────────────────────────────
     # These ports are NOT camera ports — they're scanned so the verdict
     # logic has signals to REJECT non-camera devices that happen to
@@ -453,6 +459,12 @@ CAMERA_RELEVANT_PORTS: list[int] = [
     49155,  # Pelco Endura svc-tcp range
     49156,  # Pelco Endura svc-tcp range
 ]
+_PORTS_CLASSIFIER = (22, 631, 9100)
+CAMERA_RELEVANT_PORTS: list[int] = list(_PORTS_CLASSIFIER) + sorted(
+    (set(_PORTS_DOCUMENTED)
+     | {p for e in CAMERA_DB for p in e.get("default_ports", [])}
+     | {s["port"] for e in CAMERA_DB for s in e.get("streams", [])})
+    - set(_PORTS_CLASSIFIER))
 
 
 def focused_nmap_scan(host_list: list[str]) -> list[dict]:
