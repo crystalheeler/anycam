@@ -1,3 +1,34 @@
+## 3.0.1-rc1.0
+
+Cameras inside appliances get an information card, live view works in browsers that cannot play H.265, and cards no longer show old pictures. Not field-tested.
+
+### Changes & improvements
+
+- **Cameras in appliances.** A litter box camera (iENSO module) or a Dreame robot vacuum gets an information card: its video plays only in the maker's app. If the device asks for a login, the usual login card stays.
+- **Every skipped device is in the log.** The scan names each live device with no camera port, with its MAC address and maker.
+- **H.265 and the browser.** When the browser cannot play H.265, live view plays the camera's H.264 stream. With no H.264 stream, a plain message names the fix: "HEVC Video Extensions" for Firefox on Windows, else Chrome or Edge.
+- **Readable live-view errors.** The message says what went wrong, not go2rtc's internal text.
+- **Scan progress follows the work.** The bar moves per device, and the page shows the time spent and an estimate of the time left, from the last scan.
+- **Show in Sidebar and Auto update are on** after the first start. You can switch them off; AnyCam does not switch them on again.
+- **Removed: five settings.** Low FPS, Skip Non-Reference Frames, Limit Threads, Stagger Poll and Fast Stream Start. Saved values are ignored.
+- **Removed: the Classic button in Enhanced View.** The classic view still starts by itself when live view cannot play.
+
+### Bugs fixed
+
+- **Cards showed events minutes late.** A 4K H.265 card now decodes keyframes only, about one picture a second, and a card never shows a picture older than 10 s.
+- **An insect seen in one picture recorded on the snapshot path** when the next picture was compared with it. A picture must also differ from the picture before.
+- **A stream that keeps failing filled the log.** Motion detection retries at 10 s, then less often up to 5 min, with one warning.
+- **Adding a camera by hand with protocol WebRTC failed.**
+- **One password-entry step did not pace rate-limited cameras** such as the Microseven.
+- **The log link opened the wrong page** for an add-on installed from the store.
+- **Hardware decode chose VAAPI on a device without a VAAPI driver**, such as a Pi 4. AnyCam now tests VAAPI once before it uses it.
+- **Skip Non-Reference Frames broke H.264 cameras.** The setting is removed.
+
+### Known issues
+
+- **A camera's streams are read only when its password is entered.** After you change a camera's stream settings, enter its password again.
+- **The Microseven is not tested** with this release.
+
 ## 3.0.0
 
 AnyCam's code is split into 14 files with tests, and the scan's Cancel button works. Everything else works as in 2.6.8. Same code as 3.0.0-rc1.5, field-tested on both test systems.

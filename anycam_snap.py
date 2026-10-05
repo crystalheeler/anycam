@@ -30,9 +30,8 @@ log = logging.getLogger("anycam")
 
 # Taken from camera_discovery.py at start-up (anycam_host.bind).
 NEEDS = (
-    'ACD_ESCALATED_COOLDOWN', 'CAMERAS', 'CFG_ADAPTIVE_QUALITY', 'CFG_FAST_STREAM_START',
-    'CFG_HW_DECODE', 'CFG_LIMIT_THREADS', 'CFG_LOW_FPS', 'CFG_LOW_LATENCY',
-    'CFG_SKIP_NONREF', 'CFG_STAGGER_POLL', '_FOCUS_ADAPTIVE', '_HW_DECODER_CANDIDATES',
+    'ACD_ESCALATED_COOLDOWN', 'CAMERAS', 'CFG_ADAPTIVE_QUALITY', 'CFG_HW_DECODE',
+    'CFG_LOW_LATENCY', '_FOCUS_ADAPTIVE', '_HW_DECODER_CANDIDATES',
     '_HW_PROBED', '_HW_UNAVAILABLE', '_LOG_BUFFER', '_SNAP',
     '_THREAD_POOL', '_acd_active', '_brand_throttle_seconds', '_snap_last_access',
     '_snap_state', '_strip_creds', '_throttle_wait_if_needed', 'build_authenticated_url',
@@ -118,131 +117,6 @@ def _build_focus_ladder(camera: dict) -> list:
     return ladder
 
 
-async def _hw_preheater(
-    camera_id: str,
-    state: dict,
-    hw_label: str,
-    timeout_s: float = 30.0,
-) -> None:
-    """2.6.0-rc3.0 Items 2+3 — Fast Stream Start background task.
-
-    When CFG_FAST_STREAM_START is on AND a HW decoder is selected AND
-    we're in Enhanced View (native_res=True), snap_loop launches a
-    second ffmpeg (HW) in parallel with the primary (SW) one. The
-    SW proc serves frames immediately (~1s); this task watches the
-    HW proc's stdout, waits for the first complete JPEG (proves the
-    HW decoder warmed up and the camera is delivering valid data),
-    then signals the main loop to swap state["proc"] from the SW
-    to the HW proc.
-
-    State protocol (all keys read/written under state):
-      state["proc_hw"]: the HW ffmpeg proc (set by snap_loop before
-        creating this task).
-      state["hw_ready"]: set True by us when first HW JPEG seen.
-      state["hw_preheater_failed"]: set True if HW died before
-        producing a frame, or the timeout fired.
-      state["hw_swapped"]: set True by the main loop when it has
-        consumed our signal and swapped procs. We then continue
-        draining the HW proc's stdout briefly (to prevent pipe-fill
-        before the main loop takes over) and exit.
-
-    The timeout (30s) is much longer than the rc2.5 single-proc HW
-    warmup (10s). Reason: fast_stream_start is a "best effort"
-    upgrade — if HW takes longer than usual, we just stay on SW
-    for the session instead of disrupting the user's view. The
-    rc2.5 10s timeout exists to bound the "I'm watching a frozen
-    thumbnail" window; with fast_stream_start that window is gone
-    (SW serves frames during warmup), so HW slowness is invisible.
-    """
-    proc_hw = state.get("proc_hw")
-    if not proc_hw or not proc_hw.stdout:
-        log.debug(f"SNAP [{camera_id}]: hw preheater — no proc_hw, exiting")
-        state["hw_preheater_failed"] = True
-        return
-    started = time.monotonic()
-    SOI     = bytes([0xFF, 0xD8])
-    EOI     = bytes([0xFF, 0xD9])
-    buf     = b""
-    try:
-        while True:
-            elapsed = time.monotonic() - started
-            if elapsed >= timeout_s:
-                log.warning(f"SNAP [{camera_id}]: hw preheater timeout "
-                            f"({timeout_s:.0f}s) — staying SW for this session")
-                state["hw_preheater_failed"] = True
-                try: proc_hw.kill()
-                except Exception: pass
-                return
-            try:
-                chunk = await asyncio.wait_for(
-                    proc_hw.stdout.read(65536), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-            if not chunk:
-                rc = proc_hw.returncode
-                log.info(f"SNAP [{camera_id}]: hw preheater EOF "
-                         f"(rc={rc}, elapsed={elapsed:.1f}s) — HW proc died "
-                         f"before producing a frame, staying SW")
-                state["hw_preheater_failed"] = True
-                return
-            buf += chunk
-            # Look for complete JPEG. Once seen, signal hw_ready and
-            # continue draining to prevent pipe-fill until main loop swaps.
-            if not state.get("hw_ready"):
-                s = buf.find(SOI)
-                e = buf.find(EOI, s + 2) if s >= 0 else -1
-                if s >= 0 and e > s:
-                    log.info(f"SNAP [{camera_id}]: hw preheater first frame "
-                             f"in {elapsed:.1f}s ({hw_label}) — ready for swap")
-                    state["hw_ready"] = True
-                    state["hw_preheat_elapsed"] = elapsed
-                    # Drain mode: keep reading & discarding until the main
-                    # loop swaps procs (consumes our signal). After swap,
-                    # main loop owns proc_hw and we exit.
-                    buf = b""  # reset to avoid unbounded growth in drain mode
-            else:
-                # We've signalled hw_ready — drain quickly until swap.
-                buf = b""
-                if state.get("hw_swapped"):
-                    log.debug(f"SNAP [{camera_id}]: hw preheater — main loop "
-                              f"swapped procs, exiting")
-                    return
-    except asyncio.CancelledError:
-        # Owner cancelled us (e.g., tier change, focus leave, snap_loop end).
-        # Don't kill proc_hw here — the caller is responsible for that since
-        # they cancelled us. (Cancellation might happen AFTER the swap, in
-        # which case main loop owns proc_hw and we shouldn't kill it.)
-        raise
-    except Exception as ex:
-        log.warning(f"SNAP [{camera_id}]: hw preheater error: {ex}")
-        state["hw_preheater_failed"] = True
-        try: proc_hw.kill()
-        except Exception: pass
-
-
-def _kill_hw_preheater(state: dict) -> None:
-    """2.6.0-rc3.0 Items 2+3 — clean up any active HW preheater state.
-
-    Called from:
-      - snap_loop outer restart loop, before launching a new proc pair
-        (clears stale state from a prior iteration that exited)
-      - handle_focus_clear (focus-leave), same
-      - snap_loop end-of-function cleanup
-
-    Idempotent — safe to call when no preheater is running.
-    """
-    t = state.pop("hw_preheater_task", None)
-    if t and not t.done():
-        try: t.cancel()
-        except Exception: pass
-    proc_hw = state.pop("proc_hw", None)
-    if proc_hw is not None:
-        try: proc_hw.kill()
-        except Exception: pass
-    state.pop("hw_ready", None)
-    state.pop("hw_swapped", None)
-    state.pop("hw_preheater_failed", None)
-    state.pop("hw_preheat_elapsed", None)
 
 
 async def _stop_proc(proc: asyncio.subprocess.Process, *,
@@ -363,7 +237,8 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     stream_fps   = camera.get("stream_fps")    or 0
     is_hevc      = stream_codec in ("hevc", "h265")
 
-    # Normal (card) output filters — low_fps_mode adjusts fps inside _launch_snap
+    # Normal (card) output filters. 3.0.1 (C11): Low FPS Mode is gone; cards
+    # run at these caps.
     # 2.6.0-rc3.1: Item 1 reverted to pre-rc3.0 codec-dependent rules.
     # rc3.0 had unified to fps=20 with conditional scale based on sub vs main
     # stream; reverted alongside the rest of Item 1.
@@ -385,9 +260,8 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
         """Launch ffmpeg for snapshot polling.
         native_res=True: use camera's native resolution/fps (for focus view).
-        Respects CFG_ options: thread limiting, skip_nonref, low_fps_mode.
-        In focus/native_res mode, Low FPS Mode and Limit Threads are bypassed
-        so the user gets full quality regardless of config settings.
+        3.0.1 (C11): Skip Non-Reference Frames, Low FPS Mode and Limit Threads
+        are gone with their options.
 
         2.6.0-rc2.3: hw_args is the candidate's ffmpeg_args field copied
         verbatim from _HW_DECODER_CANDIDATES — either a [-c:v <decoder>]
@@ -397,10 +271,6 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         function just splices the args in.
         """
         hw_args     = list(hw_args) if hw_args else []
-        # In focus mode: lift thread cap and nonref-skip for full quality,
-        # even if CFG_LIMIT_THREADS / CFG_SKIP_NONREF are enabled in config.
-        thread_args = [] if native_res else (["-threads", "2"] if CFG_LIMIT_THREADS else [])
-        skip_args   = [] if native_res else (["-skip_frame", "nonref"] if CFG_SKIP_NONREF else [])
         hw_label    = f"hw:{hw_label}" if hw_label else "sw"
 
         # ffmpeg_url: which URL to actually pass to ffmpeg.
@@ -453,14 +323,18 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 vf_used   = f"fps={tier_fps},format=yuvj420p"
                 fps_label = f"adaptive:{tier_fps}fps profile[{prof_idx}] ({res_label})"
             ada["run_start"] = time.monotonic()
-        elif CFG_LOW_FPS and is_hevc:
-            # Low-fps mode for HEVC — 2fps output (decode cost unchanged,
-            # encode/pipe cost drastically reduced)
-            vf_used   = out_vf.replace(f"fps={8 if stream_w < 3840 else 4}", "fps=2")
-            fps_label = "low-fps"
+        elif is_hevc and stream_w >= 3840:
+            # 3.0.1 (B20): the Pi decodes 3840x2160 H.265 in software slower
+            # than the camera sends it (2026-10-02: 2 to 25 pictures a second
+            # from a 7 a second stream, working through a backlog), so the
+            # card and the motion fallback showed pictures minutes old.
+            # Keyframes only: about one picture a second, always current.
+            vf_used   = "scale=480:-2,format=yuvj420p"
+            fps_label = "keyframes only"
         else:
             vf_used   = out_vf
             fps_label = "normal"
+        key_args = ["-skip_frame", "nokey"] if fps_label == "keyframes only" else []
 
         log.info(f"SNAP [{camera_id}]: ffmpeg starting "
                  f"(codec={stream_codec or '?'}, {hw_label}, {fps_label}, vf={vf_used})")
@@ -512,11 +386,10 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             *fflags_args,
             *lowlat_args,
             "-err_detect", "ignore_err",   # tolerate partial HEVC decode errors
-            *skip_args,
+            *key_args,
             *hw_args,
             "-i", ffmpeg_url,
             "-an", "-vf", vf_used,
-            *thread_args,
             "-vcodec", "mjpeg", "-pix_fmt", "yuvj420p",
             "-q:v", jpeg_q, "-f", "image2pipe", "pipe:1",
             stdin=asyncio.subprocess.DEVNULL,
@@ -560,11 +433,6 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                     and not (_motion_uses_snapshots(camera_id) and anycam_focus._FOCUS_ENGINE == "go2rtc")):
                 await asyncio.sleep(1.0)   # ~1fps while another cam is focused
                 continue
-
-            # Stagger polling start times across cameras to spread CPU spikes.
-            if CFG_STAGGER_POLL and state["frame_count"] == 0:
-                idx = list(_SNAP.keys()).index(camera_id) if camera_id in _SNAP else 0
-                await asyncio.sleep(idx * 0.04)   # 40ms offset per camera
 
             # 2.6.0-rc2.3 — bug #1 fix: when in adaptive focus mode,
             # re-derive stream_codec / is_hevc from the active profile.
@@ -632,73 +500,13 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                     log.debug(f"SNAP [{camera_id}]: no hw decoder available "
                               f"for codec={stream_codec}, using software")
 
-            # 2.6.0-rc3.0 Items 2+3 — Fast Stream Start dual-proc path.
-            # Clean up any preheater state from a prior outer-loop iteration
-            # (e.g. previous tier change left a HW proc + task around).
-            _kill_hw_preheater(state)
-            # 2.6.1 — Tier 1 item 3: gate Fast Stream Start by resolution and
-            # codec. At 3840x2160 HEVC the SW proc cannot produce a first frame
-            # before rpivid finishes warming up (2.5-7s), so the parallel
-            # decode spends CPU on frames that never render, and the second
-            # RTSP session draws `RTP bad cseq` warnings. Below 4K, and for
-            # h264 at any resolution, the dual-proc path still wins.
-            # Width comes from the ladder's active profile, not from the camera
-            # record, because a step-down may already have moved off 4K.
-            _fs_w = stream_w
-            if native_res:
-                _fs_ada    = _FOCUS_ADAPTIVE.get(camera_id, {})
-                _fs_ladder = _fs_ada.get("ladder") or []
-                if _fs_ladder:
-                    _fs_ti = min(_fs_ada.get("tier_idx", 0),
-                                 len(_fs_ladder) - 1)
-                    _fs_pi, _ = _fs_ladder[_fs_ti]
-                    _fs_profs = camera.get("stream_profiles") or []
-                    if 0 <= _fs_pi < len(_fs_profs):
-                        _fs_prof = _fs_profs[_fs_pi]
-                        _fs_w = _fs_prof.get("stream_width") or stream_w
-            _fs_blocked = bool(is_hevc and (_fs_w or 0) >= 3840)
-            _fast_start_active = (CFG_FAST_STREAM_START and native_res
-                                  and bool(hw_label)
-                                  and not _fs_blocked)
-            if _fs_blocked and CFG_FAST_STREAM_START and native_res and hw_label:
-                log.info(f"SNAP [{camera_id}]: fast_stream_start suppressed — "
-                         f"width={_fs_w} HEVC is at or above the 4K gate; "
-                         f"software decode cannot beat rpivid warmup here")
-            if _fast_start_active:
-                # Launch SW first (it's the active proc; main loop reads it).
-                # Launch HW second (preheater task watches it for first frame).
-                # Both ffmpegs target the same RTSP URL — most cameras tolerate
-                # two concurrent sessions for the few seconds of HW warmup; if
-                # the camera rejects the second session, the HW preheater will
-                # see proc_hw die quickly and stay-SW gracefully.
-                log.info(f"SNAP [{camera_id}]: fast_stream_start ON — "
-                         f"launching SW for immediate frame + {hw_label} "
-                         f"preheating in background")
-                proc       = await _launch_snap(hw_args=[], hw_label="",
-                                                native_res=native_res)
-                proc_hw    = await _launch_snap(hw_args=hw_args, hw_label=hw_label,
-                                                native_res=native_res)
-                state["proc"]    = proc
-                state["proc_hw"] = proc_hw
-                state["hw_ready"]    = False
-                state["hw_swapped"]  = False
-                state["hw_preheater_failed"] = False
-                state["hw_preheater_task"] = asyncio.create_task(
-                    _hw_preheater(camera_id, state, hw_label))
-                # The main read loop reads SW frames. hw_tried=False because
-                # the active proc IS the SW proc — we're not "trying HW and
-                # waiting to see if it works" in the rc2.5 sense. HW happens
-                # in the preheater. hw_started_at also stays None to keep the
-                # rc2.5 timeout/EOF fallback diagnostics for the SW proc
-                # behaving correctly (no spurious "hw EOF" logs for SW exits).
-                hw_tried       = False
-                hw_started_at  = None
-            else:
-                proc     = await _launch_snap(hw_args=hw_args, hw_label=hw_label,
-                                              native_res=native_res)
-                state["proc"] = proc
-                hw_tried       = bool(hw_label)
-                hw_started_at  = time.monotonic() if hw_tried else None
+            # 3.0.1 (C11): Fast Stream Start (a second, hardware ffmpeg
+            # warming up beside a software one) is gone with its option.
+            proc     = await _launch_snap(hw_args=hw_args, hw_label=hw_label,
+                                          native_res=native_res)
+            state["proc"] = proc
+            hw_tried       = bool(hw_label)
+            hw_started_at  = time.monotonic() if hw_tried else None
             stderr_t = asyncio.create_task(_drain_stderr(proc, f"SNAP:{camera_id}"))
             buf      = b""
             frames   = 0
@@ -715,11 +523,6 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # adaptive tier). Comparing JPEG sizes across that change would
             # read as motion, so start the comparison afresh.
             _motion_reset_prev(camera_id)
-            # hw_tried and hw_started_at were set above conditionally based
-            # on whether fast_stream_start is active. They control the rc2.5
-            # HW-EOF-fallback logic in the read loop below. In fast_stream
-            # mode, the active proc IS SW, so hw_tried=False suppresses the
-            # spurious "hw EOF" treatment of SW exits.
 
             try:
                 while True:
@@ -884,42 +687,6 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         state["frame_count"] += 1
                         # 2.4.0-rc3.4 Bug 2 fix: per-run counter, see launch site.
                         state["current_run_frames"] = state.get("current_run_frames", 0) + 1
-
-                        # 2.6.0-rc3.0 Items 2+3 — Fast Stream Start swap.
-                        # If the HW preheater task signalled hw_ready (HW
-                        # produced its first JPEG, decoder is warm and the
-                        # camera is delivering valid HW-decodable data),
-                        # atomically swap state["proc"] from the SW proc to
-                        # the HW proc. The user sees no disruption — last SW
-                        # frame is followed by first HW frame, both at the
-                        # same vf output dimensions. From this point forward
-                        # the main read loop reads HW frames and SW is dead.
-                        if state.get("hw_ready") and not state.get("hw_swapped"):
-                            sw_proc = state["proc"]
-                            hw_proc = state.get("proc_hw")
-                            if hw_proc is not None:
-                                elapsed = state.get("hw_preheat_elapsed", 0.0)
-                                log.info(f"SNAP [{camera_id}]: hw upgrade "
-                                         f"complete — swapping SW→{hw_label} "
-                                         f"(preheat took {elapsed:.1f}s)")
-                                try: sw_proc.kill()
-                                except Exception: pass
-                                state["proc"]       = hw_proc
-                                state["proc_hw"]    = None
-                                state["hw_swapped"] = True
-                                # Local proc var: subsequent reads happen
-                                # against the new (HW) proc.
-                                proc = hw_proc
-                                # Reset frame buffer — old buf is SW byte
-                                # stream, possibly mid-JPEG; HW stream starts
-                                # fresh. buf.find(SOI) below will skip any
-                                # garbage to first HW frame.
-                                buf  = b""
-                                # Replace stderr drain task with one bound
-                                # to the HW proc (the old one was on SW).
-                                stderr_t.cancel()
-                                stderr_t = asyncio.create_task(
-                                    _drain_stderr(proc, f"SNAP:{camera_id}"))
 
                         # Native-res focus task: exit the inner loop the moment
                         # focus is cleared so the task terminates quickly without
@@ -1559,6 +1326,9 @@ async def http_snap_loop(camera_id: str, camera: dict) -> None:
     log.info(f"SNAP [{camera_id}]: http loop done")
 
 
+SNAP_MAX_AGE_S = 10.0      # 3.0.1 (B20): an older picture is not shown on a card
+
+
 async def handle_snapshot(request: web.Request) -> web.Response:
     """
     Return the latest JPEG frame for a camera.
@@ -1581,7 +1351,7 @@ async def handle_snapshot(request: web.Request) -> web.Response:
     camera    = CAMERAS.get(camera_id)
     if not camera:
         return web.Response(status=404)
-    if camera.get("display") in ("webrtc", "wsrtsp", "info"):
+    if camera.get("display") in ("webrtc", "wsrtsp", "info", "appliance"):
         return web.Response(status=400, text="Not streamable")
 
     # ── Focus mode guard ──────────────────────────────────────────────────────
@@ -1695,6 +1465,12 @@ async def handle_snapshot(request: web.Request) -> web.Response:
 
     frame = state["frame"]
     age   = time.monotonic() - state["frame_time"]
+    # 3.0.1 (B20): a card showed events minutes after they happened. A
+    # picture older than SNAP_MAX_AGE_S is not served; the card says
+    # "Loading feed" until a current one arrives.
+    if age > SNAP_MAX_AGE_S:
+        log.debug(f"SNAP [{camera_id}]: picture {age:.0f} s old — not shown")
+        return web.Response(status=503, text="Picture too old")
     if age > 3.0:
         log.info(f"SNAP [{camera_id}]: serving stale frame (age={age:.1f}s)")
 

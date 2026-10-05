@@ -259,10 +259,6 @@ names below.
 `docs/BUILD_PLAN.html`. It supersedes the lists that used to be here, most
 of whose items have shipped (see its Done section). Standing reminders:
 
-- `skip_nonref=true` breaks every H.264 launch: ffmpeg rejects `nonref`
-  (build plan B3).
-- The Enhanced View automatic-quality redesign **requires full discussion
-  before any coding** (build plan C3).
 - `STREAM_DB` → `CAMERA_DB` consolidation and runtime use of
   `default_ports` need a plan document first (build plan D2).
 - The tests are in `tests/` since 3.0.0-rc1.0 (build plan E7). They cover

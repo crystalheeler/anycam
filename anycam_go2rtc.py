@@ -199,7 +199,7 @@ def _go2rtc_profile_source(camera: dict,
     _build_focus_ladder, so both engines open the same stream for the same
     profile index and the Resolution dropdown means one thing.
     """
-    if camera.get("display") in ("webrtc", "wsrtsp", "info"):
+    if camera.get("display") in ("webrtc", "wsrtsp", "info", "appliance"):
         return None, "", "this camera is not an RTSP stream"
     profiles = _go2rtc_profiles(camera)
     if not 0 <= prof_idx < len(profiles):
@@ -285,16 +285,24 @@ async def _go2rtc_register(name: str, src: str, camera_id: str) -> bool:
     return True
 
 
-def _go2rtc_card_source(camera: dict) -> tuple[str | None, str, str]:
-    """Pick the stream a live card plays; return (auth url, codec, reason)."""
-    if camera.get("display") in ("webrtc", "wsrtsp", "info"):
+def _go2rtc_card_source(camera: dict, h265: bool = True) -> tuple[str | None, str, str]:
+    """Pick the stream a live card plays; return (auth url, codec, reason).
+
+    3.0.1 (C10): h265=False skips H.265 streams, for a browser that cannot
+    play them.
+    """
+    if camera.get("display") in ("webrtc", "wsrtsp", "info", "appliance"):
         return None, "", "this camera is not an RTSP stream"
     best: tuple[int, str, str] | None = None     # (width, url, codec)
+    skipped_h265 = False
     for prof in _go2rtc_profiles(camera):
         raw = prof.get("url") or camera.get(prof.get("_url_key", "stream_url"))
         url, codec, _ = _go2rtc_relay_url(camera, raw,
                                           (prof.get("stream_codec") or "").lower())
         if not url:
+            continue
+        if not h265 and codec in ("hevc", "h265"):
+            skipped_h265 = True
             continue
         width = prof.get("stream_width") or 0
         if best is None or (width and (not best[0] or width < best[0])):
@@ -309,6 +317,8 @@ def _go2rtc_card_source(camera: dict) -> tuple[str | None, str, str]:
                 return url, codec, "ok"
         return None, best[2], f"no stream small enough for a card ({best[0]} wide)"
     if best is None:
+        if skipped_h265:
+            return None, "hevc", "this browser cannot play H.265, and the camera has no other stream"
         return None, "", "no stream that can play live"
     return best[1], best[2], "ok"
 
@@ -330,7 +340,7 @@ async def api_go2rtc_card(request: web.Request) -> web.Response:
     if not camera:
         return web.json_response({"ok": False, "reason": "camera not found"},
                                  status=404)
-    src, codec, reason = _go2rtc_card_source(camera)
+    src, codec, reason = _go2rtc_card_source(camera, h265=request.query.get("h265") != "0")
     if not src:
         return web.json_response({"ok": False, "reason": reason, "codec": codec})
     name = _go2rtc_stream_name(camera_id, 0, kind="c")

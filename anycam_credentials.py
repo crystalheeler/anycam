@@ -35,7 +35,7 @@ log = logging.getLogger("anycam")
 # Taken from camera_discovery.py at start-up (anycam_host.bind).
 NEEDS = (
     'CAMERAS', 'RTSP_PATHS', '_THREAD_POOL', '_brand_throttle_seconds',
-    '_parse_throttle_seconds', '_snap_last_access', '_snap_state', '_strip_creds',
+    '_snap_last_access', '_snap_state', '_strip_creds',
     '_throttle_wait_if_needed', 'build_authenticated_url', 'decrypt_creds', 'encrypt_creds',
     'probe_stream_details', 'save_cameras',
 )
@@ -98,7 +98,8 @@ def _match_stream_db_slug(camera: dict) -> str | None:
 
 async def _probe_db_streams(ip: str, port: int, creds: str | None,
                              db_entry: dict,
-                             existing_urls: set[str]) -> list[dict]:
+                             existing_urls: set[str],
+                             camera: dict | None = None) -> list[dict]:
     """
     Probe RTSP paths from a STREAM_DB entry.
     Returns list of {url, width, height, codec} dicts for responding paths,
@@ -143,12 +144,13 @@ async def _probe_db_streams(ip: str, port: int, creds: str | None,
     # 2.3.0: throttle awareness — even though we use one TCP socket for
     # validation now, ffprobe per match still opens its own socket, so
     # we register the validation TCP open with the tracker.
-    throttle_s = 0.0
-    # Build a minimal camera-like dict for brand lookup.  db_entry has
-    # all CAMERA_DB metadata already, so we can use it directly.
-    if db_entry.get("throttle_type") == "rate_limit_per_ip_tcp":
-        throttle_s = _parse_throttle_seconds(
-            db_entry.get("throttle_amount", "")) or 5.0
+    #
+    # 3.0.1 (B24): the cooldown comes from the camera's brand, as everywhere
+    # else in password entry. Before, it was read from db_entry, a STREAM_DB
+    # entry, which never has throttle_type (that is in CAMERA_DB), so this
+    # check and every ffprobe after it ran without the wait.
+    throttle_s = _brand_throttle_seconds(camera) if camera else 0.0
+    if throttle_s > 0:
         await _throttle_wait_if_needed(ip, throttle_s, "db_probe validation")
 
     url_results = await loop.run_in_executor(
@@ -163,7 +165,7 @@ async def _probe_db_streams(ip: str, port: int, creds: str | None,
         try:
             if throttle_s > 0:
                 await _throttle_wait_if_needed(ip, throttle_s,
-                                               f"db_probe ffprobe {url}")
+                                               f"db_probe ffprobe {_strip_creds(url)}")
             det = await probe_stream_details(url, "RTSP")
             results.append({"url": url, **det})
         except Exception:
@@ -688,7 +690,7 @@ async def api_set_credentials(request: web.Request) -> web.Response:
             if db_entry and not have_main_n_sub:
                 existing = {c["url"] for c in stream_candidates}
                 db_streams = await _probe_db_streams(ip, port, enc_creds,
-                                                     db_entry, existing)
+                                                     db_entry, existing, camera)
                 if db_streams:
                     log.info(f"  DB probe found {len(db_streams)} extra stream(s)")
                     for s in db_streams:
@@ -1033,7 +1035,7 @@ async def api_set_credentials(request: web.Request) -> web.Response:
 
     if db_entry and proto in ("RTSP", "DVR"):
         db_streams = await _probe_db_streams(ip, port, enc_creds,
-                                             db_entry, {url})
+                                             db_entry, {url}, camera)
         # 2.4.0-rc2.6: PRESERVE the main stream URL we found pre-cred-
         # auth. Previously this code sorted ALL candidates (main + DB-
         # probed sub-streams) by resolution and replaced `url` with
@@ -1665,6 +1667,10 @@ async def api_add_camera(request: web.Request) -> web.Response:
     ip        = data.get("ip","").strip()
     port      = int(data.get("port", 554))
     protocol  = data.get("protocol","RTSP").upper()
+    # 3.0.1 (B23): the scan names these "WebRTC" and "WS-RTSP" (display
+    # "webrtc", "wsrtsp"). Upper case alone never matched the check below,
+    # so a WebRTC camera added by hand always failed with 400.
+    protocol  = {"WEBRTC": "WebRTC"}.get(protocol, protocol)
     name      = data.get("name","").strip() or f"{ip}:{port}"
     username  = data.get("username","").strip()
     password  = data.get("password","")
@@ -1703,7 +1709,8 @@ async def api_add_camera(request: web.Request) -> web.Response:
         "requires_credentials": False,
         "credentials": encrypt_creds(username, password) if (username and url) else None,
         "name": name, "status": "ready" if url else "info",
-        "display": "proxy" if url else protocol.lower(),
+        "display": "proxy" if url else {"WebRTC": "webrtc", "WS-RTSP": "wsrtsp"}.get(
+            protocol, protocol.lower()),
         "user_saved": True, "verdict": "camera", "verdict_reason": "Manually added",
     }
     save_cameras()

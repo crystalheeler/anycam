@@ -342,6 +342,25 @@ _NON_CAMERA_OUI_VENDORS: set[str] = {
 }
 
 
+# 3.0.1 (B2): cameras built into household appliances. Their video goes
+# through the maker's cloud and app, and most open no local port, so the
+# scan finds them only by their MAC address. A key is a MAC prefix of any
+# length: the iENSO camera-module block is an MA-M block (28 bits).
+APPLIANCE_CAMERA_PREFIXES: dict[str, tuple[str, str]] = {
+    "04:A1:6F:1": ("Appliance camera (iENSO module)", "the appliance maker's app"),
+    "00:AE:F7":   ("Dreame robot vacuum", "the Dreamehome app"),
+}
+
+
+def appliance_camera(mac: str) -> tuple[str, str] | None:
+    """(name, app) when the MAC belongs to an appliance camera, else None."""
+    m = (mac or "").upper().replace("-", ":")
+    for prefix, info in APPLIANCE_CAMERA_PREFIXES.items():
+        if m.startswith(prefix):
+            return info
+    return None
+
+
 def _oui_key(mac: str) -> str:
     """Normalise a MAC address to XX:XX:XX uppercase OUI key."""
     mac = mac.upper().replace("-", ":").replace(".", ":")

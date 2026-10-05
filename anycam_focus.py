@@ -23,7 +23,7 @@ log = logging.getLogger("anycam")
 # Taken from camera_discovery.py at start-up (anycam_host.bind).
 NEEDS = (
     'CAMERAS', '_FOCUS_ADAPTIVE', '_MOTION', '_SNAP',
-    '_kill_hw_preheater', '_snap_last_access', '_snap_state', 'build_authenticated_url',
+    '_snap_last_access', '_snap_state', 'build_authenticated_url',
     'snap_loop',
 )
 
@@ -258,12 +258,6 @@ async def handle_focus_clear(request: web.Request) -> web.Response:
                 except Exception as ex:
                     log.debug(f"Focus: ffmpeg kill for {prev} failed "
                               f"(probably already dead): {ex}")
-            # 2.6.0-rc3.0 Items 2+3 — tear down HW preheater + HW proc if
-            # fast_stream_start was active for this focus session. Without
-            # this, the HW preheater task keeps running after focus-leave
-            # and may signal hw_ready into a snap_loop that already exited,
-            # leaking the proc_hw subprocess.
-            _kill_hw_preheater(state)
             task = state.get("task")
             if task and not task.done():
                 task.cancel()
