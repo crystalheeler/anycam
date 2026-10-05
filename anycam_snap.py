@@ -40,6 +40,26 @@ NEEDS = (
 )
 
 
+# ── 3.7.0 (B11): say when hardware decode did not happen ───────────────────
+# 2026-09 field log (B11): ffmpeg could not open the Pi's decoder devices
+# (/dev/media0 to 3, "Operation not permitted"), decoded in software, and
+# AnyCam still logged "hw first frame (hevc_drm)". ffmpeg prints why on its
+# error output while it goes on in software; those lines are caught here
+# as they arrive, so the first-frame line can tell the truth.
+_HW_FALLBACK: dict[str, str] = {}    # camera_id -> the ffmpeg line that showed it
+HW_FALLBACK_WORDS = ("operation not permitted", "permission denied",
+                     "hwaccel initialisation returned error", "failed setup for format",
+                     "could not find a valid device", "failed to open", "no such file")
+HW_FALLBACK_SUBJECTS = ("/dev/media", "/dev/video", "/dev/dri", "hwaccel", "drm", "v4l2",
+                        "vaapi", "rpivid")
+
+
+def _hw_fallback_line(line: str) -> bool:
+    """True for an ffmpeg line that says a hardware decoder did not open."""
+    low = line.lower()
+    return any(w in low for w in HW_FALLBACK_WORDS) and any(s in low for s in HW_FALLBACK_SUBJECTS)
+
+
 def _http_digest_header(www_auth: str, method: str, uri: str, u: str, p: str) -> str:
     """Build an HTTP Digest Authorization header value.
 
@@ -560,6 +580,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             state["proc"] = proc
             hw_tried       = bool(hw_label)
             hw_started_at  = time.monotonic() if hw_tried else None
+            _HW_FALLBACK.pop(camera_id, None)     # 3.7.0 (B11): this launch only
             stderr_t = asyncio.create_task(_drain_stderr(proc, f"SNAP:{camera_id}"))
             buf      = b""
             frames   = 0
@@ -730,9 +751,17 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         # know to raise it.
                         if hw_tried and hw_started_at is not None:
                             hw_first_frame_s = time.monotonic() - hw_started_at
-                            log.info(f"SNAP [{camera_id}]: hw first frame "
-                                     f"in {hw_first_frame_s:.1f}s "
-                                     f"({hw_label})")
+                            fallback = _HW_FALLBACK.get(camera_id)
+                            if fallback:
+                                # 3.7.0 (B11): ffmpeg went on in software
+                                log.warning(f"SNAP [{camera_id}]: first frame in "
+                                            f"{hw_first_frame_s:.1f}s, decoded in SOFTWARE: "
+                                            f"the {hw_label} hardware decoder did not open "
+                                            f"(ffmpeg: {fallback})")
+                            else:
+                                log.info(f"SNAP [{camera_id}]: hw first frame "
+                                         f"in {hw_first_frame_s:.1f}s "
+                                         f"({hw_label})")
                             hw_started_at = None
                         hw_tried = False   # got a frame → hw decode worked
                         state["frame"]       = frame
@@ -1559,6 +1588,9 @@ async def _drain_stderr(proc: object, label: str) -> None:
             decoded = line.decode("utf-8", errors="replace").rstrip()
             if decoded and "deprecated pixel format" not in decoded:
                 lines.append(decoded)
+                # 3.7.0 (B11): caught while ffmpeg runs, not only at its exit
+                if label.startswith("SNAP:") and _hw_fallback_line(decoded):
+                    _HW_FALLBACK.setdefault(label[5:].strip(), _strip_creds(decoded)[:200])
     except asyncio.CancelledError:
         try:
             remaining = await proc.stderr.read(8192)

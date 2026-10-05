@@ -2516,6 +2516,24 @@ async def test_snapshot_loop():
         check("Y7 ... no picture from it: software at once, failure counted",
               len(launches) == 2 and "-hwaccel" not in launches[1]
               and cd._SNAP[cid]["hw_session_fails"] == {"hevc_drm": 1})
+
+        # AH1 3.7.0 (B11): ffmpeg could not open the decoder and went on in software
+        class LateFfmpeg(FakeFfmpeg):
+            def __init__(self):
+                super().__init__((), stderr=b"[hevc @ 0x1] Failed to open media device "
+                                            b"/dev/media0: Operation not permitted\n")
+                self.stdout = asyncio.StreamReader()
+
+                async def later():
+                    await asyncio.sleep(0.05)
+                    self.stdout.feed_data(jpeg(b"s")); self.stdout.feed_eof()
+                asyncio.get_event_loop().create_task(later())
+        cd._SNAP.clear(); nobody(); CAP.lines.clear()
+        await run_snap(cid, cam, [LateFfmpeg])
+        check("AH1 B11: a picture decoded in software is not logged as hardware decode",
+              any("decoded in SOFTWARE" in l and "/dev/media0: Operation not permitted" in l
+                  for l in CAP.lines)
+              and not any("hw first frame" in l for l in CAP.lines), str(CAP.lines[-6:]))
     finally:
         cd.CFG_HW_DECODE = real_hw[0]
 
@@ -4063,6 +4081,70 @@ def _req(method, path, body=None):
     return req
 
 
+
+# ── AH. 3.7.0 ────────────────────────────────────────────────────────────────
+async def test_370():
+    print("\n[AH] 3.7.0")
+    yes = ["[hevc @ 0x55] Failed to open media device /dev/media0: Operation not permitted",
+           "[hevc @ 0x55] Failed setup for format drm_prime: hwaccel initialisation returned error",
+           "Device creation failed: -13. /dev/dri/renderD128: Permission denied"]
+    no = ["Invalid data found when processing input", "Connection refused",
+          "[rtsp @ 0x1] method DESCRIBE failed: 401 Unauthorized"]
+    check("AH2 B11: ffmpeg's hardware-failure lines are recognised, other errors are not",
+          all(cd._hw_fallback_line(l) for l in yes) and not any(cd._hw_fallback_line(l) for l in no))
+    cd._HW_FALLBACK.clear()
+    await cd._drain_stderr(FakeFfmpeg(stderr=(yes[0] + "\n").encode()), "SNAP:cam7")
+    check("AH2 ... caught for the camera while ffmpeg runs",
+          "/dev/media0" in cd._HW_FALLBACK.get("cam7", ""))
+    cd._HW_FALLBACK.clear()
+
+    # C9 and B11: the start-up device report
+    import glob as _glob
+    real = (_glob.glob, cd.os.open, cd.os.close, cd.Path.read_text)
+    devs = {"/dev/video*": ["/dev/video10", "/dev/video19"], "/dev/media*": ["/dev/media0"],
+            "/dev/dri/renderD*": []}
+    names = {"video10": "bcm2835-codec-decode", "video19": "rpivid"}
+
+    def fake_open(path, flags):
+        if path == "/dev/media0":
+            raise PermissionError(1, "Operation not permitted")
+        return 5
+
+    def fake_read(self, *a, **k):
+        if self.name == "name" and "video4linux" in self.parts:
+            return names.get(self.parent.name, "") + "\n"
+        return real[3](self, *a, **k)
+    try:
+        _glob.glob = lambda pat: devs.get(pat, [])
+        cd.os.open, cd.os.close = fake_open, (lambda fd: None)
+        cd.Path.read_text = fake_read
+        rep_ok = cd._hw_device_report()
+        names["video19"] = "bcm2835-isp"
+        rep_no = cd._hw_device_report()
+    finally:
+        _glob.glob, cd.os.open, cd.os.close, cd.Path.read_text = real
+    check("AH3 C9/B11: each device with its name and whether it opens",
+          [d["opens"] for d in rep_ok["devices"]] == ["yes", "yes", "Operation not permitted"]
+          and rep_ok["rpivid"] and rep_ok["bcm2835_codec"] and rep_ok["blocked"] == ["/dev/media0"],
+          str(rep_ok))
+    check("AH3 ... a blocked device is named in a note",
+          any("/dev/media0" in n and "software" in n for n in rep_ok["notes"]))
+    check("AH4 C9: no rpivid decoder: the note names the overlay line",
+          not rep_no["rpivid"] and any("dtoverlay=rpivid-v4l2" in n for n in rep_no["notes"]))
+    CAP.lines.clear()
+    cd._hw_report_log(rep_ok)
+    check("AH4 ... the report is in the log",
+          any("/dev/media0: cannot open — Operation not permitted" in l for l in CAP.lines)
+          and any("/dev/video19 (rpivid): opens" in l for l in CAP.lines))
+    cd._HW_REPORT.clear(); cd._HW_REPORT.update(rep_ok)
+    cd._HW_FALLBACK["cam1"] = yes[0]
+    d = json.loads((await cd.api_diagnostics_hw(make_mocked_request("GET", "/api/diagnostics/hw"))).body)
+    check("AH5 the diagnostics endpoint: devices, decoder results, software fallbacks",
+          d["blocked"] == ["/dev/media0"] and "hevc_drm" in d["candidates"]
+          and d["software_fallback"] == {"cam1": yes[0]} and "hw_decode_setting" in d)
+    cd._HW_FALLBACK.clear(); cd._HW_REPORT.clear()
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -4185,6 +4267,7 @@ async def main():
     await test_340()
     await test_350()
     await test_360()
+    await test_370()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 
