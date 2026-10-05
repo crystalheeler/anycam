@@ -25,9 +25,13 @@ log = logging.getLogger("anycam")
 # Taken from camera_discovery.py at start-up (anycam_host.bind).
 NEEDS = (
     'CAMERAS', 'CARD_MAX_WIDTH', '_ANSI_ESCAPE_RE', '_THREAD_POOL',
-    '_brand_throttle_seconds', '_dahua_sub_stream', '_strip_creds', '_throttle_wait_if_needed',
-    'build_authenticated_url',
+    '_brand_throttle_seconds', '_dahua_sub_stream', '_mjpeg_source', '_streams_refresh',
+    '_strip_creds', '_throttle_wait_if_needed', 'build_authenticated_url',
 )
+# 3.1.0 (B25): a card that cannot play live for one of these reasons may
+# have out-of-date saved streams, so AnyCam reads them again.
+_REFRESH_REASONS = ("no stream small enough", "no stream that can play live",
+                    "cannot play as live video", "no stream URL")
 GO2RTC_BIN             = Path("/usr/local/bin/go2rtc")
 GO2RTC_API_HOST        = "127.0.0.1"
 # Non-default ports. 1984 and 8555 are go2rtc's defaults, and another add-on
@@ -285,11 +289,15 @@ async def _go2rtc_register(name: str, src: str, camera_id: str) -> bool:
     return True
 
 
-def _go2rtc_card_source(camera: dict, h265: bool = True) -> tuple[str | None, str, str]:
+def _go2rtc_card_source(camera: dict, h265: bool = True,
+                        wide: bool = False) -> tuple[str | None, str, str]:
     """Pick the stream a live card plays; return (auth url, codec, reason).
 
     3.0.1 (C10): h265=False skips H.265 streams, for a browser that cannot
     play them.
+    3.1.0 (C19): wide=True (a computer, not a phone) plays the smallest
+    stream even when it is wider than CARD_MAX_WIDTH. The Pi only passes
+    the bytes; the computer decodes them.
     """
     if camera.get("display") in ("webrtc", "wsrtsp", "info", "appliance"):
         return None, "", "this camera is not an RTSP stream"
@@ -315,6 +323,8 @@ def _go2rtc_card_source(camera: dict, h265: bool = True) -> tuple[str | None, st
             url, codec, _ = _go2rtc_relay_url(camera, sub, "")
             if url:
                 return url, codec, "ok"
+        if wide:
+            return best[1], best[2], "ok"
         return None, best[2], f"no stream small enough for a card ({best[0]} wide)"
     if best is None:
         if skipped_h265:
@@ -331,23 +341,39 @@ async def api_go2rtc_card(request: web.Request) -> web.Response:
     same camera are two go2rtc streams. Never dials the camera.
     """
     camera_id = request.match_info["camera_id"]
+    camera = CAMERAS.get(camera_id)
+    # 3.1.0 (C19): an MJPEG camera plays its own MJPEG stream, through
+    # anycam_mjpeg.py; it does not need go2rtc.
+    mjpeg = _mjpeg_source(camera) if camera else None
     if not _GO2RTC_READY:
+        if mjpeg:
+            return web.json_response(_mjpeg_card(camera_id))
         # retry: go2rtc may still be starting (it starts with the web server);
         # the card uses snapshots now and tries live again later.
         return web.json_response({"ok": False, "reason": "go2rtc is not running",
                                   "retry": True})
-    camera = CAMERAS.get(camera_id)
     if not camera:
         return web.json_response({"ok": False, "reason": "camera not found"},
                                  status=404)
-    src, codec, reason = _go2rtc_card_source(camera, h265=request.query.get("h265") != "0")
+    src, codec, reason = _go2rtc_card_source(camera, h265=request.query.get("h265") != "0",
+                                             wide=request.query.get("wide") == "1")
     if not src:
+        if mjpeg:
+            return web.json_response(_mjpeg_card(camera_id))
+        if any(r in reason for r in _REFRESH_REASONS):
+            asyncio.create_task(_streams_refresh(camera_id, f"card: {reason}"))
         return web.json_response({"ok": False, "reason": reason, "codec": codec})
     name = _go2rtc_stream_name(camera_id, 0, kind="c")
     if not await _go2rtc_register(name, src, camera_id):
         return web.json_response({"ok": False,
                                   "reason": "go2rtc rejected the stream"})
     return web.json_response({"ok": True, "stream": name, "codec": codec})
+
+
+def _mjpeg_card(camera_id: str) -> dict:
+    """The answer for a card that plays the camera's MJPEG stream (3.1.0, C19)."""
+    return {"ok": True, "kind": "mjpeg", "codec": "mjpeg",
+            "url": f"/api/mjpeg/{quote(camera_id, safe='')}/ws"}
 
 
 async def handle_go2rtc_ws(request: web.Request) -> web.StreamResponse:

@@ -35,8 +35,53 @@ NEEDS = (
     '_HW_PROBED', '_HW_UNAVAILABLE', '_LOG_BUFFER', '_SNAP',
     '_THREAD_POOL', '_acd_active', '_brand_throttle_seconds', '_snap_last_access',
     '_snap_state', '_strip_creds', '_throttle_wait_if_needed', 'build_authenticated_url',
-    'decrypt_creds', 'save_cameras',
+    '_streams_refresh', 'decrypt_creds', 'save_cameras',
 )
+
+
+def _http_digest_header(www_auth: str, method: str, uri: str, u: str, p: str) -> str:
+    """Build an HTTP Digest Authorization header value.
+
+    Handles the qop=auth case (most cameras) and the simpler no-qop case.
+    3.1.0: moved out of http_snap_loop, for the live MJPEG cards
+    (anycam_mjpeg.py); unchanged.
+    """
+    # Parse WWW-Authenticate: Digest realm="...", nonce="...", ...
+    def _unquote(s: str) -> str:
+        return s.strip().strip('"')
+
+    params: dict[str, str] = {}
+    for part in re.split(r',\s*(?=[a-zA-Z])', www_auth.replace("Digest ", "", 1)):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            params[k.strip()] = _unquote(v)
+
+    realm  = params.get("realm", "")
+    nonce  = params.get("nonce", "")
+    qop    = params.get("qop", "")
+    opaque = params.get("opaque", "")
+    nc_hex = "00000001"
+    cnonce = hashlib.md5(os.urandom(8)).hexdigest()[:8]
+
+    ha1 = hashlib.md5(f"{u}:{realm}:{p}".encode()).hexdigest()
+    ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
+
+    if "auth" in qop:
+        resp_str = f"{ha1}:{nonce}:{nc_hex}:{cnonce}:auth:{ha2}"
+    else:
+        resp_str = f"{ha1}:{nonce}:{ha2}"
+
+    response = hashlib.md5(resp_str.encode()).hexdigest()
+
+    header = (
+        f'Digest username="{u}", realm="{realm}", '
+        f'nonce="{nonce}", uri="{uri}", response="{response}"'
+    )
+    if "auth" in qop:
+        header += f', qop=auth, nc={nc_hex}, cnonce="{cnonce}"'
+    if opaque:
+        header += f', opaque="{opaque}"'
+    return header
 
 # ── Adaptive fps state for focus/native_res mode ───────────────────────────────
 # Persists across focus sessions so the camera remembers its best stable fps.
@@ -947,6 +992,10 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                             profs[0]["stream_codec"] = ""
                         state["codec_clear_fired"] = True
                         # Don't save_cameras here — this is a runtime override only
+                    # 3.1.0 (B25): the saved streams may be out of date
+                    # (the camera's settings changed). Read them again with
+                    # the saved password; _streams_refresh limits how often.
+                    asyncio.create_task(_streams_refresh(camera_id, "5 failed stream starts"))
             else:
                 backoff = 2
                 state["zero_frame_streak"] = 0
@@ -1135,46 +1184,7 @@ async def http_snap_loop(camera_id: str, camera: dict) -> None:
     _connector = aiohttp.TCPConnector(ssl=False)
 
     def _make_digest_auth(www_auth: str, method: str, uri: str) -> str:
-        """
-        Build an HTTP Digest Authorization header value.
-        Handles the qop=auth case (most cameras) and the simpler no-qop case.
-        """
-        # Parse WWW-Authenticate: Digest realm="...", nonce="...", ...
-        def _unquote(s: str) -> str:
-            return s.strip().strip('"')
-
-        params: dict[str, str] = {}
-        for part in re.split(r',\s*(?=[a-zA-Z])', www_auth.replace("Digest ", "", 1)):
-            if "=" in part:
-                k, v = part.split("=", 1)
-                params[k.strip()] = _unquote(v)
-
-        realm  = params.get("realm", "")
-        nonce  = params.get("nonce", "")
-        qop    = params.get("qop", "")
-        opaque = params.get("opaque", "")
-        nc_hex = "00000001"
-        cnonce = hashlib.md5(os.urandom(8)).hexdigest()[:8]
-
-        ha1 = hashlib.md5(f"{u}:{realm}:{p}".encode()).hexdigest()
-        ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
-
-        if "auth" in qop:
-            resp_str = f"{ha1}:{nonce}:{nc_hex}:{cnonce}:auth:{ha2}"
-        else:
-            resp_str = f"{ha1}:{nonce}:{ha2}"
-
-        response = hashlib.md5(resp_str.encode()).hexdigest()
-
-        header = (
-            f'Digest username="{u}", realm="{realm}", '
-            f'nonce="{nonce}", uri="{uri}", response="{response}"'
-        )
-        if "auth" in qop:
-            header += f', qop=auth, nc={nc_hex}, cnonce="{cnonce}"'
-        if opaque:
-            header += f', opaque="{opaque}"'
-        return header
+        return _http_digest_header(www_auth, method, uri, u, p)
 
     # Track consecutive error count to rate-limit log noise
     _err_count     = 0

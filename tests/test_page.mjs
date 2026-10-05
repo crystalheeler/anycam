@@ -360,7 +360,9 @@ console.log('\n[S] live cards');
   await flush(); await flush();
   const p = created[0];
   check('attach: asks the server which stream the card plays',
-        fetched.some(u => u.endsWith('/api/go2rtc/card/lorex')));
+        fetched.some(u => /\/api\/go2rtc\/card\/lorex(\?|$)/.test(u)));
+  check('attach: a computer asks for wide streams too (C19)',
+        fetched.some(u => /\/api\/go2rtc\/card\/lorex\?wide=1$/.test(u)), JSON.stringify(fetched));
   check('player placed in the card, hidden until it plays',
         p && p.parentNode === cards.lorex.wrap && p.style.opacity === '0');
   check('player pauses off screen (visibilityThreshold set)', p.visibilityThreshold === 0.01);
@@ -417,6 +419,49 @@ console.log('\n[S] live cards');
   delete cards.lorex;
   g('cardLivePrune()');
   check('card removed: its player is dropped', !cst('lorex') && p._removed);
+
+  // 3.1.0 (C19): an MJPEG camera's card plays its MJPEG stream
+  {
+    const sockets = [], urls = [], revoked = [];
+    const realWS = globalThis.WebSocket, realCreate = URL.createObjectURL, realRevoke = URL.revokeObjectURL;
+    globalThis.WebSocket = class { constructor(u) { this.url = u; sockets.push(this); } close() { this.closed = true; } };
+    URL.createObjectURL = b => { urls.push(b); return 'blob:' + urls.length; };
+    URL.revokeObjectURL = u => revoked.push(u);
+    globalThis.location.href = 'https://ha.local/api/hassio_ingress/tok/';
+    const prevCreate = document.createElement;
+    document.createElement = tag => {
+      const e = prevCreate(tag);
+      if (tag === 'img') Object.defineProperty(e, 'isConnected', {get() { return !!e.parentNode; }});
+      return e;
+    };
+    cardInfo = {ok: true, kind: 'mjpeg', url: '/api/mjpeg/mj/ws'};
+    drawCard('mj');
+    g("cardLiveAttach('mj')"); await flush(); await flush();
+    const sm = cst('mj'), im = sm && sm.el;
+    check('C19 MJPEG card: the add-on socket opens, no go2rtc player',
+          sockets.length === 1 && /^wss:\/\/ha\.local\/.*\/api\/mjpeg\/mj\/ws$/.test(sockets[0].url)
+          && im && im.className === 'card-live' && im.parentNode === cards.mj.wrap && im.style.opacity === '0',
+          sockets[0] && sockets[0].url);
+    const j1 = {n: 1}, j2 = {n: 2}, j3 = {n: 3};
+    sockets[0].onmessage({data: j1});
+    sockets[0].onmessage({data: j2});
+    sockets[0].onmessage({data: j3});
+    check('C19 ... a picture arriving while one loads waits; only the newest waits',
+          im.src === 'blob:1' && sm.next === j3 && urls.length === 1);
+    im.onload();
+    check('C19 ... first picture: shown, its blob freed, the newest picture next',
+          im.style.opacity === '1' && cards.mj.ph.style.display === 'none'
+          && revoked.includes('blob:1') && im.src === 'blob:2' && urls[1] === j3);
+    g('cardLivePauseAll(true)');
+    check('C19 ... Enhanced View closes the MJPEG stream', sockets[0].closed && !sm.ws);
+    g('cardLivePauseAll(false)');
+    check('C19 ... and opens it again after', sockets.length === 2 && sm.ws === sockets[1]);
+    sockets[1].onmessage({data: 'error: no picture from the camera in 15 s'});
+    check('C19 ... an error from the add-on: still pictures, retried later',
+          snaps.includes('mj') && !cst('mj') && sockets[1].closed && g("_cardLiveOff['mj'].retryAt") > 0);
+    document.createElement = prevCreate;
+    globalThis.WebSocket = realWS; URL.createObjectURL = realCreate; URL.revokeObjectURL = realRevoke;
+  }
 
   document.querySelector = origQS; document.getElementById = origGet; document.createElement = origCreate;
 }
@@ -606,6 +651,65 @@ check('C10 the message names Chrome or Edge', /Chrome or Edge/.test(g('_h265Help
   globalThis.fetch = realFetch;
 }
 globalThis.__noH265 = false; g('_h265Support = null');
+
+console.log('\n[D3] 3.1.0 card order');
+{
+  const take = (a, b) => page.slice(page.indexOf(a), page.indexOf(b));
+  vm.runInThisContext(take('function _stableCardKey', 'function renderGrid')
+                      + take('/* ── 3.1.0 (D3)', 'function buildCard'));
+  const grid = {kids: [], moves: 0,
+    querySelectorAll() { return this.kids.slice(); },
+    appendChild(c) { this.moves++; this.kids = this.kids.filter(k => k !== c); this.kids.push(c); c.parentNode = this; return c; },
+    insertBefore(c, ref) {
+      this.moves++; this.kids = this.kids.filter(k => k !== c);
+      const i = ref ? this.kids.indexOf(ref) : this.kids.length;
+      this.kids.splice(i, 0, c); c.parentNode = this; return c;
+    }};
+  const mk = (key, left) => {
+    const cls = new Set();
+    const c = {dataset: {stableKey: key}, parentNode: grid,
+      classList: {add: (...a) => a.forEach(x => cls.add(x)), remove: (...a) => a.forEach(x => cls.delete(x)),
+                  has: x => cls.has(x)},
+      get nextSibling() { const k = grid.kids; return k[k.indexOf(c) + 1] || null; },
+      closest() { return c; }, getBoundingClientRect: () => ({left, width: 100})};
+    return c;
+  };
+  const A = mk('10.0.0.31:554', 0), B = mk('10.0.0.32:554', 100), C = mk('10.0.0.33:554', 200);
+  grid.kids = [A, B, C];
+  globalThis.cameras = [{id: 'b', ip: '10.0.0.32', port: 554}, {id: 'a', ip: '10.0.0.31', port: 554},
+                        {id: 'c', ip: '10.0.0.33', port: 554}];
+  g('_cardOrderApply')(grid);
+  check('D3 the cards follow the order the add-on sent',
+        grid.kids.map(k => k.dataset.stableKey).join() === '10.0.0.32:554,10.0.0.31:554,10.0.0.33:554');
+  grid.moves = 0; g('_cardOrderApply')(grid);
+  check('D3 ... and are not moved when already in order (a move restarts a live stream)', grid.moves === 0);
+
+  const sent = [];
+  const realFetch = globalThis.fetch, realQSA = document.querySelectorAll, realGet = document.getElementById;
+  globalThis.fetch = async (url, opt) => { sent.push([url, opt && JSON.parse(opt.body)]); return {ok: true}; };
+  document.querySelectorAll = () => [];
+  document.getElementById = id => id === 'cam-grid' ? grid : realGet(id);
+  document.elementFromPoint = () => C;
+  const handle = {closest: () => B, setPointerCapture() {}};
+  g('cardDragStart')({button: 0, pointerId: 1, preventDefault() {}}, handle);
+  check('D3 drag: the card is marked while it moves', B.classList.has('drag-src'));
+  handle.onpointermove({clientX: 290, clientY: 10});
+  check('D3 ... the drop place is shown after the card under the pointer', C.classList.has('drop-after'));
+  grid.moves = 0;
+  handle.onpointerup({type: 'pointerup'});
+  await flush();
+  check('D3 drop: the card moves once, to the new place',
+        grid.moves === 1 && grid.kids.map(k => k.dataset.stableKey).join() === '10.0.0.31:554,10.0.0.33:554,10.0.0.32:554');
+  check('D3 ... the order goes to the add-on, and the page keeps it',
+        sent.length === 1 && sent[0][0].endsWith('/api/card_order')
+        && sent[0][1].order.join() === '10.0.0.31:554,10.0.0.33:554,10.0.0.32:554'
+        && cameras.map(c => c.id).join() === 'a,c,b', JSON.stringify(sent));
+  g('cardDragStart')({button: 0, pointerId: 2, preventDefault() {}}, handle);
+  handle.onpointermove({clientX: 10, clientY: 10});
+  handle.onpointercancel({type: 'pointercancel'});
+  check('D3 a cancelled drag moves nothing and sends nothing', sent.length === 1 && !B.classList.has('drag-src'));
+  globalThis.fetch = realFetch; document.querySelectorAll = realQSA; document.getElementById = realGet;
+}
 
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

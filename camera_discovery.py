@@ -92,9 +92,12 @@ from anycam_snap import (
 # 3.0.0-rc1.5 (E1): anycam_credentials.
 import anycam_credentials
 from anycam_credentials import (
-    _match_stream_db, api_add_camera, api_clear_credentials, api_deep_reprobe,
-    api_dvr_enum_status, api_set_credentials,
+    _match_stream_db, _streams_refresh, api_add_camera, api_clear_credentials,
+    api_deep_reprobe, api_dvr_enum_status, api_set_credentials,
 )
+# 3.1.0 (C19): live MJPEG cards.
+import anycam_mjpeg
+from anycam_mjpeg import _mjpeg_source, handle_mjpeg_ws
 import anycam_storage
 from anycam_storage import (
     api_storage_delete, api_storage_download, api_storage_list, api_storage_move,
@@ -211,7 +214,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.0.1-rc1.0"  # must match config.yaml
+CURRENT_VERSION = "3.1.0-rc1.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -976,9 +979,69 @@ def _safe_cam(cam: dict) -> dict:
     return s
 
 
+# ── 3.1.0 (D3): one card order for every viewer ─────────────────────────────
+# The page sends the order after a card is dragged; the add-on keeps it in
+# runtime.json and returns the cameras in that order. A card is named by
+# _card_key, the same key as _stableCardKey in page_script.py: the address
+# and port survive a password entry, which changes a camera's id.
+CARD_ORDER_MAX = 500            # keys kept; more cards than this are not expected
+CARD_KEY_MAX_LEN = 200
+
+
+def _card_key(cam: dict) -> str:
+    """The card's lasting name: ip:port, plus #chN for a DVR channel."""
+    if cam.get("ip"):
+        key = f"{cam['ip']}:{cam.get('port') or ''}"
+        if cam.get("channel"):
+            key += f"#ch{cam['channel']}"
+        return key
+    return f"id:{cam.get('id', '')}"
+
+
+_CARD_ORDER: list[str] | None = None     # read from runtime.json at first use
+
+
+def _card_order() -> list[str]:
+    global _CARD_ORDER
+    if _CARD_ORDER is None:
+        _CARD_ORDER = list(load_runtime().get("card_order") or [])
+    return _CARD_ORDER
+
+
+def _cards_in_order(cams: list[dict]) -> list[dict]:
+    """The cameras in the saved card order; cards not in it keep their place at the end."""
+    order = _card_order()
+    if not order:
+        return cams
+    rank = {key: i for i, key in enumerate(order)}
+    last = len(order)
+    return [c for _, c in sorted(enumerate(cams),
+                                 key=lambda ic: (rank.get(_card_key(ic[1]), last + ic[0]),))]
+
+
+async def api_card_order(request: web.Request) -> web.Response:
+    """GET or POST /api/card_order — the saved card order, a list of card keys."""
+    global _CARD_ORDER
+    if request.method == "POST":
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        order = data.get("order") if isinstance(data, dict) else None
+        if (not isinstance(order, list) or len(order) > CARD_ORDER_MAX
+                or not all(isinstance(k, str) and 0 < len(k) <= CARD_KEY_MAX_LEN for k in order)):
+            return web.json_response({"error": "order must be a list of card keys"}, status=400)
+        _CARD_ORDER = list(dict.fromkeys(order))         # duplicates dropped, order kept
+        rt = load_runtime()
+        rt["card_order"] = _CARD_ORDER
+        save_runtime(rt)
+        log.info(f"Card order saved ({len(_CARD_ORDER)} cards)")
+    return web.json_response({"order": _card_order()})
+
+
 async def api_cameras(request: web.Request) -> web.Response:
 
-    return web.json_response([_safe_cam(c) for c in CAMERAS.values()])
+    return web.json_response([_safe_cam(c) for c in _cards_in_order(list(CAMERAS.values()))])
 
 async def api_scan(request: web.Request) -> web.Response:
 
@@ -1401,6 +1464,8 @@ def make_app() -> web.Application:
     app.router.add_post(  "/api/log_level",                        api_set_log_level)
     app.router.add_get(   "/api/logs",                            api_logs)
     app.router.add_get(   "/api/self",                            api_self)
+    app.router.add_route("*", "/api/card_order",                     api_card_order)
+    app.router.add_get(   "/api/mjpeg/{camera_id}/ws",            handle_mjpeg_ws)
     app.router.add_post(  "/snap/focus/{camera_id}",              handle_focus_set)
     app.router.add_delete("/snap/focus",                          handle_focus_clear)
     app.router.add_post(  "/api/cameras/{camera_id}/motion",      api_motion_toggle)
@@ -1886,7 +1951,7 @@ async def main() -> None:
 
 
 # 3.0.0-rc1.1: give the other modules the names they take from this file.
-anycam_host.bind(globals(), anycam_motion, anycam_storage, anycam_go2rtc, anycam_probe, anycam_scan, anycam_brand, anycam_page, anycam_focus, anycam_snap, anycam_credentials)
+anycam_host.bind(globals(), anycam_motion, anycam_storage, anycam_go2rtc, anycam_probe, anycam_scan, anycam_brand, anycam_page, anycam_focus, anycam_snap, anycam_credentials, anycam_mjpeg)
 
 if __name__ == "__main__":
     asyncio.run(main())

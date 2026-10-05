@@ -1341,6 +1341,59 @@ async def api_set_credentials(request: web.Request) -> web.Response:
                               **details})
 
 
+# ── 3.1.0 (B25): read a camera's streams again with the saved password ──────
+# AnyCam reads a camera's streams only when its password is entered, and saves
+# them. After a change in the camera's settings the saved streams can be out
+# of date: on 2026-10-02 the Hikvision PTZ card ran on snapshots until its
+# password was entered again. Now AnyCam does that itself when a card cannot
+# use what is saved. It runs the same password step (api_set_credentials),
+# which paces rate-limited cameras, at most once every STREAM_REFRESH_MIN_S
+# for each camera.
+STREAM_REFRESH_MIN_S = 6 * 3600.0
+_STREAM_REFRESH_AT: dict[str, float] = {}     # camera_id -> time.monotonic() of the last try
+
+
+class _SavedPasswordRequest:
+    """The one part of a request api_set_credentials reads: its JSON body."""
+
+    def __init__(self, body: dict) -> None:
+        self._body = body
+
+    async def json(self) -> dict:
+        return self._body
+
+
+async def _streams_refresh(camera_id: str, why: str) -> bool:
+    """Read the camera's streams again with its saved password; True on success."""
+    camera = CAMERAS.get(camera_id)
+    if (not camera or not camera.get("credentials") or camera.get("_dvr_parent_id")
+            or camera.get("display") in ("webrtc", "wsrtsp", "info", "appliance")):
+        return False
+    now = time.monotonic()
+    last = _STREAM_REFRESH_AT.get(camera_id)
+    if last is not None and now - last < STREAM_REFRESH_MIN_S:
+        return False
+    _STREAM_REFRESH_AT[camera_id] = now
+    try:
+        username, password = decrypt_creds(camera["credentials"])
+    except Exception as exc:
+        log.debug(f"Streams [{camera_id}]: saved password unreadable: {exc}")
+        return False
+    log.info(f"Streams [{camera_id}]: reading the streams again with the saved "
+             f"password ({why})")
+    resp = await api_set_credentials(_SavedPasswordRequest(
+        {"camera_id": camera_id, "username": username, "password": password}))
+    ok = resp.status == 200
+    cam = CAMERAS.get(camera_id) or {}
+    if ok:
+        log.info(f"Streams [{camera_id}]: {len(cam.get('stream_profiles') or [])} "
+                 f"stream(s) saved again")
+    else:
+        log.warning(f"Streams [{camera_id}]: the streams could not be read again "
+                    f"(HTTP {resp.status}); the saved ones stay")
+    return ok
+
+
 async def api_clear_credentials(request: web.Request) -> web.Response:
 
     cid    = request.match_info["camera_id"]

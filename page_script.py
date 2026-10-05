@@ -1260,15 +1260,29 @@ function _cardLiveShow(camId) {
   if (ph) ph.style.display = 'none';
 }
 
+// 3.1.0 (C19): a phone gets still pictures for a camera whose smallest
+// stream is wider than a card needs; a computer plays it live.
+function _isPhone() {
+  const uad = navigator.userAgentData;
+  if (uad && typeof uad.mobile === 'boolean') return uad.mobile;
+  return /Android.+Mobile|iPhone|iPod|Windows Phone/i.test(navigator.userAgent || '');
+}
+
+function _cardQuery() {
+  const q = [];
+  // 3.0.1 (C10): a browser that cannot play H.265 asks for another stream
+  if (!_browserPlaysH265()) q.push('h265=0');
+  if (!_isPhone()) q.push('wide=1');
+  return q.length ? '?' + q.join('&') : '';
+}
+
 async function _cardLiveStart(camId) {
   const st = {el: null, played: false, modes: [], errs: {}, closes: 0, tid: 0};
   _cardLive[camId] = st;
-  if (!(await _go2rtcLoadPlayer())) { _cardLiveFail(camId, st, 'player did not load', true); return; }
   let info = null;
   try {
-    // 3.0.1 (C10): a browser that cannot play H.265 asks for another stream
     info = await (await fetch(BASE + '/api/go2rtc/card/' + encodeURIComponent(camId)
-                              + (_browserPlaysH265() ? '' : '?h265=0'))).json();
+                              + _cardQuery())).json();
   } catch (e) {}
   if (_cardLive[camId] !== st) return;
   if (!info || !info.ok) {
@@ -1277,6 +1291,9 @@ async function _cardLiveStart(camId) {
     _cardLiveFail(camId, st, (info && info.reason) || 'no answer from the addon', !!info && !info.retry);
     return;
   }
+  if (info.kind === 'mjpeg') { _cardLiveMjpeg(camId, st, info); return; }
+  if (!(await _go2rtcLoadPlayer())) { _cardLiveFail(camId, st, 'player did not load', true); return; }
+  if (_cardLive[camId] !== st) return;
   const el = document.createElement('anycam-video');
   el.className = 'card-live';
   el.mode  = 'webrtc,mse';
@@ -1293,6 +1310,90 @@ async function _cardLiveStart(camId) {
   if (!_cardLiveTick) _cardLiveTick = setInterval(_cardLiveCheck, 1000);
 }
 
+/* ── 3.1.0 (C19): a card that plays the camera's MJPEG stream ────────────
+ * The add-on sends each JPEG over a WebSocket (anycam_mjpeg.py); the card
+ * shows the newest one. A picture that arrives while the one before is
+ * still loading replaces the waiting one, so the card never falls behind.
+ */
+function _wsURL(path) {
+  const u = new URL(BASE + path, location.href);
+  u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+  return u.href;
+}
+
+function _cardLiveMjpeg(camId, st, info) {
+  const img = document.createElement('img');
+  img.className = 'card-live';
+  img.alt = 'Live';
+  img.style.opacity = '0';
+  img.onclick = () => openFocus(camId);
+  st.el = img;
+  st.kind = 'mjpeg';
+  st.url = info.url;
+  _cardLivePlace(camId);
+  if (!img.isConnected) { _cardLiveFail(camId, st, 'card is gone', false); return; }
+  if (!document.hidden && !_focusCamId) _cardMjpegOpen(camId, st);
+  else st.paused = true;
+  _cardLiveArm(camId, st);
+}
+
+function _cardMjpegOpen(camId, st) {
+  if (st.ws) return;
+  let ws;
+  try { ws = new WebSocket(_wsURL(st.url)); }
+  catch (e) { _cardLiveFail(camId, st, 'the live stream could not open', false); return; }
+  ws.binaryType = 'blob';
+  st.ws = ws;
+  ws.onmessage = ev => {
+    if (_cardLive[camId] !== st || st.ws !== ws) return;
+    if (typeof ev.data === 'string') { _cardLiveFail(camId, st, ev.data.replace(/^error: /, ''), false); return; }
+    if (st.loading) { st.next = ev.data; return; }
+    _cardMjpegShow(camId, st, ev.data);
+  };
+  ws.onclose = () => {
+    if (st.ws !== ws) return;
+    st.ws = null;
+    if (_cardLive[camId] === st) _cardLiveFail(camId, st, 'the live stream closed', false);
+  };
+}
+
+function _cardMjpegShow(camId, st, blob) {
+  st.loading = true;
+  const url = URL.createObjectURL(blob);
+  const done = ok => {
+    URL.revokeObjectURL(url);     // the shown picture stays; only the blob goes
+    st.loading = false;
+    if (_cardLive[camId] !== st) return;
+    if (ok) _cardLivePlayed(camId, st);
+    const next = st.next;
+    st.next = null;
+    if (next) _cardMjpegShow(camId, st, next);
+  };
+  st.el.onload  = () => done(true);
+  st.el.onerror = () => done(false);
+  st.el.src = url;
+}
+
+function _cardMjpegClose(st) {
+  const ws = st.ws;
+  st.ws = null;
+  st.next = null;
+  if (ws) { ws.onmessage = null; ws.onclose = null; try { ws.close(); } catch (e) {} }
+}
+
+// A hidden page or an open Enhanced View closes the MJPEG streams, as
+// VideoRTC does for the other live cards.
+function _cardMjpegPause(pause) {
+  Object.keys(_cardLive).forEach(camId => {
+    const st = _cardLive[camId];
+    if (st.kind !== 'mjpeg') return;
+    st.paused = pause;
+    if (pause) _cardMjpegClose(st);
+    else if (st.el && st.el.isConnected) _cardMjpegOpen(camId, st);
+  });
+}
+document.addEventListener('visibilitychange', () => _cardMjpegPause(document.hidden || !!_focusCamId));
+
 // Give up on a card that shows no video within GO2RTC_FIRST_FRAME_MS of
 // actually connecting. An off-screen or hidden player is not connected,
 // so the time does not count against it.
@@ -1300,7 +1401,8 @@ function _cardLiveArm(camId, st) {
   clearTimeout(st.tid);
   st.tid = setTimeout(() => {
     if (_cardLive[camId] !== st || st.played) return;
-    if (document.hidden || _focusCamId || !(st.el.ws || st.el.pc)) { _cardLiveArm(camId, st); return; }
+    const connected = st.kind === 'mjpeg' ? !!st.ws : !!(st.el.ws || st.el.pc);
+    if (document.hidden || _focusCamId || !connected) { _cardLiveArm(camId, st); return; }
     _cardLiveFail(camId, st, 'no video within ' + (GO2RTC_FIRST_FRAME_MS / 1000) + ' s', false);
   }, GO2RTC_FIRST_FRAME_MS);
 }
@@ -1346,6 +1448,7 @@ function _cardLiveFail(camId, st, reason, remember) {
   if (_cardLive[camId] !== st) return;
   console.info('[AnyCam] card ' + camId + ' uses snapshots: ' + reason);
   clearTimeout(st.tid);
+  if (st.kind === 'mjpeg') _cardMjpegClose(st);
   if (st.el) {
     st.el.onanycam = null;
     try { st.el.ondisconnect(); } catch (e) {}
@@ -1359,8 +1462,9 @@ function _cardLiveFail(camId, st, reason, remember) {
 
 // Enhanced View open: stop every card's stream; closed: resume them.
 function cardLivePauseAll(pause) {
+  _cardMjpegPause(pause || document.hidden);
   Object.values(_cardLive).forEach(st => {
-    if (!st.el || !st.el.isConnected) return;
+    if (st.kind === 'mjpeg' || !st.el || !st.el.isConnected) return;
     if (pause) st.el.disconnectedCallback();
     else st.el.connectedCallback();
   });
@@ -1854,9 +1958,83 @@ function renderGrid() {
     if (!seenKeys.has(k)) c.remove();
   });
 
+  _cardOrderApply(grid);
   grid.querySelectorAll('video[data-hls]').forEach(v => { if (!v._hls) initHls(v); });
   initSnaps();   // start polling for any newly added data-snap images
   cardLivePrune();
+}
+
+/* ── 3.1.0 (D3): drag a card to move it; one order for every viewer ───────
+ * The add-on saves the order (/api/card_order) and sends the cameras in
+ * it, so every viewer sees the same order at the next load. The drag uses
+ * pointer events, which work with a mouse and with a finger. The card
+ * moves once, when it is dropped: moving a card restarts its live stream.
+ */
+function _cardOrderApply(grid) {
+  const want = cameras.map(_stableCardKey);
+  const cards = [...grid.querySelectorAll('.camera-card')];
+  const have = cards.map(c => c.dataset.stableKey);
+  if (want.join('\n') === have.join('\n')) return;
+  const byKey = new Map(cards.map(c => [c.dataset.stableKey, c]));
+  want.forEach(k => { const c = byKey.get(k); if (c) grid.appendChild(c); });
+}
+
+let _cardDrag = null;   // {card, target, after}
+
+function cardDragStart(ev, handle) {
+  const card = handle.closest('.camera-card');
+  if (!card || (ev.button !== undefined && ev.button !== 0)) return;
+  ev.preventDefault();
+  _cardDrag = {card, target: null, after: false};
+  card.classList.add('drag-src');
+  try { handle.setPointerCapture(ev.pointerId); } catch (e) {}
+  handle.onpointermove = _cardDragMove;
+  handle.onpointerup = handle.onpointercancel = e => _cardDragEnd(e, handle);
+}
+
+function _cardDragMark(target, after) {
+  document.querySelectorAll('.camera-card.drop-before,.camera-card.drop-after')
+    .forEach(c => c.classList.remove('drop-before', 'drop-after'));
+  if (target) target.classList.add(after ? 'drop-after' : 'drop-before');
+}
+
+function _cardDragMove(ev) {
+  if (!_cardDrag) return;
+  const under = document.elementFromPoint(ev.clientX, ev.clientY);
+  const target = under && under.closest('.camera-card');
+  if (!target || target === _cardDrag.card) { _cardDrag.target = null; _cardDragMark(null); return; }
+  const r = target.getBoundingClientRect();
+  _cardDrag.target = target;
+  _cardDrag.after = ev.clientX > r.left + r.width / 2;
+  _cardDragMark(target, _cardDrag.after);
+}
+
+function _cardDragEnd(ev, handle) {
+  const d = _cardDrag;
+  _cardDrag = null;
+  handle.onpointermove = handle.onpointerup = handle.onpointercancel = null;
+  _cardDragMark(null);
+  if (!d) return;
+  d.card.classList.remove('drag-src');
+  if (ev.type !== 'pointerup' || !d.target) return;
+  d.target.parentNode.insertBefore(d.card, d.after ? d.target.nextSibling : d.target);
+  cardOrderSave();
+}
+
+// Send the order on screen to the add-on, and keep `cameras` in it, so the
+// next renderGrid does not move the cards back.
+async function cardOrderSave() {
+  const grid = document.getElementById('cam-grid');
+  const keys = [...grid.querySelectorAll('.camera-card')].map(c => c.dataset.stableKey).filter(Boolean);
+  const rank = new Map(keys.map((k, i) => [k, i]));
+  cameras.sort((a, b) => (rank.get(_stableCardKey(a)) ?? 1e9) - (rank.get(_stableCardKey(b)) ?? 1e9));
+  try {
+    const r = await fetch(BASE + '/api/card_order', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({order: keys}),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+  } catch (e) { showToast('The card order could not be saved', true); }
 }
 
 function buildCard(cam) {
@@ -2268,6 +2446,9 @@ function cardHTML(cam) {
 
   return '<div class="feed-wrap">' + feedHTML(cam) + '</div>'
     + '<div class="card-info">'
+    // 3.1.0 (D3): drag here to move the card
+    + '<span class="card-drag" title="Drag to move this card" aria-label="Move card"'
+    + ' onpointerdown="cardDragStart(event,this)">⠿</span>'
     + '<div class="status-dot ' + dotClass(cam) + '"></div>'
     + '<span class="card-name" title="' + name + '"'
     + ' onclick="openRename(' + jsArg(cam.id) + ',' + jsArg(displayName(cam)) + ')">'
