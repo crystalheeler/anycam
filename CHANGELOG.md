@@ -1,3 +1,25 @@
+## 3.4.0-rc1.0
+
+Detection zones: draw up to 6 areas on a camera's picture, each with its own sensitivity, so a small, far movement can record. Not field-tested.
+
+### Changes & improvements
+
+- **Draw detection zones.** In Enhanced View, press Zones, then click to set points; click the first point or press Enter to close a zone. Drag a point to move it, drag a line's middle to add one, right-click or long-press to remove one. Pause gives a still picture to draw on.
+- **Each zone has its own sensitivity,** measured against the zone's own area, from Off to 100. An Off zone masks its area. The camera's own sensitivity applies outside the zones, or not at all with "Detection in zones only".
+- **Slow movement in a zone records.** A zone also compares with the picture from 5 s before, so a garage door that opens slowly records.
+- **Zones in the camera's settings.** The cog panel lists the zones with their sensitivity and each zone's biggest recent change, and has an Edit zones button.
+- **Show zones** in Enhanced View draws the outlines and marks the zone that started a recording. The log and the Storage tab name that zone.
+
+### Bugs fixed
+
+- **A WebRTC or RTSP-over-WebSocket camera did not open Enhanced View** in 3.2.0-rc1.0.
+
+### Known issues
+
+- **A camera with zones is judged on a finer grid.** Its whole-picture sensitivity may need a new setting after the update.
+- **Zones belong to one view.** When a PTZ camera turns, its zones no longer match.
+- **The Microseven is not tested** with this release.
+
 ## 3.3.0-rc1.0
 
 AnyCam opens each camera stream once: card pictures, the classic view, motion detection and recordings now read the camera through go2rtc. Not field-tested.

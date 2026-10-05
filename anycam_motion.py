@@ -26,6 +26,7 @@ from anycam_host import H
 import anycam_focus
 from anycam_go2rtc import _go2rtc_profiles      # 3.0.0-rc1.2: it moved there
 from anycam_go2rtc import _go2rtc_relay, _go2rtc_relay_result     # 3.3.0 (C4)
+import anycam_zones                                                 # 3.4.0 (C17)
 
 log = logging.getLogger("anycam")
 
@@ -90,7 +91,7 @@ def _motion_on_frame(camera_id: str, frame: bytes) -> None:
     chroma = _motion_jpeg_chroma(frame)
     if chroma is not None:
         _motion_night_observe(camera_id, chroma, now_m)
-    thumb = _motion_thumb(frame)
+    thumb = _motion_thumb(frame, _motion_grid(camera_id))
     if thumb is None:
         _motion_tick(camera_id, ms, now_m)
         return
@@ -118,6 +119,8 @@ def _motion_feed(camera_id: str, thumb: tuple[bytes, float, float], now_m: float
     live = stream_t is not None
     t = stream_t if live else now_m
     refs = ms.setdefault("refs", collections.deque())
+    if refs and len(refs[-1][1][0]) != len(thumb[0]):
+        _motion_reset_prev(camera_id)      # 3.4.0: the grid changed with the zones
     while len(refs) > 1 and t - refs[1][0] >= MOTION_REF_S - 1e-6:
         refs.popleft()
     ref = refs[0][1] if refs and t - refs[0][0] >= MOTION_REF_S - 1e-6 else None
@@ -130,8 +133,12 @@ def _motion_feed(camera_id: str, thumb: tuple[bytes, float, float], now_m: float
     older = hist[0] if (not live and len(hist) == 2) else None
     if not live:
         hist.append(thumb)
-    if (ref is not None and _motion_decide(camera_id, ms, ref, thumb, t, live)
-            and (live or ms["recording"] or _motion_second_look(camera_id, older, thumb))):
+    moved = (ref is not None and _motion_decide(camera_id, ms, ref, thumb, t, live)
+             and (live or ms["recording"] or _motion_second_look(camera_id, older, thumb)))
+    # 3.4.0 (C17, answer 11): slow movement inside a zone
+    if not moved and anycam_zones.has_zones(camera_id):
+        moved = _motion_slow_look(camera_id, ms, thumb, t)
+    if moved:
         ms["last_motion"] = now_m
         if not ms["recording"]:
             camera = CAMERAS.get(camera_id)
@@ -165,7 +172,9 @@ def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
     # One big change records one picture later, unless that picture shows a
     # light change: the first, half-switched picture of an infrared switch
     # changed 24% of ch7 with only 69% spread (06:20:35).
-    if live and not ms["recording"] and hits and hits[0][1] >= MOTION_INSTANT_PCT:
+    # 3.4.0 (answer 9): not inside a zone, where 3% is one or two cells
+    if (live and not ms["recording"] and hits and hits[0][1] >= MOTION_INSTANT_PCT
+            and hits[0][3] is None):
         return True
     if verdict != "motion":
         return False
@@ -180,20 +189,68 @@ def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
         return False
     if ref[0] == ms.get("echo_of"):
         return False
-    hits.append((t, pct, thumb[0]))
-    return len(hits) >= 2
+    # 3.4.0 (answer 9): the second changed picture counts in the same zone
+    zone = ms.get("judge_zone")
+    hits.append((t, pct, thumb[0], zone))
+    return sum(1 for h in hits if h[3] == zone) >= 2
 
 
 def _motion_second_look(camera_id: str, older: tuple | None, thumb: tuple) -> bool:
     """3.0.1 (B20): True when the picture also differs from an older one."""
-    if older is None:
+    if older is None or len(older[0]) != len(thumb[0]):
         return False
-    frac, spread = _motion_diff(older, thumb)
-    if spread <= MOTION_LIGHT_FRACTION and frac * 100.0 >= _motion_area_now(camera_id):
-        return True
+    if anycam_zones.has_zones(camera_id):
+        # 3.4.0: the same zone must pass against the older picture too
+        flags, _frac, spread = _motion_cells(older, thumb)
+        zone = (_MOTION.get(camera_id) or {}).get("judge_zone")
+        if spread <= MOTION_LIGHT_FRACTION and any(
+                n == zone and p >= need for n, p, need in _motion_zone_results(camera_id, flags)):
+            return True
+    else:
+        frac, spread = _motion_diff(older, thumb)
+        if spread <= MOTION_LIGHT_FRACTION and frac * 100.0 >= _motion_area_now(camera_id):
+            return True
     log.info(f"Motion [{camera_id}]: changed against the last picture only — not recorded "
              f"(most often an insect near the lens)")
     return False
+
+
+def _motion_slow_look(camera_id: str, ms: dict, thumb: tuple, t: float) -> bool:
+    """3.4.0 (C17, answer 11): a zone also compares with the picture ZONE_SLOW_S old.
+
+    A garage door takes several seconds to open, so it changes little from
+    one second to the next. The comparison counts only when the same zone
+    passes its level on two pictures in a row, so a passing insect does not.
+    """
+    slow = ms.setdefault("slow_refs", collections.deque())
+    age = anycam_zones.ZONE_SLOW_S - 1e-6
+    while len(slow) > 1 and t - slow[1][0] >= age:
+        slow.popleft()
+    old = slow[0][1] if slow and t - slow[0][0] >= age else None
+    slow.append((t, thumb))
+    runs = ms.setdefault("slow_runs", {})
+    if (old is None or len(old[0]) != len(thumb[0])
+            or t < ms.get("light_until", float("-inf"))):
+        runs.clear()
+        return False
+    flags, _frac, spread = _motion_cells(old, thumb)
+    if spread > MOTION_LIGHT_FRACTION:
+        runs.clear()
+        return False
+    passed = {n for n, p, need in _motion_zone_results(camera_id, flags)
+              if n is not None and p >= need}
+    for name in [n for n in runs if n not in passed]:
+        del runs[name]
+    for name in passed:
+        runs[name] = runs.get(name, 0) + 1
+    winner = next((n for n in sorted(passed) if runs[n] >= 2), None)
+    if winner is None:
+        return False
+    runs.clear()
+    ms["judge_zone"] = winner
+    log.info(f"Motion [{camera_id}]: zone \"{winner}\" changed over "
+             f"{anycam_zones.ZONE_SLOW_S:.0f} s on two pictures in a row (slow movement)")
+    return True
 
 
 def _motion_tick(camera_id: str, ms: dict, now_m: float) -> None:
@@ -211,6 +268,8 @@ def _motion_reset_prev(camera_id: str) -> None:
         ms["hits"], ms["light_until"] = [], float("-inf")
         ms["last_cur"] = ms["last_ref"] = ms["echo_of"] = None
         ms.setdefault("snap_hist", collections.deque(maxlen=2)).clear()
+        ms.setdefault("slow_refs", collections.deque()).clear()     # 3.4.0
+        ms["slow_runs"] = {}
 # ── 2.6.6: pixel comparison (build plan B16, C13) ──────────────────────────
 # 2.6.5 compared JPEG file sizes. A person barely changes the size of a
 # 9-10 KB Lorex snapshot, so nothing was recorded all day on 2026-09-30,
@@ -234,7 +293,17 @@ MOTION_INSTANT_PCT = 3.0        # one picture this changed records (0.25 s later
 MOTION_LIGHT_HOLD_S = 2.0       # after a light change, nothing counts for this
 
 
-def _motion_thumb(jpeg: bytes) -> tuple[bytes, float, float] | None:
+def _motion_grid(camera_id: str) -> tuple[int, int]:
+    """3.4.0 (C17, answer 8): a camera with zones is judged on a finer grid."""
+    return anycam_zones.ZONE_GRID if anycam_zones.has_zones(camera_id) else MOTION_GRID
+
+
+def _grid_of(cells: int) -> tuple[int, int]:
+    gw, gh = anycam_zones.ZONE_GRID
+    return anycam_zones.ZONE_GRID if cells == gw * gh else MOTION_GRID
+
+
+def _motion_thumb(jpeg: bytes, grid: tuple[int, int] = MOTION_GRID) -> tuple[bytes, float, float] | None:
     """Decode a JPEG to MOTION_GRID greyscale; return (pixels, mean, spread).
 
     spread is the standard deviation, floored at 1 for a flat picture.
@@ -244,8 +313,8 @@ def _motion_thumb(jpeg: bytes) -> tuple[bytes, float, float] | None:
     """
     try:
         img = Image.open(io.BytesIO(jpeg))
-        img.draft("L", (MOTION_GRID[0] * 2, MOTION_GRID[1] * 2))
-        pixels = img.convert("L").resize(MOTION_GRID, Image.Resampling.BOX).tobytes()
+        img.draft("L", (grid[0] * 2, grid[1] * 2))
+        pixels = img.convert("L").resize(grid, Image.Resampling.BOX).tobytes()
     except (OSError, ValueError, Image.DecompressionBombError):
         return None
     return _motion_thumb_gray(pixels)
@@ -274,35 +343,72 @@ def _motion_diff(prev: tuple[bytes, float, float],
     told apart by spread, not by amount: a person changes a few
     neighbouring areas, a night-to-day switch changes all of them.
     """
+    _flags, changed, spread = _motion_cells(prev, curr)
+    return changed, spread
+
+
+def _motion_cells(prev: tuple[bytes, float, float],
+                  curr: tuple[bytes, float, float]) -> tuple[bytearray, float, float]:
+    """(flags, changed, spread): _motion_diff, plus one flag byte per changed cell.
+
+    3.4.0 (C17): the zones count their own cells from the flags. The grid
+    is taken from the picture size: 64 x 48, or 128 x 96 with zones.
+    """
     (pa, ma, sa), (ca, mc, sc) = prev, curr
-    gw, gh = MOTION_GRID
+    gw, gh = _grid_of(len(ca))
     rx, ry = MOTION_REGIONS
     # MOTION_PIXEL_DELTA is in grey levels at the previous picture's contrast.
     limit = MOTION_PIXEL_DELTA / sa
     per_region = [0] * (rx * ry)
+    flags = bytearray(len(ca))
     changed = 0
     for i, (a, c) in enumerate(zip(pa, ca)):
         if abs((c - mc) / sc - (a - ma) / sa) > limit:
             changed += 1
+            flags[i] = 1
             y, x = divmod(i, gw)
             per_region[(y * ry // gh) * rx + (x * rx // gw)] += 1
     region_cells = (gw // rx) * (gh // ry)
     busy = sum(1 for n in per_region if n >= MOTION_REGION_CHANGED * region_cells)
-    return changed / len(ca), busy / len(per_region)
+    return flags, changed / len(ca), busy / len(per_region)
+
+
+def _motion_zone_results(camera_id: str, flags: bytes) -> list[tuple[str | None, float, float]]:
+    """Each zone, and outside the zones, as (name, % changed, % needed)."""
+    boost = _motion_boost(camera_id)
+    return anycam_zones.evaluate(
+        camera_id, flags, _grid_of(len(flags)), _motion_area_now(camera_id),
+        lambda level: _motion_area_pct(level + boost))
 
 
 def _motion_judge(camera_id: str, prev: tuple[bytes, float, float],
                   curr: tuple[bytes, float, float]) -> tuple[str, float]:
     """("motion" | "light" | "", % changed); logs for tuning."""
-    frac, spread = _motion_diff(prev, curr)
+    flags, frac, spread = _motion_cells(prev, curr)
     pct = frac * 100.0
+    ms = _MOTION.get(camera_id) or {}
+    ms["judge_zone"] = None
     _motion_note_peak(camera_id, pct, spread > MOTION_LIGHT_FRACTION)
+    # 3.4.0 (answer 10): the light rule stays on the whole picture
     if spread > MOTION_LIGHT_FRACTION:
         log.info(f"Motion [{camera_id}]: change across {spread:.0%} of the "
                  f"picture ({pct:.0f}% of it changed) — treated as a light "
                  f"change, not recorded")
         return "light", pct
     area = _motion_area_now(camera_id)
+    if anycam_zones.has_zones(camera_id):
+        # 3.4.0 (C17): each zone on its own cells, outside the zones on the rest
+        results = _motion_zone_results(camera_id, flags)
+        _motion_note_zone_peaks(ms, results)
+        hit = anycam_zones.best_pass(results)
+        if hit is None:
+            return "", max((p for _n, p, _need in results), default=0.0)
+        name, zpct = hit
+        ms["judge_zone"] = name
+        need = next(nd for n, _p, nd in results if n == name)
+        log.info(f"Motion [{camera_id}]: {zpct:.1f}% of {_zone_label(name)} changed "
+                 f"(threshold {need:.1f}%)")
+        return "motion", zpct
     if pct >= area:
         log.info(f"Motion [{camera_id}]: {pct:.1f}% of the picture changed "
                  f"(threshold {area:.1f}%)")
@@ -330,6 +436,25 @@ def _motion_note_peak(camera_id: str, pct: float, light: bool) -> None:
         ms["peak_pct"] = pct
 
 
+def _zone_label(name: str | None) -> str:
+    return f'zone "{name}"' if name is not None else "the picture outside the zones"
+
+
+def _motion_note_zone_peaks(ms: dict, results: list) -> None:
+    """3.4.0 (answer 14): the largest change in each zone and outside them."""
+    peaks = ms.setdefault("zone_peaks", {})
+    for name, pct, need in results:
+        old = peaks.get(name)
+        if old is None or pct > old[0]:
+            peaks[name] = (pct, need)
+
+
+def _motion_zone_peak_text(peaks: dict) -> str:
+    return ", ".join(
+        f"{n if n is not None else 'outside'}: peak {p:.1f}% (records at {need:.1f}%)"
+        for n, (p, need) in sorted(peaks.items(), key=lambda kv: (kv[0] is None, kv[0] or "")))
+
+
 def _motion_report_peak(camera_id: str, ms: dict, now_m: float) -> None:
     """Log and reset the minute's largest change (called by the keeper)."""
     start = ms.setdefault("peak_since", now_m)
@@ -339,6 +464,11 @@ def _motion_report_peak(camera_id: str, ms: dict, now_m: float) -> None:
     single, repeat = ms.get("peak_single", 0), ms.get("peak_repeat", 0)
     ms["peak_since"], ms["peak_n"], ms["peak_pct"], ms["peak_light"] = now_m, 0, 0.0, 0
     ms["peak_single"] = ms["peak_repeat"] = 0
+    zone_peaks = ms.pop("zone_peaks", None)
+    if zone_peaks:
+        ms["last_zone_peaks"] = zone_peaks
+        log.info(f"Motion [{camera_id}]: zones in the last {MOTION_PEAK_REPORT_S} s: "
+                 f"{_motion_zone_peak_text(zone_peaks)}")
     if not n:
         return
     ms["last_peak_pct"] = pct      # for the settings panel's live readout
@@ -500,7 +630,69 @@ def _motion_settings_payload(camera_id: str) -> dict:
         "night":      bool(ms.get("night")),
         "night_boost": MOTION_NIGHT_BOOST,
         "night_note": HA_LOC_NOTE if _HA_LOC_STATE["mismatch"] else ms.get("night_note"),
+        **_motion_zones_payload(camera_id),
     }
+
+
+def _motion_zones_payload(camera_id: str) -> dict:
+    """3.4.0 (C17): the camera's zones, and what each saw in the last minute."""
+    ms = _MOTION.get(camera_id) or {}
+    cfg = anycam_zones.zone_cfg(camera_id)
+    peaks = ms.get("zone_peaks") or ms.get("last_zone_peaks") or {}
+    return {
+        "zones": [{**z, "cells": len(anycam_zones.polygon_cells(z["points"], anycam_zones.ZONE_GRID))
+                   if z.get("closed") else 0} for z in cfg["zones"]],
+        "zones_only": cfg["zones_only"],
+        "zone_max": anycam_zones.ZONE_MAX,
+        "zone_min_cells": anycam_zones.ZONE_MIN_CELLS,
+        "zone_peaks": [{"name": n, "peak": round(p, 2), "need": round(need, 2)}
+                       for n, (p, need) in peaks.items()],
+        "recording_zone": ms.get("rec_zone") if ms.get("recording") else None,
+    }
+
+
+async def api_motion_zones(request: web.Request) -> web.Response:
+    """GET/POST /api/cameras/{camera_id}/motion/zones (3.4.0, C17).
+
+    POST replaces all of the camera's zones. Zones belong to the camera,
+    also while the global recording settings are on.
+    """
+    camera_id = request.match_info["camera_id"]
+    if camera_id not in CAMERAS:
+        return web.json_response({"error": "Camera not found"}, status=404)
+    if request.method == "POST":
+        try:
+            data = await request.json()
+        except ValueError:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        clean, errors = anycam_zones.validate(data)
+        if errors:
+            return web.json_response({"error": "; ".join(errors)}, status=400)
+        anycam_zones.set_zones(camera_id, clean)
+        names = ", ".join(z["name"] + ("" if z["closed"] else " (open)") for z in clean["zones"])
+        log.info(f"Motion [{camera_id}]: zones saved — {len(clean['zones'])} zone(s)"
+                 + (f": {names}" if names else "")
+                 + f"; detection in zones only {'on' if clean['zones_only'] else 'off'}")
+        try:
+            await asyncio.to_thread(_motion_save)
+        except OSError as ex:
+            log.warning(f"Motion: could not save {MOTION_FILE}: {ex}")
+        await _motion_restart_detector(camera_id)
+    return web.json_response(_motion_zones_payload(camera_id))
+
+
+async def _motion_restart_detector(camera_id: str) -> None:
+    """The grid follows the zones, so the detector starts again (the buffer keeps running)."""
+    ms = _MOTION.get(camera_id)
+    if not ms:
+        return
+    task = ms.pop("det_task", None)
+    if task and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    _motion_reset_prev(camera_id)
+    if ms.get("enabled"):
+        _motion_ensure_pipelines(camera_id)
 
 
 async def api_motion_settings(request: web.Request) -> web.Response:
@@ -687,7 +879,7 @@ async def _motion_throttle(camera: dict) -> None:
 async def _motion_detector(camera_id: str, url: str) -> None:
     """Watch the camera's small stream; feed each frame to _motion_feed."""
     ms = _motion_state(camera_id)
-    w, h = MOTION_GRID
+    w, h = _motion_grid(camera_id)     # 3.4.0: 128 x 96 with zones
     luma = w * h
     # 2.6.7: yuv420p, so each frame also carries its colour planes (a
     # quarter of the luma size each); night mode is read from those.
@@ -1171,6 +1363,18 @@ def _motion_load() -> None:
         if camera_id in CAMERAS and not errors:
             _MOTION_CFG[camera_id] = {k: v for k, v in clean.items()
                                       if v != MOTION_DEFAULTS[k]}
+    # 3.4.0 (C17, answer 17): zones in the same file
+    try:
+        zones = json.loads(MOTION_FILE.read_text(encoding="utf-8")).get("zones", {})
+    except (OSError, ValueError):
+        zones = {}
+    for camera_id, raw in (zones.items() if isinstance(zones, dict) else []):
+        clean, errors = anycam_zones.validate(raw)
+        if camera_id in CAMERAS and not errors:
+            anycam_zones.set_zones(camera_id, clean)
+        elif errors:
+            log.warning(f"Motion [{camera_id}]: saved zones not used: {'; '.join(errors)}")
+    anycam_zones.REC_ZONES.update(_rec_zones_read())
     if CFG_MOTION_GLOBAL:
         log.info("Motion: global recording settings are on — they apply to "
                  "every camera")
@@ -1179,8 +1383,30 @@ def _motion_load() -> None:
 def _motion_save() -> None:
     armed = sorted(cid for cid, ms in _MOTION.items() if ms["enabled"])
     DATA_DIR.mkdir(exist_ok=True)
-    MOTION_FILE.write_text(json.dumps({"armed": armed, "cameras": _MOTION_CFG}),
+    MOTION_FILE.write_text(json.dumps({"armed": armed, "cameras": _MOTION_CFG,
+                                       "zones": anycam_zones.ZONES}),
                            encoding="utf-8")
+
+
+def _rec_zones_file() -> Path:
+    return DATA_DIR / "recording_zones.json"
+
+
+def _rec_zones_read() -> dict:
+    try:
+        data = json.loads(_rec_zones_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def _rec_zones_save() -> None:
+    """3.4.0 (answer 15): which zone started each recording, for the Storage tab."""
+    keep = dict(list(anycam_zones.REC_ZONES.items())[-anycam_zones.REC_ZONES_MAX:])
+    anycam_zones.REC_ZONES.clear()
+    anycam_zones.REC_ZONES.update(keep)
+    DATA_DIR.mkdir(exist_ok=True)
+    _rec_zones_file().write_text(json.dumps(keep), encoding="utf-8")
 
 
 def _cam_folder_name(camera: dict) -> str:
@@ -1257,6 +1483,16 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
     clip     = cam_dir / f"{base}_part01.mp4"
     ms["clip_path"] = clip
     ms["clip_base"] = base
+    # 3.4.0 (answer 15): the zone goes into the log and the Storage tab, not the file name
+    zone = ms.get("judge_zone")
+    ms["rec_zone"] = zone
+    if zone is not None:
+        log.info(f"Motion [{camera_id}]: recording started by zone \"{zone}\"")
+        anycam_zones.REC_ZONES[base] = zone
+        try:
+            await asyncio.to_thread(_rec_zones_save)
+        except OSError as ex:
+            log.warning(f"Motion: could not save {_rec_zones_file()}: {ex}")
     seg_args = ["-f", "segment", "-segment_time", str(cfg["clip_s"]),
                 "-segment_start_number", "1", "-reset_timestamps", "1",
                 "-segment_format", "mp4",
@@ -1396,7 +1632,9 @@ async def api_motion_all(request: web.Request) -> web.Response:
     server had the camera armed.
     """
     return web.json_response({
-        cid: {"enabled": ms["enabled"], "recording": ms["recording"]}
+        cid: {"enabled": ms["enabled"], "recording": ms["recording"],
+              # 3.4.0 (answer 16): the zone that started the recording
+              **({"zone": ms["rec_zone"]} if ms["recording"] and ms.get("rec_zone") else {})}
         for cid, ms in _MOTION.items() if ms["enabled"] or ms["recording"]
     })
 

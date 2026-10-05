@@ -7,4 +7,5 @@ MODULES = ["camera_discovery.py", "camera_db.py", "page_script.py",
            "anycam_brand.py", "anycam_credentials.py", "anycam_focus.py",
            "anycam_go2rtc.py", "anycam_host.py", "anycam_motion.py",
            "anycam_page.py", "anycam_probe.py", "anycam_scan.py",
-           "anycam_snap.py", "anycam_storage.py", "anycam_mjpeg.py"]
+           "anycam_snap.py", "anycam_storage.py", "anycam_mjpeg.py",
+           "anycam_zones.py"]

@@ -46,7 +46,7 @@ import anycam_motion
 from anycam_motion import (
     _MOTION, _motion_keeper, _motion_load, _motion_on_frame,
     _motion_reset_prev, _motion_uses_snapshots, api_motion_all, api_motion_settings,
-    api_motion_status, api_motion_toggle,
+    api_motion_status, api_motion_toggle, api_motion_zones,
 )
 # 3.0.0-rc1.2 (E1): go2rtc.
 import anycam_go2rtc
@@ -214,7 +214,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.3.0-rc1.0"  # must match config.yaml
+CURRENT_VERSION = "3.4.0-rc1.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1475,6 +1475,7 @@ def make_app() -> web.Application:
     app.router.add_get(   "/api/cameras/{camera_id}/motion",      api_motion_status)
     app.router.add_get(   "/api/motion",                          api_motion_all)
     app.router.add_route("*", "/api/cameras/{camera_id}/motion/settings", api_motion_settings)
+    app.router.add_route("*", "/api/cameras/{camera_id}/motion/zones", api_motion_zones)
     app.router.add_get(   "/api/storage",                         api_storage_list)
     app.router.add_post(  "/api/storage/rename",                  api_storage_rename)
     app.router.add_post(  "/api/storage/move",                    api_storage_move)
