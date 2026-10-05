@@ -68,6 +68,10 @@ from aiohttp.test_utils import make_mocked_request
 from cryptography.fernet import Fernet
 
 cd._FERNET = Fernet(Fernet.generate_key())   # never touch /data/secret.key
+# 3.0.1: the scan and the add-on's first-start settings write runtime.json;
+# keep it in the scratch folder, never in /data (C:\data on Windows).
+cd.DATA_DIR = SCRATCH
+cd.RUNTIME_FILE = SCRATCH / "runtime.json"
 
 
 def _scene_jpegs():
@@ -555,7 +559,8 @@ async def test_265():
     check("G4 Resolution, Frame Rate and Auto controls removed",
           not any(k in html for k in ("focus-res-sel", "focus-fps-sel", "focusResetAuto()",
                                       ">Auto<", "focus-ctrl-group")))
-    check("G4 Classic button kept", "focusUseClassic()" in html and 'id="focus-classic-grp"' in html)
+    check("G4 3.0.1 (C20): the Classic button is gone", "focusUseClassic" not in html
+          and 'id="focus-classic-grp"' not in html and ">Classic<" not in html)
     check("G4 'decoded on this device' text removed", "decoded on this device" not in html)
     check("G4 loading message in the overlay",
           'id="focus-loading"' in html and "Loading feed, please wait" in html)
@@ -2305,18 +2310,19 @@ async def test_focus_more():
         await cd.handle_focus_clear(make_mocked_request("DELETE", "/snap/focus"))
         cd._MOTION.clear()
 
-        # Classic leave: the preheater goes, the learned tier stays.
+        # Classic leave: the ffmpeg is killed, the learned tier stays.
+        # (3.0.1, C11: the hardware preheater is gone with Fast Stream Start.)
         cd._SNAP.clear(); started.clear()
         await cd.handle_focus_set(make_mocked_request(
             "POST", "/snap/focus/cam1", match_info={"camera_id": "cam1"}))
         await asyncio.sleep(0)
         st = cd._SNAP["cam1"]
-        hw = FakeProc(); st["proc_hw"] = hw; st["hw_ready"] = True
+        ff = FakeProc(); st["proc"] = ff
         cd._FOCUS_ADAPTIVE["cam1"] = {"tier_idx": 4, "locked": True, "run_start": 9.0}
         await cd.handle_focus_clear(make_mocked_request("DELETE", "/snap/focus"))
         await asyncio.sleep(0); await asyncio.sleep(0)
-        check("X4 classic leave: hardware preheater stopped, its state gone",
-              hw.killed and "proc_hw" not in st and "hw_ready" not in st)
+        check("X4 classic leave: the full-resolution ffmpeg is killed, the leave flag set",
+              ff.killed and st.get("focus_leave_kill") is True)
         ada = cd._FOCUS_ADAPTIVE["cam1"]
         check("X4 ... the learned tier kept, its run timer reset",
               ada["tier_idx"] == 4 and ada["locked"] is True and ada["run_start"] is None)
@@ -2415,31 +2421,32 @@ async def test_snapshot_loop():
           and any("after exit — not restarting" in l for l in CAP.lines))
 
     # Y2 the settings that change the arguments
-    real_cfg = (cd.CFG_LIMIT_THREADS, cd.CFG_SKIP_NONREF, cd.CFG_LOW_LATENCY, cd.CFG_LOW_FPS)
+    real_cfg = cd.CFG_LOW_LATENCY
     try:
-        cd.CFG_LIMIT_THREADS = cd.CFG_SKIP_NONREF = cd.CFG_LOW_LATENCY = True
+        cd.CFG_LOW_LATENCY = True
         cam = camera(stream_codec="hevc", stream_width=3840, preferred_transport="udp",
                      needs_fflags_discardcorrupt=True)
         cd.CAMERAS[cid] = cam; cd._SNAP.clear(); nobody()
         launches, _ = await run_snap(cid, cam, [lambda: FakeFfmpeg([jpeg(b"a")])])
         a = launches[0]
-        check("Y2 4K H.265: 4 fps at 480 wide", opt(a, "-vf") == "fps=4,scale=480:-2,format=yuvj420p")
-        check("Y2 thread limit, non-reference skip, low latency, UDP, discard corrupt",
-              opt(a, "-threads") == "2" and opt(a, "-skip_frame") == "nonref"
-              and opt(a, "-probesize") == "32" and opt(a, "-rtsp_transport") == "udp"
+        check("Y2 3.0.1 (B20): 4K H.265 card: keyframes only, 480 wide",
+              opt(a, "-vf") == "scale=480:-2,format=yuvj420p" and opt(a, "-skip_frame") == "nokey"
+              and a.index("-skip_frame") < a.index("-i"), str(a))
+        check("Y2 low latency, UDP, discard corrupt",
+              opt(a, "-probesize") == "32" and opt(a, "-rtsp_transport") == "udp"
               and opt(a, "-fflags") == "+nobuffer+discardcorrupt", str(a))
-        cd.CFG_LIMIT_THREADS = cd.CFG_SKIP_NONREF = cd.CFG_LOW_LATENCY = False
-        cd.CFG_LOW_FPS = True
+        check("Y2 3.0.1 (C11): no thread limit, and never the broken non-reference skip",
+              "-threads" not in a and "nonref" not in a, str(a))
+        cd.CFG_LOW_LATENCY = False
         cam = camera(stream_codec="hevc", stream_width=1920)
         cd.CAMERAS[cid] = cam; cd._SNAP.clear(); nobody()
         launches, _ = await run_snap(cid, cam, [lambda: FakeFfmpeg([jpeg(b"a")])])
-        check("Y2 low-fps mode on H.265: 2 fps", opt(launches[0], "-vf") == "fps=2,scale=640:-2,format=yuvj420p")
+        check("Y2 3.0.1 (C11): H.265 card at its own cap, 8 fps (Low FPS Mode is gone)",
+              opt(launches[0], "-vf") == "fps=8,scale=640:-2,format=yuvj420p")
     finally:
-        cd.CFG_LIMIT_THREADS, cd.CFG_SKIP_NONREF, cd.CFG_LOW_LATENCY, cd.CFG_LOW_FPS = real_cfg
+        cd.CFG_LOW_LATENCY = real_cfg
 
     # Y3 Enhanced View (classic): the ladder's first rung, full quality
-    real_cfg = cd.CFG_LIMIT_THREADS
-    cd.CFG_LIMIT_THREADS = True
     try:
         cam = camera(stream_width=2560, stream_height=1440)
         cam["stream_profiles"][0].update(stream_width=2560, stream_height=1440)
@@ -2454,7 +2461,6 @@ async def test_snapshot_loop():
         check("Y3 ... the adaptive state is created with its ladder",
               ada["tier_idx"] == 0 and len(ada["ladder"]) == 62 and ada["run_start"] is not None)
     finally:
-        cd.CFG_LIMIT_THREADS = real_cfg
         cd._FOCUSED_CAMERA = cd._FOCUS_ENGINE = None
 
     # Y4 a camera that sends nothing: transport flip at 3, codec cleared at 5
@@ -2520,36 +2526,14 @@ async def test_snapshot_loop():
     check("Y8 no profiles: built from the stream URLs, duplicates dropped",
           len(cd._build_focus_ladder(old)) == 93)
 
-    # Y9 the hardware preheater
-    st = {}
-    await cd._hw_preheater(cid, st, "hevc_drm")
-    check("Y9 preheater with no process: failed", st.get("hw_preheater_failed") is True)
-    st = {"proc_hw": FakeFfmpeg()}
-    await cd._hw_preheater(cid, st, "hevc_drm")
-    check("Y9 ... process ends before a picture: failed", st.get("hw_preheater_failed") is True)
-
-    class Live(FakeFfmpeg):
-        def __init__(self):
-            super().__init__()
-            self.stdout = asyncio.StreamReader()
-    p = Live()
-    st = {"proc_hw": p}
-    t = asyncio.create_task(cd._hw_preheater(cid, st, "hevc_drm"))
-    p.stdout.feed_data(jpeg(b"hw"))
-    await asyncio.sleep(0.05)
-    check("Y9 ... first hardware picture: ready to swap", st.get("hw_ready") is True and not t.done())
-    st["hw_swapped"] = True
-    p.stdout.feed_data(b"more")
-    await asyncio.wait_for(t, 3)
-    check("Y9 ... after the swap it stops", t.done() and not p.killed)
-    hold = asyncio.create_task(asyncio.sleep(1000))
-    hw = FakeProc()
-    st = {"hw_preheater_task": hold, "proc_hw": hw, "hw_ready": True, "hw_swapped": False,
-          "hw_preheater_failed": False, "hw_preheat_elapsed": 1.0, "frame": b"x"}
-    cd._kill_hw_preheater(st)
-    await asyncio.sleep(0)
-    check("Y9 _kill_hw_preheater: task cancelled, process killed, only its keys removed",
-          hold.cancelled() and hw.killed and st == {"frame": b"x"})
+    # Y9 3.0.1 (C11): the removed options are gone from every file
+    gone = ("low_fps_mode", "skip_nonref", "limit_threads", "stagger_polling", "fast_stream_start")
+    texts = {f: (REPO / f).read_text(encoding="utf-8") for f in ("config.yaml", "run.sh", "translations/en.yaml")}
+    check("Y9 3.0.1 (C11): the five removed options are in no manifest, start script or translation",
+          not [(f, o) for f, t in texts.items() for o in gone if o in t])
+    check("Y9 ... and their code is gone", not any(n in repo_source() for n in (
+        "CFG_LOW_FPS", "CFG_SKIP_NONREF", "CFG_LIMIT_THREADS", "CFG_STAGGER_POLL",
+        "CFG_FAST_STREAM_START", "_hw_preheater", "proc_hw")))
 
     # Y10 ffmpeg's error output
     cd.CAMERAS.clear(); cd.CAMERAS[cid] = camera()
@@ -2855,13 +2839,14 @@ async def test_credentials():
         c = cd.CAMERAS[cid]
         check("Z4 rate-limited camera: the card says it is waiting, then ready",
               st == 200 and c["status"] == "ready" and "Camera rate-limited" in c.get("status_text", ""))
-        # The stream-table check is not in this list: its pacing never runs
-        # (build plan B24). No check here pins that.
         labels = [l for _, l in calls["waits"]]
         check("Z4 ... the main ffprobe and each locked-stream check wait out the 5 s cooldown",
               all(s == 5.0 for s, _ in calls["waits"]) and labels[0] == "non-ONVIF ffprobe"
               and {"locked-stream-validate 1", "locked-stream-details 1",
                    "locked-stream-validate 3"} <= set(labels), str(calls["waits"]))
+        check("Z4 3.0.1 (B24): the stream-table check and its ffprobe wait out the cooldown too",
+              labels[1] == "db_probe validation"
+              and any(l.startswith("db_probe ffprobe") and l.endswith("/12") for l in labels), str(labels))
         check("Z4 ... table paths checked with the password percent-encoded, the main path skipped",
               all("admin:p%40ss&w+rd%20%2350%25%20x@10.0.0.42:554/" in u for u in calls["validate"][0][1])
               and not any(u.endswith("/11") for u in calls["validate"][0][1]))
@@ -2962,7 +2947,12 @@ async def test_credentials():
         check("Z9 ... RTMP gets its default path; WS-RTSP is an information card",
               cd.CAMERAS["10.0.0.62_1935_manual"]["stream_url"] == "rtmp://10.0.0.62:1935/live/stream"
               and cd.CAMERAS["10.0.0.63_8443_manual"]["status"] == "info"
-              and cd.CAMERAS["10.0.0.63_8443_manual"]["display"] == "ws-rtsp")
+              and cd.CAMERAS["10.0.0.63_8443_manual"]["display"] == "wsrtsp")
+        r = await add({"ip": "10.0.0.64", "port": 443, "protocol": "WebRTC"})
+        c = cd.CAMERAS.get("10.0.0.64_443_manual", {})
+        check("Z9 3.0.1 (B23): WebRTC added by hand is an information card, named as the scan names it",
+              r.status == 200 and c.get("protocol") == "WebRTC" and c.get("display") == "webrtc"
+              and c.get("status") == "info", f"{r.status} {c}")
 
         # Z10 Deep Re-Probe
         rp = lambda c: cd.api_deep_reprobe(JsonReq(match={"camera_id": c}))
@@ -3024,6 +3014,250 @@ async def test_credentials():
 def datetime_now_iso():
     import datetime as _dt
     return _dt.datetime.utcnow().isoformat()
+
+
+
+# ── AA. 3.0.1 ────────────────────────────────────────────────────────────────
+async def test_301():
+    print("\n[AA] 3.0.1")
+    # B2: appliance cameras by MAC prefix
+    check("AA1 B2: the iENSO block (28 bits) and Dreame are appliance cameras",
+          (cd.appliance_camera("04:a1:6f:1a:2b:3c") or ("",))[0] == "Appliance camera (iENSO module)"
+          and (cd.appliance_camera("00-AE-F7-AA-BB-01") or ("",))[0] == "Dreame robot vacuum"
+          and cd.appliance_camera("04:A1:6F:20:00:01") is None and cd.appliance_camera("") is None)
+
+    # B2 in the scan: every dropped host logged; an information card, or a note on a login card
+    def live(subnet):
+        cd.LIVE_HOST_MACS.clear()
+        cd.LIVE_HOST_MACS.update({"10.0.0.40": "04:A1:6F:1A:2B:3C", "10.0.0.41": "00:AE:F7:AA:BB:01",
+                                  "10.0.0.42": "02:11:22:33:44:55", "10.0.0.44": "04:A1:6F:10:00:09"})
+        return {"10.0.0.40", "10.0.0.41", "10.0.0.42", "10.0.0.43", "10.0.0.44"}
+
+    def nmap(ips):
+        return [{"ip": "10.0.0.43", "hostname": "cam", "mac_addr": "", "mac_vendor": "",
+                 "open_ports": [{"port": 554, "service": "rtsp", "product": ""}]},
+                {"ip": "10.0.0.44", "hostname": "appl", "mac_addr": "04:A1:6F:10:00:09", "mac_vendor": "",
+                 "open_ports": [{"port": 80, "service": "http", "product": ""}]}]
+
+    async def probe(ip, port, hostname, initial, prev, verdict, reason, loop, host_meta=None):
+        status = "ready" if ip == "10.0.0.43" else "needs_credentials"
+        return {"id": f"{ip}_{port}", "ip": ip, "hostname": hostname, "port": port, "protocol": "RTSP",
+                "stream_url": f"rtsp://{ip}:{port}/x", "status": status, "display": "proxy",
+                "name": hostname, "verdict": "camera", "verdict_reason": "test",
+                "requires_credentials": status != "ready", "user_saved": False}
+    cd.CAMERAS.clear()
+    CAP.lines.clear()
+    with _Swap(get_local_subnet=lambda: "10.0.0.0/26", get_default_gateway=lambda: "10.0.0.1",
+               discover_live_hosts=live, onvif_discover=lambda t: [], ssdp_discover=lambda t: [],
+               mdns_discover=lambda t: [], broad_nmap_scan=lambda i: [], focused_nmap_scan=nmap,
+               _probe_host_port=probe, save_cameras=lambda: None):
+        await cd.run_scan()
+    dropped = [l for l in CAP.lines if "No camera port open on" in l]
+    check("AA2 B2: each live host without a camera port is named in the log, with its MAC",
+          len(dropped) == 3 and any("10.0.0.42 (MAC 02:11:22:33:44:55" in l for l in dropped), str(dropped))
+    a40, a41 = cd.CAMERAS.get("10.0.0.40_appliance", {}), cd.CAMERAS.get("10.0.0.41_appliance", {})
+    check("AA2 ... an appliance camera with no open port gets an information card",
+          a40.get("display") == "appliance" and a40.get("status") == "info"
+          and a41.get("name") == "Dreame robot vacuum" and "Dreamehome" in a41.get("info", "")
+          and "10.0.0.42_appliance" not in cd.CAMERAS, str(a40))
+    c44 = cd.CAMERAS.get("10.0.0.44_80", {})
+    check("AA2 ... an appliance camera that asks for a login keeps its login card, with a note",
+          c44.get("status") == "needs_credentials" and "appliance" in (c44.get("device_notes") or "")
+          and "10.0.0.44_appliance" not in cd.CAMERAS, str(c44))
+    st = dict(cd.SCAN_STATE)
+    check("AA3 B8: the scan reports its elapsed time and no time left at the end",
+          st["progress"] == 100 and st["eta"] == 0 and st["elapsed"] > 0 and st["started_at"] > 0, str(st))
+    check("AA3 ... and keeps each stage's time for the next estimate",
+          len(cd.load_runtime().get("scan_stage_s", [])) == 4)
+
+    # B8: progress from work done
+    saved_rt = []
+    with _Swap(load_runtime=lambda: {"scan_stage_s": [10, 10, 10, 10]},
+               save_runtime=lambda d: saved_rt.append(d)):
+        pr = cd._ScanProgress(broad=False)
+        pr.start(1); pr.update(0.5)
+        p1 = cd.SCAN_STATE["progress"]
+        pr.start(3); pr.update(0.5)
+        p3, eta3 = cd.SCAN_STATE["progress"], cd.SCAN_STATE["eta"]
+        pr.finish(save=True)
+    check("AA3 B8: progress follows the work done, from the last scan's stage times",
+          p1 == 16 and p3 == 83 and eta3 == 5, f"{p1} {p3} {eta3}")
+    check("AA3 ... the deeper scan counts only when it runs; the times are saved",
+          pr.expect[3] == 0.0 and saved_rt and len(saved_rt[0]["scan_stage_s"]) == 4)
+    cd.SCAN_STATE.update(running=False, progress=0, message="Idle. Click Scan to begin.")
+
+    # B12: VAAPI only with a device a VAAPI driver opens
+    real = (cd.VAAPI_DEVICE, cd.asyncio.create_subprocess_exec)
+    try:
+        cd.VAAPI_DEVICE = str(SCRATCH / "no-such-render-node")
+        ok, why = await cd._vaapi_usable()
+        check("AA4 B12: no render device: VAAPI not available", ok is False and "no " in why, why)
+        dev = SCRATCH / "renderD128"; dev.write_bytes(b"")
+        cd.VAAPI_DEVICE = str(dev)
+
+        class P:
+            def __init__(self, rc, err):
+                self.returncode, self._err = rc, err
+
+            async def communicate(self):
+                return b"", self._err
+
+        async def no_driver(*a, **k):
+            return P(1, b"[AVHWDeviceContext] Failed to initialise VAAPI connection: -1 (unknown libva error).")
+
+        async def driver(*a, **k):
+            return P(0, b"")
+        cd.asyncio.create_subprocess_exec = no_driver
+        ok, why = await cd._vaapi_usable()
+        check("AA4 ... a device but no VAAPI driver (a Pi 4): not available, with ffmpeg's reason",
+              ok is False and "Failed to initialise VAAPI" in why, why)
+        cd.asyncio.create_subprocess_exec = driver
+        ok, why = await cd._vaapi_usable()
+        check("AA4 ... a working driver: available", ok is True)
+    finally:
+        cd.VAAPI_DEVICE, cd.asyncio.create_subprocess_exec = real
+
+    # B20 (3): a card is never shown a picture older than 10 s
+    async def idle_loop(camera_id, url, camera_, native_res=False):
+        await asyncio.sleep(1000)
+    cid = "camb20"
+    with _Swap(snap_loop=idle_loop):
+        cd.CAMERAS.clear(); cd._SNAP.clear(); cd.CAMERAS[cid] = camera(id=cid)
+        st = cd._snap_state(cid)
+        st["frame"], st["frame_time"] = jpeg(b"old"), time.monotonic() - 20
+        req = make_mocked_request("GET", f"/snapshot/{cid}", match_info={"camera_id": cid})
+        r_old = await cd.handle_snapshot(req)
+        st["frame_time"] = time.monotonic() - 2
+        r_new = await cd.handle_snapshot(req)
+        check("AA5 B20: a picture 20 s old is not shown (503); a 2 s old one is",
+              r_old.status == 503 and r_new.status == 200, f"{r_old.status} {r_new.status}")
+        if st.get("task"):
+            st["task"].cancel()
+
+    # B20 (4): on the snapshot path, the echo of an insect is not recorded
+    starts = []
+
+    async def fake_start(camera_id, camera_, url):
+        starts.append(camera_id)
+    w, h = cd.MOTION_GRID
+    import random as _r
+    rnd = _r.Random(7)
+    calm = bytes(rnd.randrange(60, 200) for _ in range(w * h))
+    bug = bytearray(calm)
+    for y in range(4, 20):
+        for x in range(4, 20):
+            bug[y * w + x] = 255 - calm[y * w + x]
+    A, B = cd._motion_thumb_gray(calm), cd._motion_thumb_gray(bytes(bug))
+
+    def run(hold_until=None):
+        cd._MOTION.clear()
+        ms = cd._motion_state(cid); ms["enabled"] = True
+        cd._motion_reset_prev(cid)
+        CAP.lines.clear(); starts.clear()
+        for t, pic in ((0.0, A), (1.0, A), (2.0, A), (3.0, B), (4.0, A)):
+            if hold_until and t == 3.0:
+                ms["light_until"] = 1000.0 + hold_until
+            cd._motion_feed(cid, pic, 1000.0 + t)
+    with _Swap(_start_recording=fake_start):
+        cd.CAMERAS.clear(); cd.CAMERAS[cid] = camera(id=cid)
+        run()
+        await asyncio.sleep(0)
+        rec1 = list(starts)
+        # the insect picture itself is not judged (a light hold); the next
+        # picture differs from it, but not from the picture before it
+        run(hold_until=3.5)
+        await asyncio.sleep(0)
+        rec2 = list(starts)
+    check("AA6 B20: a picture that differs from both pictures before it records",
+          rec1 == [cid], str(rec1))
+    check("AA6 ... a picture that differs only from an insect picture does not",
+          rec2 == [] and any("changed against the last picture only" in l for l in CAP.lines),
+          str(CAP.lines[-4:]))
+    cd._MOTION.clear()
+
+    # B20 (2): the detector's retry backs off from 10 s to 5 min
+    delays = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(d, *a, **k):
+        if d >= 1:
+            delays.append(d)
+            if len(delays) >= 6:
+                cd._motion_state(cid)["enabled"] = False
+        await real_sleep(0)
+
+    async def no_ffmpeg(*a, **k):
+        raise OSError("test: no ffmpeg")
+    real_exec = cd.asyncio.create_subprocess_exec
+    cd.asyncio.create_subprocess_exec = no_ffmpeg
+    cd.asyncio.sleep = fake_sleep
+    CAP.lines.clear()
+    try:
+        cd._MOTION.clear(); cd._motion_state(cid)["enabled"] = True
+        await asyncio.wait_for(cd._motion_detector(cid, "rtsp://10.0.0.33/x"), 10)
+    finally:
+        cd.asyncio.sleep = real_sleep
+        cd.asyncio.create_subprocess_exec = real_exec
+    check("AA7 B20: detector retries at 10, 20, 40, 80, 160, then 300 s",
+          delays == [10.0, 20.0, 40.0, 80.0, 160.0, 300.0], str(delays))
+    check("AA7 ... with one warning, not one per retry",
+          sum("live detection stopped" in l for l in CAP.lines) == 1)
+    cd._MOTION.clear()
+
+    # B26: the add-on's own ID for the log link
+    asked = []
+
+    async def sup(method, path, payload=None):
+        asked.append((method, path))
+        return {"slug": "5c53de3b_camera_discovery"}
+    with _Swap(_supervisor_self=sup):
+        cd._SELF_SLUG = None
+        r1 = json.loads((await cd.api_self(make_mocked_request("GET", "/api/self"))).body)
+        r2 = json.loads((await cd.api_self(make_mocked_request("GET", "/api/self"))).body)
+    check("AA8 B26: the log link gets the add-on's own ID from the Supervisor, once",
+          r1["slug"] == r2["slug"] == "5c53de3b_camera_discovery" and asked == [("GET", "info")])
+
+    async def sup_none(method, path, payload=None):
+        return None
+    with _Swap(_supervisor_self=sup_none):
+        cd._SELF_SLUG = None
+        r3 = json.loads((await cd.api_self(make_mocked_request("GET", "/api/self"))).body)
+    check("AA8 ... no Supervisor: the local ID", r3["slug"] == "local_camera_discovery")
+    cd._SELF_SLUG = None
+    check("AA8 ... the page asks for it", "/api/self" in repo_source() and "fetch(BASE + '/api/self')" in cd._JS)
+
+    # F10: Show in Sidebar and Auto update, once
+    posted = []
+
+    async def sup_ok(method, path, payload=None):
+        posted.append((method, path, payload))
+        return {}
+    rt = cd.load_runtime(); rt.pop("store_defaults_set", None); cd.save_runtime(rt)
+    with _Swap(_supervisor_self=sup_ok):
+        await cd._store_defaults_once()
+        await cd._store_defaults_once()
+    check("AA9 F10: on the first start, Show in Sidebar and Auto update are switched on, once",
+          posted == [("POST", "options", {"ingress_panel": True, "auto_update": True})]
+          and cd.load_runtime().get("store_defaults_set"), str(posted))
+    rt = cd.load_runtime(); rt.pop("store_defaults_set", None); cd.save_runtime(rt)
+    with _Swap(_supervisor_self=sup_none):
+        await cd._store_defaults_once()
+    check("AA9 ... a failed call sets no marker, so the next start tries again",
+          not cd.load_runtime().get("store_defaults_set"))
+
+    # C10: a browser without H.265 gets another stream for a card
+    camx = {"id": "cx", "ip": "10.0.0.35", "credentials": None, "stream_url": "rtsp://10.0.0.35/main",
+            "stream_profiles": [{"url": "rtsp://10.0.0.35/main", "stream_codec": "hevc", "stream_width": 1280},
+                                {"url": "rtsp://10.0.0.35/sub", "stream_codec": "h264", "stream_width": 1920}]}
+    u1, c1, _ = cd._go2rtc_card_source(camx)
+    u2, c2, _ = cd._go2rtc_card_source(camx, h265=False)
+    check("AA10 C10: a card plays its smallest stream; without H.265, the H.264 one",
+          u1.endswith("/main") and c1 == "hevc" and u2.endswith("/sub") and c2 == "h264", f"{u1} {u2}")
+    camx["stream_profiles"] = camx["stream_profiles"][:1]
+    u3, c3, why = cd._go2rtc_card_source(camx, h265=False)
+    check("AA10 ... only H.265: no live card, and the reason says why",
+          u3 is None and "cannot play H.265" in why, why)
+    cd.CAMERAS.clear()
 
 
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
@@ -3138,6 +3372,7 @@ async def main():
     await test_focus_more()
     await test_snapshot_loop()
     await test_credentials()
+    await test_301()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

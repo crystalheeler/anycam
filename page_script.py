@@ -205,9 +205,16 @@ async function cancelScan() {
 
 
 /* ── Open HA addon log page ─────────────────────────────────────────────────── */
-function openHALog() {
+async function openHALog() {
   // Navigate the top-level HA window (not this ingress iframe) to the addon log page.
-  window.top.location.href = window.top.location.origin + '/config/app/local_camera_discovery/logs';
+  // 3.0.1 (B26): the add-on's ID differs between a copy in /addons and a copy
+  // from an add-on store, so ask the add-on for it.
+  let slug = 'local_camera_discovery';
+  try {
+    const r = await (await fetch(BASE + '/api/self')).json();
+    if (r && r.slug) slug = r.slug;
+  } catch (e) {}
+  window.top.location.href = window.top.location.origin + '/config/app/' + encodeURIComponent(slug) + '/logs';
 }
 
 /* ── Camera page opener (Firefox addon or direct) ────────────────────────────── */
@@ -908,6 +915,59 @@ function _go2rtcLoadPlayer() {
 }
 
 // Ask the server for a go2rtc stream for one camera profile.
+/* ── 3.0.1 (C10): H.265 and the browser ─────────────────────────────────
+ * Chrome and Edge play H.265. Firefox plays it only on Windows, through
+ * Windows itself, which needs Microsoft's "HEVC Video Extensions" and a
+ * graphics chip that decodes H.265. A page cannot install a codec. So the
+ * page asks the browser first: when it cannot play H.265, Enhanced View
+ * plays the camera's own H.264 stream if it has one, cards skip H.265
+ * streams, and otherwise the user gets a plain message.
+ */
+let _h265Support = null;
+function _browserPlaysH265() {
+  if (_h265Support !== null) return _h265Support;
+  let ok = false;
+  try {
+    const MS = window.ManagedMediaSource || window.MediaSource;
+    ok = !!(MS && MS.isTypeSupported
+            && (MS.isTypeSupported('video/mp4; codecs="hvc1.1.6.L153.B0"')
+                || MS.isTypeSupported('video/mp4; codecs="hev1.1.6.L153.B0"')));
+  } catch (e) {}
+  _h265Support = ok;
+  return ok;
+}
+
+function _isH265(codec) {
+  const c = String(codec || '').toLowerCase();
+  return c === 'hevc' || c === 'h265';
+}
+
+function _h264ProfileIdx(cam) {
+  const ps = (cam && cam.stream_profiles) || [];
+  for (let i = 0; i < ps.length; i++) {
+    if (String(ps[i].stream_codec || '').toLowerCase() === 'h264') return i;
+  }
+  return -1;
+}
+
+function _h265Help() {
+  const ua = navigator.userAgent || '';
+  if (/Windows/.test(ua) && /Firefox\//.test(ua))
+    return 'This browser cannot play H.265 video. Install "HEVC Video Extensions" from the '
+         + 'Microsoft Store, or use Chrome or Edge.';
+  return 'This browser cannot play H.265 video. Use Chrome or Edge.';
+}
+
+// go2rtc's error text, for a person. The original stays in the console.
+function _readableLiveError(reason) {
+  const r = String(reason || '');
+  if (/codecs not matched/i.test(r) && /H26?5|hevc/i.test(r)) return 'this browser cannot play H.265 video';
+  if (/codecs not matched/i.test(r)) return "this browser cannot play this camera's video format";
+  if (/ICE|webrtc\/offer|webrtc\/answer/i.test(r)) return 'the live connection could not be set up';
+  if (/^no video within|^connection closed|^no answer|^go2rtc/i.test(r)) return r;
+  return 'the live stream did not start';
+}
+
 async function _go2rtcStreamInfo(camId, profIdx) {
   try {
     const r = await fetch(BASE + '/api/go2rtc/focus/' + encodeURIComponent(camId)
@@ -925,12 +985,25 @@ async function _go2rtcTryFocus(camId, cam, session) {
   if (_go2rtcDeclined[camId]) return false;
   if (!(await _go2rtcLoadPlayer())) return false;
   if (session !== _focusSession) return true;
-  const info = await _go2rtcStreamInfo(camId, 0);
+  let info = await _go2rtcStreamInfo(camId, 0);
   if (session !== _focusSession) return true;
   if (!info || !info.ok) {
     console.info('[AnyCam] live view not used for ' + camId + ': '
                  + ((info && info.reason) || 'no answer'));
     return false;
+  }
+  // 3.0.1 (C10): an H.265 stream in a browser that cannot play H.265
+  if (_isH265(info.codec) && !_browserPlaysH265()) {
+    const alt = _h264ProfileIdx(cam);
+    if (alt < 0) {
+      console.info('[AnyCam] live view not used for ' + camId + ': H.265 not playable here');
+      showToast(_h265Help() + ' Using the classic view.', true);
+      return false;
+    }
+    info = await _go2rtcStreamInfo(camId, alt);
+    if (session !== _focusSession) return true;
+    if (!info || !info.ok) return false;
+    showToast("This browser cannot play H.265 video, so live view plays the camera's H.264 stream.", false);
   }
   _focusCamId  = camId;
   _focusEngine = 'go2rtc';
@@ -969,7 +1042,6 @@ function _go2rtcMount(camId, cam, info, session) {
   _go2rtcWatchdog = setTimeout(watchdog, GO2RTC_FIRST_FRAME_MS);
   clearInterval(_go2rtcStatsTid);
   _go2rtcStatsTid = setInterval(() => _go2rtcStats(session), 1000);
-  _go2rtcControls(true);
   _focusLoading(true);
   _go2rtcUpdateInfo();
 }
@@ -1039,13 +1111,6 @@ function _go2rtcUpdateInfo() {
     + res + ' · ' + fps + (g.codec ? ' · ' + esc(g.codec) : '');
 }
 
-// The Classic button shows only while live view is mounted. 2.6.5 removed
-// the Resolution, Frame Rate and Auto controls.
-function _go2rtcControls(on) {
-  const classic = document.getElementById('focus-classic-grp');
-  if (classic) classic.style.display = on ? '' : 'none';
-}
-
 function _go2rtcUnmount() {
   clearTimeout(_go2rtcWatchdog);
   clearInterval(_go2rtcStatsTid);
@@ -1066,7 +1131,6 @@ function _go2rtcUnmount() {
   if (wrap) { wrap.innerHTML = ''; wrap.style.display = 'none'; }
   const img = document.getElementById('focus-img');
   if (img) img.style.display = '';
-  _go2rtcControls(false);
 }
 
 // Leave live view for the classic engine inside the same focus session.
@@ -1085,18 +1149,15 @@ function _go2rtcFail(session, reason, remember) {
   console.warn('[AnyCam] live view failed for ' + g.camId + ': ' + reason
                + ' — using the classic view');
   if (remember) _go2rtcDeclined[g.camId] = reason;
+  // 3.0.1 (C10): readable text, and the fix when the browser cannot play H.265
+  const readable = _readableLiveError(reason);
+  const help = readable === 'this browser cannot play H.265 video' ? ' ' + _h265Help() : '';
   _go2rtcToClassic(g.camId, g.cam,
-                   'Live view unavailable (' + reason + ') — using the classic view', true);
+                   'Live view unavailable (' + readable + ') — using the classic view.' + help, true);
 }
 
-// "Classic" button: compare against the classic view for this session only.
-// Not remembered, so closing and reopening the camera returns to live view.
-function focusUseClassic() {
-  const g = _go2rtc;
-  if (!g) return;
-  _go2rtcToClassic(g.camId, g.cam,
-                   'Classic view for this session — reopen the camera for live view', false);
-}
+// 3.0.1 (C20): the Classic button is gone. The classic view stays as the
+// automatic fallback (_go2rtcFail, openFocus).
 
 /* ── Enhanced View loading message (2.6.5) ───────────────────────────────
  * Shown from open until the first frame of this session, in both engines.
@@ -1205,7 +1266,9 @@ async function _cardLiveStart(camId) {
   if (!(await _go2rtcLoadPlayer())) { _cardLiveFail(camId, st, 'player did not load', true); return; }
   let info = null;
   try {
-    info = await (await fetch(BASE + '/api/go2rtc/card/' + encodeURIComponent(camId))).json();
+    // 3.0.1 (C10): a browser that cannot play H.265 asks for another stream
+    info = await (await fetch(BASE + '/api/go2rtc/card/' + encodeURIComponent(camId)
+                              + (_browserPlaysH265() ? '' : '?h265=0'))).json();
   } catch (e) {}
   if (_cardLive[camId] !== st) return;
   if (!info || !info.ok) {
@@ -1876,6 +1939,11 @@ function feedHTML(cam) {
     return '<div class="info-overlay"><div class="pi">🔌</div><strong>WS-RTSP Detected</strong>'
          + '<p>' + esc(cam.info || '') + '</p>'
          + '<code>' + esc(cam.ws_url || '') + '</code></div>';
+
+  // 3.0.1 (B2): a camera built into an appliance, found by its MAC address
+  if (d === 'appliance')
+    return '<div class="info-overlay"><div class="pi">📷</div><strong>Camera in an appliance</strong>'
+         + '<p>' + esc(cam.info || '') + '</p></div>';
 
   if (cam.verdict === 'uncertain' || cam.verdict === 'not_camera')
     return '<div class="feed-placeholder">'

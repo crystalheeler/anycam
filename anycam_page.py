@@ -200,8 +200,6 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 #focus-video{{width:100vw;height:calc(100vh - 52px - 44px);height:calc(100dvh - 52px - 44px);margin:44px 0 0 0;background:#000}}
 #focus-video anycam-video{{display:block;width:100%;height:100%}}
 #focus-video video{{object-fit:contain;background:#000}}
-.focus-engine-btn{{background:#1e1e2e;border:1px solid #555;color:#aaa;border-radius:6px;padding:3px 8px;font-size:.72rem;cursor:pointer;height:26px}}
-.focus-engine-btn:hover{{border-color:#4a9eff;color:#4a9eff}}
 #focus-bar{{position:absolute;bottom:0;left:0;right:0;height:52px;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:space-between;padding:0 16px;gap:12px;z-index:9001;border-top:1px solid #333}}
 #focus-info{{font-size:.78rem;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}}
 #focus-controls{{display:flex;align-items:center;gap:12px;flex-shrink:0}}
@@ -620,11 +618,7 @@ header h1{{cursor:pointer}}
   </div>
   <div id="focus-bar">
     <div id="focus-info">Loading…</div>
-    <div id="focus-controls">
-      <div id="focus-classic-grp" style="display:none">
-        <button class="focus-engine-btn" onclick="focusUseClassic()" title="Compare against the classic view for this session">Classic</button>
-      </div>
-    </div>
+    <div id="focus-controls"></div>
   </div>
 </div>
 

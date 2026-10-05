@@ -58,6 +58,8 @@ const DOM = {
 };
 globalThis.HTMLElement = class { appendChild(c) { return c; } };
 globalThis.WebSocket = {CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3};
+// 3.0.1 (C10): a Chrome-like browser plays H.264 and H.265; __noH265 turns H.265 off.
+globalThis.MediaSource = {isTypeSupported: t => !(globalThis.__noH265 && /hvc1|hev1/.test(t))};
 globalThis.window = globalThis;
 globalThis.location = {origin: 'https://ha.local'};
 // HA's app panel: the page runs in its iframe.
@@ -155,7 +157,6 @@ check('mount: video wrapper shown, JPEG image hidden',
 check('mount: player socket URL uses the ingress path + stream name',
       s.el.wsURL === 'wss://ha.local/api/hassio_ingress/TOKEN/go2rtc/ws?src=s0', s.el.wsURL);
 check('mount: mode webrtc,mse and video only', s.el.mode === 'webrtc,mse' && s.el.media === 'video');
-check('mount: Classic button shown', DOM['focus-classic-grp'].style.display === '');
 check('mount: loading message shown', loading() === 'block');
 check('info bar escapes the camera name', DOM['focus-info'].innerHTML.includes('Hikvision &lt;PTZ>'));
 check('info bar says connecting before first frame', DOM['focus-info'].innerHTML.includes('connecting'));
@@ -171,9 +172,8 @@ check('every attempted mode errored -> falls back', live() === null && calls.pol
 check('codec failure IS remembered (same result on every open)', !!declined()['cam1']);
 check('fallback toast is marked as an error', calls.toast.length === 1 && calls.toast[0][1] === true);
 check('fallback tears down the player', s._disconnected && s._removed);
-check('fallback restores the JPEG image and hides Classic',
-      DOM['focus-img'].style.display === '' && DOM['focus-video'].style.display === 'none'
-      && DOM['focus-classic-grp'].style.display === 'none');
+check('fallback restores the JPEG image',
+      DOM['focus-img'].style.display === '' && DOM['focus-video'].style.display === 'none');
 g("delete _go2rtcDeclined['cam1']");
 
 s = mount();
@@ -242,12 +242,8 @@ check('stats: fps measured as frames per second', live().fps === 25);
 check('info bar shows resolution and fps', DOM['focus-info'].innerHTML.includes('3840x2160 · 25 fps'));
 
 console.log('\n[O] user actions');
-s = mount();
-g('focusUseClassic()');
-await flush();
-check('Classic button: switches to the classic view', live() === null && calls.poll.length === 1);
-check('Classic button: NOT remembered as a failure', !declined()['cam1']);
-check('Classic button: toast is not an error', calls.toast[0] && calls.toast[0][1] === false);
+check('3.0.1 (C20): the Classic button is gone', g('typeof focusUseClassic') === 'undefined'
+      && g('typeof _go2rtcControls') === 'undefined');
 
 g("_go2rtcDeclined['cam1'] = 'test'");
 calls.fetch.length = 0;
@@ -571,6 +567,45 @@ console.log('\n[R] motion state mirrored from the server');
   try { g('_setEmptyText(true)'); } catch (e) { threw = true; }
   check('empty page: no error when the elements are not on the page', !threw);
 }
+
+console.log('\n[C10] 3.0.1 H.265 and the browser');
+g('_h265Support = null');
+check('C10 a Chrome-like browser: H.265 playable', g('_browserPlaysH265()') === true);
+g('_h265Support = null'); globalThis.__noH265 = true;
+check('C10 a browser without H.265 is detected', g('_browserPlaysH265()') === false);
+check('C10 the H.264 profile is found, or -1',
+      g("_h264ProfileIdx({stream_profiles: [{stream_codec: 'hevc'}, {stream_codec: 'H264'}]})") === 1
+      && g("_h264ProfileIdx({stream_profiles: [{stream_codec: 'hevc'}]})") === -1);
+check('C10 readable text for the H.265 error',
+      g("_readableLiveError('mse: streams: codecs not matched: video:H265')") === 'this browser cannot play H.265 video'
+      && g("_readableLiveError('webrtc/offer: ICE failed')") === 'the live connection could not be set up');
+check('C10 the message names Chrome or Edge', /Chrome or Edge/.test(g('_h265Help()')));
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    calls.fetch.push(url);
+    const info = /profile=1/.test(url) ? {ok: true, stream: 's9h', profile: 1, codec: 'h264'}
+               : /profile=0/.test(url) ? {ok: true, stream: 's9', profile: 0, codec: 'hevc'} : {};
+    return {json: async () => info};
+  };
+  const camH = {id: 'cam9', name: 'X', stream_codec: 'hevc',
+                stream_profiles: [{stream_codec: 'hevc'}, {stream_codec: 'h264'}]};
+  calls.fetch.length = 0; calls.toast.length = 0;
+  session++; g('_focusSession = ' + session);
+  const r = await g(`_go2rtcTryFocus('cam9', ${JSON.stringify(camH)}, ${session})`);
+  check('C10 Enhanced View: H.265 not playable -> the H.264 profile is requested and played',
+        r === true && calls.fetch.some(u => /focus\/cam9\?profile=1/.test(u))
+        && g('_go2rtc') && g('_go2rtc').stream === 's9h', JSON.stringify(calls.fetch));
+  { const sx = g('_go2rtc'); if (sx) { sx.el.ondisconnect = () => {}; sx.el.remove = () => {}; } }
+  g('_go2rtcUnmount()');
+  calls.toast.length = 0; session++; g('_focusSession = ' + session);
+  const camNo = {id: 'cam9', name: 'X', stream_profiles: [{stream_codec: 'hevc'}]};
+  const r2 = await g(`_go2rtcTryFocus('cam9', ${JSON.stringify(camNo)}, ${session})`);
+  check('C10 ... no H.264 stream: the classic view, with the plain message',
+        r2 === false && calls.toast.some(t => /cannot play H\.265/.test(t[0]) && t[1] === true));
+  globalThis.fetch = realFetch;
+}
+globalThis.__noH265 = false; g('_h265Support = null');
 
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

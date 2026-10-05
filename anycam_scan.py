@@ -20,7 +20,7 @@ import xml.etree.ElementTree as ET
 
 from anycam_host import H
 from anycam_brand import (
-    CAMERA_KEYWORDS, NON_CAMERA_KEYWORDS, lookup_oui,
+    CAMERA_KEYWORDS, NON_CAMERA_KEYWORDS, appliance_camera, lookup_oui,
 )
 from anycam_probe import (
     _onvif_media_url, _rtsp_options_fingerprint, find_rtsp_path, onvif_get_profiles,
@@ -52,6 +52,9 @@ NEEDS = (
 # scan-time card writers should call _publish_scan_card(cam) which
 # handles the routing.
 PENDING_CAMERAS: dict | None = None
+# 3.0.1 (B2): the MAC address of each live host from the last ARP scan,
+# so a host with no open camera port can still be named in the log.
+LIVE_HOST_MACS: dict[str, str] = {}
 # Last ARP-discovered hosts — populated by run_scan(), consumed by Port Scan UI
 ARP_HOSTS: list[dict] = []   # [{ip, hostname}, ...]
 
@@ -144,6 +147,7 @@ def discover_live_hosts(subnet: str) -> set[str]:
     """
     log.info(f"ARP ping scan: {subnet}")
     live = set()
+    LIVE_HOST_MACS.clear()
     try:
         r = subprocess.run(
             ["nmap", "-sn", "-PR", "-T4", "--host-timeout", "8s", "-oX", "-", subnet],
@@ -156,6 +160,9 @@ def discover_live_hosts(subnet: str) -> set[str]:
                 addr = host.find("address[@addrtype='ipv4']")
                 if addr is not None:
                     live.add(addr.get("addr"))
+                    mac = host.find("address[@addrtype='mac']")
+                    if mac is not None and mac.get("addr"):
+                        LIVE_HOST_MACS[addr.get("addr")] = mac.get("addr")
         log.info(f"ARP scan: {len(live)} live host(s)")
     except Exception as e:
         log.warning(f"ARP scan error: {e}")
@@ -1331,6 +1338,60 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
     return None
 
 
+# 3.0.1 (B8): the progress bar follows the work done, not fixed jumps
+# (0, 25, 55, then per host to 80, 82, 100), and the page gets the elapsed
+# time and an estimate of the time left, which it showed as 0:00 before.
+# Each stage's share comes from how long it took in the last scan.
+SCAN_STAGE_DEFAULT_S = (8.0, 14.0, 10.0, 60.0)    # discovery, port scan, probing, deeper scan
+
+
+class _ScanProgress:
+    """Progress and time left of one scan, from the last scan's stage times."""
+
+    def __init__(self, broad: bool) -> None:
+        saved = load_runtime().get("scan_stage_s") or []
+        self.expect = [float(saved[i]) if i < len(saved) and saved[i] else SCAN_STAGE_DEFAULT_S[i]
+                       for i in range(4)]
+        if not broad:
+            self.expect[3] = 0.0
+        self.t0 = time.time()
+        self.stage = 0
+        self.stage_t0 = self.t0
+        self.took = [0.0, 0.0, 0.0, 0.0]
+
+    def start(self, stage: int) -> None:
+        """Begin stage 1 to 4."""
+        now = time.time()
+        if self.stage:
+            self.took[self.stage - 1] = now - self.stage_t0
+        self.stage, self.stage_t0 = stage, now
+        self.update(0.0)
+
+    def update(self, done: float) -> None:
+        """Set the share of the current stage that is done (0 to 1)."""
+        now, i = time.time(), self.stage - 1
+        done = min(max(done, 0.0), 1.0)
+        total = sum(self.expect) or 1.0
+        before = sum(self.expect[:i])
+        pct = int(100 * (before + done * self.expect[i]) / total)
+        in_stage = now - self.stage_t0
+        left_here = (self.expect[i] * (1 - done) if done
+                     else max(self.expect[i] - in_stage, 0.0))
+        SCAN_STATE.update(progress=min(pct, 99), started_at=self.t0, elapsed=now - self.t0,
+                          eta=int(left_here + sum(self.expect[i + 1:])))
+
+    def finish(self, save: bool) -> None:
+        """End the scan; keep the stage times for the next estimate."""
+        now = time.time()
+        if self.stage:
+            self.took[self.stage - 1] = now - self.stage_t0
+        SCAN_STATE.update(elapsed=now - self.t0, eta=0)
+        if save:
+            rt = load_runtime()
+            rt["scan_stage_s"] = [round(t, 1) if t else self.expect[k] for k, t in enumerate(self.took)]
+            save_runtime(rt)
+
+
 async def run_scan() -> None:
     """
     4-stage network camera discovery:
@@ -1345,6 +1406,8 @@ async def run_scan() -> None:
     SCAN_STATE.update(running=True, progress=0, stage=1,
                       stage_label="Stage 1/4 — Live host & multicast discovery",
                       message="Stage 1/4 — ARP scan + ONVIF/SSDP/mDNS discovery…")
+    prog = _ScanProgress(bool(SCAN_OPTIONS.get("broad_sweep")))
+    prog.start(1)
     loop = asyncio.get_event_loop()
 
     # 2.4.0-rc2.6: pending-flush card buffer. New cards discovered
@@ -1385,7 +1448,8 @@ async def run_scan() -> None:
                     and not ip.startswith("169.254.")}
         log.info(f"Live: {len(all_live)} host(s) ({len(arp_hosts)} ARP, {len(multicast_ips)} multicast)")
 
-        SCAN_STATE.update(progress=25, stage=2,
+        prog.start(2)
+        SCAN_STATE.update(stage=2,
                           stage_label="Stage 2/4 — Camera port scan",
                           message=f"Stage 2/4 — Scanning camera ports on {len(all_live)} live host(s)…")
 
@@ -1412,7 +1476,17 @@ async def run_scan() -> None:
                 "nmap_product": (_ports[0].get("product", "") if _ports else ""),
             }
 
-        SCAN_STATE.update(progress=55, stage=3,
+        # 3.0.1 (B2): name every live host that gets no card from the port
+        # scan. Before, these were dropped without a log line, so a missing
+        # camera could not be found in the log.
+        for dip in sorted(all_live - responding_ips,
+                          key=lambda a: tuple(int(x) for x in a.split(".")) if a.count(".") == 3 else (999,)):
+            dmac = LIVE_HOST_MACS.get(dip, "")
+            dmaker = (lookup_oui(dmac) if dmac else "") or "maker unknown"
+            log.info(f"  No camera port open on {dip} (MAC {dmac or 'not seen'}, {dmaker})")
+
+        prog.start(3)
+        SCAN_STATE.update(stage=3,
                           stage_label="Stage 3/4 — Stream probing",
                           message=f"Stage 3/4 — Probing {len(nmap_results)} responding host(s)…")
 
@@ -1431,13 +1505,14 @@ async def run_scan() -> None:
         CAMERAS.clear()
         CAMERAS.update(saved)
 
-        total = max(len(nmap_results), 1)
+        # 3.0.1 (B8): one unit per probed host and per ONVIF-only device
+        units3 = max(len(nmap_results) + len(onvif_results), 1)
         for idx, host in enumerate(nmap_results):
             if SCAN_CANCELLED:
                 break
             ip, hostname = host["ip"], host.get("hostname", host["ip"])
+            prog.update(idx / units3)
             SCAN_STATE.update(
-                progress=55 + int(25 * idx / total),
                 message=f"Stage 3/4 — Probing {ip} ({idx+1}/{len(nmap_results)})…")
 
             verdict, reason = classify_device(host)
@@ -1472,9 +1547,10 @@ async def run_scan() -> None:
             # flag goes True and subsequent ports propagate it via
             # host_meta["host_skip_layer2"].
             host_has_skip_layer2 = False
-            for port_info in open_ports_sorted:
+            for pidx, port_info in enumerate(open_ports_sorted):
                 if SCAN_CANCELLED:      # 3.0.0-rc1.5 (B22): stop between ports too
                     break
+                prog.update((idx + pidx / max(len(open_ports_sorted), 1)) / units3)
                 port = port_info["port"]
                 cid  = f"{ip}_{port}"
                 if cid in BLACKLIST:
@@ -1650,7 +1726,8 @@ async def run_scan() -> None:
         # Stage 4: optional broad sweep on silent live hosts
         silent = sorted(all_live - responding_ips)
         if SCAN_OPTIONS.get("broad_sweep") and silent and not SCAN_CANCELLED:
-            SCAN_STATE.update(progress=82, stage=4,
+            prog.start(4)
+            SCAN_STATE.update(stage=4,
                               stage_label="Stage 4/4 — Deeper Scan",
                               message=f"Stage 4/4 — Deeper scan on {len(silent)} unresponsive host(s)…")
             broad_results = await loop.run_in_executor(_THREAD_POOL, broad_nmap_scan, silent)
@@ -1689,10 +1766,42 @@ async def run_scan() -> None:
                     if cam:
                         _publish_scan_card(cam)
 
+        # 3.0.1 (B2): an appliance camera (by its MAC) gets an information
+        # card. If the probing above already gave it a card (a login form,
+        # for example), that card stays and only gets a note.
+        if not SCAN_CANCELLED:
+            macs = dict(LIVE_HOST_MACS)
+            macs.update({h["ip"]: h.get("mac_addr", "") for h in nmap_results if h.get("mac_addr")})
+            for aip, amac in sorted(macs.items()):
+                appl = appliance_camera(amac)
+                if not appl or aip in BLACKLIST:
+                    continue
+                aname, app = appl
+                note = f"Camera built into an appliance; its video is reachable only through {app}."
+                have = [c for c in list(CAMERAS.values()) + list((PENDING_CAMERAS or {}).values())
+                        if c.get("ip") == aip]
+                if have:
+                    for c in have:
+                        if note not in (c.get("device_notes") or ""):
+                            c["device_notes"] = ((c.get("device_notes") or "") + " " + note).strip()
+                    continue
+                log.info(f"  Appliance camera: {aip} ({aname}, MAC {amac}) — information card")
+                _publish_scan_card({
+                    "id": f"{aip}_appliance", "ip": aip, "hostname": aip, "port": 0,
+                    "protocol": "Appliance", "stream_url": "",
+                    "requires_credentials": False, "credentials": None,
+                    "name": aname, "status": "info", "display": "appliance",
+                    "user_saved": False, "verdict": "camera",
+                    "verdict_reason": "Appliance camera, recognised by its MAC address",
+                    "mac_addr": amac, "mac_vendor": lookup_oui(amac) or aname,
+                    "manufacturer": aname, "info": note, "device_notes": note,
+                })
+
         # Merge multicast-only ONVIF cameras not found by nmap
-        for onvif in onvif_results:
+        for oidx, onvif in enumerate(onvif_results):
             if SCAN_CANCELLED:          # 3.0.0-rc1.5 (B22): no new probing after Cancel
                 break
+            prog.update((len(nmap_results) + oidx) / units3)
             ip = onvif["ip"]
             if ip == gateway or ip in BLACKLIST:
                 continue
@@ -2025,6 +2134,7 @@ async def run_scan() -> None:
                      f"{'…' if len(suppressed_cids) > 6 else ''}")
 
         save_cameras()
+        prog.finish(save=not SCAN_CANCELLED)
         ready = sum(1 for c in CAMERAS.values() if c.get("status") == "ready")
         SCAN_STATE.update(
             running=False, progress=100, stage=0, stage_label="",
