@@ -233,7 +233,9 @@ CONTRACTS = {
     # so each control below is pinned to fail the release if it is removed.
     # Exact module allowlist: adding exec, echo, expr or ffmpeg fails here.
     "_go2rtc_config":        ['{"modules": ["api", "ws", "rtsp", "webrtc", "mp4"]}',
-                              '"rtsp":   {"listen": ""}',
+                              # 3.3.0 (C4): the RTSP server on 127.0.0.1, with a password
+                              '"rtsp":   {"listen": f"{GO2RTC_API_HOST}:{GO2RTC_RTSP_PORT}"',
+                              '"username": GO2RTC_RTSP_USER, "password": _GO2RTC_RTSP_PASS',
                               "GO2RTC_API_HOST"],
     # Inline config: a file path would let go2rtc write camera passwords to disk.
     "_go2rtc_supervisor":    ['"-config", _go2rtc_config()'],

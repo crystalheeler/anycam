@@ -214,7 +214,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.2.0-rc1.0"  # must match config.yaml
+CURRENT_VERSION = "3.3.0-rc1.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -869,8 +869,11 @@ _FOCUS_ADAPTIVE:         dict  = {}    # camera_id → {tier_idx, locked, run_st
 #      even for a local caller. Leaving out ffmpeg also enforces zero
 #      transcode: a codec the browser cannot play produces an error and the
 #      browser falls back, instead of go2rtc quietly burning Pi CPU.
-#   3. go2rtc's RTSP server is off (listen ""). go2rtc registers its RTSP
-#      *client* before it checks that value, so reading cameras still works.
+#   3. go2rtc's RTSP server listens on 127.0.0.1 only and asks for a
+#      password made new at each start (3.3.0, C4; before, it was off).
+#      AnyCam's ffmpeg jobs read the cameras through it, so go2rtc holds one
+#      connection per camera stream; no other program can use it without
+#      the password, and nothing outside the Pi can reach it.
 #   4. The browser reaches go2rtc only through handle_go2rtc_ws, which
 #      forwards /api/ws for stream names AnyCam registered itself.
 # verify_release.py carries contracts on _go2rtc_config and

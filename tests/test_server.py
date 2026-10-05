@@ -147,7 +147,9 @@ def test_pure():
           not {"exec", "echo", "expr", "ffmpeg"} & set(conf["app"]["modules"]))
     check("config: API on 127.0.0.1:28984",
           conf["api"]["listen"] == "127.0.0.1:28984", conf["api"]["listen"])
-    check("config: RTSP server disabled", conf["rtsp"]["listen"] == "")
+    check("config: RTSP server on 127.0.0.1 only, with a password (3.3.0, C4)",
+          conf["rtsp"]["listen"] == "127.0.0.1:28554" and conf["rtsp"]["username"] == "anycam"
+          and len(conf["rtsp"]["password"]) >= 24, str(conf["rtsp"]))
     check("config: WebRTC on :28555", conf["webrtc"]["listen"] == ":28555")
     check("config: log level warn", conf["log"]["level"] == "warn")
 
@@ -3532,6 +3534,92 @@ async def test_320():
           "el.media = 'video,audio'" in cd._JS and cd._JS.count("el.media = 'video';") == 1)
 
 
+
+# ── AD. 3.3.0 ────────────────────────────────────────────────────────────────
+async def test_330():
+    print("\n[AD] 3.3.0")
+    fake = FakeGo2rtc()
+    await fake.start()
+    real_ready = cd.anycam_go2rtc._GO2RTC_READY
+    cid = "cam1"
+    cam = camera()
+    main = cd.build_authenticated_url(cam)
+    try:
+        cd.anycam_go2rtc._GO2RTC_READY = True
+        cd._GO2RTC_STREAMS.clear(); cd._GO2RTC_STREAM_CAM.clear(); cd._RELAY_FAILS.clear()
+        r1 = await cd._go2rtc_relay(cid, main)
+        r2 = await cd._go2rtc_relay(cid, main)
+        name = cd._go2rtc_shared_name(cid, main)
+        check("AD1 C4: ffmpeg reads the camera through go2rtc's RTSP server on 127.0.0.1",
+              r1 == f"rtsp://anycam:{cd._GO2RTC_RTSP_PASS}@127.0.0.1:28554/{name}", r1)
+        check("AD1 ... two users of one stream: one go2rtc stream, so one camera connection",
+              r2 == r1 and len(fake.puts) == 1 and fake.registered.get(name) == main)
+        check("AD2 C4: the stream name holds no password, and never changes its source",
+              TRICKY_PASS not in name and "admin" not in name
+              and cd._go2rtc_shared_name(cid, main) == name
+              and cd._go2rtc_shared_name(cid, main.replace("101", "102")) != name)
+        other = await cd._go2rtc_relay("cam2", main)
+        check("AD2 ... the same address on another camera card is another stream",
+              other != r1)
+        http = await cd._go2rtc_relay(cid, "http://10.0.0.33/snap.jpg")
+        cd.anycam_go2rtc._GO2RTC_READY = False
+        off = await cd._go2rtc_relay(cid, main)
+        cd.anycam_go2rtc._GO2RTC_READY = True
+        check("AD3 C4: not RTSP, or go2rtc not running: the camera's own address",
+              http == "http://10.0.0.33/snap.jpg" and off == main)
+        for _ in range(cd.RELAY_FAIL_LIMIT):
+            cd._go2rtc_relay_result(cid, r1, False)
+        direct = await cd._go2rtc_relay(cid, main)
+        check("AD4 C4: 3 failed runs through go2rtc: ffmpeg opens the camera directly again",
+              direct == main and any("opens the camera directly" in l for l in CAP.lines))
+        cd._RELAY_FAILS.clear()
+        cd._go2rtc_relay_result(cid, r1, False); cd._go2rtc_relay_result(cid, r1, True)
+        cd._go2rtc_relay_result(cid, main, False)
+        check("AD4 ... a good run clears the count; a direct run is not counted",
+              cid not in cd._RELAY_FAILS)
+
+        # the live card and the snapshot loop share the stream
+        cd.CAMERAS.clear()
+        card_cam = camera(id=cid, stream_profiles=[{"url": "rtsp://10.0.0.33:554/Streaming/Channels/102",
+                                                    "stream_codec": "h264", "stream_width": 640}])
+        cd.CAMERAS[cid] = card_cam
+        req = make_mocked_request("GET", f"/api/go2rtc/card/{cid}", match_info={"camera_id": cid})
+        card = json.loads((await cd.api_go2rtc_card(req)).body)
+        sub = cd.build_authenticated_url(card_cam, url="rtsp://10.0.0.33:554/Streaming/Channels/102")
+        relay_sub = await cd._go2rtc_relay(cid, sub)
+        check("AD5 C4/B15: the live card and AnyCam's ffmpeg use one go2rtc stream",
+              card.get("ok") and relay_sub.endswith("/" + card["stream"]), f"{card} {relay_sub}")
+
+        # the motion detector reads through go2rtc
+        captured = []
+        real_exec, real_sleep = cd.asyncio.create_subprocess_exec, asyncio.sleep
+
+        async def cap_exec(*a, **k):
+            captured.append(a)
+            raise OSError("test: stop here")
+
+        async def stop_sleep(d, *a, **k):
+            cd._motion_state(cid)["enabled"] = False
+            await real_sleep(0)
+        cd._MOTION.clear(); cd._motion_state(cid)["enabled"] = True
+        cd.asyncio.create_subprocess_exec = cap_exec
+        cd.asyncio.sleep = stop_sleep
+        try:
+            await asyncio.wait_for(cd._motion_detector(cid, sub), 10)
+        finally:
+            cd.asyncio.create_subprocess_exec = real_exec
+            cd.asyncio.sleep = real_sleep
+        args = list(captured[0]) if captured else []
+        check("AD6 C4: motion detection's ffmpeg reads go2rtc's copy, over TCP",
+              opt(args, "-i") == relay_sub and opt(args, "-rtsp_transport") == "tcp", str(args[:8]))
+        check("AD6 ... and its failed start is counted", cd._RELAY_FAILS.get(cid) == 1)
+    finally:
+        cd.anycam_go2rtc._GO2RTC_READY = real_ready
+        cd._GO2RTC_STREAMS.clear(); cd._GO2RTC_STREAM_CAM.clear(); cd._RELAY_FAILS.clear()
+        cd.CAMERAS.clear(); cd._MOTION.clear()
+        await fake.stop()
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -3623,6 +3711,9 @@ async def main():
             await fake.stop()
         except Exception:
             pass
+    # The go2rtc tests above leave it True; the tests below run without
+    # go2rtc unless they say otherwise (3.3.0: ffmpeg jobs read through it).
+    cd._GO2RTC_READY = False
     await test_focus_engine()
     await test_265()
     await test_motion()
@@ -3647,6 +3738,7 @@ async def main():
     await test_301()
     await test_310()
     await test_320()
+    await test_330()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

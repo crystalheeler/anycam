@@ -1,3 +1,22 @@
+## 3.3.0-rc1.0
+
+AnyCam opens each camera stream once: card pictures, the classic view, motion detection and recordings now read the camera through go2rtc. Not field-tested.
+
+### Changes & improvements
+
+- **One connection per camera stream.** go2rtc holds the camera connection, and every part of AnyCam reads its copy. An armed camera could have up to 5 connections open before. This helps cameras that limit connections, such as DVRs and the Microseven.
+- **go2rtc's RTSP server is on, for AnyCam only.** It listens on 127.0.0.1 and asks for a password that is new at each start. No other device or program can use it.
+- **Automatic way back.** A camera that fails 3 times in a row through go2rtc is opened directly again, as before.
+
+### Bugs fixed
+
+- **Opening the classic view stopped the card's stream** and opened a second camera connection, which a DVR could refuse. The classic view now reads go2rtc's copy of the stream.
+
+### Known issues
+
+- **Recordings still use their own buffer** for the 3 s before the motion. It now reads go2rtc's copy, not the camera.
+- **The Microseven is not tested** with this release.
+
 ## 3.2.0-rc1.0
 
 Enhanced View plays the camera's sound, and cameras that speak WebRTC or RTSP over WebSocket now play live. Not field-tested.

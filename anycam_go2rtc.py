@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import re
+import secrets
 import time
 from aiohttp import web
 from pathlib import Path
@@ -39,6 +40,17 @@ GO2RTC_API_HOST        = "127.0.0.1"
 # on a host-networked HAOS box (Frigate, the go2rtc add-on) may hold them.
 GO2RTC_API_PORT        = 28984
 GO2RTC_WEBRTC_PORT     = 28555
+# 3.3.0 (C4): go2rtc's RTSP server, for AnyCam's own ffmpeg jobs. It listens
+# on 127.0.0.1 only and asks for a password that is new at each start, so
+# no other program on the Pi can read the cameras through it (approved by
+# CrystalHeeler, 2026-10-04).
+GO2RTC_RTSP_PORT       = 28554
+GO2RTC_RTSP_USER       = "anycam"
+_GO2RTC_RTSP_PASS      = secrets.token_urlsafe(24)
+# A camera whose stream fails this many times in a row through go2rtc is
+# opened directly by ffmpeg again, as before 3.3.0, until the add-on restarts.
+RELAY_FAIL_LIMIT       = 3
+_RELAY_FAILS: dict[str, int] = {}
 GO2RTC_PLAYER_JS       = Path("/www/video-rtc.js")
 GO2RTC_READY_TIMEOUT_S = 10.0
 _GO2RTC_PROC: asyncio.subprocess.Process | None = None
@@ -61,7 +73,8 @@ def _go2rtc_config() -> str:
     return json.dumps({
         "app":    {"modules": ["api", "ws", "rtsp", "webrtc", "mp4"]},
         "api":    {"listen": f"{GO2RTC_API_HOST}:{GO2RTC_API_PORT}"},
-        "rtsp":   {"listen": ""},
+        "rtsp":   {"listen": f"{GO2RTC_API_HOST}:{GO2RTC_RTSP_PORT}",
+                   "username": GO2RTC_RTSP_USER, "password": _GO2RTC_RTSP_PASS},
         "webrtc": {"listen": f":{GO2RTC_WEBRTC_PORT}"},
         # warn keeps routine per-request lines out of the addon log. Source
         # URLs can still appear in a warning; _go2rtc_log_pump strips creds.
@@ -191,6 +204,55 @@ def _go2rtc_stream_name(camera_id: str, prof_idx: int, kind: str = "p") -> str:
     tag = re.sub(r"[^A-Za-z0-9]", "_", camera_id)[:40]
     digest = hashlib.sha1(camera_id.encode("utf-8")).hexdigest()[:8]
     return f"anycam_{tag}_{digest}_{kind}{prof_idx}"
+
+
+def _go2rtc_shared_name(camera_id: str, src: str) -> str:
+    """3.3.0 (C4): one go2rtc stream name for one camera source.
+
+    Every user of the same source (a live card, Enhanced View, the snapshot
+    loop, motion detection, the recording buffer) gets the same name, so
+    go2rtc holds one connection to the camera for all of them. A name never
+    changes its source, so no user's stream is swapped under it. The hash
+    is of the address without its password: the name reaches the browser.
+    """
+    tag = re.sub(r"[^A-Za-z0-9]", "_", camera_id)[:40]
+    digest = hashlib.sha1(f"{camera_id}\n{_strip_creds(src)}".encode("utf-8")).hexdigest()[:10]
+    return f"anycam_{tag}_{digest}"
+
+
+async def _go2rtc_relay(camera_id: str, url: str | None) -> str | None:
+    """3.3.0 (C4): the address of go2rtc's copy of an RTSP stream, for ffmpeg.
+
+    Returns the camera's own address when go2rtc cannot serve it: go2rtc not
+    running, not an RTSP address, the stream not accepted, or the camera
+    already failed RELAY_FAIL_LIMIT times through go2rtc.
+    """
+    if (not url or not url.lower().startswith(("rtsp://", "rtsps://")) or not _GO2RTC_READY
+            or _RELAY_FAILS.get(camera_id, 0) >= RELAY_FAIL_LIMIT):
+        return url
+    name = _go2rtc_shared_name(camera_id, url)
+    if not await _go2rtc_register(name, url, camera_id):
+        return url
+    return (f"rtsp://{GO2RTC_RTSP_USER}:{_GO2RTC_RTSP_PASS}@{GO2RTC_API_HOST}:"
+            f"{GO2RTC_RTSP_PORT}/{name}")
+
+
+def _go2rtc_relayed(url: str | None) -> bool:
+    return f"@{GO2RTC_API_HOST}:{GO2RTC_RTSP_PORT}/" in (url or "")
+
+
+def _go2rtc_relay_result(camera_id: str, url: str | None, ok: bool) -> None:
+    """Count a run that read through go2rtc; after RELAY_FAIL_LIMIT failures, go direct."""
+    if not _go2rtc_relayed(url):
+        return
+    if ok:
+        _RELAY_FAILS.pop(camera_id, None)
+        return
+    n = _RELAY_FAILS.get(camera_id, 0) + 1
+    _RELAY_FAILS[camera_id] = n
+    if n == RELAY_FAIL_LIMIT:
+        log.warning(f"go2rtc: {camera_id} failed {n} times in a row through go2rtc — "
+                    f"AnyCam opens the camera directly from now on")
 
 
 def _go2rtc_profile_source(camera: dict,
@@ -397,7 +459,7 @@ async def api_go2rtc_card(request: web.Request) -> web.Response:
         if any(r in reason for r in _REFRESH_REASONS):
             asyncio.create_task(_streams_refresh(camera_id, f"card: {reason}"))
         return web.json_response({"ok": False, "reason": reason, "codec": codec})
-    name = _go2rtc_stream_name(camera_id, 0, kind="c")
+    name = _go2rtc_shared_name(camera_id, src)     # 3.3.0 (C4): shared with the other users
     if not await _go2rtc_register(name, src, camera_id):
         return web.json_response({"ok": False,
                                   "reason": "go2rtc rejected the stream"})
