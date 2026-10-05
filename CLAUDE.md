@@ -261,8 +261,9 @@ names below.
 `docs/BUILD_PLAN.html`. It supersedes the lists that used to be here, most
 of whose items have shipped (see its Done section). Standing reminders:
 
-- `STREAM_DB` → `CAMERA_DB` consolidation and runtime use of
-  `default_ports` need a plan document first (build plan D2).
+- Since 3.5.0-rc1.0 the stream paths are on each `CAMERA_DB` brand
+  (`"streams"`), and `STREAM_DB` is built from them; edit the brand entry,
+  never a second table (`docs/Camera_DB_Merge_Plan.md`).
 - The tests are in `tests/` since 3.0.0-rc1.0 (build plan E7). They cover
   the scan since 3.0.0-rc1.4, and password entry, the snapshot loop, the
   Enhanced View engine, brand identification and the page builder since

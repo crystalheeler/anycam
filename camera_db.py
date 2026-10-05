@@ -1,338 +1,14 @@
 """AnyCam camera knowledge tables.
 
-STREAM_DB: stream paths to try, by brand.
-CAMERA_DB: how to recognise a brand, and what is known about its behaviour.
+CAMERA_DB: how to recognise a brand, what is known about its behaviour, and
+           (3.5.0, D2) the stream paths to try.
+STREAM_DB: the stream paths by slug, built from CAMERA_DB.
 
-Data only: no functions, and nothing here imports the rest of AnyCam.
+Data only, apart from the STREAM_DB builder; nothing here imports the rest
+of AnyCam.
 Moved out of camera_discovery.py in 3.0.0-rc1.0 (build plan E1, stage 1);
 the entries are unchanged. verify_release.py checks the throttle fields.
 """
-
-# ── Stream database — compact form of the RTSP/MJPEG URL database ─────────────
-# Keyed by lowercase manufacturer slug.  Used for:
-#   1. Post-login silent probe of alternate stream paths
-#   2. Pre-login heuristic probing when ONVIF returns no profiles
-#
-# Fields:
-#   match  — substrings to look for in camera name / vendor / model (lowercase)
-#   rtsp   — RTSP path candidates to probe (ordered: most likely first)
-#   mjpeg  — HTTP MJPEG stream path (None if not supported)
-#   snap   — HTTP JPEG snapshot path (None if not available)
-#   port   — default RTSP port (554 unless the brand uses something else)
-STREAM_DB: dict = {
-    # ── Professional / Enterprise ──────────────────────────────────────────────
-    "hikvision": {
-        "match": ["hikvision", "hikv", "ds-2", "ds-7", "ds-6", "isapi"],
-        "rtsp":  ["/Streaming/Channels/101", "/Streaming/Channels/102",
-                  "/Streaming/Channels/103",
-                  "/ISAPI/Streaming/channels/101", "/ISAPI/Streaming/channels/102",
-                  "/h.264/ch1/main/av_stream", "/h.264/ch1/sub/av_stream"],
-        "mjpeg": "/ISAPI/Streaming/channels/102/httpPreview",
-        "snap":  "/ISAPI/Streaming/channels/101/picture",
-        "port":  554,
-    },
-    "ezviz": {
-        "match": ["ezviz"],
-        "rtsp":  ["/Streaming/Channels/101", "/Streaming/Channels/102"],
-        "mjpeg": "/ISAPI/Streaming/channels/102/httpPreview",
-        "snap":  "/ISAPI/Streaming/channels/101/picture",
-        "port":  554,
-    },
-    "dahua": {
-        "match": ["dahua", "dh-ipc", "dh-sd", "ipc-hfw", "ipc-hdw", "ipc-hdb",
-                  "sd4", "sd5", "sd6", "hfw", "hdw"],
-        "rtsp":  ["/cam/realmonitor?channel=1&subtype=0",
-                  "/cam/realmonitor?channel=1&subtype=1",
-                  "/cam/realmonitor?channel=1&subtype=2"],
-        "mjpeg": "/cgi-bin/mjpg/video.cgi?channel=1&subtype=1",
-        "snap":  "/cgi-bin/snapshot.cgi",
-        "port":  554,
-    },
-    "imou": {
-        "match": ["imou"],
-        "rtsp":  ["/cam/realmonitor?channel=1&subtype=0",
-                  "/cam/realmonitor?channel=1&subtype=1"],
-        "mjpeg": "/cgi-bin/mjpg/video.cgi?channel=1&subtype=1",
-        "snap":  "/cgi-bin/snapshot.cgi",
-        "port":  554,
-    },
-    "amcrest": {
-        "match": ["amcrest"],
-        "rtsp":  ["/cam/realmonitor?channel=1&subtype=0",
-                  "/cam/realmonitor?channel=1&subtype=1"],
-        "mjpeg": "/cgi-bin/mjpg/video.cgi?channel=1&subtype=1",
-        "snap":  "/cgi-bin/snapshot.cgi",
-        "port":  554,
-    },
-    "axis": {
-        "match": ["axis"],
-        "rtsp":  ["/axis-media/media.amp", "/axis-media/media.amp?videocodec=h264",
-                  "/axis-media/media.amp?videocodec=h265", "/mpeg4/media.amp"],
-        "mjpeg": "/axis-cgi/mjpg/video.cgi",
-        "snap":  "/axis-cgi/jpg/image.cgi",
-        "port":  554,
-    },
-    "hanwha": {
-        "match": ["hanwha", "wisenet", "samsung", "snv-", "xnv-", "qnv-", "pnv-",
-                  "qnd-", "xnd-", "pnd-"],
-        "rtsp":  ["/profile1/media.smp", "/profile2/media.smp",
-                  "/profile10/media.smp", "/0/profile2/media.smp"],
-        "mjpeg": "/stw-cgi/video.cgi?msubmenu=stream&action=view&Profile=1&CodecType=MJPEG&Resolution=800x450&FrameRate=15&CompressionLevel=10",
-        "snap":  "/stw-cgi/image.cgi?msubmenu=snapshot&action=view",
-        "port":  554,
-    },
-    "uniview": {
-        "match": ["uniview", "unv", "ipc3", "ipc6", "ipc8"],
-        "rtsp":  ["/media/video1", "/media/video2", "/media/video3"],
-        "mjpeg": None,
-        "snap":  "/images/snapshot.jpg",
-        "port":  554,
-    },
-    "vivotek": {
-        "match": ["vivotek", "vivo", "fd8", "fd9", "ip8", "ip9", "cc8", "ms8"],
-        "rtsp":  ["/live1s1", "/live1s2", "/live.sdp", "/live2.sdp"],
-        "mjpeg": "/video.mjpg",
-        "snap":  "/cgi-bin/viewer/video.jpg",
-        "port":  554,
-    },
-    "bosch": {
-        "match": ["bosch", "ndc-", "nti-", "nbn-", "nbe-", "nuc-"],
-        "rtsp":  ["/rtsp_tunnel", "/?inst=1", "/?inst=2"],
-        "mjpeg": None,
-        "snap":  "/snap.jpg",
-        "port":  554,
-    },
-    "pelco": {
-        "match": ["pelco", "sarix", "optera", "spectra"],
-        "rtsp":  ["/stream1", "/stream2", "/?video"],
-        "mjpeg": "/media/mjpeg",
-        "snap":  "/media/jpeg",
-        "port":  554,
-    },
-    "avigilon": {
-        "match": ["avigilon"],
-        "rtsp":  ["/defaultPrimary?streamType=u", "/defaultSecondary?streamType=u",
-                  "/defaultPrimary-0?streamType=u", "/defaultPrimary-1?streamType=u"],
-        "mjpeg": None,
-        "snap":  None,   # generated in camera web UI per-stream
-        "port":  554,
-    },
-    "mobotix": {
-        "match": ["mobotix", "mx-", "mxfb"],
-        "rtsp":  ["/mobotix.h264", "/stream/profile0", "/stream/profile1",
-                  "/onvif/stream0/mobotix.mjpeg"],
-        "mjpeg": "/cgi-bin/faststream.jpg?stream=MxPEG",
-        "snap":  "/cgi-bin/faststream.jpg?stream=snapshot",
-        "port":  554,
-    },
-    "geovision": {
-        "match": ["geovision", "gv-", "geo-"],
-        "rtsp":  ["/CH001.sdp", "/CH002.sdp", "/h264.sdp"],
-        "mjpeg": "/mjpeg?cam=1",
-        "snap":  "/PictureCatch.cgi?CH=1",
-        "port":  8554,
-    },
-    "panasonic": {
-        "match": ["panasonic", "wv-s", "wv-x", "wv-v", "wv-u", "wv-sc", "bl-c",
-                  "i-pro"],
-        "rtsp":  ["/MediaInput/h264", "/MediaInput/h264/stream_1/ch_1",
-                  "/MediaInput/h264/stream_2/ch_1"],
-        "mjpeg": "/nphMotionJpeg?Resolution=640x480&Quality=Standard",
-        "snap":  "/SnapShotJPEG?Resolution=640x480&Quality=Clarity",
-        "port":  554,
-    },
-    "acti": {
-        "match": ["acti", "tcm-", "kce-", "e21", "e22", "e23", "e24", "e31"],
-        "rtsp":  ["/track1", "/track2"],
-        "mjpeg": None,
-        "snap":  "/snapshot.jpg",
-        "port":  554,
-    },
-    "tiandy": {
-        "match": ["tiandy", "tc-c", "tc-h", "tc-r"],
-        "rtsp":  ["/profile1", "/profile2"],
-        "mjpeg": None,
-        "snap":  None,
-        "port":  554,
-    },
-    "honeywell": {
-        "match": ["honeywell", "equip-", "hc3", "hp4", "hd4", "hb4"],
-        "rtsp":  ["/Streaming/Channels/101", "/Streaming/Channels/102",
-                  "/cam/realmonitor?channel=1&subtype=0"],
-        "mjpeg": None,
-        "snap":  "/ISAPI/Streaming/channels/101/picture",
-        "port":  554,
-    },
-    "arecont": {
-        "match": ["arecont", "av2", "av5", "av10", "av20"],
-        "rtsp":  ["/h264.sdp", "/h264.sdp?res=full", "/h264.sdp1", "/h264.sdp2"],
-        "mjpeg": "/mjpeg.cgi",
-        "snap":  "/image.jpg",
-        "port":  554,
-    },
-    "digital_watchdog": {
-        "match": ["digital watchdog", "dw-", "dwc-"],
-        "rtsp":  ["/1/stream1", "/1/stream2"],
-        "mjpeg": None,
-        "snap":  None,
-        "port":  554,
-    },
-    "sony": {
-        "match": ["sony", "snc-", "srg-", "srd-"],
-        "rtsp":  ["/media/video1", "/media/video2"],
-        "mjpeg": "/image?speed=1&size=3",
-        "snap":  "/oneshotimage.jpg",
-        "port":  554,
-    },
-    "iqinvision": {
-        "match": ["iqinvision", "iqm", "iqe"],
-        "rtsp":  ["/rtsp/now.mp4"],
-        "mjpeg": None,
-        "snap":  None,
-        "port":  554,
-    },
-    "verint": {
-        "match": ["verint"],
-        "rtsp":  ["/live.sdp", "/live2.sdp", "/live3.sdp", "/live4.sdp"],
-        "mjpeg": None,
-        "snap":  None,
-        "port":  554,
-    },
-    "ubiquiti": {
-        "match": ["ubiquiti", "unifi", "uvc-"],
-        "rtsp":  ["/{camera_id}"],   # served via UniFi Protect NVR
-        "mjpeg": None,
-        "snap":  None,
-        "port":  7447,
-    },
-    # ── Consumer / Prosumer ────────────────────────────────────────────────────
-    "reolink": {
-        "match": ["reolink", "rlc-", "rlk-", "rlp-", "rln-"],
-        "rtsp":  ["/h264Preview_01_main", "/h264Preview_01_sub",
-                  "/Preview_01_main", "/Preview_01_sub",
-                  "/h265Preview_01_main"],
-        "mjpeg": None,
-        # Snap requires credentials as URL params: &user={user}&password={pass}
-        # http_snap_loop handles this via reolink_snap_auth flag
-        "snap":  "/cgi-bin/api.cgi?cmd=Snap&channel=0&rs=AnyCam",
-        "port":  554,
-    },
-    "foscam": {
-        "match": ["foscam", "fi8", "fi9", "r2", "r4"],
-        "rtsp":  ["/videoMain", "/videoSub"],
-        "mjpeg": "/videostream.cgi",
-        "snap":  "/cgi-bin/CGIProxy.fcgi?cmd=snapPicture2",
-        "port":  88,
-    },
-    "tplink": {
-        "match": ["tapo", "tp-link", "tplink", "c100", "c200", "c300", "c310",
-                  "c320", "vigi"],
-        "rtsp":  ["/stream1", "/stream2"],
-        "mjpeg": None,
-        "snap":  None,   # no HTTP snapshot endpoint — RTSP only
-        "port":  554,
-    },
-    "annke": {
-        "match": ["annke"],
-        "rtsp":  ["/H264/ch1/main/av_stream", "/H264/ch1/sub/av_stream",
-                  "/Streaming/channels/101", "/Streaming/channels/102"],
-        "mjpeg": "/ISAPI/Streaming/channels/102/httpPreview",
-        "snap":  "/ISAPI/Streaming/channels/101/picture",
-        "port":  554,
-    },
-    "trendnet": {
-        "match": ["trendnet", "tv-ip"],
-        "rtsp":  ["/channel1", "/channel2"],
-        "mjpeg": "/cgi/mjpg/mjpeg.cgi",
-        "snap":  "/cgi-bin/video.jpg",
-        "port":  554,
-    },
-    "dlink": {
-        "match": ["d-link", "dlink", "dcs-"],
-        "rtsp":  ["/play1.sdp", "/play2.sdp"],
-        "mjpeg": "/video.cgi",
-        "snap":  "/image.jpg",
-        "port":  554,
-    },
-    "lorex": {
-        "match": ["lorex"],
-        "rtsp":  ["/cam/realmonitor?channel=1&subtype=0",
-                  "/cam/realmonitor?channel=1&subtype=1",
-                  "/ch01/0"],
-        "mjpeg": None,
-        "snap":  "/cgi-bin/snapshot.cgi",
-        "port":  554,
-    },
-    "grandstream": {
-        "match": ["grandstream", "gxv3"],
-        "rtsp":  ["/0", "/1"],
-        "mjpeg": None,
-        "snap":  "/snapshot/view0.jpg",
-        "port":  554,
-    },
-    "wansview": {
-        "match": ["wansview", "ncm-", "ncb-", "w2", "w3", "w4", "w5", "w6",
-                  "q5", "k1", "k2"],
-        "rtsp":  ["/live/ch0", "/live/ch1", "/live/mpeg4"],
-        "mjpeg": "/videostream.cgi",
-        "snap":  "/mjpeg/snap.cgi?chn=0",
-        "port":  554,
-    },
-    "eufy": {
-        "match": ["eufy", "eufycam"],
-        "rtsp":  ["/live0"],
-        "mjpeg": None,
-        "snap":  None,   # no HTTP snapshot — RTSP only (must enable in app)
-        "port":  554,
-    },
-    "vstarcam": {
-        "match": ["vstarcam", "c7", "c8", "c9"],
-        "rtsp":  ["/udp/av0_0", "/udp/av0_1", "/tcp/av0_0", "/udp/av0_2"],
-        "mjpeg": "/videostream.cgi",
-        "snap":  None,
-        "port":  554,
-    },
-    "swann": {
-        "match": ["swann"],
-        "rtsp":  ["/ch01/0", "/ch01/1",
-                  "/Streaming/Channels/101",
-                  "/cam/realmonitor?channel=1&subtype=0"],
-        "mjpeg": None,
-        "snap":  "/ISAPI/Streaming/channels/101/picture",
-        "port":  554,
-    },
-    "hiseeu": {
-        "match": ["hiseeu"],
-        "rtsp":  ["/Streaming/Channels/101", "/Streaming/Channels/102",
-                  "/cam/realmonitor?channel=1&subtype=0"],
-        "mjpeg": None,
-        "snap":  "/ISAPI/Streaming/channels/101/picture",
-        "port":  554,
-    },
-    "flir": {
-        "match": ["flir"],
-        "rtsp":  ["/avc", "/avc/ch1"],
-        "mjpeg": None,
-        "snap":  None,
-        "port":  554,
-    },
-    "sricam": {
-        "match": ["sricam", "ipcam", "generic"],
-        "rtsp":  ["/11", "/12", "/1", "/2", "/onvif1"],
-        "mjpeg": "/videostream.cgi",
-        "snap":  "/tmpfs/snap.jpg",
-        "port":  554,
-    },
-    "microseven": {
-        "match": ["microseven", "m7d", "m7b", "m7t", "hipcam", "hiipcam",
-                  "hipcam realserver", "hiipcam/v100r003"],
-        "rtsp":  ["/11", "/12", "/13", "/h264major", "/h264minor"],
-        "mjpeg": "/auto.jpg",
-        "snap":  "/tmpfs/snap.jpg",
-        "port":  554,
-    },
-}
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Camera manufacturer / model database
@@ -345,13 +21,45 @@ STREAM_DB: dict = {
 #   "http_headers" : substrings to match in any HTTP response header value
 #   "nmap_products": substrings to match in nmap service product/version field
 #   "onvif_scopes" : substrings to match in ONVIF WS-Discovery scope strings
-#   "default_ports": hint ports commonly used by this manufacturer
+#   "default_ports": hint ports commonly used by this manufacturer; the scan's
+#                    port list includes them (anycam_scan.CAMERA_RELEVANT_PORTS)
+#   "streams"      : 3.5.0 (D2): stream paths to try, formerly STREAM_DB. Each:
+#       slug  — the stream entry's key in STREAM_DB
+#       rank  — its place in STREAM_DB: of two equally long matching
+#               keywords, the lower rank wins (_match_stream_db)
+#       match — substrings to look for in camera name / vendor / model (lowercase)
+#       rtsp  — RTSP path candidates to probe (ordered: most likely first)
+#       mjpeg — HTTP MJPEG stream path (None if not supported)
+#       snap  — HTTP JPEG snapshot path (None if not available)
+#       port  — default RTSP port (554 unless the brand uses something else)
 #   "notes"        : human-readable notes shown in Identity section
 # ─────────────────────────────────────────────────────────────────────────────
 
 CAMERA_DB: list[dict] = [
     {
         "name": "Hikvision",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "hikvision", "rank": 0,
+             "match": ["hikvision", "hikv", "ds-2", "ds-7", "ds-6", "isapi"],
+             "rtsp":  ["/Streaming/Channels/101",
+                       "/Streaming/Channels/102",
+                       "/Streaming/Channels/103",
+                       "/ISAPI/Streaming/channels/101",
+                       "/ISAPI/Streaming/channels/102",
+                       "/h.264/ch1/main/av_stream",
+                       "/h.264/ch1/sub/av_stream"],
+             "mjpeg": "/ISAPI/Streaming/channels/102/httpPreview",
+             "snap":  "/ISAPI/Streaming/channels/101/picture",
+             "port":  554},
+            {"slug": "ezviz", "rank": 1,
+             "match": ["ezviz"],
+             "rtsp":  ["/Streaming/Channels/101",
+                       "/Streaming/Channels/102"],
+             "mjpeg": "/ISAPI/Streaming/channels/102/httpPreview",
+             "snap":  "/ISAPI/Streaming/channels/101/picture",
+             "port":  554},
+        ],
         "aliases": ["hik", "hikvision", "ds-2"],
         "http_titles": ["hikvision", "ds-2", "network camera", "ivms"],
         "http_body":   ["hikvision", "ivms-4200", "ds-2cd", "ds-2de", "hik-connect"],
@@ -396,6 +104,24 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Dahua",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "dahua", "rank": 2,
+             "match": ["dahua", "dh-ipc", "dh-sd", "ipc-hfw", "ipc-hdw", "ipc-hdb", "sd4", "sd5", "sd6", "hfw", "hdw"],
+             "rtsp":  ["/cam/realmonitor?channel=1&subtype=0",
+                       "/cam/realmonitor?channel=1&subtype=1",
+                       "/cam/realmonitor?channel=1&subtype=2"],
+             "mjpeg": "/cgi-bin/mjpg/video.cgi?channel=1&subtype=1",
+             "snap":  "/cgi-bin/snapshot.cgi",
+             "port":  554},
+            {"slug": "imou", "rank": 3,
+             "match": ["imou"],
+             "rtsp":  ["/cam/realmonitor?channel=1&subtype=0",
+                       "/cam/realmonitor?channel=1&subtype=1"],
+             "mjpeg": "/cgi-bin/mjpg/video.cgi?channel=1&subtype=1",
+             "snap":  "/cgi-bin/snapshot.cgi",
+             "port":  554},
+        ],
         "aliases": ["dahua", "dhip", "dh-ipc", "imou"],
         "http_titles": ["dahua", "ipc", "nvr", "xvr", "imou"],
         "http_body":   ["dahua technology", "dahua", "imou", "lechange", "dh-ipc"],
@@ -420,6 +146,17 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Lorex",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "lorex", "rank": 30,
+             "match": ["lorex"],
+             "rtsp":  ["/cam/realmonitor?channel=1&subtype=0",
+                       "/cam/realmonitor?channel=1&subtype=1",
+                       "/ch01/0"],
+             "mjpeg": None,
+             "snap":  "/cgi-bin/snapshot.cgi",
+             "port":  554},
+        ],
         "aliases": ["lorex", "flir lorex", "flirlorex"],
         "http_titles": ["lorex", "lorex nvr", "lorex dvr", "flirlorex"],
         "http_body":   ["lorex", "lorextechnology", "lorex technology",
@@ -442,6 +179,19 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Reolink",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "reolink", "rank": 24,
+             "match": ["reolink", "rlc-", "rlk-", "rlp-", "rln-"],
+             "rtsp":  ["/h264Preview_01_main",
+                       "/h264Preview_01_sub",
+                       "/Preview_01_main",
+                       "/Preview_01_sub",
+                       "/h265Preview_01_main"],
+             "mjpeg": None,
+             "snap":  "/cgi-bin/api.cgi?cmd=Snap&channel=0&rs=AnyCam",
+             "port":  554},
+        ],
         "aliases": ["reolink"],
         "http_titles": ["reolink"],
         "http_body":   ["reolink", "reolink app"],
@@ -478,6 +228,18 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Axis",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "axis", "rank": 5,
+             "match": ["axis"],
+             "rtsp":  ["/axis-media/media.amp",
+                       "/axis-media/media.amp?videocodec=h264",
+                       "/axis-media/media.amp?videocodec=h265",
+                       "/mpeg4/media.amp"],
+             "mjpeg": "/axis-cgi/mjpg/video.cgi",
+             "snap":  "/axis-cgi/jpg/image.cgi",
+             "port":  554},
+        ],
         "aliases": ["axis communications", "axis network"],
         "http_titles": ["axis", "axis network camera", "axis video"],
         "http_body":   ["axis communications", "axis network camera", "axiscam"],
@@ -513,6 +275,18 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Hanwha / Samsung Techwin",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "hanwha", "rank": 6,
+             "match": ["hanwha", "wisenet", "samsung", "snv-", "xnv-", "qnv-", "pnv-", "qnd-", "xnd-", "pnd-"],
+             "rtsp":  ["/profile1/media.smp",
+                       "/profile2/media.smp",
+                       "/profile10/media.smp",
+                       "/0/profile2/media.smp"],
+             "mjpeg": "/stw-cgi/video.cgi?msubmenu=stream&action=view&Profile=1&CodecType=MJPEG&Resolution=800x450&FrameRate=15&CompressionLevel=10",
+             "snap":  "/stw-cgi/image.cgi?msubmenu=snapshot&action=view",
+             "port":  554},
+        ],
         "aliases": ["hanwha", "samsung techwin", "wisenet", "qnv", "xnv"],
         "http_titles": ["wisenet", "hanwha", "samsung techwin", "snv-", "qnv-"],
         "http_body":   ["hanwha", "wisenet", "samsung techwin"],
@@ -547,6 +321,16 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Amcrest",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "amcrest", "rank": 4,
+             "match": ["amcrest"],
+             "rtsp":  ["/cam/realmonitor?channel=1&subtype=0",
+                       "/cam/realmonitor?channel=1&subtype=1"],
+             "mjpeg": "/cgi-bin/mjpg/video.cgi?channel=1&subtype=1",
+             "snap":  "/cgi-bin/snapshot.cgi",
+             "port":  554},
+        ],
         "aliases": ["amcrest", "amcrest technologies"],
         "http_titles": ["amcrest", "amcrest ip"],
         "http_body":   ["amcrest", "amcrestsecurity"],
@@ -567,6 +351,17 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Uniview (UNV)",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "uniview", "rank": 7,
+             "match": ["uniview", "unv", "ipc3", "ipc6", "ipc8"],
+             "rtsp":  ["/media/video1",
+                       "/media/video2",
+                       "/media/video3"],
+             "mjpeg": None,
+             "snap":  "/images/snapshot.jpg",
+             "port":  554},
+        ],
         "aliases": ["uniview", "unv", "univideo"],
         "http_titles": ["uniview", "unv", "network camera"],
         "http_body":   ["uniview", "univideo", "unv camera"],
@@ -585,6 +380,18 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Vivotek",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "vivotek", "rank": 8,
+             "match": ["vivotek", "vivo", "fd8", "fd9", "ip8", "ip9", "cc8", "ms8"],
+             "rtsp":  ["/live1s1",
+                       "/live1s2",
+                       "/live.sdp",
+                       "/live2.sdp"],
+             "mjpeg": "/video.mjpg",
+             "snap":  "/cgi-bin/viewer/video.jpg",
+             "port":  554},
+        ],
         "aliases": ["vivotek"],
         "http_titles": ["vivotek", "network camera", "ip camera"],
         "http_body":   ["vivotek", "vvtk"],
@@ -611,6 +418,17 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Bosch",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "bosch", "rank": 9,
+             "match": ["bosch", "ndc-", "nti-", "nbn-", "nbe-", "nuc-"],
+             "rtsp":  ["/rtsp_tunnel",
+                       "/?inst=1",
+                       "/?inst=2"],
+             "mjpeg": None,
+             "snap":  "/snap.jpg",
+             "port":  554},
+        ],
         "aliases": ["bosch security", "bosch camera", "autodome", "flexidome", "dinion"],
         "http_titles": ["bosch", "autodome", "flexidome", "dinion"],
         "http_body":   ["bosch security", "bosch camera", "dinion", "flexidome", "autodome"],
@@ -622,6 +440,17 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Pelco",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "pelco", "rank": 10,
+             "match": ["pelco", "sarix", "optera", "spectra"],
+             "rtsp":  ["/stream1",
+                       "/stream2",
+                       "/?video"],
+             "mjpeg": "/media/mjpeg",
+             "snap":  "/media/jpeg",
+             "port":  554},
+        ],
         "aliases": ["pelco", "sarix", "spectra", "optera"],
         "http_titles": ["pelco", "sarix", "spectra enhanced"],
         "http_body":   ["pelco", "sarix", "pelco.com"],
@@ -633,6 +462,16 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Sony",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "sony", "rank": 20,
+             "match": ["sony", "snc-", "srg-", "srd-"],
+             "rtsp":  ["/media/video1",
+                       "/media/video2"],
+             "mjpeg": "/image?speed=1&size=3",
+             "snap":  "/oneshotimage.jpg",
+             "port":  554},
+        ],
         "aliases": ["sony ipela", "sony security", "snc-"],
         "http_titles": ["sony", "sony ipela", "snc-"],
         "http_body":   ["sony ipela", "sony security", "snc-rz", "snc-ep", "snc-vb"],
@@ -644,6 +483,17 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Panasonic / i-PRO",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "panasonic", "rank": 14,
+             "match": ["panasonic", "wv-s", "wv-x", "wv-v", "wv-u", "wv-sc", "bl-c", "i-pro"],
+             "rtsp":  ["/MediaInput/h264",
+                       "/MediaInput/h264/stream_1/ch_1",
+                       "/MediaInput/h264/stream_2/ch_1"],
+             "mjpeg": "/nphMotionJpeg?Resolution=640x480&Quality=Standard",
+             "snap":  "/SnapShotJPEG?Resolution=640x480&Quality=Clarity",
+             "port":  554},
+        ],
         "aliases": ["panasonic", "i-pro", "ipro", "wv-"],
         "http_titles": ["panasonic", "i-pro", "network camera", "wv-"],
         "http_body":   ["panasonic", "i-pro", "wv-sc", "wv-sf", "wv-sp"],
@@ -655,6 +505,18 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Avigilon",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "avigilon", "rank": 11,
+             "match": ["avigilon"],
+             "rtsp":  ["/defaultPrimary?streamType=u",
+                       "/defaultSecondary?streamType=u",
+                       "/defaultPrimary-0?streamType=u",
+                       "/defaultPrimary-1?streamType=u"],
+             "mjpeg": None,
+             "snap":  None,
+             "port":  554},
+        ],
         "aliases": ["avigilon", "motorola solutions"],
         "http_titles": ["avigilon"],
         "http_body":   ["avigilon", "avigilon corporation"],
@@ -666,6 +528,16 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "FLIR",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "flir", "rank": 37,
+             "match": ["flir"],
+             "rtsp":  ["/avc",
+                       "/avc/ch1"],
+             "mjpeg": None,
+             "snap":  None,
+             "port":  554},
+        ],
         "aliases": ["flir systems", "flir camera"],
         "http_titles": ["flir", "flir systems"],
         "http_body":   ["flir systems", "flir camera", "flir.com"],
@@ -677,6 +549,18 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Mobotix",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "mobotix", "rank": 12,
+             "match": ["mobotix", "mx-", "mxfb"],
+             "rtsp":  ["/mobotix.h264",
+                       "/stream/profile0",
+                       "/stream/profile1",
+                       "/onvif/stream0/mobotix.mjpeg"],
+             "mjpeg": "/cgi-bin/faststream.jpg?stream=MxPEG",
+             "snap":  "/cgi-bin/faststream.jpg?stream=snapshot",
+             "port":  554},
+        ],
         "aliases": ["mobotix"],
         "http_titles": ["mobotix", "mx-"],
         "http_body":   ["mobotix", "mx-q", "mx-s", "mobotix.com"],
@@ -688,6 +572,16 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "ACTi",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "acti", "rank": 15,
+             "match": ["acti", "tcm-", "kce-", "e21", "e22", "e23", "e24", "e31"],
+             "rtsp":  ["/track1",
+                       "/track2"],
+             "mjpeg": None,
+             "snap":  "/snapshot.jpg",
+             "port":  554},
+        ],
         "aliases": ["acti", "acti corporation"],
         "http_titles": ["acti"],
         "http_body":   ["acti corporation", "acti camera"],
@@ -699,6 +593,17 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "GeoVision",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "geovision", "rank": 13,
+             "match": ["geovision", "gv-", "geo-"],
+             "rtsp":  ["/CH001.sdp",
+                       "/CH002.sdp",
+                       "/h264.sdp"],
+             "mjpeg": "/mjpeg?cam=1",
+             "snap":  "/PictureCatch.cgi?CH=1",
+             "port":  8554},
+        ],
         "aliases": ["geovision", "gv-"],
         "http_titles": ["geovision", "gv-"],
         "http_body":   ["geovision", "geo vision", "gv-bx", "gv-ptz"],
@@ -710,6 +615,16 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Foscam",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "foscam", "rank": 25,
+             "match": ["foscam", "fi8", "fi9", "r2", "r4"],
+             "rtsp":  ["/videoMain",
+                       "/videoSub"],
+             "mjpeg": "/videostream.cgi",
+             "snap":  "/cgi-bin/CGIProxy.fcgi?cmd=snapPicture2",
+             "port":  88},
+        ],
         "aliases": ["foscam"],
         "http_titles": ["foscam", "ip camera"],
         "http_body":   ["foscam", "foscam digital technologies"],
@@ -739,6 +654,18 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Annke",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "annke", "rank": 27,
+             "match": ["annke"],
+             "rtsp":  ["/H264/ch1/main/av_stream",
+                       "/H264/ch1/sub/av_stream",
+                       "/Streaming/channels/101",
+                       "/Streaming/channels/102"],
+             "mjpeg": "/ISAPI/Streaming/channels/102/httpPreview",
+             "snap":  "/ISAPI/Streaming/channels/101/picture",
+             "port":  554},
+        ],
         "aliases": ["annke"],
         "http_titles": ["annke"],
         "http_body":   ["annke", "annke.com"],
@@ -761,6 +688,18 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Swann",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "swann", "rank": 35,
+             "match": ["swann"],
+             "rtsp":  ["/ch01/0",
+                       "/ch01/1",
+                       "/Streaming/Channels/101",
+                       "/cam/realmonitor?channel=1&subtype=0"],
+             "mjpeg": None,
+             "snap":  "/ISAPI/Streaming/channels/101/picture",
+             "port":  554},
+        ],
         "aliases": ["swann", "swann communications"],
         "http_titles": ["swann"],
         "http_body":   ["swann", "swann security", "swann communications"],
@@ -784,6 +723,16 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "TP-Link Tapo / Kasa",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "tplink", "rank": 26,
+             "match": ["tapo", "tp-link", "tplink", "c100", "c200", "c300", "c310", "c320", "vigi"],
+             "rtsp":  ["/stream1",
+                       "/stream2"],
+             "mjpeg": None,
+             "snap":  None,
+             "port":  554},
+        ],
         "aliases": ["tapo", "kasa", "tp-link"],
         "http_titles": ["tapo", "kasa", "tp-link"],
         "http_body":   ["tapo", "tp-link tapo", "kasa camera"],
@@ -848,6 +797,16 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Digital Watchdog",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "digital_watchdog", "rank": 19,
+             "match": ["digital watchdog", "dw-", "dwc-"],
+             "rtsp":  ["/1/stream1",
+                       "/1/stream2"],
+             "mjpeg": None,
+             "snap":  None,
+             "port":  554},
+        ],
         "aliases": ["digital watchdog", "dw-"],
         "http_titles": ["digital watchdog", "dw megazip"],
         "http_body":   ["digital watchdog", "dwipnetwork", "dw.com"],
@@ -941,6 +900,15 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Eufy / Anker",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "eufy", "rank": 33,
+             "match": ["eufy", "eufycam"],
+             "rtsp":  ["/live0"],
+             "mjpeg": None,
+             "snap":  None,
+             "port":  554},
+        ],
         "aliases": ["eufy", "anker", "eufysecurity"],
         "http_titles": ["eufy", "eufysecurity"],
         "http_body":   ["eufy", "eufysecurity", "anker innovations"],
@@ -1020,6 +988,16 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Tiandy",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "tiandy", "rank": 16,
+             "match": ["tiandy", "tc-c", "tc-h", "tc-r"],
+             "rtsp":  ["/profile1",
+                       "/profile2"],
+             "mjpeg": None,
+             "snap":  None,
+             "port":  554},
+        ],
         "aliases": ["tiandy"],
         "http_titles": ["tiandy"],
         "http_body":   ["tiandy", "tiandy technologies", "tiandy.com"],
@@ -1104,6 +1082,19 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Sricam / Srihome",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "sricam", "rank": 38,
+             "match": ["sricam", "ipcam", "generic"],
+             "rtsp":  ["/11",
+                       "/12",
+                       "/1",
+                       "/2",
+                       "/onvif1"],
+             "mjpeg": "/videostream.cgi",
+             "snap":  "/tmpfs/snap.jpg",
+             "port":  554},
+        ],
         "aliases": ["sricam", "srihome"],
         "http_titles": ["sricam", "srihome"],
         "http_body":   ["sricam", "srihome", "sricam.com"],
@@ -1131,6 +1122,18 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Vstarcam",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "vstarcam", "rank": 34,
+             "match": ["vstarcam", "c7", "c8", "c9"],
+             "rtsp":  ["/udp/av0_0",
+                       "/udp/av0_1",
+                       "/tcp/av0_0",
+                       "/udp/av0_2"],
+             "mjpeg": "/videostream.cgi",
+             "snap":  None,
+             "port":  554},
+        ],
         "aliases": ["vstarcam"],
         "http_titles": ["vstarcam"],
         "http_body":   ["vstarcam", "vstarcam.com"],
@@ -1156,6 +1159,17 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Wansview",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "wansview", "rank": 32,
+             "match": ["wansview", "ncm-", "ncb-", "w2", "w3", "w4", "w5", "w6", "q5", "k1", "k2"],
+             "rtsp":  ["/live/ch0",
+                       "/live/ch1",
+                       "/live/mpeg4"],
+             "mjpeg": "/videostream.cgi",
+             "snap":  "/mjpeg/snap.cgi?chn=0",
+             "port":  554},
+        ],
         "aliases": ["wansview"],
         "http_titles": ["wansview"],
         "http_body":   ["wansview", "wansview.com"],
@@ -1327,6 +1341,19 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Hipcam/Microseven",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "microseven", "rank": 39,
+             "match": ["microseven", "m7d", "m7b", "m7t", "hipcam", "hiipcam", "hipcam realserver", "hiipcam/v100r003"],
+             "rtsp":  ["/11",
+                       "/12",
+                       "/13",
+                       "/h264major",
+                       "/h264minor"],
+             "mjpeg": "/auto.jpg",
+             "snap":  "/tmpfs/snap.jpg",
+             "port":  554},
+        ],
         "aliases": ["microseven", "hipcam", "hiipcam", "m7d", "m7b", "m7t",
                     "srihome", "sricam", "vstarcam", "wansview"],
         "http_titles": ["microseven", "hipcam", "ipcam", "rtspserver"],
@@ -1365,6 +1392,17 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Honeywell",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "honeywell", "rank": 17,
+             "match": ["honeywell", "equip-", "hc3", "hp4", "hd4", "hb4"],
+             "rtsp":  ["/Streaming/Channels/101",
+                       "/Streaming/Channels/102",
+                       "/cam/realmonitor?channel=1&subtype=0"],
+             "mjpeg": None,
+             "snap":  "/ISAPI/Streaming/channels/101/picture",
+             "port":  554},
+        ],
         "aliases": ["honeywell", "hbt", "performance series", "hc30"],
         "http_titles": ["honeywell"],
         "http_body":   ["honeywell", "hbt"],
@@ -1391,6 +1429,18 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Arecont Vision",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "arecont", "rank": 18,
+             "match": ["arecont", "av2", "av5", "av10", "av20"],
+             "rtsp":  ["/h264.sdp",
+                       "/h264.sdp?res=full",
+                       "/h264.sdp1",
+                       "/h264.sdp2"],
+             "mjpeg": "/mjpeg.cgi",
+             "snap":  "/image.jpg",
+             "port":  554},
+        ],
         "aliases": ["arecont", "arecont vision", "contera", "megavideo"],
         "http_titles": ["arecont", "contera"],
         "http_body":   ["arecont vision", "megavideo"],
@@ -1419,6 +1469,15 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "IQinVision",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "iqinvision", "rank": 21,
+             "match": ["iqinvision", "iqm", "iqe"],
+             "rtsp":  ["/rtsp/now.mp4"],
+             "mjpeg": None,
+             "snap":  None,
+             "port":  554},
+        ],
         "aliases": ["iqinvision", "iqeye"],
         "http_titles": ["iqinvision", "iqeye"],
         "http_body":   ["iqinvision", "iqeye"],
@@ -1451,6 +1510,18 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Verint",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "verint", "rank": 22,
+             "match": ["verint"],
+             "rtsp":  ["/live.sdp",
+                       "/live2.sdp",
+                       "/live3.sdp",
+                       "/live4.sdp"],
+             "mjpeg": None,
+             "snap":  None,
+             "port":  554},
+        ],
         "aliases": ["verint", "nextiva", "s1700", "s1708"],
         "http_titles": ["verint", "nextiva"],
         "http_body":   ["verint", "nextiva", "video solutions"],
@@ -1468,6 +1539,15 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Ubiquiti UniFi Protect",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "ubiquiti", "rank": 23,
+             "match": ["ubiquiti", "unifi", "uvc-"],
+             "rtsp":  ["/{camera_id}"],
+             "mjpeg": None,
+             "snap":  None,
+             "port":  7447},
+        ],
         "aliases": ["ubiquiti", "unifi", "unifi protect", "ubnt", "g3", "g4", "g5"],
         "http_titles": ["unifi", "unifi protect"],
         "http_body":   ["ubiquiti", "unifi protect", "ui.com"],
@@ -1496,6 +1576,17 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Hiseeu",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "hiseeu", "rank": 36,
+             "match": ["hiseeu"],
+             "rtsp":  ["/Streaming/Channels/101",
+                       "/Streaming/Channels/102",
+                       "/cam/realmonitor?channel=1&subtype=0"],
+             "mjpeg": None,
+             "snap":  "/ISAPI/Streaming/channels/101/picture",
+             "port":  554},
+        ],
         "aliases": ["hiseeu", "eseecloud", "esee"],
         "http_titles": ["hiseeu"],
         "http_body":   ["hiseeu", "eseecloud"],
@@ -1514,6 +1605,16 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "Grandstream",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "grandstream", "rank": 31,
+             "match": ["grandstream", "gxv3"],
+             "rtsp":  ["/0",
+                       "/1"],
+             "mjpeg": None,
+             "snap":  "/snapshot/view0.jpg",
+             "port":  554},
+        ],
         "aliases": ["grandstream", "gxv", "gsc"],
         "http_titles": ["grandstream"],
         "http_body":   ["grandstream networks", "grandstream.com"],
@@ -1528,6 +1629,16 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "TRENDnet",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "trendnet", "rank": 28,
+             "match": ["trendnet", "tv-ip"],
+             "rtsp":  ["/channel1",
+                       "/channel2"],
+             "mjpeg": "/cgi/mjpg/mjpeg.cgi",
+             "snap":  "/cgi-bin/video.jpg",
+             "port":  554},
+        ],
         "aliases": ["trendnet", "tv-ip"],
         "http_titles": ["trendnet", "tv-ip"],
         "http_body":   ["trendnet", "trendnet.com"],
@@ -1546,6 +1657,16 @@ CAMERA_DB: list[dict] = [
     },
     {
         "name": "D-Link",
+        # 3.5.0 (D2): stream paths, formerly STREAM_DB
+        "streams": [
+            {"slug": "dlink", "rank": 29,
+             "match": ["d-link", "dlink", "dcs-"],
+             "rtsp":  ["/play1.sdp",
+                       "/play2.sdp"],
+             "mjpeg": "/video.cgi",
+             "snap":  "/image.jpg",
+             "port":  554},
+        ],
         "aliases": ["d-link", "dlink", "dcs-"],
         "http_titles": ["d-link", "dlink", "dcs-"],
         "http_body":   ["d-link", "dlink.com"],
@@ -1937,3 +2058,20 @@ CAMERA_DB: list[dict] = [
         "streaming_recipe_confidence": "HIGH",
     },
 ]
+
+
+# ── 3.5.0 (D2): STREAM_DB, built from CAMERA_DB ─────────────────────────────
+# Before 3.5.0 the stream paths were a second table, keyed by slug, kept by
+# hand beside CAMERA_DB. Now each brand's paths are on its entry, and
+# STREAM_DB is built here, in rank order, so every lookup is unchanged
+# (docs/Camera_DB_Merge_Plan.md). Used for:
+#   1. Post-login silent probe of alternate stream paths
+#   2. Pre-login heuristic probing when ONVIF returns no profiles
+def _build_stream_db(entries: list[dict]) -> dict:
+    found = sorted(((s["rank"], s) for e in entries for s in e.get("streams", [])),
+                   key=lambda rs: rs[0])
+    return {s["slug"]: {"match": s["match"], "rtsp": s["rtsp"], "mjpeg": s["mjpeg"],
+                        "snap": s["snap"], "port": s["port"]} for _rank, s in found}
+
+
+STREAM_DB: dict = _build_stream_db(CAMERA_DB)

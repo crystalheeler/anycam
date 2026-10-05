@@ -1,3 +1,22 @@
+## 3.5.0-rc1.0
+
+A Lorex or Dahua DVR is walked for the channels it reports, and the two camera databases are one. Not field-tested.
+
+### Changes & improvements
+
+- **DVR channels from the DVR.** After the password is accepted, AnyCam asks a Lorex or Dahua DVR how many channels it has and walks only those. A DVR that does not answer is walked for 16 channels, as before.
+- **One camera database.** Each brand's stream paths are now on its brand entry. The lookups give the same results as before.
+- **The scan follows the database.** A brand added with a new port is scanned on it. Today's scan uses the same 54 ports.
+
+### Bugs fixed
+
+- **A DVR with more than 16 channels showed only 16.** An 8-channel DVR was also probed 8 times for channels it does not have.
+
+### Known issues
+
+- **A channel with no camera** still answers like a camera on some DVRs; such a channel can get a card.
+- **The Microseven is not tested** with this release.
+
 ## 3.4.0-rc1.0
 
 Detection zones: draw up to 6 areas on a camera's picture, each with its own sensitivity, so a small, far movement can record. Not field-tested.
