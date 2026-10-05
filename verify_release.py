@@ -274,7 +274,9 @@ CONTRACTS = {
                               "format=yuv420p", "_motion_night_observe"],
     "_motion_buffer":        ['"-c:v", "copy"', "_TsBuffer()", "rec_queue",
                               "_motion_write", "_stop_proc"],
-    "_motion_diff":          ["MOTION_PIXEL_DELTA", "MOTION_REGIONS", "/ sa", "/ sc"],
+    # 3.4.0 (C17): the comparison moved to _motion_cells, which also flags each cell
+    "_motion_cells":         ["MOTION_PIXEL_DELTA", "MOTION_REGIONS", "/ sa", "/ sc"],
+    "_motion_diff":          ["_motion_cells(prev, curr)"],
     "_motion_judge":         ["MOTION_LIGHT_FRACTION", "_motion_area_now(camera_id)"],
     # 2.6.7: night boost (C15).
     "_motion_area_now":      ["_motion_cfg(camera_id)", "_motion_boost(camera_id)"],

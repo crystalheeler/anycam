@@ -14,6 +14,7 @@ from aiohttp import web
 from pathlib import Path
 
 from anycam_host import H
+import anycam_zones          # 3.4.0 (C17): the zone that started a recording
 
 log = logging.getLogger("anycam")
 
@@ -53,6 +54,7 @@ async def api_storage_list(request: web.Request) -> web.Response:
                     "size_mb":  round(st.st_size / 1e6, 2),
                     "mtime":    int(st.st_mtime),
                     "path":     str(f.relative_to(MEDIA_DIR)),
+                    "zone":     anycam_zones.rec_zone_for(f.name),   # 3.4.0 (C17)
                 })
         folders.append({
             "folder":   cam_dir.name,

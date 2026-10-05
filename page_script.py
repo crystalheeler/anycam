@@ -610,7 +610,10 @@ function _renderStorageView() {
       row.className = 'stor-row';
       row.draggable = true;
       row.innerHTML = '<div class="stor-row-name"><span>🎬</span>'
-        + '<span class="stor-row-name-text editable">' + esc(f.name) + '</span></div>'
+        + '<span class="stor-row-name-text editable">' + esc(f.name) + '</span>'
+        + (f.zone ? '<span class="stor-zone" title="The zone that started this recording">'
+                    + esc(f.zone) + '</span>' : '')   // 3.4.0 (answer 15)
+        + '</div>'
         + '<div class="stor-row-date">' + dt + '</div>'
         + '<div class="stor-row-type">' + esc(f._type) + '</div>'
         + '<div class="stor-row-size">' + sz + '</div>'
@@ -689,12 +692,14 @@ async function syncMotion(redraw) {
     cameras.forEach(cam => {
       const m  = all[cam.id] || {};
       const on = !!m.enabled, rec = !!m.recording;
+      _recZone[cam.id] = m.zone || null;    // 3.4.0 (answer 16)
       if (on !== !!_motionEnabled[cam.id] || rec !== !!_recording[cam.id]) {
         _motionEnabled[cam.id] = on;
         _recording[cam.id]     = rec;
         if (redraw) updateCard(cam);
       }
     });
+    if (_zoneShow) _zoneDraw();
   } catch(e) {}
 }
 setInterval(() => syncMotion(true), 3000);
@@ -755,6 +760,7 @@ function _csFill(d) {
   ['cs-level', 'cs-cooldown', 'cs-tail', 'cs-clip', 'cs-path', 'cs-save', 'cs-reset']
     .forEach(id => { document.getElementById(id).disabled = off; });
   document.getElementById('cs-global').style.display = off ? '' : 'none';
+  _csZonesFill(d, off);
 }
 
 function csLevelShow() {
@@ -775,6 +781,12 @@ function _csPeak(d) {
   note.textContent = d.night_note || '';
   note.style.display = d.night_note ? '' : 'none';
   mark.style.display = 'none';
+  // 3.4.0 (answer 14): each zone's largest change, and outside the zones
+  const zp = document.getElementById('cs-zone-peaks');
+  zp.textContent = (d.armed && d.zone_peaks && d.zone_peaks.length)
+    ? d.zone_peaks.map(p => (p.name === null ? 'Outside the zones' : p.name) + ': peak '
+                            + p.peak.toFixed(1) + '% (records at ' + p.need.toFixed(1) + '%)').join(' · ')
+    : '';
   if (!d.armed) {
     txt.textContent = 'Arm this camera (Record button) to see how strongly movement registers.';
   } else if (d.peak_level === null || d.peak_level === undefined) {
@@ -805,9 +817,66 @@ async function saveCamSettings() {
                            body: JSON.stringify(body)});
     const d = await r.json();
     if (!r.ok) { err.textContent = d.error || 'Could not save'; return; }
+    if (!(await _csZonesSave(camId))) return;      // 3.4.0
   } catch (e) { err.textContent = 'Could not save: ' + e; return; }
   closeCamSettings();
   showToast('Settings saved');
+}
+
+/* ── 3.4.0 (C17): the camera's zones in its settings (answers 5, 14, 21) ── */
+let _csZones = null;   // {zones, zones_only, changed} as loaded for this panel
+
+function _csZonesFill(d, off) {
+  _csZones = {zones: (d.zones || []).map(z => ({name: z.name, points: z.points, level: z.level,
+                                                closed: !!z.closed})),
+              zones_only: !!d.zones_only, changed: false};
+  const box = document.getElementById('cs-zones');
+  box.innerHTML = _csZones.zones.length ? _csZones.zones.map((z, i) =>
+      '<div class="cs-zone"><span class="cs-zone-name">' + esc(z.name) + (z.closed ? '' : ' (open)') + '</span>'
+      + '<input type="range" min="0" max="100" value="' + z.level + '"' + (off ? ' disabled' : '')
+      + ' oninput="csZoneLevel(' + i + ',this.value)">'
+      + '<span class="cs-val" data-cszlev="' + i + '">' + (z.level ? z.level : 'Off') + '</span></div>').join('')
+    : '<div class="cs-help">No zones. A zone watches one part of the picture with its own sensitivity.</div>';
+  // Requirement 12: the switch shows once the camera has a zone
+  document.getElementById('cs-zones-only-row').style.display =
+    _csZones.zones.some(z => z.closed) ? '' : 'none';
+  const only = document.getElementById('cs-zones-only');
+  only.checked = _csZones.zones_only;
+  only.disabled = off;
+}
+
+function csZoneLevel(i, v) {
+  if (!_csZones || !_csZones.zones[i]) return;
+  _csZones.zones[i].level = parseInt(v, 10) || 0;
+  _csZones.changed = true;
+  const lab = document.querySelector('[data-cszlev="' + i + '"]');
+  if (lab) lab.textContent = _csZones.zones[i].level ? _csZones.zones[i].level : 'Off';
+}
+
+function csZonesOnly() {
+  if (!_csZones) return;
+  _csZones.zones_only = document.getElementById('cs-zones-only').checked;
+  _csZones.changed = true;
+}
+
+async function _csZonesSave(camId) {
+  if (!_csZones || !_csZones.changed) return true;
+  const r = await fetch(BASE + '/api/cameras/' + encodeURIComponent(camId) + '/motion/zones', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({zones: _csZones.zones, zones_only: _csZones.zones_only})});
+  if (r.ok) return true;
+  const d = await r.json().catch(() => ({}));
+  document.getElementById('cs-error').textContent = d.error || 'Could not save the zones';
+  return false;
+}
+
+// Answer 21: "Edit zones" opens Enhanced View directly in zone editing.
+async function csEditZones() {
+  const camId = _csCamId;
+  if (!camId) return;
+  closeCamSettings();
+  await openFocus(camId);
+  if (_focusCamId === camId) zoneEditOpen();
 }
 
 async function resetCamSettings() {
@@ -1544,7 +1613,8 @@ let _focus4kWarnTimer = null;   // auto-dismiss timer for the 4K-fallback toast
 
 async function openFocus(camId) {
   const cam = cameras.find(c => c.id === camId);
-  if (!cam || cam.status !== 'ready') return;
+  // 3.4.0: also a WebRTC or WS-RTSP camera (status 'info'), which 3.2.0-rc1.0 plays
+  if (!cam || !(cam.status === 'ready' || cam.display === 'webrtc' || cam.display === 'wsrtsp')) return;
 
   const session = ++_focusSession;
   document.getElementById('focus-overlay').style.display = 'flex';
@@ -1792,6 +1862,11 @@ async function _startFocusPoll(camId, cam) {
 }
 
 async function closeFocus() {
+  // 3.4.0 (C17): unsaved zone changes need Done or Cancel first
+  if (_ze && _ze.dirty) { showToast('Press Done or Cancel in the zone window first', true); return; }
+  document.getElementById('focus-zone-show').checked = false;
+  if (_ze) _zoneTeardown();
+  _zoneShowOff();
   _focusSession++;          // any open still awaiting the server bails out
   _focusCamId  = null;
   _focusEngine = null;
@@ -1810,6 +1885,7 @@ async function closeFocus() {
 
 // Close focus on Escape key
 document.addEventListener('keydown', e => {
+  if (zoneKey(e)) return;   // 3.4.0: the zone window uses Esc, Enter and Backspace
   if (e.key === 'Escape' && _focusCamId) closeFocus();
   else if (e.key === 'Escape' && _csCamId) closeCamSettings();
 });
@@ -1825,6 +1901,529 @@ document.addEventListener('visibilitychange', () => {
     });
   }
 });
+
+/* ── 3.4.0 (C17): detection zones ────────────────────────────────────────
+ * The drawing window opens over Enhanced View ("Zones" in its bar, or
+ * "Edit zones" in the camera's settings). The 23 answers CrystalHeeler
+ * approved are in docs/Detection_Zones_Plan.md; the numbers below are
+ * those answers. Points are kept in picture coordinates (0 to 1), so a
+ * zone holds when the stream changes (answer 19).
+ */
+const ZONE_GRID = [128, 96], ZONE_MIN_CELLS = 24, ZONE_MAX = 6, ZONE_SNAP_PX = 12;
+let _ze = null;            // the drawing window's state while it is open
+let _zoneShow = null;      // {camId, zones} while "Show zones" is on
+const _recZone = {};       // camId -> the zone that started the current recording
+
+function _zoneClamp(v) { return Math.min(1, Math.max(0, v)); }
+
+// The element that shows the picture, and the picture's own size.
+function _zoneMedia() {
+  const still = document.getElementById('zone-still');
+  if (_ze && _ze.paused) return {el: still, w: still.width || 16, h: still.height || 9};
+  const v = _go2rtc && _go2rtc.el && _go2rtc.el.video;
+  if (v && v.videoWidth) return {el: v, w: v.videoWidth, h: v.videoHeight};
+  const img = document.getElementById('focus-img');
+  return {el: img, w: img.naturalWidth || 16, h: img.naturalHeight || 9};
+}
+
+// The picture's rectangle on screen: the media is drawn with object-fit: contain.
+function _zoneRect() {
+  const m = _zoneMedia();
+  const r = m.el.getBoundingClientRect();
+  const s = Math.min(r.width / m.w, r.height / m.h) || 1;
+  const w = m.w * s, h = m.h * s;
+  return {left: r.left + (r.width - w) / 2, top: r.top + (r.height - h) / 2, width: w, height: h};
+}
+
+/* geometry, as in anycam_zones.py */
+function _zoneOrient(a, b, c) { return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]); }
+function _zoneSegCross(p1, p2, p3, p4) {
+  const d1 = _zoneOrient(p3, p4, p1), d2 = _zoneOrient(p3, p4, p2);
+  const d3 = _zoneOrient(p1, p2, p3), d4 = _zoneOrient(p1, p2, p4);
+  if ((d1 > 0) !== (d2 > 0) && (d3 > 0) !== (d4 > 0) && d1 && d2 && d3 && d4) return true;
+  const on = (a, b, c) => Math.min(a[0], b[0]) <= c[0] && c[0] <= Math.max(a[0], b[0])
+                       && Math.min(a[1], b[1]) <= c[1] && c[1] <= Math.max(a[1], b[1]);
+  return (d1 === 0 && on(p3, p4, p1)) || (d2 === 0 && on(p3, p4, p2))
+      || (d3 === 0 && on(p1, p2, p3)) || (d4 === 0 && on(p1, p2, p4));
+}
+function _zoneSelfCrossing(pts) {
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (j === i + 1 || (i === 0 && j === n - 1)) continue;
+      if (_zoneSegCross(pts[i], pts[(i + 1) % n], pts[j], pts[(j + 1) % n])) return true;
+    }
+  }
+  return false;
+}
+function _zoneInside(x, y, pts) {
+  let inside = false;
+  for (let i = 0, n = pts.length; i < n; i++) {
+    const [x1, y1] = pts[i], [x2, y2] = pts[(i + 1) % n];
+    if ((y1 > y) !== (y2 > y) && x < x1 + (y - y1) * (x2 - x1) / (y2 - y1)) inside = !inside;
+  }
+  return inside;
+}
+function _zoneCells(pts) {
+  const [gw, gh] = ZONE_GRID;
+  let n = 0;
+  for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++)
+    if (_zoneInside((x + 0.5) / gw, (y + 0.5) / gh, pts)) n++;
+  return n;
+}
+
+/* ── opening and leaving (answers 21 to 23) ─────────────────────────────── */
+async function zoneEditOpen() {
+  const camId = _focusCamId;
+  if (!camId || _ze) return;
+  let d;
+  try {
+    d = await (await fetch(BASE + '/api/cameras/' + encodeURIComponent(camId) + '/motion/settings')).json();
+  } catch (e) { showToast('Could not load the zones', true); return; }
+  if (camId !== _focusCamId || !d || !d.settings) return;
+  _ze = {camId, zones: (d.zones || []).map(z => ({name: z.name, points: z.points.map(p => p.slice()),
+                                                  level: z.level, closed: !!z.closed})),
+         zonesOnly: !!d.zones_only, defLevel: d.settings.level || 63,
+         sel: null, drawing: null, cursor: null, drag: null, press: 0,
+         dirty: false, paused: false, cancelArmed: 0};
+  _zoneShowOff();
+  const svg = document.getElementById('zone-svg');
+  svg.classList.add('zone-edit');
+  svg.style.display = 'block';
+  svg.onpointerdown = _zoneDown;
+  svg.onpointermove = _zoneMove;
+  svg.onpointerup = svg.onpointercancel = _zoneUp;
+  svg.ondblclick = e => { e.preventDefault(); zoneFinish(true); };
+  svg.oncontextmenu = _zoneContext;
+  document.getElementById('zone-panel').style.display = 'flex';
+  document.getElementById('zone-only').checked = _ze.zonesOnly;
+  _zoneLayout();
+  _zoneList();
+}
+
+function _zoneTeardown() {
+  if (_ze) clearTimeout(_ze.press);
+  _ze = null;
+  const svg = document.getElementById('zone-svg');
+  svg.onpointerdown = svg.onpointermove = svg.onpointerup = svg.onpointercancel = null;
+  svg.ondblclick = svg.oncontextmenu = null;
+  svg.classList.remove('zone-edit');
+  svg.style.display = 'none';
+  svg.innerHTML = '';
+  document.getElementById('zone-panel').style.display = 'none';
+  document.getElementById('zone-still').style.display = 'none';
+  if (_go2rtc && _go2rtc.el && _go2rtc.el.video && _go2rtc.el.video.paused) _go2rtc.el.video.play();
+  if (document.getElementById('focus-zone-show').checked) zoneShowToggle();
+}
+
+async function zoneDone() {
+  if (!_ze) return;
+  const z = _ze.zones.find(z => z.closed && _zoneSelfCrossing(z.points));
+  if (z) { _zoneHint('Two lines of "' + z.name + '" cross. Move a point first.', true); return; }
+  const names = _ze.zones.map(z => z.name.trim().toLowerCase());
+  if (names.some(n => !n) || new Set(names).size !== names.length) {
+    _zoneHint('Each zone needs its own name.', true); return;
+  }
+  try {
+    const r = await fetch(BASE + '/api/cameras/' + encodeURIComponent(_ze.camId) + '/motion/zones', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({zones: _ze.zones, zones_only: _ze.zonesOnly})});
+    const d = await r.json();
+    if (!r.ok) { _zoneHint(d.error || 'Could not save the zones', true); return; }
+  } catch (e) { _zoneHint('Could not save the zones: ' + e, true); return; }
+  _zoneTeardown();
+  showToast('Zones saved');
+}
+
+function zoneCancel() {
+  if (!_ze) return;
+  const btn = document.getElementById('zone-cancel');
+  if (_ze.dirty && !_ze.cancelArmed) {
+    _ze.cancelArmed = setTimeout(() => { if (_ze) { _ze.cancelArmed = 0; btn.textContent = 'Cancel'; } }, 3000);
+    btn.textContent = 'Discard changes?';
+    return;
+  }
+  btn.textContent = 'Cancel';
+  _zoneTeardown();
+}
+
+/* ── drawing ─────────────────────────────────────────────────────────────── */
+function _zonePt(ev) {
+  const r = _ze.rect;
+  return [_zoneClamp((ev.clientX - r.left) / r.width), _zoneClamp((ev.clientY - r.top) / r.height)];
+}
+
+function _zoneNearFirst(z, ev) {
+  const r = _ze.rect, p = z.points[0];
+  return Math.hypot(ev.clientX - (r.left + p[0] * r.width), ev.clientY - (r.top + p[1] * r.height)) <= ZONE_SNAP_PX;
+}
+
+function _zoneAt(p) {
+  for (let i = _ze.zones.length - 1; i >= 0; i--) {
+    const z = _ze.zones[i];
+    if (z.closed && _zoneInside(p[0], p[1], z.points)) return i;
+  }
+  return null;
+}
+
+function _zoneNextName() {
+  const used = new Set(_ze.zones.map(z => z.name.toLowerCase()));
+  for (let n = 1; ; n++) if (!used.has('zone ' + n)) return 'Zone ' + n;
+}
+
+function _zoneStart(p) {
+  if (_ze.zones.length >= ZONE_MAX) { _zoneHint('A camera has at most ' + ZONE_MAX + ' zones.', true); return; }
+  _ze.zones.push({name: _zoneNextName(), points: [p], level: _ze.defLevel, closed: false});
+  _ze.sel = _ze.drawing = _ze.zones.length - 1;
+  _ze.dirty = true;
+  _zoneDraw(); _zoneList();
+}
+
+function _zoneClose(i) {
+  const z = _ze.zones[i];
+  if (!z || z.points.length < 3) { _zoneHint('A zone needs at least 3 points.', true); return; }
+  if (_zoneSelfCrossing(z.points)) {
+    _zoneHint('Two lines of this zone cross. Move a point, then close the shape again.', true); return;
+  }
+  z.closed = true;
+  _ze.drawing = null;
+  _ze.dirty = true;
+  _zoneDraw(); _zoneList();
+  // Answer 7: ask for the name; "Zone N" is suggested.
+  const inp = document.querySelector('#zone-list [data-zname="' + i + '"]');
+  if (inp) { inp.focus(); inp.select(); }
+  _zoneHint('Zone closed. Type its name, and set its sensitivity.');
+}
+
+function _zoneDown(ev) {
+  if (!_ze) return;
+  ev.preventDefault();
+  _ze.rect = _zoneRect();
+  const t = ev.target, ds = (t && t.dataset) || {};
+  const zi = ds.z !== undefined ? +ds.z : null;
+  const svg = document.getElementById('zone-svg');
+  if (ds.p !== undefined && zi !== null) {          // an anchor point
+    const z = _ze.zones[zi], pi = +ds.p;
+    if (_ze.drawing === zi && pi === 0 && z.points.length >= 3) { _zoneClose(zi); return; }
+    _ze.sel = zi;
+    _ze.drag = {z: zi, p: pi, moved: false, x: ev.clientX, y: ev.clientY};
+    clearTimeout(_ze.press);
+    _ze.press = setTimeout(() => {                  // answer 2: a long press removes the point
+      if (_ze && _ze.drag && !_ze.drag.moved) { const d = _ze.drag; _ze.drag = null; _zoneRemovePoint(d.z, d.p); }
+    }, 600);
+    try { svg.setPointerCapture(ev.pointerId); } catch (e) {}
+    _zoneDraw(); _zoneList();
+    return;
+  }
+  if (ds.m !== undefined && zi !== null) {          // a line's middle handle: a new point
+    const z = _ze.zones[zi], at = +ds.m + 1;
+    z.points.splice(at, 0, _zonePt(ev));
+    _ze.sel = zi;
+    _ze.drag = {z: zi, p: at, moved: true};
+    _ze.dirty = true;
+    try { svg.setPointerCapture(ev.pointerId); } catch (e) {}
+    _zoneDraw();
+    return;
+  }
+  const p = _zonePt(ev);
+  // Drawing, or an open zone selected (requirement 5: drawing resumes)
+  const open = _ze.drawing !== null ? _ze.drawing
+             : (_ze.sel !== null && _ze.zones[_ze.sel] && !_ze.zones[_ze.sel].closed ? _ze.sel : null);
+  if (open !== null) {
+    const z = _ze.zones[open];
+    _ze.drawing = open;
+    if (z.points.length >= 3 && _zoneNearFirst(z, ev)) { _zoneClose(open); return; }
+    z.points.push(p);
+    z.lastAdd = Date.now();
+    _ze.dirty = true;
+    _zoneDraw(); _zoneList();
+    return;
+  }
+  const hit = _zoneAt(p);                           // answer 22: a click in a zone selects it
+  if (hit !== null) { _ze.sel = hit; _zoneDraw(); _zoneList(); return; }
+  _zoneStart(p);                                    // elsewhere: a new zone
+}
+
+function _zoneMove(ev) {
+  if (!_ze) return;
+  _ze.rect = _ze.rect || _zoneRect();
+  _ze.cursor = _zonePt(ev);
+  const d = _ze.drag;
+  if (d) {
+    if (!d.moved && Math.hypot(ev.clientX - (d.x || 0), ev.clientY - (d.y || 0)) > 3) {
+      d.moved = true; clearTimeout(_ze.press);
+    }
+    if (d.moved) { _ze.zones[d.z].points[d.p] = _ze.cursor; _ze.dirty = true; }
+  }
+  if (d || _ze.drawing !== null) _zoneDraw();
+}
+
+function _zoneUp(ev) {
+  if (!_ze) return;
+  clearTimeout(_ze.press);
+  const d = _ze.drag;
+  _ze.drag = null;
+  if (d && d.moved) {
+    const z = _ze.zones[d.z];
+    if (z.closed && _zoneSelfCrossing(z.points)) _zoneHint('Two lines of "' + z.name + '" now cross. Move a point.', true);
+    _zoneList();
+  }
+}
+
+function _zoneContext(ev) {           // answer 2: a right-click on a point removes it
+  ev.preventDefault();
+  const ds = (ev.target && ev.target.dataset) || {};
+  if (_ze && ds.p !== undefined && ds.z !== undefined) _zoneRemovePoint(+ds.z, +ds.p);
+}
+
+function _zoneRemovePoint(zi, pi) {
+  const z = _ze.zones[zi];
+  if (!z) return;
+  if (z.closed && z.points.length <= 3) { _zoneHint('A zone needs at least 3 points.', true); return; }
+  z.points.splice(pi, 1);
+  _ze.dirty = true;
+  _zoneDraw(); _zoneList();
+}
+
+// Answer 2: Undo or Backspace removes the last point while drawing.
+function zoneUndo() {
+  if (!_ze || _ze.drawing === null) return;
+  const z = _ze.zones[_ze.drawing];
+  z.points.pop();
+  if (!z.points.length) { _ze.zones.splice(_ze.drawing, 1); _ze.sel = _ze.drawing = null; }
+  _ze.dirty = true;
+  _zoneDraw(); _zoneList();
+}
+
+// Requirement 4 (double click) and answer 3 (Finish): stop drawing; the
+// lines stay, as an open zone that does not detect.
+function zoneFinish(fromDblClick) {
+  if (!_ze || _ze.drawing === null) return;
+  const z = _ze.zones[_ze.drawing];
+  if (fromDblClick && z.points.length >= 2) {
+    const a = z.points[z.points.length - 1], b = z.points[z.points.length - 2];
+    if (Math.abs(a[0] - b[0]) < 0.005 && Math.abs(a[1] - b[1]) < 0.005) z.points.pop();
+  }
+  if (z.points.length < 2) {                     // nothing drawn yet: no zone
+    _ze.zones.splice(_ze.drawing, 1);
+    _ze.sel = _ze.drawing = null;
+    _zoneDraw(); _zoneList();
+    return;
+  }
+  _ze.drawing = null;
+  _zoneDraw(); _zoneList();
+  _zoneHint('Drawing stopped. The zone is open and does not detect; click to go on drawing it.');
+}
+
+function zoneCloseShape() { if (_ze && _ze.drawing !== null) _zoneClose(_ze.drawing); }
+
+function zoneNew() {
+  if (!_ze) return;
+  if (_ze.zones.length >= ZONE_MAX) return;
+  _ze.drawing = null;
+  _ze.sel = null;
+  _zoneHint('Click on the picture to set the first point of the new zone.');
+}
+
+// Answer 18: points are easier to place on a still picture.
+function zonePause() {
+  if (!_ze) return;
+  const btn = document.getElementById('zone-pause');
+  const still = document.getElementById('zone-still');
+  if (_ze.paused) {
+    _ze.paused = false;
+    still.style.display = 'none';
+    btn.textContent = 'Pause';
+    const v = _go2rtc && _go2rtc.el && _go2rtc.el.video;
+    if (v && v.paused) v.play();
+    _zoneLayout();
+    return;
+  }
+  const m = _zoneMedia();
+  try {
+    still.width = m.w; still.height = m.h;
+    still.getContext('2d').drawImage(m.el, 0, 0, m.w, m.h);
+  } catch (e) { _zoneHint('This picture cannot be paused.', true); return; }
+  if (m.el.tagName === 'VIDEO') m.el.pause();
+  _ze.paused = true;
+  btn.textContent = 'Resume';
+  _zoneLayout();
+  still.style.display = 'block';
+}
+
+function zoneOnlyChange() {
+  if (!_ze) return;
+  _ze.zonesOnly = document.getElementById('zone-only').checked;
+  _ze.dirty = true;
+}
+
+function zoneRename(i, v) { if (_ze && _ze.zones[i]) { _ze.zones[i].name = v.slice(0, 40); _ze.dirty = true; _zoneDraw(); } }
+
+function zoneLevel(i, v) {
+  if (!_ze || !_ze.zones[i]) return;
+  _ze.zones[i].level = parseInt(v, 10) || 0;
+  _ze.dirty = true;
+  const lab = document.querySelector('#zone-list [data-zlev="' + i + '"]');
+  if (lab) lab.textContent = _ze.zones[i].level ? _ze.zones[i].level : 'Off';
+}
+
+function zoneDelete(i, btn) {
+  if (!_ze || !_ze.zones[i]) return;
+  if (!btn.dataset.armed) {          // answer 2: delete asks to confirm
+    btn.dataset.armed = '1';
+    btn.textContent = 'Delete?';
+    setTimeout(() => { delete btn.dataset.armed; btn.textContent = 'Delete'; }, 3000);
+    return;
+  }
+  _ze.zones.splice(i, 1);
+  _ze.sel = _ze.drawing = null;
+  _ze.dirty = true;
+  _zoneDraw(); _zoneList();
+}
+
+function zoneSelect(i) { if (_ze) { _ze.sel = i; _zoneDraw(); _zoneList(); } }
+
+// Keys while the drawing window is open. True when the key was used.
+function zoneKey(e) {
+  if (!_ze) return false;
+  const typing = e.target && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName || '');
+  if (e.key === 'Escape') {          // answer 23: stops drawing, never closes the window
+    if (_ze.drawing !== null) zoneFinish(false);
+    return true;
+  }
+  if (typing) return false;
+  if (e.key === 'Enter') { zoneCloseShape(); return true; }
+  if (e.key === 'Backspace') { e.preventDefault(); zoneUndo(); return true; }
+  return false;
+}
+
+/* ── drawing the outlines ───────────────────────────────────────────────── */
+function _zoneLayout() {
+  const svg = document.getElementById('zone-svg');
+  const r = _zoneRect();
+  for (const el of [svg, document.getElementById('zone-still')]) {
+    el.style.left = r.left + 'px'; el.style.top = r.top + 'px';
+    el.style.width = r.width + 'px'; el.style.height = r.height + 'px';
+  }
+  svg.setAttribute('viewBox', '0 0 ' + r.width + ' ' + r.height);
+  if (_ze) _ze.rect = r;
+  _zoneDraw();
+}
+
+function _zoneSvg(zones, opt) {
+  const r = opt.rect, W = r.width, H = r.height;
+  const xy = p => (p[0] * W).toFixed(1) + ',' + (p[1] * H).toFixed(1);
+  let out = '';
+  zones.forEach((z, i) => {
+    if (!z.points.length) return;
+    const sel = opt.sel === i, rec = opt.recZone && opt.recZone === z.name;
+    const cls = 'zone-shape' + (sel ? ' zone-sel' : '') + (z.level ? '' : ' zone-off')
+              + (z.closed ? '' : ' zone-open') + (rec ? ' zone-rec' : '');
+    const pts = z.points.map(xy).join(' ');
+    out += z.closed
+      ? '<polygon class="' + cls + '" data-z="' + i + '" points="' + pts + '"/>'
+      : '<polyline class="' + cls + '" data-z="' + i + '" points="' + pts + '"/>';
+    const c = z.points.reduce((a, p) => [a[0] + p[0] / z.points.length, a[1] + p[1] / z.points.length], [0, 0]);
+    out += '<text class="zone-label" x="' + (c[0] * W).toFixed(1) + '" y="' + (c[1] * H).toFixed(1) + '">'
+         + esc(z.name) + (rec ? ' ● REC' : '') + (z.level ? '' : ' (off)') + '</text>';
+    if (!opt.edit || !sel) return;
+    const n = z.points.length, last = z.closed ? n : n - 1;
+    for (let k = 0; k < last; k++) {                 // middle handles: drag to add a point
+      const a = z.points[k], b = z.points[(k + 1) % n];
+      out += '<circle class="zone-mid" data-z="' + i + '" data-m="' + k + '" r="5" cx="'
+           + ((a[0] + b[0]) / 2 * W).toFixed(1) + '" cy="' + ((a[1] + b[1]) / 2 * H).toFixed(1) + '"/>';
+    }
+    z.points.forEach((p, k) => {
+      const first = k === 0 && opt.drawing === i;
+      const near = first && opt.cursor && z.points.length >= 3
+        && Math.hypot((opt.cursor[0] - p[0]) * W, (opt.cursor[1] - p[1]) * H) <= ZONE_SNAP_PX;
+      out += '<circle class="zone-pt' + (first ? ' zone-first' : '') + (near ? ' zone-near' : '')
+           + '" data-z="' + i + '" data-p="' + k + '" r="' + (first ? 9 : 6) + '" cx="'
+           + (p[0] * W).toFixed(1) + '" cy="' + (p[1] * H).toFixed(1) + '"/>';
+    });
+    if (opt.drawing === i && opt.cursor) {            // the line follows the pointer
+      const a = z.points[z.points.length - 1];
+      out += '<line class="zone-rubber" x1="' + (a[0] * W).toFixed(1) + '" y1="' + (a[1] * H).toFixed(1)
+           + '" x2="' + (opt.cursor[0] * W).toFixed(1) + '" y2="' + (opt.cursor[1] * H).toFixed(1) + '"/>';
+    }
+  });
+  return out;
+}
+
+function _zoneDraw() {
+  const svg = document.getElementById('zone-svg');
+  if (_ze) {
+    svg.innerHTML = _zoneSvg(_ze.zones, {edit: true, rect: _ze.rect || _zoneRect(), sel: _ze.sel,
+                                         drawing: _ze.drawing, cursor: _ze.cursor});
+  } else if (_zoneShow && _zoneShow.camId === _focusCamId) {
+    svg.innerHTML = _zoneSvg(_zoneShow.zones, {edit: false, rect: _zoneRect(),
+                                               recZone: _recZone[_zoneShow.camId]});
+  }
+}
+
+function _zoneHint(text, bad) {
+  const h = document.getElementById('zone-hint');
+  h.textContent = text;
+  h.classList.toggle('zone-bad', !!bad);
+}
+
+function _zoneList() {
+  if (!_ze) return;
+  const list = document.getElementById('zone-list');
+  list.innerHTML = _ze.zones.map((z, i) => {
+    let note = '';
+    if (!z.closed) note = 'Open: does not detect until the shape is closed.';
+    else if (_zoneSelfCrossing(z.points)) note = 'Two lines cross: move a point.';
+    else {
+      const cells = _zoneCells(z.points);
+      if (cells < ZONE_MIN_CELLS) note = 'Small: ' + cells + ' cells. Detection may be unreliable.';
+    }
+    return '<div class="zl-row' + (_ze.sel === i ? ' zl-sel' : '') + '" onclick="zoneSelect(' + i + ')">'
+      + '<input class="zl-name" data-zname="' + i + '" maxlength="40" value="' + esc(z.name) + '"'
+      + ' onclick="event.stopPropagation()" oninput="zoneRename(' + i + ',this.value)">'
+      + '<div class="zl-lev"><input type="range" min="0" max="100" value="' + z.level + '"'
+      + ' onclick="event.stopPropagation()" oninput="zoneLevel(' + i + ',this.value)">'
+      + '<span data-zlev="' + i + '">' + (z.level ? z.level : 'Off') + '</span></div>'
+      + '<button class="btn btn-ghost btn-sm zl-del" onclick="event.stopPropagation();zoneDelete(' + i + ',this)">Delete</button>'
+      + (note ? '<div class="zl-note">' + esc(note) + '</div>' : '')
+      + '</div>';
+  }).join('') || '<div class="zl-empty">No zones yet. Click on the picture to start one.</div>';
+  document.getElementById('zone-new').disabled = _ze.zones.length >= ZONE_MAX;
+  const drawing = _ze.drawing !== null;
+  document.getElementById('zone-undo').disabled = !drawing;
+  document.getElementById('zone-finish').disabled = !drawing;
+  document.getElementById('zone-close').disabled = !(drawing && _ze.zones[_ze.drawing].points.length >= 3);
+  if (!document.getElementById('zone-hint').textContent) {
+    _zoneHint('Click to set points; click the first point (or press Enter) to close the shape. '
+            + 'Right-click or long-press a point to remove it.');
+  }
+}
+
+/* ── "Show zones" in Enhanced View (answer 16) ──────────────────────────── */
+async function zoneShowToggle() {
+  const on = document.getElementById('focus-zone-show').checked;
+  if (!on || !_focusCamId) { _zoneShowOff(); return; }
+  const camId = _focusCamId;
+  try {
+    const d = await (await fetch(BASE + '/api/cameras/' + encodeURIComponent(camId) + '/motion/zones')).json();
+    if (camId !== _focusCamId || _ze) return;
+    _zoneShow = {camId, zones: (d.zones || []).filter(z => z.closed)};
+    if (d.recording_zone) _recZone[camId] = d.recording_zone;
+  } catch (e) { return; }
+  const svg = document.getElementById('zone-svg');
+  svg.style.display = 'block';
+  _zoneLayout();
+}
+
+function _zoneShowOff() {
+  _zoneShow = null;
+  if (_ze) return;
+  const svg = document.getElementById('zone-svg');
+  svg.style.display = 'none';
+  svg.innerHTML = '';
+}
+
+window.addEventListener('resize', () => { if (_ze || _zoneShow) _zoneLayout(); });
 
 /* ── Storage browser ─────────────────────────────────────────────────────── */
 let _storageData    = null;

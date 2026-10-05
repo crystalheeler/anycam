@@ -56,7 +56,17 @@ const DOM = {
   'focus-warning': el('focus-warning', {style: {display: 'none'}}),
   'focus-warn-text': el('focus-warn-text'),
   'focus-controls': el('focus-controls', {dataset: {}}),
+  // 3.4.0 (C17): the zone window
+  'focus-zone-show': el('focus-zone-show', {checked: false}),
+  'zone-svg': el('zone-svg', {classList: {add() {}, remove() {}, toggle() {}}, setAttribute() {},
+                              setPointerCapture() {}}),
+  'zone-still': el('zone-still'), 'zone-panel': el('zone-panel'),
+  'zone-hint': el('zone-hint', {classList: {toggle() {}}}), 'zone-list': el('zone-list'),
+  'zone-only': el('zone-only', {checked: false}), 'zone-new': el('zone-new'),
+  'zone-undo': el('zone-undo'), 'zone-close': el('zone-close'), 'zone-finish': el('zone-finish'),
+  'zone-pause': el('zone-pause'), 'zone-cancel': el('zone-cancel'),
 };
+globalThis.addEventListener = () => {};
 globalThis.HTMLElement = class { appendChild(c) { return c; } };
 globalThis.WebSocket = {CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3};
 // 3.0.1 (C10): a Chrome-like browser plays H.264 and H.265; __noH265 turns H.265 off.
@@ -558,7 +568,8 @@ console.log('\n[R] motion state mirrored from the server');
 
   // 2.6.6 cog menu: live reading and read-only state
   const ids = ['cs-peak', 'cs-peak-mark', 'cs-level', 'cs-level-val', 'cs-cooldown', 'cs-tail',
-               'cs-clip', 'cs-path', 'cs-save', 'cs-reset', 'cs-global', 'cs-mode', 'cs-night-note'];
+               'cs-clip', 'cs-path', 'cs-save', 'cs-reset', 'cs-global', 'cs-mode', 'cs-night-note',
+               'cs-zone-peaks', 'cs-zones', 'cs-zones-only-row', 'cs-zones-only'];  // 3.4.0
   ids.forEach(id => { DOM[id] = el(id); });
   const peak = d => { g('_csPeak(' + JSON.stringify(d) + ')'); return DOM['cs-peak'].textContent; };
   check('cog: not armed -> asks to arm', peak({armed: false}).startsWith('Arm this camera'));
@@ -674,6 +685,84 @@ console.log('\n[C5] 3.2.0 sound in live view');
   fake.el.mseCodecs = ''; fake.el.pc = {getReceivers: () => [{track: {kind: 'audio', readyState: 'live'}}]};
   check('C5 WebRTC sound is seen from the audio track', g('_liveHasAudio(_go2rtc)') === true);
   g('_go2rtc = null'); delete globalThis.__g;
+}
+
+console.log('\n[C17] 3.4.0 detection zones');
+{
+  check('C17 a square is not self-crossing; a bow tie is (answer 6)',
+        g('_zoneSelfCrossing([[0,0],[1,0],[1,1],[0,1]])') === false
+        && g('_zoneSelfCrossing([[0,0],[1,1],[1,0],[0,1]])') === true);
+  check('C17 a quarter-picture square covers a quarter of the 128 x 96 cells',
+        g('_zoneCells([[0,0],[0.5,0],[0.5,0.5],[0,0.5]])') === 64 * 48);
+  const img = DOM['focus-img'];
+  img.getBoundingClientRect = () => ({left: 0, top: 0, width: 1000, height: 600});
+  img.naturalWidth = 1600; img.naturalHeight = 800;      // letterboxed: 1000 x 500, 50 px down
+  check('C17 the picture rectangle allows for the letterbox',
+        JSON.stringify(g('_zoneRect()')) === JSON.stringify({left: 0, top: 50, width: 1000, height: 500}));
+  const posts = [];
+  const realFetch = globalThis.fetch;
+  let zonesNow = [];
+  globalThis.fetch = async (url, opt) => {
+    if (opt && opt.method === 'POST') { posts.push([url, JSON.parse(opt.body)]); return {ok: true, json: async () => ({})}; }
+    return {ok: true, json: async () => ({settings: {level: 40}, zones: zonesNow, zones_only: false})};
+  };
+  g("_focusCamId = 'cam1'");
+  await g('zoneEditOpen()');
+  check('C17 the drawing window opens for the camera in Enhanced View',
+        g('_ze') && g('_ze.camId') === 'cam1' && DOM['zone-panel'].style.display === 'flex');
+  const down = (x, y, ds = {}) => g('_zoneDown')({clientX: x, clientY: y, pointerId: 1, target: {dataset: ds},
+                                                 preventDefault() {}});
+  down(100, 100); down(600, 100); down(600, 450);
+  check('C17 each click sets a point, in picture coordinates',
+        JSON.stringify(g('_ze.zones[0].points')) === JSON.stringify([[0.1, 0.1], [0.6, 0.1], [0.6, 0.8]])
+        && g('_ze.drawing') === 0);
+  down(108, 104);
+  check('C17 a click near the first point closes the zone; it gets a name and the camera level',
+        g('_ze.zones[0].closed') === true && g('_ze.zones[0].name') === 'Zone 1'
+        && g('_ze.zones[0].level') === 40 && g('_ze.drawing') === null);
+  down(500, 300);
+  check('C17 ... a click inside a closed zone selects it, no new zone', g('_ze.sel') === 0 && g('_ze.zones.length') === 1);
+  down(800, 120); down(950, 450); down(800, 450); down(950, 120);
+  g('zoneCloseShape()');
+  check('C17 a zone whose lines cross is not closed, and the user is told',
+        g('_ze.zones[1].closed') === false && /cross/.test(DOM['zone-hint'].textContent));
+  check('C17 Esc stops drawing and keeps the window open (answer 23)',
+        g("zoneKey({key: 'Escape', target: {}})") === true && g('_ze.drawing') === null && g('_ze') !== null);
+  down(900, 300);
+  check('C17 ... a later click goes on with the open zone (requirement 5)',
+        g('_ze.drawing') === 1 && g('_ze.zones[1].points.length') === 5);
+  g('zoneUndo()'); g('zoneUndo()');
+  check('C17 Undo removes the last points', g('_ze.zones[1].points.length') === 3);
+  g('_ze.zones.splice(1, 1); _ze.drawing = null; _ze.sel = null');
+  for (let i = 0; i < 5; i++) g(`_ze.zones.push({name: 'X${i}', points: [[0,0],[0.1,0],[0,0.1]], level: 5, closed: true})`);
+  g('_zoneStart([0.5, 0.5])');
+  check('C17 at most 6 zones (requirement 8)', g('_ze.zones.length') === 6 && /6 zones/.test(DOM['zone-hint'].textContent));
+  g('_ze.zones.splice(1, 5)');
+  check('C17 the window warns about a small zone (answer 8)',
+        (g("_ze.zones.push({name: 'Tiny', points: [[0,0],[0.02,0],[0,0.02]], level: 5, closed: true})"), g('_zoneList()'),
+         /Small: \d+ cells/.test(DOM['zone-list'].innerHTML)));
+  g('_ze.zones.pop()');
+  g("zoneRename(0, 'Garage')"); g("zoneLevel(0, '0')");
+  check('C17 rename, and Off as a sensitivity (answer 5)', g('_ze.zones[0].name') === 'Garage' && g('_ze.zones[0].level') === 0);
+  check('C17 unsaved changes keep Enhanced View open', (await g('closeFocus()'), g('_ze') !== null));
+  g('zoneCancel()');
+  check('C17 Cancel asks first when there are changes', g('_ze') !== null && DOM['zone-cancel'].textContent === 'Discard changes?');
+  DOM['zone-only'].checked = true; g('zoneOnlyChange()');
+  await g('zoneDone()');
+  check('C17 Done saves every zone and the switch, then closes the window',
+        posts.length === 1 && posts[0][0].endsWith('/api/cameras/cam1/motion/zones')
+        && posts[0][1].zones.length === 1 && posts[0][1].zones[0].name === 'Garage'
+        && posts[0][1].zones_only === true && g('_ze') === null, JSON.stringify(posts));
+  await g('zoneEditOpen()');
+  g('zoneCancel()');
+  check('C17 Cancel with no changes closes at once', g('_ze') === null);
+  await g('zoneEditOpen()');
+  down(100, 100);
+  g('zoneFinish(true)');
+  check('C17 a double click before any line leaves no zone behind', g('_ze.zones.length') === 0);
+  g('zoneCancel()'); g('zoneCancel()');
+  globalThis.fetch = realFetch;
+  g('_focusCamId = null');
 }
 
 console.log('\n[D3] 3.1.0 card order');

@@ -1,7 +1,10 @@
 # Detection Zones Plan (build plan C17)
 
-Status: requirements from CrystalHeeler, 2026-10-02; all 23 answers approved 2026-10-04. Not built.
-No version assigned.
+Status: requirements from CrystalHeeler, 2026-10-02; all 23 answers approved 2026-10-04. Built in
+3.4.0-rc1.0 (2026-10-04), not field-tested. Code: `anycam_zones.py` (geometry, checks, judging),
+`anycam_motion.py` (detection, `/api/cameras/{id}/motion/zones`), `page_script.py` (the drawing
+window). Not yet done: answer 8's re-check of the whole-picture levels at 128 x 96, which needs
+field data.
 
 ## Why
 

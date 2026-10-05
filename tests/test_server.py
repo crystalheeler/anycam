@@ -3620,6 +3620,151 @@ async def test_330():
         await fake.stop()
 
 
+
+# ── AE. 3.4.0 ────────────────────────────────────────────────────────────────
+async def test_340():
+    print("\n[AE] 3.4.0")
+    import random as _r
+    Z = cd.anycam_zones
+    sq = [[0.75, 0.0], [1.0, 0.0], [1.0, 0.25], [0.75, 0.25]]
+    good = {"zones": [{"name": "Garage", "points": sq, "level": 50, "closed": True},
+                      {"name": "Path", "points": [[0.1, 0.5], [0.2, 0.5]], "level": 30, "closed": False}],
+            "zones_only": False}
+    clean, errs = Z.validate(good)
+    check("AE1 C17: a closed zone and an open one are accepted", not errs and len(clean["zones"]) == 2, str(errs))
+    bad = [
+        {"zones": [dict(good["zones"][0], name=f"Z{i}") for i in range(7)]},
+        {"zones": [good["zones"][0], dict(good["zones"][0], name="garage")]},
+        {"zones": [dict(good["zones"][0], points=[[0, 0], [1.5, 0], [0, 1]])]},
+        {"zones": [dict(good["zones"][0], points=[[0, 0], [1, 1], [1, 0], [0, 1]])]},
+        {"zones": [dict(good["zones"][0], level=101)]},
+        {"zones": [dict(good["zones"][0], name="x" * 41)]},
+        {"zones": [dict(good["zones"][0], points=[[0, 0], [1, 0]])]},
+        {"zones": "no"},
+    ]
+    reasons = [Z.validate(b)[1] for b in bad]
+    check("AE1 ... refused: 7 zones, a repeated name, a point off the picture, crossing lines, "
+          "level 101, a long name, 2 points closed, not a list",
+          all(reasons), str([bool(r) for r in reasons]))
+    check("AE1 ... the crossing-lines message says what to do", "move a point" in reasons[3][0])
+    check("AE2 C17: a quarter square in the corner covers 32 x 24 cells of 128 x 96",
+          len(Z.polygon_cells(sq, Z.ZONE_GRID)) == 32 * 24)
+
+    # judging: a 0.2% door in a zone, which the whole picture would never see
+    gw, gh = Z.ZONE_GRID
+    rnd = _r.Random(5)
+    calm = bytes(rnd.randrange(60, 200) for _ in range(gw * gh))
+
+    def changed(x0, y0, w, h):
+        b = bytearray(calm)
+        for y in range(y0, y0 + h):
+            for x in range(x0, x0 + w):
+                b[y * gw + x] = 255 - calm[y * gw + x]
+        return cd._motion_thumb_gray(bytes(b))
+    A = cd._motion_thumb_gray(calm)
+    door = changed(100, 4, 16, 10)          # inside the zone: 160 cells, 21% of it, 1.3% of the picture
+    door2 = changed(100, 4, 16, 11)         # the next picture: a little more of the door
+    yard = changed(10, 50, 40, 30)          # outside: 1,200 cells, 10% of the picture
+    cid = "cz"
+    cd.CAMERAS.clear(); cd.CAMERAS[cid] = camera(id=cid)
+    cd._MOTION.clear(); cd._MOTION_CFG.clear(); cd._motion_state(cid)["enabled"] = True
+    Z.set_zones(cid, None)
+    v0, p0 = cd._motion_judge(cid, A, door)
+    Z.set_zones(cid, clean)
+    v1, p1 = cd._motion_judge(cid, A, door)
+    check("AE3 C17: without the zone the door is too small; with it, it is motion in the zone",
+          v0 == "" and v1 == "motion" and cd._MOTION[cid]["judge_zone"] == "Garage" and p1 > 10,
+          f"{v0} {v1} {p1:.1f}")
+    check("AE3 ... the log names the zone", any('zone "Garage" changed' in l for l in CAP.lines))
+    v2, _ = cd._motion_judge(cid, A, yard)
+    Z.set_zones(cid, dict(clean, zones_only=True))
+    v3, _ = cd._motion_judge(cid, A, yard)
+    check("AE4 C17: outside the zones the camera's own level applies; with zones only, nothing there",
+          v2 == "motion" and v3 == "", f"{v2} {v3}")
+    Z.set_zones(cid, {"zones": [dict(clean["zones"][0], level=0)], "zones_only": False})
+    v4, _ = cd._motion_judge(cid, A, door)
+    check("AE5 C17: an Off zone never records and masks its cells (answer 5)", v4 == "")
+    check("AE5 ... its cells are not part of outside either",
+          len(Z.outside_cells(cid, Z.ZONE_GRID)) == gw * gh - 32 * 24)
+
+    # answer 9: the second picture counts in the same zone, and no one-picture rule in a zone
+    Z.set_zones(cid, clean)
+    ms = cd._motion_state(cid); cd._motion_reset_prev(cid)
+    first = cd._motion_decide(cid, ms, A, door, 10.0, True)
+    same = cd._motion_decide(cid, ms, A, A, 10.25, True)
+    check("AE6 C17: one changed picture in a zone does not record at once (answer 9)",
+          first is False and same is False)
+    cd._motion_reset_prev(cid)
+    cd._motion_decide(cid, ms, A, door, 20.0, True)
+    A2 = cd._motion_thumb_gray(bytes([calm[0] ^ 1]) + calm[1:])   # the next reference: not a repeat
+    second = cd._motion_decide(cid, ms, A2, door2, 20.25, True)
+    check("AE6 ... a second changed picture in the same zone records", second is True)
+
+    # answer 11: slow movement
+    cd._motion_reset_prev(cid)
+    looks = [cd._motion_slow_look(cid, ms, A, float(t)) for t in range(6)]
+    l6 = cd._motion_slow_look(cid, ms, door, 6.0)
+    l7 = cd._motion_slow_look(cid, ms, door, 7.0)
+    check("AE7 C17: a zone also compares with the picture 5 s old, on two pictures in a row",
+          not any(looks) and l6 is False and l7 is True and ms["judge_zone"] == "Garage",
+          f"{looks} {l6} {l7}")
+
+    # answer 8: the finer grid
+    check("AE8 C17: a camera with a zone is judged on 128 x 96, without one on 64 x 48",
+          cd._motion_grid(cid) == (128, 96) and cd._motion_grid("nozones") == cd.MOTION_GRID)
+    from PIL import Image as _Img
+    import io as _io
+    buf = _io.BytesIO(); _Img.new("L", (640, 480), 90).save(buf, "JPEG")
+    th = cd._motion_thumb(buf.getvalue(), cd._motion_grid(cid))
+    check("AE8 ... the snapshot path decodes to that grid", th and len(th[0]) == 128 * 96)
+
+    # answer 14: the tuning line
+    ms["peak_since"] = 0.0; ms["peak_n"] = 5; ms["peak_pct"] = 0.3
+    ms["zone_peaks"] = {"Garage": (3.1, 2.0), None: (0.4, 5.0)}
+    CAP.lines.clear()
+    cd._motion_report_peak(cid, ms, 1000.0)
+    check("AE9 C17: the tuning line has one entry for each zone and one for outside",
+          any("Garage: peak 3.1% (records at 2.0%)" in l and "outside: peak 0.4%" in l for l in CAP.lines),
+          str(CAP.lines[-2:]))
+
+    # the endpoint, motion.json, and the Storage tab (answers 15, 17)
+    real_mf, real_media = cd.MOTION_FILE, cd.MEDIA_DIR
+    try:
+        cd.MOTION_FILE = SCRATCH / "motion_zones.json"
+        Z.set_zones(cid, None)
+        req = make_mocked_request("POST", f"/api/cameras/{cid}/motion/zones", match_info={"camera_id": cid})
+        async def body(): return {"zones": [{"name": "A", "points": [[0, 0], [1, 1], [1, 0], [0, 1]],
+                                             "level": 5, "closed": True}]}
+        req.json = body
+        r_bad = await cd.api_motion_zones(req)
+        async def body2(): return good
+        req.json = body2
+        r_ok = await cd.api_motion_zones(req)
+        saved = json.loads(cd.MOTION_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(r_ok.body)
+        check("AE10 C17: the endpoint refuses crossing lines (400) and saves good zones in motion.json",
+              r_bad.status == 400 and r_ok.status == 200 and saved["zones"][cid]["zones"][0]["name"] == "Garage")
+        check("AE10 ... it answers each zone's cells, for the small-zone warning",
+              payload["zones"][0]["cells"] == 32 * 24 and payload["zones"][1]["cells"] == 0)
+        Z.set_zones(cid, None)
+        cd._motion_load()
+        check("AE10 ... the zones come back after a restart", Z.has_zones(cid))
+        cd.MEDIA_DIR = SCRATCH / "media_zones"
+        (cd.MEDIA_DIR / "LorexCH4").mkdir(parents=True, exist_ok=True)
+        (cd.MEDIA_DIR / "LorexCH4" / "LorexCH4_20261004_101010_part02.mp4").write_bytes(b"x")
+        (cd.MEDIA_DIR / "LorexCH4" / "LorexCH4_20261004_111111.mp4").write_bytes(b"x")
+        Z.REC_ZONES["LorexCH4_20261004_101010"] = "Garage"
+        st = json.loads((await cd.api_storage_list(make_mocked_request("GET", "/api/storage"))).body)
+        zones = {f["name"]: f["zone"] for f in st["folders"][0]["files"]}
+        check("AE11 C17: the Storage tab shows the zone that started a recording (answer 15)",
+              zones == {"LorexCH4_20261004_101010_part02.mp4": "Garage", "LorexCH4_20261004_111111.mp4": None},
+              str(zones))
+    finally:
+        cd.MOTION_FILE, cd.MEDIA_DIR = real_mf, real_media
+        Z.set_zones(cid, None); Z.REC_ZONES.clear()
+        cd.CAMERAS.clear(); cd._MOTION.clear()
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -3739,6 +3884,7 @@ async def main():
     await test_310()
     await test_320()
     await test_330()
+    await test_340()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 
