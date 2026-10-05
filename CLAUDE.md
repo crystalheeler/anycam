@@ -16,7 +16,8 @@ Deep Re-Probe, manual add), `anycam_snap.py` (the snapshot loop),
 `anycam_go2rtc.py` (go2rtc), `anycam_probe.py` (stream probers and ONVIF
 calls), `anycam_scan.py` (the network scan), `anycam_storage.py` (the
 Storage tab), `anycam_mjpeg.py` (live MJPEG cards, since 3.1.0-rc1.0), `anycam_zones.py`
-(detection zones, since 3.4.0-rc1.0),
+(detection zones, since 3.4.0-rc1.0), `anycam_upload.py` (recording upload,
+since 3.6.0-rc1.0),
 `anycam_host.py` (the link between them). A new file must be
 added to `anycam_modules.py` and to the Dockerfile's COPY lines; the release
 gate checks both. Package with `python package_release.py`.

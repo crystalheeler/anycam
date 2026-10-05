@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 4 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
+**Compiled:** 28 September 2026; updated 4 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0, 3.6.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -11,11 +11,11 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 ---
 
-## Next up: 3.6.0
+## Next up: 3.7.0
 
-3.0.1-rc1.0 to 3.5.0-rc1.0 are built (2026-10-04), not field-tested. Next, in the untested run CrystalHeeler ordered on 2026-10-04:
+3.0.1-rc1.0 to 3.6.0-rc1.0 are built (2026-10-04), not field-tested. Next, in the untested run CrystalHeeler ordered on 2026-10-04:
 
-1. **C14, upload recordings** by SFTP, FTPS or FTP, for each camera and for all; upload, delete the local copy, retry; passwords encrypted.
+1. **B11 and C9, hardware decode diagnostics.** The fix itself needs CrystalHeeler's logs (CLAUDE.md rule 2).
 
 ---
 
@@ -44,7 +44,7 @@ Agreed with CrystalHeeler on 2026-10-03. Mode, CrystalHeeler 2026-10-04: every p
 | 3.3.0 | One connection per camera. Built: 3.3.0-rc1.0, 2026-10-04, not field-tested | C4, B15 |
 | 3.4.0 | Detection zones. Built: 3.4.0-rc1.0, 2026-10-04, not field-tested | C17 |
 | 3.5.0 | Discovery and DVRs. Built: 3.5.0-rc1.0, 2026-10-04, not field-tested | D1, D2 |
-| 3.6.0 | Recording upload | C14 |
+| 3.6.0 | Recording upload. Built: 3.6.0-rc1.0, 2026-10-04, not field-tested | C14 |
 | 3.7.0 | Hardware decode | B11, C9 |
 
 Outside the phases: B6 waits until CrystalHeeler unlocks the Microseven.
@@ -68,7 +68,6 @@ Outside the phases: B6 waits until CrystalHeeler unlocks the Microseven.
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
 | C21 | Later | **Remove the classic engine** | From C20 and C19. 3.0.1-rc1.0 removed the Classic button; 3.1.0-rc1.0 made MJPEG cameras and wide streams play live in cards. The classic engine (the native-resolution snapshot loop, the adaptive ladder, the Adaptive Quality toggle) is still the fallback for a camera or browser that cannot play live | Remove it only when no camera or browser needs the fallback any more, after C10, C19 and C4 are field-tested |
-| C14 | Later | **Upload recordings to SFTP or FTP** | CrystalHeeler, 2026-09-30: per-camera recording destination, including SCP, SFTP, FTP or another remote share. Samba and NFS already work in 2.6.6 through Home Assistant's network storage under /media. SCP is SFTP in current OpenSSH | Parked (CrystalHeeler, 2026-10-02: "We'll get to it eventually"; do not propose it for a build). Upload each finished file, then delete the local copy; keep it and retry until the upload succeeds. SFTP needs asyncssh; FTP and FTPS are in Python's standard library. Passwords stored encrypted, like camera passwords |
 | C9 | Later | Pi 4 decoder overlay check or toggle | Deferred since 2.2.8 | Lower priority now that live view does no decoding on the Pi |
 
 ## D. Discovery and device support
@@ -92,6 +91,7 @@ Outside the phases: B6 waits until CrystalHeeler unlocks the Microseven.
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
+| Upload recordings by SFTP, FTPS or FTP (C14) | This plan, C14 | 3.6.0-rc1.0, CrystalHeeler's defaults of 2026-10-04: global plus per camera (global, own, off); upload when a recording stops, then delete the local copy (a box keeps it); retry 1 min doubling to 30 min, queue kept in /data; passwords encrypted, never sent to the page; SFTP server key saved at the first upload. New file `anycam_upload.py`; asyncssh 2.23.1 (the newest that accepts cryptography 48.0.0). Tests AG1 to AG10. Not field-tested |
 | DVR channel limit from the DVR (D1) | This plan, D1 | 3.5.0-rc1.0: after the password, `devVideoInput.cgi?action=getCollect` and `MaxRemoteInputChannels` (Basic, then Digest); the larger count, 1 to 256, sets the channels walked; 16 when the DVR does not answer. Tests AF1 to AF3. Open from D1: a sample of what a known-empty channel sends. Not field-tested |
 | One camera database; default ports used (D2) | This plan, D2; CLAUDE.md | 3.5.0-rc1.0, plan `docs/Camera_DB_Merge_Plan.md`: stream paths on the brands (`"streams"`, with `rank`), `STREAM_DB` built from them and byte for byte the old table; the scan's port list built from the database (same 54 ports). Tests AF4 to AF6 |
 | Detection zones (C17) | This plan, C17 | 3.4.0-rc1.0, to the 23 answers in `docs/Detection_Zones_Plan.md`: drawing window over Enhanced View (Zones button, Edit zones in the cog panel), up to 6 polygons, own sensitivity with Off, zones only, 128 x 96 grid with zones, per-zone confirmation, slow comparison over 5 s, tuning line and cog reading per zone, Show zones with the recording's zone, zone in the log and the Storage tab, zones in motion.json. New file `anycam_zones.py`. Tests AE1 to AE11, page section C17. Open: answer 8's re-check of the whole-picture levels at 128 x 96 (needs field data). Not field-tested |

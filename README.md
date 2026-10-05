@@ -22,6 +22,7 @@ anycam_scan.py          The network scan
 anycam_storage.py       The Storage tab
 anycam_mjpeg.py         Live MJPEG cards: one camera connection, pictures over a WebSocket
 anycam_zones.py         Detection zones: geometry, checks, judging each zone
+anycam_upload.py        Recording upload by SFTP, FTPS or FTP
 anycam_host.py          Connects the files above to camera_discovery.py
 anycam_modules.py       The list of the files above
 package_release.py      Builds _build/anycam-<version>.zip

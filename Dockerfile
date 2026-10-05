@@ -37,6 +37,8 @@ ARG BUILD_ARCH
 # PyPI packages:
 #   aiohttp==3.13.5
 #   cryptography==48.0.0
+#   asyncssh==2.23.1, typing_extensions==4.16.0 (3.6.0: SFTP upload; 2.23.1 is
+#   the newest asyncssh that accepts cryptography 48.0.0, 2.24.x needs 48.0.1)
 #
 # If any of these versions has rotated out of its source repo by the
 # time this Dockerfile is built, apt or pip will fail loudly and we
@@ -126,6 +128,8 @@ RUN apt-get update \
         aiohttp==3.13.5 \
         cryptography==48.0.0 \
         Pillow==12.3.0 \
+        asyncssh==2.23.1 \
+        typing_extensions==4.16.0 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Step 3 (2.6.3): go2rtc, for Enhanced View live playback (Tier 2).
@@ -165,6 +169,7 @@ COPY anycam_brand.py anycam_credentials.py anycam_focus.py /
 COPY anycam_go2rtc.py anycam_host.py anycam_motion.py /
 COPY anycam_page.py anycam_probe.py anycam_scan.py /
 COPY anycam_snap.py anycam_storage.py anycam_mjpeg.py anycam_zones.py /
+COPY anycam_upload.py /
 COPY www/video-rtc.js /www/video-rtc.js
 
 RUN chmod +x /run.sh

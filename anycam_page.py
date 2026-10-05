@@ -547,12 +547,54 @@ header h1{{cursor:pointer}}
     <label class="cs-full">Recording folder<input type="text" id="cs-path" spellcheck="false"></label>
     <div class="cs-help">Under /media. For a Samba or NFS share, add it in Home Assistant
       (Settings, System, Storage, Add network storage, usage Media); it appears as
-      /media/&lt;name&gt;. SFTP and FTP upload are planned for a later version.</div>
+      /media/&lt;name&gt;. To copy recordings to a server by SFTP, FTPS or FTP, use Upload.</div>
+    <button class="btn btn-ghost btn-sm" onclick="openUpload(_csCamId)">&#x21E7; Upload…</button>
     <div class="cs-error" id="cs-error"></div>
     <div class="modal-btns">
       <button class="btn btn-ghost btn-sm" id="cs-reset" onclick="resetCamSettings()" style="margin-right:auto">Defaults</button>
       <button class="btn btn-ghost btn-sm" onclick="closeCamSettings()">Cancel</button>
       <button class="btn btn-primary btn-sm" id="cs-save" onclick="saveCamSettings()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- 3.6.0 (C14): recording upload -->
+<div class="modal-backdrop" id="upload-modal" onclick="if(event.target.id==='upload-modal')closeUpload()">
+  <div class="modal cs-modal">
+    <h3 id="up-title">Upload recordings</h3>
+    <label id="up-mode-row" style="display:none">This camera
+      <select id="up-mode" onchange="upModeShow()">
+        <option value="global">Use the global destination</option>
+        <option value="own">Its own destination</option>
+        <option value="off">Do not upload</option>
+      </select></label>
+    <div class="cs-help" id="up-global-note"></div>
+    <div id="up-fields" style="display:flex;flex-direction:column;gap:10px">
+      <div class="cs-grid">
+        <label>Protocol<select id="up-proto" onchange="upProtoPort()">
+          <option value="sftp">SFTP</option><option value="ftps">FTPS</option><option value="ftp">FTP</option>
+        </select></label>
+        <label>Server<input type="text" id="up-host" spellcheck="false" autocomplete="off"></label>
+        <label>Port<input type="number" id="up-port" min="1" max="65535"></label>
+      </div>
+      <div class="cs-grid">
+        <label>User<input type="text" id="up-user" spellcheck="false" autocomplete="off"></label>
+        <label>Password<input type="password" id="up-pass" autocomplete="new-password"></label>
+        <label>Folder<input type="text" id="up-path" spellcheck="false"></label>
+      </div>
+      <label class="cs-check"><input type="checkbox" id="up-delete" checked> Delete the local copy after the upload</label>
+      <div class="cs-help" id="up-ftp-warn" style="display:none">FTP sends the password and the
+        recordings unencrypted. Use SFTP or FTPS when the server offers them.</div>
+      <div class="cs-help">Each recording goes to &lt;folder&gt;/&lt;camera&gt;/ once it is finished.
+        A failed upload is tried again later; the file stays here until it succeeds.</div>
+    </div>
+    <div class="cs-help" id="up-status"></div>
+    <div class="cs-error" id="up-error"></div>
+    <div class="modal-btns">
+      <button class="btn btn-ghost btn-sm" id="up-remove" onclick="removeUpload()" style="margin-right:auto;display:none">Remove</button>
+      <button class="btn btn-ghost btn-sm" onclick="testUpload()">Test</button>
+      <button class="btn btn-ghost btn-sm" onclick="closeUpload()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="saveUpload()">Save</button>
     </div>
   </div>
 </div>
@@ -629,6 +671,7 @@ header h1{{cursor:pointer}}
       <span id="disk-label">Loading...</span>
       <div id="disk-bar-track"><div id="disk-bar-fill"></div></div>
     </div>
+    <button class="btn btn-secondary btn-sm" onclick="openUpload(null)" title="Upload recordings by SFTP, FTPS or FTP">&#x21E7; Upload…</button>
     <button class="btn btn-secondary btn-sm" onclick="loadStorage()">&#x21BB; Refresh</button>
   </div>
   <!-- Explorer pane: nav bar + column headers + file list all inside white box -->
