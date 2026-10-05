@@ -15,7 +15,7 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 All phases of the untested run CrystalHeeler ordered on 2026-10-04 are built: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0, 3.6.0-rc1.0 and 3.7.0-rc1.0, each its own commit, tag and zip, none pushed. Each audit report lists its field test.
 
-1. **Field-test 3.7.0-rc1.0;** on a fault, install an earlier release candidate to narrow it down.
+1. **Field-test 3.7.0-rc1.0;** on a fault, install an earlier release candidate to narrow it down. 2026-10-05, CrystalHeeler: 3.7.0-rc1.0 installed and working; some minor visual glitches, and a UI rearrangement to come. CrystalHeeler sends the log and the changes later.
 2. **B11:** send the 3.7.0-rc1.0 start-up log (the "HW device" lines) for the hardware decode fix.
 
 ---
