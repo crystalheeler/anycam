@@ -25,6 +25,7 @@ from anycam_probe import (
     probe_rtsp,
 )
 import anycam_focus
+from anycam_go2rtc import _go2rtc_relay, _go2rtc_relay_result, _go2rtc_relayed
 
 log = logging.getLogger("anycam")
 
@@ -380,6 +381,11 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             vf_used   = out_vf
             fps_label = "normal"
         key_args = ["-skip_frame", "nokey"] if fps_label == "keyframes only" else []
+        # 3.3.0 (C4): read the camera through go2rtc, which holds one
+        # connection for every user of this stream (B15: the classic view no
+        # longer opens a second connection to the camera).
+        ffmpeg_url = await _go2rtc_relay(camera_id, ffmpeg_url)
+        state["ffmpeg_url_used"] = ffmpeg_url     # for _go2rtc_relay_result below
 
         log.info(f"SNAP [{camera_id}]: ffmpeg starting "
                  f"(codec={stream_codec or '?'}, {hw_label}, {fps_label}, vf={vf_used})")
@@ -395,6 +401,8 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
         # UDP; we honour that here.
         cam_for_transport = CAMERAS.get(camera_id, camera)
         pref_transport    = cam_for_transport.get("preferred_transport", "tcp")
+        if _go2rtc_relayed(ffmpeg_url):
+            pref_transport = "tcp"      # go2rtc's RTSP server speaks TCP
         transport_args    = ["-rtsp_transport", pref_transport, "-timeout", "8000000"]
 
         # rc1 (Item B1): -fflags +discardcorrupt on cameras with H.265+ history.
@@ -841,6 +849,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # Without this, the early sequence (1s, 2s, 4s) is inside the
             # Hipcam 5s window and accumulates lockout pressure across
             # restarts.
+            _go2rtc_relay_result(camera_id, state.get("ffmpeg_url_used"), frames > 0)
             if frames == 0:
                 streak = state.get("zero_frame_streak", 0) + 1
                 state["zero_frame_streak"] = streak

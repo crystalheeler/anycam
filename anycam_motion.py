@@ -25,6 +25,7 @@ from pathlib import Path
 from anycam_host import H
 import anycam_focus
 from anycam_go2rtc import _go2rtc_profiles      # 3.0.0-rc1.2: it moved there
+from anycam_go2rtc import _go2rtc_relay, _go2rtc_relay_result     # 3.3.0 (C4)
 
 log = logging.getLogger("anycam")
 
@@ -696,11 +697,12 @@ async def _motion_detector(camera_id: str, url: str) -> None:
         await _motion_throttle(CAMERAS.get(camera_id) or {})
         proc = None
         frames = 0
+        src = await _go2rtc_relay(camera_id, url)     # 3.3.0 (C4)
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-nostdin", "-loglevel", "error",
                 "-rtsp_transport", "tcp", "-timeout", "8000000",
-                "-i", url, "-an",
+                "-i", src, "-an",
                 "-vf", f"fps={MOTION_DETECT_FPS},scale={w}:{h}:flags=area,format=yuv420p",
                 "-f", "rawvideo", "pipe:1",
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
@@ -735,6 +737,7 @@ async def _motion_detector(camera_id: str, url: str) -> None:
             log.warning(f"Motion [{camera_id}]: could not start detection ffmpeg: {ex}")
         finally:
             ms["detector_live"] = False
+            _go2rtc_relay_result(camera_id, src, frames > 0)
             _motion_reset_prev(camera_id)      # 2.6.7: the stream clock ends here
             if proc is not None:
                 await _stop_proc(proc, exited_grace=0.5)
@@ -758,11 +761,12 @@ async def _motion_buffer(camera_id: str, url: str) -> None:
         await _motion_throttle(CAMERAS.get(camera_id) or {})
         proc = None
         buf = _TsBuffer()
+        src = await _go2rtc_relay(camera_id, url)     # 3.3.0 (C4)
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-nostdin", "-loglevel", "error",
                 "-rtsp_transport", "tcp", "-timeout", "8000000",
-                "-fflags", "+genpts", "-i", url,
+                "-fflags", "+genpts", "-i", src,
                 "-map", "0:v:0", "-map", "0:a:0?",
                 # Video copied unchanged. Audio to AAC: DVRs often send G.711,
                 # which neither MPEG-TS nor MP4 can carry.
@@ -798,6 +802,7 @@ async def _motion_buffer(camera_id: str, url: str) -> None:
         except OSError as ex:
             log.warning(f"Motion [{camera_id}]: could not start buffer ffmpeg: {ex}")
         finally:
+            _go2rtc_relay_result(camera_id, src, bool(buf.gops))
             ms["buffer_live"] = False
             ms["tsbuf"] = None
             if proc is not None:
@@ -1293,11 +1298,12 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
              f"recording stream is not running yet; a new file every "
              f"{cfg['clip_s']} s while motion continues)")
     try:
+        src = await _go2rtc_relay(camera_id, url)     # 3.3.0 (C4)
         ms["proc"] = await asyncio.create_subprocess_exec(
             "ffmpeg", "-nostdin", "-loglevel", "warning",
             "-rtsp_transport", "tcp", "-timeout", "8000000",
             "-fflags", "+genpts",   # 2.6.6: Lorex packets arrive without timestamps
-            "-i", url,
+            "-i", src,
             "-c", "copy",   # stream-copy: no decode/encode — nearly zero CPU
             *tag, *seg_args,
             stdin=asyncio.subprocess.DEVNULL,

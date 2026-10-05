@@ -14,7 +14,7 @@ from aiohttp import web
 
 from anycam_host import H
 from anycam_go2rtc import (
-    _go2rtc_profile_source, _go2rtc_register, _go2rtc_stream_name,
+    _go2rtc_profile_source, _go2rtc_register, _go2rtc_shared_name,
 )
 import anycam_go2rtc
 
@@ -60,7 +60,7 @@ async def api_go2rtc_focus(request: web.Request) -> web.Response:
     src, codec, reason = _go2rtc_profile_source(camera, prof_idx)
     if not src:
         return web.json_response({"ok": False, "reason": reason, "codec": codec})
-    name = _go2rtc_stream_name(camera_id, prof_idx)
+    name = _go2rtc_shared_name(camera_id, src)     # 3.3.0 (C4): shared with the other users
     if not await _go2rtc_register(name, src, camera_id):
         return web.json_response({"ok": False,
                                   "reason": "go2rtc rejected the stream"})
