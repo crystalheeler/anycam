@@ -1,6 +1,6 @@
 # Detection Zones Plan (build plan C17)
 
-Status: requirements from CrystalHeeler, 2026-10-02; proposed answers to the open points, 2026-10-04, for review. Not built.
+Status: requirements from CrystalHeeler, 2026-10-02; answers 1 to 20 approved 2026-10-04, answers 21 to 23 for review. Not built.
 No version assigned.
 
 ## Why
@@ -67,7 +67,7 @@ CrystalHeeler: "I'm sure there's stuff I'm forgetting to add." Known open points
 
 ## Proposed answers (for CrystalHeeler's review, 2026-10-04)
 
-Not approved yet. Nothing is built until CrystalHeeler has reviewed this list.
+Answers 1 to 20 approved by CrystalHeeler on 2026-10-04 ("All of that sounds great"). Answers 21 to 23 added the same day, after the question how zone editing is opened; awaiting review.
 
 **Drawing**
 
@@ -149,6 +149,23 @@ Not approved yet. Nothing is built until CrystalHeeler has reviewed this list.
 20. **The PTZ camera.** A zone belongs to one view. When the Hikvision PTZ is
    moved, its zones point at the wrong place; the cog panel says so. Zones
    for each preset position are not proposed.
+
+**Opening and leaving zone editing**
+
+21. **Opening.** Two ways: a "Zones" button in Enhanced View's bottom bar
+   opens the drawing window over the camera being watched; an "Edit zones"
+   button in the cog panel's motion section opens Enhanced View for that
+   camera directly in zone editing. A camera with snapshots only has the
+   same button and draws on its latest picture (answer 18).
+22. **Inside zone editing.** A click on the picture outside any zone starts a
+   new zone (requirement 3); a "+ New zone" button in the zone list does the
+   same and is greyed out at 6 zones. A click on an existing zone selects it
+   for moving, adding or removing points. A double click leaves the drawing
+   of the current zone and stays in zone editing (requirement 4).
+23. **Leaving.** "Done" saves all changes and returns to Enhanced View.
+   "Cancel" discards every change made since zone editing was opened, after
+   a confirmation when there are changes. Esc stops drawing the current
+   zone only and never closes the window.
 
 ## Technical notes
 
