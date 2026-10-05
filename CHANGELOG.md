@@ -1,3 +1,21 @@
+## 3.7.0-rc1.0
+
+The log now shows which hardware decoders the add-on can use, and says when a picture was decoded in software. Not field-tested.
+
+### Changes & improvements
+
+- **Decoder devices in the log.** At start-up AnyCam lists each decoder device, its name, and whether the add-on may open it. It also says when the Pi's HEVC decoder overlay (rpivid) is missing, with the line to add.
+- **A diagnostics page for decoding:** /api/diagnostics/hw lists the devices, the decoders that work, and each camera that fell back to software.
+
+### Bugs fixed
+
+- **The log said "hw first frame" when ffmpeg had fallen back to software.** It now says the picture was decoded in software, with ffmpeg's reason.
+
+### Known issues
+
+- **Hardware decode can still fall back to software.** This release only reports it; the fix needs the start-up log of this release.
+- **The Microseven is not tested** with this release.
+
 ## 3.6.0-rc1.0
 
 Recordings can be uploaded to a server by SFTP, FTPS or FTP, for all cameras or for one. Not field-tested.

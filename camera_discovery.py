@@ -217,7 +217,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.6.0-rc1.0"  # must match config.yaml
+CURRENT_VERSION = "3.7.0-rc1.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1470,6 +1470,7 @@ def make_app() -> web.Application:
     app.router.add_post(  "/api/log_level",                        api_set_log_level)
     app.router.add_get(   "/api/logs",                            api_logs)
     app.router.add_get(   "/api/self",                            api_self)
+    app.router.add_get(   "/api/diagnostics/hw",                  api_diagnostics_hw)
     app.router.add_route("*", "/api/card_order",                     api_card_order)
     app.router.add_route("*", "/api/upload/settings",                api_upload_settings)
     app.router.add_post(  "/api/upload/test",                        api_upload_test)
@@ -1524,6 +1525,75 @@ async def _vaapi_usable() -> tuple[bool, str]:
     return True, ""
 
 
+# ── 3.7.0 (B11, C9): which decoder devices the add-on can use ───────────────
+# Logged at start-up, and answered by /api/diagnostics/hw, so a log shows at
+# once whether the Pi's decoders exist (C9: the rpivid overlay) and whether
+# the add-on may open them (B11). The fix for B11 waits for CrystalHeeler's
+# logs (CLAUDE.md rule 2); this only reports.
+HW_DEVICE_GLOBS = ("/dev/video*", "/dev/media*", "/dev/dri/renderD*")
+_HW_REPORT: dict = {}
+
+
+def _hw_device_report() -> dict:
+    """Each decoder device: its name, and whether it opens for reading and writing."""
+    import glob
+    devices = []
+    for pattern in HW_DEVICE_GLOBS:
+        for dev in sorted(glob.glob(pattern)):
+            name = ""
+            sysname = Path("/sys/class/video4linux") / Path(dev).name / "name"
+            if dev.startswith("/dev/video"):
+                try:
+                    name = sysname.read_text(encoding="utf-8").strip()
+                except OSError:
+                    pass
+            try:
+                fd = os.open(dev, os.O_RDWR | getattr(os, "O_NONBLOCK", 0))
+                os.close(fd)
+                opens = "yes"
+            except OSError as ex:
+                opens = ex.strerror or str(ex)
+            devices.append({"device": dev, "name": name, "opens": opens})
+    names = " ".join(d["name"].lower() for d in devices)
+    report = {
+        "devices": devices,
+        "rpivid": "rpivid" in names,                         # the HEVC decoder (C9)
+        "bcm2835_codec": "bcm2835-codec-decode" in names,    # the H.264 decoder
+        "blocked": [d["device"] for d in devices if d["opens"] != "yes"],
+    }
+    notes = []
+    if not devices:
+        notes.append("no decoder device is visible inside the add-on")
+    elif not report["rpivid"] and any(d["device"].startswith("/dev/video") for d in devices):
+        notes.append("no rpivid HEVC decoder: on a Pi 4, add dtoverlay=rpivid-v4l2 to "
+                     "/boot/firmware/config.txt and restart the Pi")
+    if report["blocked"]:
+        notes.append("the add-on may not open " + ", ".join(report["blocked"])
+                     + "; hardware decode on these falls back to software")
+    report["notes"] = notes
+    return report
+
+
+def _hw_report_log(report: dict) -> None:
+    for d in report["devices"]:
+        log.info(f"  HW device {d['device']}" + (f" ({d['name']})" if d["name"] else "")
+                 + (": opens" if d["opens"] == "yes" else f": cannot open — {d['opens']}"))
+    for note in report["notes"]:
+        log.warning(f"  HW decode: {note}")
+
+
+async def api_diagnostics_hw(request: web.Request) -> web.Response:
+    """GET /api/diagnostics/hw (3.7.0) — devices, decoder results, software fallbacks."""
+    report = _HW_REPORT or await asyncio.to_thread(_hw_device_report)
+    return web.json_response({
+        **report,
+        "hw_decode_setting": CFG_HW_DECODE,
+        "unavailable": sorted(_HW_UNAVAILABLE),
+        "candidates": [label for label, _c, _a in _HW_DECODER_CANDIDATES],
+        "software_fallback": dict(anycam_snap._HW_FALLBACK),
+    })
+
+
 async def _probe_hw_decoders() -> None:
     """
     Probe hardware decoder availability once at startup.
@@ -1565,6 +1635,10 @@ async def _probe_hw_decoders() -> None:
         <label>: unavailable (<reason>)
       HW decoders available: <comma list> | No hardware decoders available
     """
+    # 3.7.0 (B11, C9): the devices first, also with hardware decode off
+    _HW_REPORT.clear()
+    _HW_REPORT.update(await asyncio.to_thread(_hw_device_report))
+    _hw_report_log(_HW_REPORT)
     if not CFG_HW_DECODE:
         log.info("Hardware decode disabled by config — skipping probe")
         _HW_PROBED.set()

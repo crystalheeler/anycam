@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 4 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0, 3.6.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
+**Compiled:** 28 September 2026; updated 4 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0, 3.6.0-rc1.0, 3.7.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -11,11 +11,12 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 ---
 
-## Next up: 3.7.0
+## Next up: field tests
 
-3.0.1-rc1.0 to 3.6.0-rc1.0 are built (2026-10-04), not field-tested. Next, in the untested run CrystalHeeler ordered on 2026-10-04:
+All phases of the untested run CrystalHeeler ordered on 2026-10-04 are built: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0, 3.6.0-rc1.0 and 3.7.0-rc1.0, each its own commit, tag and zip, none pushed. Each audit report lists its field test.
 
-1. **B11 and C9, hardware decode diagnostics.** The fix itself needs CrystalHeeler's logs (CLAUDE.md rule 2).
+1. **Field-test 3.7.0-rc1.0;** on a fault, install an earlier release candidate to narrow it down.
+2. **B11:** send the 3.7.0-rc1.0 start-up log (the "HW device" lines) for the hardware decode fix.
 
 ---
 
@@ -45,7 +46,7 @@ Agreed with CrystalHeeler on 2026-10-03. Mode, CrystalHeeler 2026-10-04: every p
 | 3.4.0 | Detection zones. Built: 3.4.0-rc1.0, 2026-10-04, not field-tested | C17 |
 | 3.5.0 | Discovery and DVRs. Built: 3.5.0-rc1.0, 2026-10-04, not field-tested | D1, D2 |
 | 3.6.0 | Recording upload. Built: 3.6.0-rc1.0, 2026-10-04, not field-tested | C14 |
-| 3.7.0 | Hardware decode | B11, C9 |
+| 3.7.0 | Hardware decode. Built: 3.7.0-rc1.0 (diagnostics), 2026-10-04, not field-tested | B11, C9 |
 
 Outside the phases: B6 waits until CrystalHeeler unlocks the Microseven.
 
@@ -61,14 +62,13 @@ Outside the phases: B6 waits until CrystalHeeler unlocks the Microseven.
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
 | B6 | You | **Test the Microseven once it is unlocked, and make AnyCam robust to cameras that lock out** | CrystalHeeler, 2026-09-29: the Microseven at 10.0.0.22 is recognized and authenticates, but serves MJPEG only, with no RTSP stream. That matches the lockout CLAUDE.md describes, which only a power cycle reliably clears. It may be the same fault as the "Invalid data found" regression open since 2.4.0-rc3.3. It also blocks the last Tier 1 check: that the 2.6.1 ONVIF fix stops AnyCam opening connections inside the Microseven's 5 s cooldown 2026-10-03: the throttle research (`docs/anycam_rtsp_throttle_research_report.md`) found the connection-rate limit rare: the Hipcam RealServer family (Microseven, Sricam, Vstarcam, older Wansview, Tenvis) is the only documented family, 5 of the 76 entries in CAMERA_DB. The lockout that only a power cycle clears was seen on the Microseven; the research names no other camera with it. The nearest is CVE-2023-50685 in the same firmware family, a crash that recovers in about 45 s | Retitled by CrystalHeeler, 2026-10-03. When CrystalHeeler has unlocked the camera: field-test that it behaves as expected (scan, password entry with the 5 s pacing, card, Enhanced View, no new lockout over a day). Then review the code: detect the locked state (accepts the connection, returns no valid answer), stop connecting to it, and tell the user on the card to power-cycle the camera. No phase until it is unlocked |
-| B11 | Later | **Hardware decode silently falls back to software** | Log1: ffmpeg cannot open the Pi's decoder devices (`/dev/media0` to `3`, "Operation not permitted"), then decodes in software, while AnyCam logs "hw first frame (hevc_drm)". Classic 4K runs at 8 fps; 2.6.0-rc2.5 measured 22 fps. The gray frames CrystalHeeler sees when the classic view bogs down fit this: ffmpeg's HEVC decoder fills any missing frame with mid-gray, and Log1 shows ch7 repeating one identical frame 400 times. Live view does no decoding on the Pi, which is why Chrome was clean | Parked by CrystalHeeler. When picked up: logs first, then find what changed since rc2.5 (HAOS or Supervisor update, ffmpeg 5.1.8 to 5.1.9, device permissions). Also make the log stop reporting hardware decode when it is not happening |
+| B11 | Logs | **Hardware decode silently falls back to software** | Log1: ffmpeg cannot open the Pi's decoder devices (`/dev/media0` to `3`, "Operation not permitted"), then decodes in software, while AnyCam logs "hw first frame (hevc_drm)". Classic 4K runs at 8 fps; 2.6.0-rc2.5 measured 22 fps. The gray frames CrystalHeeler sees when the classic view bogs down fit this: ffmpeg's HEVC decoder fills any missing frame with mid-gray, and Log1 shows ch7 repeating one identical frame 400 times. Live view does no decoding on the Pi, which is why Chrome was clean | Parked by CrystalHeeler. When picked up: logs first, then find what changed since rc2.5 (HAOS or Supervisor update, ffmpeg 5.1.8 to 5.1.9, device permissions). Also make the log stop reporting hardware decode when it is not happening 3.7.0-rc1.0 (2026-10-04) adds the diagnostics: the start-up "HW device" lines, /api/diagnostics/hw, and a warning when a picture was decoded in software. Next: CrystalHeeler's 3.7.0-rc1.0 start-up log, then the fix |
 
 ## C. Video and recording
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
 | C21 | Later | **Remove the classic engine** | From C20 and C19. 3.0.1-rc1.0 removed the Classic button; 3.1.0-rc1.0 made MJPEG cameras and wide streams play live in cards. The classic engine (the native-resolution snapshot loop, the adaptive ladder, the Adaptive Quality toggle) is still the fallback for a camera or browser that cannot play live | Remove it only when no camera or browser needs the fallback any more, after C10, C19 and C4 are field-tested |
-| C9 | Later | Pi 4 decoder overlay check or toggle | Deferred since 2.2.8 | Lower priority now that live view does no decoding on the Pi |
 
 ## D. Discovery and device support
 
@@ -91,6 +91,7 @@ Outside the phases: B6 waits until CrystalHeeler unlocks the Microseven.
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
+| Pi 4 decoder overlay check (C9) | This plan, C9 | 3.7.0-rc1.0: the start-up device report says when no rpivid decoder is visible and names the line `dtoverlay=rpivid-v4l2` for /boot/firmware/config.txt. A toggle is not possible from inside the add-on (it cannot write the boot partition). Tests AH3, AH4. Not field-tested |
 | Upload recordings by SFTP, FTPS or FTP (C14) | This plan, C14 | 3.6.0-rc1.0, CrystalHeeler's defaults of 2026-10-04: global plus per camera (global, own, off); upload when a recording stops, then delete the local copy (a box keeps it); retry 1 min doubling to 30 min, queue kept in /data; passwords encrypted, never sent to the page; SFTP server key saved at the first upload. New file `anycam_upload.py`; asyncssh 2.23.1 (the newest that accepts cryptography 48.0.0). Tests AG1 to AG10. Not field-tested |
 | DVR channel limit from the DVR (D1) | This plan, D1 | 3.5.0-rc1.0: after the password, `devVideoInput.cgi?action=getCollect` and `MaxRemoteInputChannels` (Basic, then Digest); the larger count, 1 to 256, sets the channels walked; 16 when the DVR does not answer. Tests AF1 to AF3. Open from D1: a sample of what a known-empty channel sends. Not field-tested |
 | One camera database; default ports used (D2) | This plan, D2; CLAUDE.md | 3.5.0-rc1.0, plan `docs/Camera_DB_Merge_Plan.md`: stream paths on the brands (`"streams"`, with `rank`), `STREAM_DB` built from them and byte for byte the old table; the scan's port list built from the database (same 54 ports). Tests AF4 to AF6 |
