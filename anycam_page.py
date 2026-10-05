@@ -86,6 +86,15 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .feed-wrap img,.feed-wrap video{{width:100%;height:100%;object-fit:cover;display:block}}
 /* 2.6.6 live cards: the player sits over the placeholder until it plays */
 .feed-wrap anycam-video{{position:absolute;inset:0;display:block;transition:opacity .3s;cursor:pointer}}
+/* 3.1.0 (C19): an MJPEG card's live picture, the same way */
+.feed-wrap img.card-live{{position:absolute;inset:0;transition:opacity .3s;cursor:pointer}}
+/* 3.1.0 (D3): drag to move a card */
+.card-drag{{flex-shrink:0;cursor:grab;color:var(--text-dim);touch-action:none;user-select:none;
+            padding:0 2px;line-height:1.1;font-size:1rem}}
+.card-drag:hover{{color:var(--text)}}
+.camera-card.drag-src{{opacity:.5}}
+.camera-card.drop-before{{box-shadow:-4px 0 0 var(--primary)}}
+.camera-card.drop-after{{box-shadow:4px 0 0 var(--primary)}}
 .feed-placeholder{{display:flex;flex-direction:column;align-items:center;gap:6px;
                    color:var(--text-dim);font-size:.78rem;text-align:center;padding:10px}}
 .feed-placeholder svg{{opacity:.3}}

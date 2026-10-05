@@ -20,6 +20,7 @@ anycam_go2rtc.py        go2rtc: supervisor, streams, live-view proxy
 anycam_probe.py         Stream probers, the RTSP fingerprint, ONVIF calls
 anycam_scan.py          The network scan
 anycam_storage.py       The Storage tab
+anycam_mjpeg.py         Live MJPEG cards: one camera connection, pictures over a WebSocket
 anycam_host.py          Connects the files above to camera_discovery.py
 anycam_modules.py       The list of the files above
 package_release.py      Builds _build/anycam-<version>.zip

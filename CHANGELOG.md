@@ -1,3 +1,23 @@
+## 3.1.0-rc1.0
+
+More cards play live, out-of-date saved streams are read again by AnyCam itself, and you can drag cards into the order you want. Not field-tested.
+
+### Changes & improvements
+
+- **MJPEG cameras play live in their cards.** The add-on keeps one connection to the camera's MJPEG stream and passes each picture to every card that shows it. Nothing is decoded on the Pi.
+- **Wide streams play live on a computer.** A camera whose smallest stream is wider than 1,920 now plays live in its card on a computer. A phone still shows pictures for it.
+- **Drag cards to arrange them.** Drag a card by the handle at the left of its name. The add-on saves the order, so every viewer sees the same order.
+
+### Bugs fixed
+
+- **A camera's saved streams went out of date when its settings changed.** When a card cannot use the saved streams, AnyCam now reads them again with the saved password, at most once every 6 hours for each camera.
+
+### Known issues
+
+- **An MJPEG stream sent over RTSP still shows pictures.** Only an MJPEG stream over HTTP plays live in a card.
+- **Another viewer sees a new card order at the next page load.**
+- **The Microseven is not tested** with this release.
+
 ## 3.0.1-rc1.0
 
 Cameras inside appliances get an information card, live view works in browsers that cannot play H.265, and cards no longer show old pictures. Not field-tested.

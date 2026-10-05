@@ -3260,6 +3260,223 @@ async def test_301():
     cd.CAMERAS.clear()
 
 
+
+# ── AB. 3.1.0 ────────────────────────────────────────────────────────────────
+def mjpg(body: bytes) -> bytes:
+    """A small, well-formed JPEG: start, one APP0 segment, picture data, end."""
+    return b"\xff\xd8" + b"\xff\xe0\x00\x04ab" + b"\xff\xda\x00\x02" + body + b"\xff\xd9"
+
+
+async def test_310():
+    print("\n[AB] 3.1.0")
+    from aiohttp.test_utils import TestServer, TestClient
+
+    # C19: a computer plays a wide stream live; a phone does not
+    wide = camera(id="w1", stream_profiles=[{"url": "rtsp://10.0.0.33:554/main",
+                                             "stream_codec": "h264", "stream_width": 2560}])
+    u_phone, _, why = cd._go2rtc_card_source(wide)
+    u_pc, c_pc, _ = cd._go2rtc_card_source(wide, wide=True)
+    check("AB1 C19: a 2560-wide stream: still pictures on a phone, live on a computer",
+          u_phone is None and "small enough" in why and u_pc and u_pc.endswith("/main") and c_pc == "h264")
+
+    # C19: which cameras have an MJPEG stream for a live card
+    m1 = camera(id="m1", protocol="MJPEG", stream_url="http://10.0.0.22:81/videostream.cgi",
+                stream_profiles=[])
+    m2 = camera(id="m2", sub_stream_url="http://admin:pw@10.0.0.22/mjpeg", sub_stream_codec="mjpeg",
+                sub_stream_width=640)
+    check("AB2 C19: an MJPEG camera's HTTP stream is found; an RTSP MJPEG profile is not",
+          cd._mjpeg_source(m1) == "http://10.0.0.22:81/videostream.cgi"
+          and cd._mjpeg_source(camera()) is None)
+    check("AB2 ... a sub-stream URL loses its password",
+          cd._mjpeg_source(m2) == "http://10.0.0.22/mjpeg")
+    check("AB2 ... an information card has none",
+          cd._mjpeg_source(dict(m1, display="appliance")) is None)
+
+    async def no_refresh(camera_id, why):
+        refreshed.append((camera_id, why))
+        return False
+    refreshed = []
+    real_ready = cd.anycam_go2rtc._GO2RTC_READY
+    try:
+        with _Swap(_streams_refresh=no_refresh):
+            cd.CAMERAS.clear(); cd.CAMERAS["m1"] = m1; cd.CAMERAS["w1"] = wide
+            cd.anycam_go2rtc._GO2RTC_READY = False
+            req = make_mocked_request("GET", "/api/go2rtc/card/m1", match_info={"camera_id": "m1"})
+            r1 = json.loads((await cd.api_go2rtc_card(req)).body)
+            cd.anycam_go2rtc._GO2RTC_READY = True
+            req = make_mocked_request("GET", "/api/go2rtc/card/w1", match_info={"camera_id": "w1"})
+            r2 = json.loads((await cd.api_go2rtc_card(req)).body)
+            await asyncio.sleep(0)
+    finally:
+        cd.anycam_go2rtc._GO2RTC_READY = real_ready
+    check("AB3 C19: an MJPEG card plays live through the add-on, also while go2rtc starts",
+          r1.get("ok") and r1.get("kind") == "mjpeg" and r1.get("url") == "/api/mjpeg/m1/ws", str(r1))
+    check("AB3 B25: a card that cannot use the saved streams has them read again",
+          not r2.get("ok") and refreshed and refreshed[0][0] == "w1" and "small enough" in refreshed[0][1],
+          str(refreshed))
+
+    # C19: pictures cut from the byte stream
+    a, b = mjpg(b"one"), mjpg(b"two")
+    thumb = b"\xff\xd8\xff\xd9"                              # an EXIF thumbnail's markers
+    exif = (b"\xff\xd8" + b"\xff\xe1" + (2 + len(thumb)).to_bytes(2, "big") + thumb
+            + b"\xff\xda\x00\x02pic\xff\xd9")
+    stream = (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + a + b"\r\n--frame\r\n\r\n" + exif
+              + b"\r\n--frame\r\n\r\n" + b)
+    sp = cd._JpegSplitter()
+    got = []
+    for i in range(0, len(stream), 7):                     # pieces cut anywhere
+        got += sp.feed(stream[i:i + 7])
+    check("AB4 C19: JPEGs are cut out of the stream across reads",
+          got[0] == a and got[2] == b and len(got) == 3, str([len(x) for x in got]))
+    check("AB4 ... an end marker inside a segment does not cut a picture short", got[1] == exif)
+
+    # C19: the WebSocket relay, against a camera that serves MJPEG
+    opened, auth_seen = [], []
+
+    async def camera_mjpeg(request):
+        auth_seen.append(request.headers.get("Authorization", ""))
+        if not request.headers.get("Authorization", "").startswith("Basic "):
+            return web.Response(status=401, headers={"WWW-Authenticate": 'Basic realm="cam"'})
+        opened.append(1)
+        resp = web.StreamResponse(headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"})
+        await resp.prepare(request)
+        try:
+            for n in range(200):
+                await resp.write(b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                                 + mjpg(b"f%03d" % n) + b"\r\n")
+                await asyncio.sleep(0.02)
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        return resp
+
+    async def camera_still(request):
+        return web.Response(body=mjpg(b"x"), content_type="image/jpeg")
+    cam_app = web.Application()
+    cam_app.router.add_get("/video", camera_mjpeg)
+    cam_app.router.add_get("/still", camera_still)
+    cam_srv = TestServer(cam_app); await cam_srv.start_server()
+    app = web.Application(); app.router.add_get("/api/mjpeg/{camera_id}/ws", cd.handle_mjpeg_ws)
+    client = TestClient(TestServer(app)); await client.start_server()
+    real_idle = cd.MJPEG_IDLE_S
+    cd.MJPEG_IDLE_S = 0.2
+    try:
+        cd.CAMERAS.clear(); cd._HUBS.clear()
+        cd.CAMERAS["mj"] = camera(id="mj", ip="127.0.0.1", protocol="MJPEG", stream_profiles=[],
+                                  stream_url=f"http://127.0.0.1:{cam_srv.port}/video")
+        ws1 = await client.ws_connect("/api/mjpeg/mj/ws")
+        ws2 = await client.ws_connect("/api/mjpeg/mj/ws")
+        m1a = await asyncio.wait_for(ws1.receive(), 5)
+        m1b = await asyncio.wait_for(ws1.receive(), 5)
+        m2a = await asyncio.wait_for(ws2.receive(), 5)
+        check("AB5 C19: each card gets the camera's JPEGs, unchanged, one per message",
+              m1a.type == aiohttp.WSMsgType.BINARY and m1a.data.startswith(b"\xff\xd8")
+              and m1a.data.endswith(b"\xff\xd9") and m1a.data != m1b.data
+              and m2a.type == aiohttp.WSMsgType.BINARY)
+        check("AB5 ... two cards share one camera connection, with the saved password",
+              len(opened) == 1 and auth_seen[-1].startswith("Basic "), f"{opened} {auth_seen}")
+        await ws1.close(); await ws2.close()
+        for _ in range(100):
+            if "mj" not in cd._HUBS:
+                break
+            await asyncio.sleep(0.05)
+        check("AB5 ... the camera connection closes after the last card", "mj" not in cd._HUBS)
+
+        cd.CAMERAS["st"] = camera(id="st", ip="127.0.0.1", protocol="MJPEG", stream_profiles=[],
+                                  stream_url=f"http://127.0.0.1:{cam_srv.port}/still")
+        ws3 = await client.ws_connect("/api/mjpeg/st/ws")
+        m3 = await asyncio.wait_for(ws3.receive(), 5)
+        check("AB6 C19: a URL that sends one picture, not a stream: the card is told, in words",
+              m3.type == aiohttp.WSMsgType.TEXT and m3.data.startswith("error:")
+              and "single pictures" in m3.data, str(m3.data))
+        await ws3.close()
+        r404 = await client.get("/api/mjpeg/cam1/ws")
+        check("AB6 ... a camera with no MJPEG stream: 404", r404.status == 404)
+    finally:
+        cd.MJPEG_IDLE_S = real_idle
+        await client.close(); await cam_srv.close()
+        cd.CAMERAS.clear()
+
+    # B25: the saved password, the same password step, at most every 6 hours
+    calls = []
+
+    async def fake_set(request):
+        calls.append(await request.json())
+        return web.json_response({"status": "ok"})
+    with _Swap(api_set_credentials=fake_set):
+        cd._STREAM_REFRESH_AT.clear(); cd.CAMERAS.clear()
+        cd.CAMERAS["cam1"] = camera()
+        cd.CAMERAS["ch3"] = camera(id="ch3", _dvr_parent_id="dvr")
+        cd.CAMERAS["nopw"] = camera(id="nopw", credentials=None)
+        ok1 = await cd._streams_refresh("cam1", "test")
+        ok2 = await cd._streams_refresh("cam1", "test")
+        ok3 = await cd._streams_refresh("ch3", "test")
+        ok4 = await cd._streams_refresh("nopw", "test")
+        cd._STREAM_REFRESH_AT["cam1"] -= cd.STREAM_REFRESH_MIN_S + 1
+        ok5 = await cd._streams_refresh("cam1", "test")
+    check("AB7 B25: the streams are read again with the saved password",
+          ok1 and calls and calls[0] == {"camera_id": "cam1", "username": "admin",
+                                         "password": TRICKY_PASS}, str(calls[:1]))
+    check("AB7 ... not again within 6 hours; then again",
+          ok2 is False and ok5 is True and len(calls) == 2)
+    check("AB7 ... not for a DVR channel card, or a camera with no saved password",
+          ok3 is False and ok4 is False)
+
+    async def fail_set(request):
+        return web.json_response({"error": "Could not connect"}, status=401)
+    with _Swap(api_set_credentials=fail_set):
+        cd._STREAM_REFRESH_AT.clear()
+        saved = list(cd.CAMERAS["cam1"]["stream_profiles"])
+        ok6 = await cd._streams_refresh("cam1", "test")
+    check("AB7 ... a failed try keeps the saved streams",
+          ok6 is False and cd.CAMERAS["cam1"]["stream_profiles"] == saved)
+    cd._STREAM_REFRESH_AT.clear(); cd.CAMERAS.clear()
+
+    # D3: one card order for every viewer
+    order_app = web.Application()
+    order_app.router.add_route("*", "/api/card_order", cd.api_card_order)
+    order_app.router.add_get("/api/cameras", cd.api_cameras)
+    oc = TestClient(TestServer(order_app)); await oc.start_server()
+    real_rt = cd.RUNTIME_FILE
+    try:
+        cd.RUNTIME_FILE = SCRATCH / "runtime_order.json"
+        cd.RUNTIME_FILE.unlink(missing_ok=True)
+        cd._CARD_ORDER = None
+        cd.CAMERAS.clear()
+        cd.CAMERAS["a"] = camera(id="a", ip="10.0.0.31")
+        cd.CAMERAS["b"] = camera(id="b", ip="10.0.0.32")
+        cd.CAMERAS["c"] = camera(id="c", ip="10.0.0.60", port=80, channel=3)
+        cd.CAMERAS["d"] = camera(id="d", ip="10.0.0.34")
+        check("AB8 D3: the card key matches the page's: ip:port, #chN for a DVR channel",
+              cd._card_key(cd.CAMERAS["c"]) == "10.0.0.60:80#ch3"
+              and cd._card_key({"id": "x"}) == "id:x")
+        before = [c["id"] for c in await (await oc.get("/api/cameras")).json()]
+        r = await oc.post("/api/card_order",
+                          json={"order": ["10.0.0.60:80#ch3", "10.0.0.32:554", "10.0.0.60:80#ch3"]})
+        saved = (await r.json())["order"]
+        after = [c["id"] for c in await (await oc.get("/api/cameras")).json()]
+        check("AB8 D3: no saved order: the cameras in their own order", before == ["a", "b", "c", "d"])
+        check("AB8 ... a saved order (duplicates dropped) comes first; other cards follow in their order",
+              saved == ["10.0.0.60:80#ch3", "10.0.0.32:554"] and after == ["c", "b", "a", "d"], str(after))
+        cd._CARD_ORDER = None      # a restart reads it from runtime.json
+        again = [c["id"] for c in await (await oc.get("/api/cameras")).json()]
+        check("AB8 ... the order survives a restart", again == after)
+        bad = [await oc.post("/api/card_order", json={"order": "x"}),
+               await oc.post("/api/card_order", json={"order": [1, 2]}),
+               await oc.post("/api/card_order", json={"order": ["k"] * 501}),
+               await oc.post("/api/card_order", data=b"{")]
+        check("AB8 ... a bad order is refused (400) and the saved one stays",
+              all(x.status == 400 for x in bad)
+              and (await (await oc.get("/api/card_order")).json())["order"] == saved)
+    finally:
+        cd.RUNTIME_FILE = real_rt
+        cd._CARD_ORDER = None
+        await oc.close()
+        cd.CAMERAS.clear()
+    check("AB9 D3: the page draws a drag handle and sends the order",
+          "cardDragStart(event,this)" in cd._JS and "'/api/card_order'" in cd._JS
+          and "_cardOrderApply(grid)" in cd._JS)
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -3373,6 +3590,7 @@ async def main():
     await test_snapshot_loop()
     await test_credentials()
     await test_301()
+    await test_310()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 
