@@ -1,6 +1,6 @@
 # Detection Zones Plan (build plan C17)
 
-Status: requirements from CrystalHeeler, 2026-10-02; answers 1 to 20 approved 2026-10-04, answers 21 to 23 for review. Not built.
+Status: requirements from CrystalHeeler, 2026-10-02; all 23 answers approved 2026-10-04. Not built.
 No version assigned.
 
 ## Why
@@ -67,7 +67,7 @@ CrystalHeeler: "I'm sure there's stuff I'm forgetting to add." Known open points
 
 ## Proposed answers (for CrystalHeeler's review, 2026-10-04)
 
-Answers 1 to 20 approved by CrystalHeeler on 2026-10-04 ("All of that sounds great"). Answers 21 to 23 added the same day, after the question how zone editing is opened; awaiting review.
+Answers 1 to 20 approved by CrystalHeeler on 2026-10-04 ("All of that sounds great"). Answers 21 to 23 added the same day, after the question how zone editing is opened, and approved ("Let's do it all!").
 
 **Drawing**
 
