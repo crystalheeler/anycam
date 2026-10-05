@@ -25,7 +25,8 @@ log = logging.getLogger("anycam")
 # Taken from camera_discovery.py at start-up (anycam_host.bind).
 NEEDS = (
     'CAMERAS', 'CARD_MAX_WIDTH', '_ANSI_ESCAPE_RE', '_THREAD_POOL',
-    '_brand_throttle_seconds', '_dahua_sub_stream', '_mjpeg_source', '_streams_refresh',
+    '_brand_throttle_seconds', '_dahua_sub_stream', '_match_stream_db', '_mjpeg_source',
+    '_streams_refresh',
     '_strip_creds', '_throttle_wait_if_needed', 'build_authenticated_url',
 )
 # 3.1.0 (B25): a card that cannot play live for one of these reasons may
@@ -203,7 +204,11 @@ def _go2rtc_profile_source(camera: dict,
     _build_focus_ladder, so both engines open the same stream for the same
     profile index and the Resolution dropdown means one thing.
     """
-    if camera.get("display") in ("webrtc", "wsrtsp", "info", "appliance"):
+    if camera.get("display") in ("webrtc", "wsrtsp"):
+        if prof_idx != 0:
+            return None, "", f"profile {prof_idx} does not exist"
+        return _go2rtc_native_source(camera)
+    if camera.get("display") in ("info", "appliance"):
         return None, "", "this camera is not an RTSP stream"
     profiles = _go2rtc_profiles(camera)
     if not 0 <= prof_idx < len(profiles):
@@ -211,6 +216,33 @@ def _go2rtc_profile_source(camera: dict,
     prof = profiles[prof_idx]
     raw = prof.get("url") or camera.get(prof.get("_url_key", "stream_url"))
     return _go2rtc_relay_url(camera, raw, (prof.get("stream_codec") or "").lower())
+
+
+def _go2rtc_native_source(camera: dict) -> tuple[str | None, str, str]:
+    """3.2.0 (C6): the go2rtc source for a WebRTC or RTSP-over-WebSocket camera.
+
+    Before 3.2.0 these cameras had an information card only. go2rtc
+    1.9.14 plays both with the modules already loaded: a WHEP source
+    (webrtc:http://..., the POST-an-offer endpoint probe_webrtc finds) and
+    RTSP with a WebSocket transport (rtsp://...#transport=ws://...). The
+    RTSP path inside the WebSocket is the brand's first stream-table path,
+    else "/".
+    """
+    display = camera.get("display")
+    if display == "webrtc":
+        sig = camera.get("signaling_url") or camera.get("stream_url") or ""
+        if not sig.lower().startswith(("http://", "https://")):
+            return None, "", "no WebRTC signalling address"
+        return f"webrtc:{build_authenticated_url(camera, url=sig) or sig}", "", "ok"
+    if display == "wsrtsp":
+        ws = camera.get("ws_url") or camera.get("stream_url") or ""
+        if not ws.lower().startswith(("ws://", "wss://")):
+            return None, "", "no WebSocket address"
+        entry = _match_stream_db(camera) or {}
+        path = (entry.get("rtsp") or ["/"])[0]
+        rtsp = f"rtsp://{camera.get('ip', '')}:{entry.get('port') or 554}{path}"
+        return f"{build_authenticated_url(camera, url=rtsp) or rtsp}#transport={ws}", "", "ok"
+    return None, "", "this camera is not a WebRTC or WebSocket stream"
 
 
 def _go2rtc_profiles(camera: dict) -> list[dict]:
@@ -299,7 +331,9 @@ def _go2rtc_card_source(camera: dict, h265: bool = True,
     stream even when it is wider than CARD_MAX_WIDTH. The Pi only passes
     the bytes; the computer decodes them.
     """
-    if camera.get("display") in ("webrtc", "wsrtsp", "info", "appliance"):
+    if camera.get("display") in ("webrtc", "wsrtsp"):
+        return _go2rtc_native_source(camera)
+    if camera.get("display") in ("info", "appliance"):
         return None, "", "this camera is not an RTSP stream"
     best: tuple[int, str, str] | None = None     # (width, url, codec)
     skipped_h265 = False

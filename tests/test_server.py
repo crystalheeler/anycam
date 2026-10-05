@@ -3477,6 +3477,61 @@ async def test_310():
           and "_cardOrderApply(grid)" in cd._JS)
 
 
+
+# ── AC. 3.2.0 ────────────────────────────────────────────────────────────────
+async def test_320():
+    print("\n[AC] 3.2.0")
+    from urllib.parse import unquote
+    wrtc = {"id": "w", "ip": "10.0.0.50", "port": 8889, "display": "webrtc", "status": "info",
+            "protocol": "WebRTC", "signaling_url": "http://10.0.0.50:8889/cam/whep",
+            "credentials": cd.encrypt_creds("admin", "p#ss")}
+    src, _, _ = cd._go2rtc_card_source(wrtc)
+    check("AC1 C6: a WebRTC camera plays through go2rtc's WHEP source, with its password",
+          src == "webrtc:http://admin:p%23ss@10.0.0.50:8889/cam/whep", str(src))
+    fsrc, _, _ = cd._go2rtc_profile_source(wrtc, 0)
+    none1, _, why1 = cd._go2rtc_profile_source(wrtc, 1)
+    check("AC1 ... Enhanced View plays it too; it has one stream",
+          fsrc == src and none1 is None and "does not exist" in why1)
+    ws = {"id": "s", "ip": "10.0.0.51", "port": 80, "display": "wsrtsp", "status": "info",
+          "protocol": "WS-RTSP", "ws_url": "ws://10.0.0.51:80/rtspoverwebsocket",
+          "manufacturer": "Hikvision", "name": "Hikvision"}
+    with _Swap(_match_stream_db=lambda c: {"rtsp": ["/Streaming/Channels/101"], "port": 554}):
+        wsrc, _, _ = cd._go2rtc_card_source(ws)
+    with _Swap(_match_stream_db=lambda c: None):
+        wsrc2, _, _ = cd._go2rtc_card_source(ws)
+    check("AC2 C6: an RTSP-over-WebSocket camera: the brand's RTSP path, carried by the WebSocket",
+          wsrc == "rtsp://10.0.0.51:554/Streaming/Channels/101#transport=ws://10.0.0.51:80/rtspoverwebsocket",
+          str(wsrc))
+    check("AC2 ... an unknown brand asks for the root path",
+          wsrc2 == "rtsp://10.0.0.51:554/#transport=ws://10.0.0.51:80/rtspoverwebsocket", str(wsrc2))
+    bad, _, why = cd._go2rtc_card_source(dict(wrtc, signaling_url="ftp://x"))
+    check("AC3 C6: a bad signalling address is refused, with the reason",
+          bad is None and "signalling" in why)
+    info, _, _ = cd._go2rtc_card_source({"display": "appliance"})
+    check("AC3 ... an information card still has no live source", info is None)
+    registered = []
+
+    async def reg(name, src_, cid):
+        registered.append(src_)
+        return True
+    real_ready = cd.anycam_go2rtc._GO2RTC_READY
+    try:
+        cd.anycam_go2rtc._GO2RTC_READY = True
+        with _Swap(_go2rtc_register=reg):
+            cd.CAMERAS.clear(); cd.CAMERAS["w"] = wrtc
+            req = make_mocked_request("GET", "/api/go2rtc/card/w", match_info={"camera_id": "w"})
+            r = json.loads((await cd.api_go2rtc_card(req)).body)
+    finally:
+        cd.anycam_go2rtc._GO2RTC_READY = real_ready
+        cd.CAMERAS.clear()
+    check("AC4 C6: the card endpoint registers the WHEP source with go2rtc",
+          r.get("ok") and registered and registered[0].startswith("webrtc:http://"), str(r))
+    check("AC5 C6: the card draws a live player and no still-picture fallback",
+          "data-nosnap" in cd._JS and "img.dataset.nosnap" in cd._JS)
+    check("AC6 C5: Enhanced View asks for sound; cards stay video only",
+          "el.media = 'video,audio'" in cd._JS and cd._JS.count("el.media = 'video';") == 1)
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -3591,6 +3646,7 @@ async def main():
     await test_credentials()
     await test_301()
     await test_310()
+    await test_320()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

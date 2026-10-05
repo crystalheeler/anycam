@@ -55,6 +55,7 @@ const DOM = {
   'focus-loading-note': el('focus-loading-note'),
   'focus-warning': el('focus-warning', {style: {display: 'none'}}),
   'focus-warn-text': el('focus-warn-text'),
+  'focus-controls': el('focus-controls', {dataset: {}}),
 };
 globalThis.HTMLElement = class { appendChild(c) { return c; } };
 globalThis.WebSocket = {CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3};
@@ -156,7 +157,7 @@ check('mount: video wrapper shown, JPEG image hidden',
       DOM['focus-video'].style.display === 'block' && DOM['focus-img'].style.display === 'none');
 check('mount: player socket URL uses the ingress path + stream name',
       s.el.wsURL === 'wss://ha.local/api/hassio_ingress/TOKEN/go2rtc/ws?src=s0', s.el.wsURL);
-check('mount: mode webrtc,mse and video only', s.el.mode === 'webrtc,mse' && s.el.media === 'video');
+check('mount: mode webrtc,mse, video and sound (C5)', s.el.mode === 'webrtc,mse' && s.el.media === 'video,audio');
 check('mount: loading message shown', loading() === 'block');
 check('info bar escapes the camera name', DOM['focus-info'].innerHTML.includes('Hikvision &lt;PTZ>'));
 check('info bar says connecting before first frame', DOM['focus-info'].innerHTML.includes('connecting'));
@@ -651,6 +652,29 @@ check('C10 the message names Chrome or Edge', /Chrome or Edge/.test(g('_h265Help
   globalThis.fetch = realFetch;
 }
 globalThis.__noH265 = false; g('_h265Support = null');
+
+console.log('\n[C5] 3.2.0 sound in live view');
+{
+  const box = DOM['focus-controls'];
+  const fake = {el: {video: {muted: true, play: () => Promise.resolve()}, mseCodecs: ''}, played: false};
+  g('_go2rtc = null'); g('_liveSoundButton()');
+  check('C5 no live view: no sound button', box.innerHTML === '');
+  globalThis.__g = fake; g('_go2rtc = globalThis.__g'); g('_liveSoundButton()');
+  check('C5 before the first frame: the button waits, disabled', /disabled/.test(box.innerHTML) && /waiting/.test(box.innerHTML));
+  fake.played = true; fake.el.mseCodecs = 'avc1.640029'; g('_liveSoundButton()');
+  check('C5 a stream with no sound: disabled, and says why', /disabled/.test(box.innerHTML) && /no sound/.test(box.innerHTML));
+  fake.el.mseCodecs = 'avc1.640029,mp4a.40.2'; g('_liveSoundButton()');
+  check('C5 a stream with sound: the button is on, the video still muted',
+        !/disabled/.test(box.innerHTML) && /Sound off/.test(box.innerHTML) && fake.el.video.muted === true);
+  g('toggleLiveSound()');
+  check('C5 a click turns the sound on', fake.el.video.muted === false && /Sound on/.test(box.innerHTML));
+  const before = box.innerHTML; box.innerHTML = 'x'; g('_liveSoundButton()');
+  check('C5 ... not redrawn every second when nothing changed', box.innerHTML === 'x');
+  box.innerHTML = before;
+  fake.el.mseCodecs = ''; fake.el.pc = {getReceivers: () => [{track: {kind: 'audio', readyState: 'live'}}]};
+  check('C5 WebRTC sound is seen from the audio track', g('_liveHasAudio(_go2rtc)') === true);
+  g('_go2rtc = null'); delete globalThis.__g;
+}
 
 console.log('\n[D3] 3.1.0 card order');
 {
