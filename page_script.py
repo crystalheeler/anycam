@@ -653,7 +653,8 @@ function initSnaps() {
     img.style.cursor = 'pointer';
     img.onclick = () => openFocus(img.dataset.snap);
     // 2.6.6: live first; snapshots when the card cannot play live.
-    if (!cardLiveAttach(img.dataset.snap)) startSnap(img.dataset.snap);
+    // 3.2.0 (C6): never snapshots for a WebRTC or WS-RTSP camera.
+    if (!cardLiveAttach(img.dataset.snap) && !img.dataset.nosnap) startSnap(img.dataset.snap);
   });
 }
 
@@ -1022,7 +1023,7 @@ function _go2rtcMount(camId, cam, info, session) {
   wrap.style.display = 'block';
   const el = document.createElement('anycam-video');
   el.mode  = 'webrtc,mse';
-  el.media = 'video';
+  el.media = 'video,audio';    // 3.2.0 (C5): sound too; it starts muted
   _go2rtc = {
     el, camId, cam, session,
     stream: info.stream,
@@ -1109,6 +1110,56 @@ function _go2rtcUpdateInfo() {
   infoEl.innerHTML =
     esc(displayName(g.cam)) + ' — <b>Live (' + esc(label) + '):</b> '
     + res + ' · ' + fps + (g.codec ? ' · ' + esc(g.codec) : '');
+  _liveSoundButton();
+}
+
+/* ── 3.2.0 (C5): sound in live view ──────────────────────────────────────
+ * Enhanced View asks go2rtc for the camera's sound as well as its video.
+ * VideoRTC offers go2rtc only the audio codecs this browser plays, so a
+ * camera whose sound the browser cannot play gives video only. The video
+ * starts muted, because browsers block sound that starts on its own; the
+ * button turns it on. Cards stay video only.
+ */
+function _liveHasAudio(g) {
+  const el = g && g.el;
+  if (!el) return false;
+  if (/mp4a|flac|opus|alaw|ulaw/i.test(el.mseCodecs || '')) return true;
+  try {
+    return !!(el.pc && el.pc.getReceivers().some(r => r.track && r.track.kind === 'audio'
+                                                      && r.track.readyState === 'live'));
+  } catch (e) { return false; }
+}
+
+function _liveSoundButton() {
+  const box = document.getElementById('focus-controls');
+  if (!box) return;
+  const g = _go2rtc;
+  const v = g && g.el && g.el.video;
+  let key = '', html = '';
+  if (g) {
+    const has = g.played && _liveHasAudio(g);
+    const on = has && v && !v.muted;
+    const title = has ? (on ? 'Turn the sound off' : 'Turn the sound on')
+                : g.played ? 'This camera sends no sound this browser can play'
+                : 'Sound: waiting for the stream';
+    key = (has ? 'a' : 'n') + (on ? '1' : '0') + (g.played ? 'p' : '');
+    html = '<button id="focus-sound" class="btn btn-ghost btn-sm" onclick="toggleLiveSound()"'
+         + (has ? '' : ' disabled') + ' title="' + title + '">'
+         + (on ? '🔊 Sound on' : '🔇 Sound off') + '</button>';
+  }
+  if (box.dataset.sound === key) return;   // redrawn only on a change, not every second
+  box.dataset.sound = key;
+  box.innerHTML = html;
+}
+
+function toggleLiveSound() {
+  const g = _go2rtc;
+  const v = g && g.el && g.el.video;
+  if (!v) return;
+  v.muted = !v.muted;
+  // A click allows sound; if the browser still refuses, stay muted.
+  if (!v.muted) Promise.resolve(v.play()).catch(() => { v.muted = true; _liveSoundButton(); });
+  _liveSoundButton();
 }
 
 function _go2rtcUnmount() {
@@ -1129,6 +1180,7 @@ function _go2rtcUnmount() {
   }
   const wrap = document.getElementById('focus-video');
   if (wrap) { wrap.innerHTML = ''; wrap.style.display = 'none'; }
+  _liveSoundButton();   // 3.2.0 (C5): no live view, no sound button
   const img = document.getElementById('focus-img');
   if (img) img.style.display = '';
 }
@@ -1457,7 +1509,12 @@ function _cardLiveFail(camId, st, reason, remember) {
   }
   delete _cardLive[camId];
   _cardLiveOff[camId] = {reason, retryAt: remember ? 0 : Date.now() + CARD_LIVE_RETRY_MS};
-  if (document.querySelector('[data-snap="' + CSS.escape(camId) + '"]')) startSnap(camId);
+  const img = document.querySelector('[data-snap="' + CSS.escape(camId) + '"]');
+  // 3.2.0 (C6): a WebRTC or WS-RTSP camera has no still pictures to fall back to
+  if (img && img.dataset && img.dataset.nosnap) {
+    const ph = document.getElementById('ph-' + camId);
+    if (ph) ph.textContent = 'Live view failed: ' + reason;
+  } else if (img) startSnap(camId);
 }
 
 // Enhanced View open: stop every card's stream; closed: resume them.
@@ -2108,15 +2165,13 @@ function feedHTML(cam) {
   if (d === 'hls' && cam.status === 'ready')
     return '<video data-hls="' + esc(cam.stream_url) + '" autoplay muted playsinline></video>';
 
-  if (d === 'webrtc')
-    return '<div class="info-overlay"><div class="pi">🔗</div><strong>WebRTC Detected</strong>'
-         + '<p>' + esc(cam.info || '') + '</p>'
-         + '<a href="' + esc(cam.signaling_url || '#') + '" target="_blank">Open endpoint ↗</a></div>';
-
-  if (d === 'wsrtsp')
-    return '<div class="info-overlay"><div class="pi">🔌</div><strong>WS-RTSP Detected</strong>'
-         + '<p>' + esc(cam.info || '') + '</p>'
-         + '<code>' + esc(cam.ws_url || '') + '</code></div>';
+  // 3.2.0 (C6): go2rtc plays a WebRTC (WHEP) or RTSP-over-WebSocket camera
+  // live. No still pictures exist for it: data-nosnap stops the fallback.
+  if (d === 'webrtc' || d === 'wsrtsp')
+    return '<img class="live" data-snap="' + esc(cam.id) + '" data-nosnap="1" alt="Live" style="display:none">'
+         + '<div class="feed-placeholder" id="ph-' + esc(cam.id) + '">'
+         + '<span>' + (d === 'webrtc' ? 'WebRTC camera' : 'RTSP over WebSocket camera')
+         + ' — starting live view…</span></div>';
 
   // 3.0.1 (B2): a camera built into an appliance, found by its MAC address
   if (d === 'appliance')

@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 4 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
+**Compiled:** 28 September 2026; updated 4 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -11,12 +11,12 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 ---
 
-## Next up: 3.2.0, in work order
+## Next up: 3.3.0, in work order
 
-3.0.1-rc1.0 and 3.1.0-rc1.0 are built (2026-10-04), not field-tested. Next, in the untested run CrystalHeeler ordered on 2026-10-04:
+3.0.1-rc1.0 to 3.2.0-rc1.0 are built (2026-10-04), not field-tested. Next, in the untested run CrystalHeeler ordered on 2026-10-04:
 
-1. **C5, audio in live view.** Muted by default, with an unmute button.
-2. **C6, cameras that speak WebRTC or RTSP-over-WebSocket.** go2rtc plays both.
+1. **C4, one camera connection through go2rtc.** go2rtc's RTSP server on 127.0.0.1 only, with a random password set at each start; AnyCam's ffmpeg jobs read from it.
+2. **B15, the classic view keeps the card's stream.** Follows from C4.
 
 ---
 
@@ -41,7 +41,7 @@ Agreed with CrystalHeeler on 2026-10-03. Mode, CrystalHeeler 2026-10-04: every p
 |---|---|---|
 | 3.0.1 | Fixes, then the Firefox message. Built: 3.0.1-rc1.0, 2026-10-04, not field-tested | **B2 first** (CrystalHeeler, 2026-10-03: "the first thing we work on"), **C10 second** (CrystalHeeler, 2026-10-03), then B20, B23, B24, B26, B12, B8, F10, C11 (also closes B3), C20 |
 | 3.1.0 | Cards. Built: 3.1.0-rc1.0, 2026-10-04, not field-tested | B25, C19, D3 |
-| 3.2.0 | Live view | C5, C6 |
+| 3.2.0 | Live view. Built: 3.2.0-rc1.0, 2026-10-04, not field-tested | C5, C6 |
 | 3.3.0 | One connection per camera | C4, B15 |
 | 3.4.0 | Detection zones | C17 |
 | 3.5.0 | Discovery and DVRs | D1, D2 |
@@ -73,8 +73,6 @@ Outside the phases: B6 waits until CrystalHeeler unlocks the Microseven.
 | C21 | Later | **Remove the classic engine** | From C20 and C19. 3.0.1-rc1.0 removed the Classic button; 3.1.0-rc1.0 made MJPEG cameras and wide streams play live in cards. The classic engine (the native-resolution snapshot loop, the adaptive ladder, the Adaptive Quality toggle) is still the fallback for a camera or browser that cannot play live | Remove it only when no camera or browser needs the fallback any more, after C10, C19 and C4 are field-tested |
 | C14 | Later | **Upload recordings to SFTP or FTP** | CrystalHeeler, 2026-09-30: per-camera recording destination, including SCP, SFTP, FTP or another remote share. Samba and NFS already work in 2.6.6 through Home Assistant's network storage under /media. SCP is SFTP in current OpenSSH | Parked (CrystalHeeler, 2026-10-02: "We'll get to it eventually"; do not propose it for a build). Upload each finished file, then delete the local copy; keep it and retry until the upload succeeds. SFTP needs asyncssh; FTP and FTPS are in Python's standard library. Passwords stored encrypted, like camera passwords |
 | C4 | Discuss | **One camera connection through go2rtc: thumbnails, motion and recording read go2rtc's local stream** | CrystalHeeler's long-term interest since April 2026 ("Fix B"). One camera connection instead of several, and go2rtc copes with cameras that break the RTSP rules. 2026-10-03 (merged from C18): CrystalHeeler, 2026-10-03, asked why everything cannot run through go2rtc. go2rtc relays without decoding, so the motion detector and the picture paths need ffmpeg (see C19). But each consumer opens its own connection to the camera today: an armed camera can have up to 5 open at once (live card, Enhanced View, detector, recording buffer, snapshot loop). The Microseven resets connections and DVRs limit sessions. go2rtc's MP4 output (module `mp4`) is already loaded | Discuss, then design: (1) go2rtc holds the only connection to each camera stream; AnyCam's ffmpeg jobs read from go2rtc's RTSP server on 127.0.0.1. That server is off by design (security model in `anycam_go2rtc.py`), so a security review comes first. (2) Recording saves go2rtc's MP4 output to files without the buffer ffmpeg; the 3 s of pre-event video needs its own design. No version: phases are planned after 3.0.0 Approved 2026-10-04 (CrystalHeeler): go2rtc's RTSP server on, listening on 127.0.0.1 only, with a random password set at each start, so no other program on the Pi can read the cameras through it. 3.3.0 |
-| C5 | Ready | Audio in live view | 2.6.3 plays video only | Decided 2026-10-04 (CrystalHeeler): audio in live view, muted by default with an unmute button (browsers block sound that starts on its own); check the audio codec each browser plays. 3.2.0 |
-| C6 | Ready | Cameras that speak WebRTC or RTSP-over-WebSocket | Detected since 1.x, but shown as information cards only | CrystalHeeler, 2026-10-04: build without further input; go2rtc plays both. Neither test system has such a camera, so the field test cannot cover it. 3.2.0 |
 | C9 | Later | Pi 4 decoder overlay check or toggle | Deferred since 2.2.8 | Lower priority now that live view does no decoding on the Pi |
 
 ## D. Discovery and device support
@@ -100,6 +98,8 @@ Outside the phases: B6 waits until CrystalHeeler unlocks the Microseven.
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
+| Sound in live view (C5) | This plan, C5 | 3.2.0-rc1.0: Enhanced View asks go2rtc for video and audio; VideoRTC offers only the audio codecs the browser plays; muted at the start, a Sound button turns it on, grey when there is no playable sound. Cards stay video only. Page section C5, test AC6. Not field-tested |
+| WebRTC and RTSP-over-WebSocket cameras play live (C6) | This plan, C6 | 3.2.0-rc1.0: go2rtc's WHEP source (`webrtc:http://...`) and RTSP with `#transport=ws://...`, both in go2rtc 1.9.14 with the modules already loaded; card and Enhanced View; no still-picture fallback. Tests AC1 to AC5. No test system has such a camera |
 | Saved streams read again when out of date (B25) | This plan, B25 | 3.1.0-rc1.0: when a card cannot use the saved streams, or after 5 failed stream starts, AnyCam runs the password step again with the saved password, at most once every 6 hours for each camera; not for DVR channel cards. Tests AB3, AB7. Not field-tested |
 | Fewer snapshot cards (C19) | This plan, C19 | 3.1.0-rc1.0: an HTTP MJPEG camera plays its stream live in the card through `anycam_mjpeg.py` (one camera connection, JPEGs over a WebSocket, no decoding); a stream wider than 1,920 plays live on a computer, still pictures on a phone. Tests AB1 to AB6, page section C19. RTSP MJPEG still shows pictures. Not field-tested |
 | Drag to reorder cards (D3) | This plan, D3 | 3.1.0-rc1.0: a drag handle on each card; the order is saved by the add-on (`/api/card_order`, runtime.json) and `/api/cameras` returns the cameras in it. Tests AB8, AB9, page section D3. Not field-tested |

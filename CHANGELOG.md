@@ -1,3 +1,23 @@
+## 3.2.0-rc1.0
+
+Enhanced View plays the camera's sound, and cameras that speak WebRTC or RTSP over WebSocket now play live. Not field-tested.
+
+### Changes & improvements
+
+- **Sound in Enhanced View.** Live view now gets the camera's sound. It starts muted; the new Sound button turns it on. The button is grey when the camera sends no sound this browser can play.
+- **WebRTC cameras play live.** A camera with a WebRTC (WHEP) address had an information card only. Its card and Enhanced View now play it through go2rtc.
+- **RTSP-over-WebSocket cameras play live.** The same for a camera that carries RTSP inside a WebSocket.
+
+### Bugs fixed
+
+- None in this release.
+
+### Known issues
+
+- **Cards play no sound.** Only Enhanced View has sound.
+- **No test system has a WebRTC or RTSP-over-WebSocket camera**, so these cards are not field-tested. For an RTSP-over-WebSocket camera of an unknown brand, AnyCam asks for the root stream path.
+- **The Microseven is not tested** with this release.
+
 ## 3.1.0-rc1.0
 
 More cards play live, out-of-date saved streams are read again by AnyCam itself, and you can drag cards into the order you want. Not field-tested.
