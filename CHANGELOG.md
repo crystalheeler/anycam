@@ -1,3 +1,26 @@
+## 3.6.0-rc1.0
+
+Recordings can be uploaded to a server by SFTP, FTPS or FTP, for all cameras or for one. Not field-tested.
+
+### Changes & improvements
+
+- **Upload recordings.** Set a destination in the Storage tab (Upload). Each finished recording goes to <folder>/<camera>/ on the server.
+- **For each camera.** In a camera's settings, Upload chooses the global destination, the camera's own, or no upload.
+- **The local copy is deleted after the upload,** unless you clear that box. A failed upload is tried again after 1 min, then less often up to 30 min; the file stays until the upload succeeds, also across restarts.
+- **Passwords are stored encrypted,** like camera passwords, and never sent back to the page.
+- **Test** uploads a small file to check the destination.
+- **SFTP checks the server.** Its key is saved at the first upload; a changed key stops the uploads, with a log line.
+
+### Bugs fixed
+
+- None in this release.
+
+### Known issues
+
+- **FTP is unencrypted.** The form says so; use SFTP or FTPS where the server offers them.
+- **A recording is uploaded only when it has stopped**, not while it is still recording.
+- **The Microseven is not tested** with this release.
+
 ## 3.5.0-rc1.0
 
 A Lorex or Dahua DVR is walked for the channels it reports, and the two camera databases are one. Not field-tested.

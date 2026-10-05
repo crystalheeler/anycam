@@ -879,6 +879,130 @@ async function csEditZones() {
   if (_focusCamId === camId) zoneEditOpen();
 }
 
+/* ── 3.6.0 (C14): recording upload ──────────────────────────────────────
+ * One form for the global destination (Storage tab) and for one camera
+ * (its settings). The password is never sent back to the page: an empty
+ * password field keeps the saved one.
+ */
+let _upCam = null;          // the camera the form is for; null = global
+let _upData = null;         // the last answer from /api/upload/settings
+const UP_PORTS = {sftp: 22, ftps: 21, ftp: 21};
+
+function _upURL(path) {
+  return BASE + path + (_upCam ? '?camera_id=' + encodeURIComponent(_upCam) : '');
+}
+
+async function openUpload(camId) {
+  _upCam = camId || null;
+  if (_csCamId) closeCamSettings();
+  const cam = _upCam && cameras.find(c => c.id === _upCam);
+  document.getElementById('up-title').textContent = _upCam
+    ? 'Upload — ' + (cam ? displayName(cam) : _upCam) : 'Upload recordings: global destination';
+  document.getElementById('up-error').textContent = '';
+  document.getElementById('up-status').textContent = '';
+  document.getElementById('upload-modal').classList.add('open');
+  try { _upData = await (await fetch(_upURL('/api/upload/settings'))).json(); }
+  catch (e) { document.getElementById('up-error').textContent = 'Could not load: ' + e; return; }
+  _upFill();
+}
+
+function closeUpload() {
+  _upCam = null;
+  document.getElementById('upload-modal').classList.remove('open');
+}
+
+function _upFill() {
+  const d = _upData || {};
+  const camEntry = d.camera;
+  const t = camEntry ? (camEntry.target || null) : d.global;
+  document.getElementById('up-mode-row').style.display = camEntry ? '' : 'none';
+  document.getElementById('up-remove').style.display = (!camEntry && d.global) ? '' : 'none';
+  if (camEntry) document.getElementById('up-mode').value = camEntry.mode || 'global';
+  document.getElementById('up-proto').value = (t && t.protocol) || 'sftp';
+  document.getElementById('up-host').value  = (t && t.host) || '';
+  document.getElementById('up-port').value  = (t && t.port) || UP_PORTS[(t && t.protocol) || 'sftp'];
+  document.getElementById('up-user').value  = (t && t.username) || '';
+  document.getElementById('up-pass').value  = '';
+  document.getElementById('up-pass').placeholder = (t && t.has_password) ? 'saved; type to change' : '';
+  document.getElementById('up-path').value  = (t && t.path) || '/anycam';
+  document.getElementById('up-delete').checked = !t || t.delete_local !== false;
+  const g = d.global;
+  document.getElementById('up-global-note').textContent = g
+    ? 'Global destination: ' + g.protocol.toUpperCase() + ' ' + g.host + g.path
+    : 'No global destination is set (Storage tab, Upload).';
+  const st = d.status || {};
+  document.getElementById('up-status').textContent = (d.queue ? d.queue + ' recording(s) waiting to upload. ' : '')
+    + (st.last_error ? 'Last error: ' + st.last_error : '');
+  upModeShow();
+}
+
+function upModeShow() {
+  const own = !_upCam || document.getElementById('up-mode').value === 'own';
+  document.getElementById('up-fields').style.display = own ? '' : 'none';
+  document.getElementById('up-global-note').style.display = (_upCam && !own) ? '' : 'none';
+  upProtoPort(false);
+}
+
+function upProtoPort(setPort) {
+  const p = document.getElementById('up-proto').value;
+  if (setPort !== false) document.getElementById('up-port').value = UP_PORTS[p];
+  document.getElementById('up-ftp-warn').style.display = p === 'ftp' ? '' : 'none';
+}
+
+function _upTarget() {
+  return {protocol: document.getElementById('up-proto').value,
+          host: document.getElementById('up-host').value.trim(),
+          port: parseInt(document.getElementById('up-port').value, 10),
+          username: document.getElementById('up-user').value.trim(),
+          password: document.getElementById('up-pass').value,
+          path: document.getElementById('up-path').value.trim(),
+          delete_local: document.getElementById('up-delete').checked};
+}
+
+async function _upPost(path, body) {
+  const r = await fetch(_upURL(path), {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                       body: JSON.stringify(body)});
+  return [r.ok, await r.json().catch(() => ({}))];
+}
+
+async function saveUpload() {
+  const err = document.getElementById('up-error');
+  const body = _upCam ? {mode: document.getElementById('up-mode').value, target: _upTarget()} : _upTarget();
+  try {
+    const [ok, d] = await _upPost('/api/upload/settings', body);
+    if (!ok) { err.textContent = d.error || 'Could not save'; return false; }
+    _upData = d;
+  } catch (e) { err.textContent = 'Could not save: ' + e; return false; }
+  closeUpload();
+  showToast('Upload settings saved');
+  return true;
+}
+
+async function removeUpload() {
+  try {
+    const [ok, d] = await _upPost('/api/upload/settings', {off: true});
+    if (!ok) { document.getElementById('up-error').textContent = d.error || 'Could not remove'; return; }
+  } catch (e) { return; }
+  closeUpload();
+  showToast('Global upload destination removed');
+}
+
+// Save first, so the test uses what is on the form.
+async function testUpload() {
+  const st = document.getElementById('up-status'), err = document.getElementById('up-error');
+  err.textContent = '';
+  const body = _upCam ? {mode: document.getElementById('up-mode').value, target: _upTarget()} : _upTarget();
+  const [ok, d] = await _upPost('/api/upload/settings', body).catch(e => [false, {error: String(e)}]);
+  if (!ok) { err.textContent = d.error || 'Could not save'; return; }
+  _upData = d;
+  document.getElementById('up-pass').value = '';
+  document.getElementById('up-pass').placeholder = 'saved; type to change';
+  st.textContent = 'Testing…';
+  const [, t] = await _upPost('/api/upload/test', {}).catch(e => [false, {ok: false, error: String(e)}]);
+  st.textContent = t.ok ? 'Test file uploaded: ' + t.remote : '';
+  if (!t.ok) err.textContent = 'Test failed: ' + (t.error || 'no answer');
+}
+
 async function resetCamSettings() {
   const camId = _csCamId;
   if (!camId) return;
@@ -1888,6 +2012,7 @@ document.addEventListener('keydown', e => {
   if (zoneKey(e)) return;   // 3.4.0: the zone window uses Esc, Enter and Backspace
   if (e.key === 'Escape' && _focusCamId) closeFocus();
   else if (e.key === 'Escape' && _csCamId) closeCamSettings();
+  else if (e.key === 'Escape' && document.getElementById('upload-modal').classList.contains('open')) closeUpload();
 });
 
 // When the browser tab returns to focus after being backgrounded, the browser

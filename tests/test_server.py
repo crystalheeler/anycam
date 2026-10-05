@@ -1001,7 +1001,8 @@ async def test_cam_settings():
     check("L12 Identity starts with protocol, IP and port",
           "rows.push(['Protocol'" in html and html.index("rows.push(['Protocol'") < html.index("rows.push(['IP address'")
           < html.index("rows.push(['Port'") < html.index("rows.push(['Manufacturer'"))
-    check("L13 test-stream endpoint removed", "handle_stream_test" not in src and "/test\"" not in src)
+    check("L13 test-stream endpoint removed",   # 3.6.0: /api/upload/test is the upload test, not it
+          "handle_stream_test" not in src and "/test\"" not in src.replace('"/api/upload/test"', ""))
 
     # L14 file names: _partNN only for a split event
     import tempfile
@@ -1713,8 +1714,8 @@ async def test_location_check():
         cd._HA_LOCATION.clear(); cd._HA_LOC_STATE.update(next=0.0, mismatch=False)
         cd._MOTION.clear()
     src = repo_source()
-    check("Q4 cog help no longer promises SFTP for 2.6.8",
-          "planned for a later version" in src and "planned for 2.6.8" not in src)
+    check("Q4 cog help no longer promises SFTP for 2.6.8; since 3.6.0 it points to Upload",
+          "SFTP, FTPS or FTP, use Upload" in src and "planned for 2.6.8" not in src)
 
 
 # ── R. 3.0.0-rc1.0 no credentials in any log line (E4) ──────────────────────
@@ -3846,6 +3847,222 @@ async def test_350():
         _db.CAMERA_DB[:] = real
 
 
+
+# ── AG. 3.6.0 ────────────────────────────────────────────────────────────────
+async def test_360():
+    print("\n[AG] 3.6.0")
+    import types
+    U = cd.anycam_upload
+    real_data = cd.DATA_DIR
+    cd.DATA_DIR = SCRATCH / "upload_data"
+    cd.DATA_DIR.mkdir(exist_ok=True)
+    U._STATE.update(global_=None)
+    U._STATE.pop("global_", None)
+    U._STATE.update({"global": None, "cameras": {}, "host_keys": {}})
+    U._QUEUE.clear()
+    try:
+        t, e = U.validate_target({"protocol": "SFTP", "host": "nas.example", "username": "rec",
+                                  "password": "s3cret", "path": "/anycam/"}, None)
+        check("AG1 C14: a destination is checked; the password is stored encrypted",
+              not e and t["port"] == 22 and t["path"] == "/anycam" and "s3cret" not in json.dumps(t)
+              and cd.decrypt_creds(t["credentials"]) == ("rec", "s3cret") and t["delete_local"] is True, str(e))
+        bad = [U.validate_target(d, None)[1] for d in (
+            {"protocol": "scp", "host": "h", "username": "u", "password": "p"},
+            {"protocol": "ftp", "host": "a b", "username": "u", "password": "p"},
+            {"protocol": "ftp", "host": "h", "port": 70000, "username": "u", "password": "p"},
+            {"protocol": "ftp", "host": "h", "username": "u", "password": "p", "path": "/a/../b"},
+            {"protocol": "ftp", "host": "h", "username": "u"})]
+        check("AG1 ... refused: an unknown protocol, a bad server, port, folder, no password",
+              all(bad), str([bool(b) for b in bad]))
+        t2, e2 = U.validate_target({"protocol": "sftp", "host": "nas.example", "username": "rec",
+                                    "password": "", "path": "/x"}, t)
+        check("AG1 ... an empty password field keeps the saved password", not e2 and t2["credentials"] == t["credentials"])
+        check("AG2 C14: the page never gets the password",
+              "credentials" not in U.public_target(t) and U.public_target(t)["has_password"] is True)
+
+        # where each camera's recordings go
+        cd.CAMERAS.clear()
+        for cid in ("a", "b", "c"):
+            cd.CAMERAS[cid] = camera(id=cid)
+        U._STATE["global"] = t
+        own = dict(t, host="other.example")
+        U._STATE["cameras"] = {"b": {"mode": "own", "target": own}, "c": {"mode": "off"}}
+        check("AG3 C14: global for a camera with no entry, its own, or none",
+              U.target_for("a") is t and U.target_for("b") is own and U.target_for("c") is None)
+
+        # the queue
+        rec_dir = SCRATCH / "upload_media" / "LorexCH4"
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        f1, f2 = rec_dir / "LorexCH4_20261004_101010.mp4", rec_dir / "LorexCH4_20261004_111111.mp4"
+        f1.write_bytes(b"video1"); f2.write_bytes(b"video2")
+        U.enqueue("c", [f1])
+        U.enqueue("a", [f1]); U.enqueue("a", [f1])
+        saved_q = json.loads(U._queue_file().read_text(encoding="utf-8"))
+        check("AG4 C14: a finished recording is queued once; a camera set to off is not",
+              len(U._QUEUE) == 1 and U._QUEUE[0]["camera_id"] == "a" and len(saved_q) == 1)
+        U._QUEUE.clear(); U.upload_load()
+        check("AG4 ... the queue survives a restart", len(U._QUEUE) == 1)
+
+        # FTP and FTPS
+        calls = []
+
+        class FakeFTP:
+            def __init__(self, timeout=None):
+                calls.append(("new", type(self).__name__))
+            def connect(self, host, port): calls.append(("connect", host, port))
+            def login(self, u, p): calls.append(("login", u, p))
+            def prot_p(self): calls.append(("prot_p",))
+            def mkd(self, d):
+                calls.append(("mkd", d))
+                if d == "/anycam":
+                    raise U.ftplib.error_perm("550 exists")
+            def storbinary(self, cmd, fh): calls.append(("stor", cmd, fh.read()))
+            def delete(self, f): raise U.ftplib.error_perm("550 no file")
+            def rename(self, a, b): calls.append(("rename", a, b))
+            def quit(self): calls.append(("quit",))
+            def close(self): pass
+
+        class FakeTLS(FakeFTP):
+            pass
+        real_ftp, real_tls = U.ftplib.FTP, U.ftplib.FTP_TLS
+        U.ftplib.FTP, U.ftplib.FTP_TLS = FakeFTP, FakeTLS
+        try:
+            await U.upload_one(dict(t, protocol="ftp", port=21), f1)
+            ftp_calls = list(calls); calls.clear()
+            await U.upload_one(dict(t, protocol="ftps", port=21), f1)
+        finally:
+            U.ftplib.FTP, U.ftplib.FTP_TLS = real_ftp, real_tls
+        check("AG5 C14: FTP: folders made, written as .part, then renamed into <folder>/<camera>/",
+              ("mkd", "/anycam/LorexCH4") in ftp_calls
+              and ("stor", "STOR /anycam/LorexCH4/LorexCH4_20261004_101010.mp4.part", b"video1") in ftp_calls
+              and ("rename", "/anycam/LorexCH4/LorexCH4_20261004_101010.mp4.part",
+                   "/anycam/LorexCH4/LorexCH4_20261004_101010.mp4") in ftp_calls
+              and ("prot_p",) not in ftp_calls, str(ftp_calls))
+        check("AG5 ... FTPS encrypts the data connection too",
+              ("new", "FakeTLS") in calls and ("prot_p",) in calls)
+
+        # SFTP, with a stand-in for asyncssh
+        sftp_log, key = [], {"fp": "SHA256:aaaa"}
+
+        class Key:
+            def get_fingerprint(self): return key["fp"]
+
+        class Sftp:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def makedirs(self, d, exist_ok=False): sftp_log.append(("makedirs", d))
+            async def put(self, a, b): sftp_log.append(("put", Path(a).name, b))
+            async def exists(self, p): return False
+            async def remove(self, p): sftp_log.append(("remove", p))
+            async def rename(self, a, b): sftp_log.append(("rename", a, b))
+
+        class Conn:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            def get_server_host_key(self): return Key()
+            def start_sftp_client(self): return Sftp()
+        fake_ssh = types.ModuleType("asyncssh")
+        fake_ssh.connect = lambda host, **kw: (sftp_log.append(("connect", host, kw.get("port"),
+                                                                kw.get("username"))), Conn())[1]
+        real_mod = sys.modules.get("asyncssh")
+        sys.modules["asyncssh"] = fake_ssh
+        try:
+            U._STATE["host_keys"].clear()
+            await U.upload_one(t, f1)
+            first = dict(U._STATE["host_keys"])
+            key["fp"] = "SHA256:bbbb"
+            try:
+                await U.upload_one(t, f1)
+                changed = None
+            except RuntimeError as ex:
+                changed = str(ex)
+        finally:
+            if real_mod is None:
+                sys.modules.pop("asyncssh", None)
+            else:
+                sys.modules["asyncssh"] = real_mod
+        check("AG6 C14: SFTP: login, folders, .part then rename",
+              ("connect", "nas.example", 22, "rec") in sftp_log
+              and ("put", "LorexCH4_20261004_101010.mp4", "/anycam/LorexCH4/LorexCH4_20261004_101010.mp4.part") in sftp_log
+              and ("rename", "/anycam/LorexCH4/LorexCH4_20261004_101010.mp4.part",
+                   "/anycam/LorexCH4/LorexCH4_20261004_101010.mp4") in sftp_log, str(sftp_log))
+        check("AG6 ... the server's key is saved at the first upload; a changed key stops the upload",
+              first == {"nas.example:22": "SHA256:aaaa"} and changed and "key changed" in changed)
+
+        # the worker: success deletes the local copy; failure keeps it and waits
+        U._QUEUE.clear()
+        U._QUEUE.append({"file": str(f1), "camera_id": "a", "tries": 0, "next": 0.0})
+        U._QUEUE.append({"file": str(f2), "camera_id": "a", "tries": 0, "next": 0.0})
+        outcomes = {"LorexCH4_20261004_101010.mp4": None, "LorexCH4_20261004_111111.mp4": "refused"}
+
+        async def fake_upload(target, local):
+            if outcomes[local.name]:
+                raise OSError(outcomes[local.name])
+        CAP.lines.clear()
+        with _Swap(upload_one=fake_upload):
+            await U._upload_due(); await U._upload_due()
+            again = await U._upload_due()
+        check("AG7 C14: an uploaded file is deleted here and leaves the queue",
+              not f1.exists() and all(q["file"] != str(f1) for q in U._QUEUE)
+              and any("uploaded to SFTP nas.example; local copy deleted" in l for l in CAP.lines))
+        q2 = next(q for q in U._QUEUE if q["file"] == str(f2))
+        check("AG7 ... a failed upload keeps the file and waits 60 s, doubling to 30 min",
+              f2.exists() and q2["tries"] == 1 and 55 < q2["next"] - time.time() < 65 and again is False
+              and sum("failed (refused)" in l for l in CAP.lines) == 1)
+
+        # the endpoints
+        U._STATE.update({"global": None, "cameras": {}})
+        mk = lambda method, query="", body=None: _req(method, "/api/upload/settings" + query, body)
+        U._STATE["host_keys"]["nas.example:21"] = "SHA256:old"
+        r = await U.api_upload_settings(mk("POST", "", {"protocol": "ftps", "host": "nas.example",
+                                                        "username": "rec", "password": "pw", "path": "/r"}))
+        d = json.loads(r.body)
+        check("AG8 C14: the global destination is saved; the answer has no password",
+              r.status == 200 and d["global"]["protocol"] == "ftps" and d["global"]["port"] == 21
+              and "pw" not in r.body.decode() and "credentials" not in r.body.decode()
+              and json.loads(U._settings_file().read_text(encoding="utf-8"))["global"]["host"] == "nas.example")
+        check("AG8 ... saving a destination again accepts its server's key anew",
+              "nas.example:21" not in U._STATE["host_keys"])
+        r_own = await U.api_upload_settings(mk("POST", "?camera_id=b", {"mode": "own", "target": {
+            "protocol": "sftp", "host": "cam-nas.example", "username": "u", "password": "p"}}))
+        r_off = await U.api_upload_settings(mk("POST", "?camera_id=c", {"mode": "off"}))
+        r_bad = await U.api_upload_settings(mk("POST", "?camera_id=c", {"mode": "sometimes"}))
+        r_404 = await U.api_upload_settings(mk("GET", "?camera_id=nope"))
+        check("AG8 ... a camera's own destination, off, a bad mode (400), an unknown camera (404)",
+              r_own.status == 200 and U.target_for("b")["host"] == "cam-nas.example"
+              and r_off.status == 200 and U.target_for("c") is None and r_bad.status == 400
+              and r_404.status == 404)
+
+        async def ok_upload(target, local):
+            return None
+        with _Swap(upload_one=ok_upload):
+            tr = json.loads((await U.api_upload_test(mk("POST"))).body)
+        check("AG9 C14: Test uploads a small file to the destination",
+              tr["ok"] is True and tr["remote"].startswith("/r/anycam_upload_test/anycam-test-"), str(tr))
+
+        # the recorder hands finished files over
+        U._QUEUE.clear()
+        f3 = rec_dir / "LorexCH4_20261004_121212_part01.mp4"
+        f3.write_bytes(b"v3")
+        ms = {"clip_base": "LorexCH4_20261004_121212", "clip_path": f3}
+        cd._motion_finish_files("a", ms)
+        check("AG10 C14: a finished recording goes to the upload queue under its final name",
+              [q["file"] for q in U._QUEUE] == [str(rec_dir / "LorexCH4_20261004_121212.mp4")])
+    finally:
+        cd.DATA_DIR = real_data
+        U._STATE.update({"global": None, "cameras": {}, "host_keys": {}})
+        U._QUEUE.clear()
+        cd.CAMERAS.clear()
+
+
+def _req(method, path, body=None):
+    req = make_mocked_request(method, path)
+    async def _json():
+        return body
+    req.json = _json
+    return req
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -3967,6 +4184,7 @@ async def main():
     await test_330()
     await test_340()
     await test_350()
+    await test_360()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

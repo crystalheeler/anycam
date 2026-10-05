@@ -27,6 +27,7 @@ import anycam_focus
 from anycam_go2rtc import _go2rtc_profiles      # 3.0.0-rc1.2: it moved there
 from anycam_go2rtc import _go2rtc_relay, _go2rtc_relay_result     # 3.3.0 (C4)
 import anycam_zones                                                 # 3.4.0 (C17)
+import anycam_upload                                                # 3.6.0 (C14)
 
 log = logging.getLogger("anycam")
 
@@ -513,12 +514,15 @@ def _motion_finish_files(camera_id: str, ms: dict) -> None:
             log.warning(f"Motion [{camera_id}]: could not rename {parts[0].name}: {ex}")
             single = parts[0]
         log.info(f"Motion [{camera_id}]: recording stopped → {single}")
+        parts = [single]
     elif parts:
         log.info(f"Motion [{camera_id}]: recording stopped → {len(parts)} files, "
                  f"{parts[0].name} to {parts[-1].name}")
     else:
         log.warning(f"Motion [{camera_id}]: recording stopped, but no file was "
                     f"written in {clip.parent} — see the REC: lines above")
+    # 3.6.0 (C14): upload the finished files, if the camera has a destination
+    anycam_upload.enqueue(camera_id, parts)
 
 
 def _motion_quiet(camera_id: str, ms: dict, now_m: float) -> bool:

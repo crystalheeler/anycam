@@ -95,6 +95,9 @@ from anycam_credentials import (
     _match_stream_db, _streams_refresh, api_add_camera, api_clear_credentials,
     api_deep_reprobe, api_dvr_enum_status, api_set_credentials,
 )
+# 3.6.0 (C14): recording upload.
+import anycam_upload
+from anycam_upload import api_upload_settings, api_upload_test, upload_load, upload_worker
 # 3.1.0 (C19): live MJPEG cards.
 import anycam_mjpeg
 from anycam_mjpeg import _mjpeg_source, handle_mjpeg_ws
@@ -214,7 +217,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.5.0-rc1.0"  # must match config.yaml
+CURRENT_VERSION = "3.6.0-rc1.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1468,6 +1471,8 @@ def make_app() -> web.Application:
     app.router.add_get(   "/api/logs",                            api_logs)
     app.router.add_get(   "/api/self",                            api_self)
     app.router.add_route("*", "/api/card_order",                     api_card_order)
+    app.router.add_route("*", "/api/upload/settings",                api_upload_settings)
+    app.router.add_post(  "/api/upload/test",                        api_upload_test)
     app.router.add_get(   "/api/mjpeg/{camera_id}/ws",            handle_mjpeg_ws)
     app.router.add_post(  "/snap/focus/{camera_id}",              handle_focus_set)
     app.router.add_delete("/snap/focus",                          handle_focus_clear)
@@ -1885,6 +1890,9 @@ async def main() -> None:
     # loops within MOTION_KEEPER_S, with or without a viewer.
     _motion_load()
     _MOTION_TASK = asyncio.create_task(_motion_keeper())
+    # 3.6.0 (C14): recordings waiting to upload, then the uploader
+    upload_load()
+    asyncio.create_task(upload_worker())
 
     # ── Graceful shutdown plumbing ────────────────────────────────────────────
     # _STOP_EVENT is set by SIGTERM/SIGINT handlers below. main() blocks on it,
@@ -1955,7 +1963,7 @@ async def main() -> None:
 
 
 # 3.0.0-rc1.1: give the other modules the names they take from this file.
-anycam_host.bind(globals(), anycam_motion, anycam_storage, anycam_go2rtc, anycam_probe, anycam_scan, anycam_brand, anycam_page, anycam_focus, anycam_snap, anycam_credentials, anycam_mjpeg)
+anycam_host.bind(globals(), anycam_motion, anycam_storage, anycam_go2rtc, anycam_probe, anycam_scan, anycam_brand, anycam_page, anycam_focus, anycam_snap, anycam_credentials, anycam_mjpeg, anycam_upload)
 
 if __name__ == "__main__":
     asyncio.run(main())

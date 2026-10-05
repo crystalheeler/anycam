@@ -670,7 +670,8 @@ def _check_build_inputs() -> bool:
             return any(f.endswith(".whl") and "manylinux" in f and f"_{arch}" in f
                        and re.search(r"-(cp311-cp311|cp3\d+-abi3|py3-none)-", f)
                        for f in files)
-        if has("aarch64") and has("x86_64"):
+        # 3.6.0: a pure-Python wheel (asyncssh) installs on every platform
+        if any(f.endswith("-py3-none-any.whl") for f in files) or (has("aarch64") and has("x86_64")):
             ok(f"pip {name}=={ver} has CPython 3.11 wheels for aarch64 and x86_64")
         else:
             fail(f"F1 pip {name}=={ver}: no CPython 3.11 manylinux wheel for both "
