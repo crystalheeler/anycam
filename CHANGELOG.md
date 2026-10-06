@@ -1,3 +1,25 @@
+## 3.7.3
+
+Live view now gives up when no picture really arrives, Firefox gets a second try over WebRTC, the classic view shows real pictures, and cards on still pictures ask far less often. Not field-tested.
+
+### Changes & improvements
+
+- **Cards on still pictures ask once per new picture,** not 8 times a second. Five DVR channels went from about 40 requests a second to about 4.
+- **Enhanced View tries WebRTC, video only, before the classic view** when no picture arrives in 15 s.
+- **The start-up log line names the AnyCam version.**
+- **The hardware picture test also tries the camera's smallest H.265 stream,** to tell a lack of decoder memory from a decoder fault.
+
+### Bugs fixed
+
+- **A card or Enhanced View could stay black for good.** It counted the stream's description, or the browser's "playing" signal, as a picture. Now only a decoded picture counts.
+- **The classic view showed one grey or frozen picture.** ffmpeg repeated its first picture; it now sends each decoded picture once.
+- **Firefox: Enhanced View stayed black on H.265 cameras whose cards played.**
+
+### Known issues
+
+- **Hardware HEVC decode on the Pi gives a green picture;** AnyCam switches that camera to software. The picture test results decide the fix.
+- **One Amcrest camera can get two cards** (under investigation).
+
 ## 3.7.2
 
 Cards that cannot play live now fall back to still pictures, cards keep their last picture while a stream restarts, and a broken hardware picture switches to software. Not field-tested.

@@ -32,7 +32,7 @@ log = logging.getLogger("anycam")
 # Taken from camera_discovery.py at start-up (anycam_host.bind).
 NEEDS = (
     'ACD_ESCALATED_COOLDOWN', 'CAMERAS', 'CFG_ADAPTIVE_QUALITY', 'CFG_HW_DECODE',
-    'CFG_LOW_LATENCY', '_FOCUS_ADAPTIVE', '_HW_DECODER_CANDIDATES',
+    'CFG_LOW_LATENCY', '_FOCUS_ADAPTIVE', '_HW_DECODER_CANDIDATES', '_dahua_sub_stream',
     '_HW_PROBED', '_HW_UNAVAILABLE', '_LOG_BUFFER', '_SNAP',
     '_THREAD_POOL', '_acd_active', '_brand_throttle_seconds', '_snap_last_access',
     '_snap_state', '_strip_creds', '_throttle_wait_if_needed', 'build_authenticated_url',
@@ -72,7 +72,7 @@ _HW_FROZEN: dict[str, str] = {}              # camera_id -> hw label that froze
 _HW_TEST_RESULTS: dict[str, dict] = {}       # camera_id -> last _hw_picture_test report
 HW_TEST_PIXELS = 8 * 8 * 3                   # one 8x8 RGB picture
 HW_TEST_WORDS = ("hwaccel", "v4l2", "drm", "sand", "error", "fail", "invalid",
-                 "cannot", "not supported", "impossible")
+                 "cannot", "not supported", "impossible", "video:")   # video: the codec line
 
 
 def _hw_frozen_step(same: int, last_len: int, frame_len: int) -> tuple[int, int, bool]:
@@ -110,7 +110,31 @@ def _cma_info() -> str:
     return ", ".join(f"{k} {v}" for k, v in vals.items()) or "not reported"
 
 
-async def _hw_picture_test(camera_id: str, url: str, hw_args: list[str]) -> dict:
+def _hw_small_stream(camera: dict, url: str) -> str | None:
+    """3.7.3 (B37): the camera's smallest H.265 stream other than url, as a URL.
+
+    A smaller picture needs less decoder memory, so its hardware result
+    tells a lack of memory from a decoder fault. A DVR channel that knows
+    only its main stream uses the Dahua sub-stream (subtype=1).
+    """
+    plain = _strip_creds(url)
+    best = None
+    for prof in camera.get("stream_profiles") or []:
+        p_url = prof.get("url")
+        codec = (prof.get("stream_codec") or "").lower()
+        if not p_url or codec not in ("hevc", "h265") or _strip_creds(p_url) == plain:
+            continue
+        width = prof.get("stream_width") or 0
+        if best is None or (width and width < best[0]):
+            best = (width or 10 ** 6, p_url)
+    if best:
+        return build_authenticated_url(camera, url=best[1])
+    sub = _dahua_sub_stream(camera.get("stream_url") or "")
+    return build_authenticated_url(camera, url=sub) if sub else None
+
+
+async def _hw_picture_test(camera_id: str, url: str, hw_args: list[str],
+                           small_url: str | None = None) -> dict:
     """3.7.2 (B37): decode a few pictures each way and say which ways give a real one.
 
     Software is the reference. The hardware ways: as AnyCam runs it; with
@@ -125,11 +149,14 @@ async def _hw_picture_test(camera_id: str, url: str, hw_args: list[str]) -> dict
         variants.append(("hardware, drm_prime frames and hwdownload",
                          hw_args[:2] + ["-hwaccel_output_format", "drm_prime"] + hw_args[2:],
                          "hwdownload,format=yuv420p,"))
+    runs = [(name, url, args, pre) for name, args, pre in variants]
+    if small_url:
+        runs.append(("hardware, the camera's smallest stream", small_url, hw_args, "format=yuvj420p,"))
     report = {"camera": camera_id, "cma": await asyncio.to_thread(_cma_info), "runs": []}
     log.info(f"HW TEST [{camera_id}]: kernel memory for the decoder: {report['cma']}")
-    for name, args, pre in variants:
+    for name, run_url, args, pre in runs:
         cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-v", "verbose",
-               "-rtsp_transport", "tcp", "-timeout", "8000000", *args, "-i", url, "-an",
+               "-rtsp_transport", "tcp", "-timeout", "8000000", *args, "-i", run_url, "-an",
                "-vf", f"{pre}fps=2,scale=8:8:flags=area,format=rgb24",
                "-frames:v", "6", "-f", "rawvideo", "pipe:1"]
         try:
@@ -168,8 +195,11 @@ async def api_diagnostics_hwtest(request: web.Request) -> web.Response:
     if cand is None:
         return web.json_response({"error": f"no hardware decoder for codec {codec or '?'}"},
                                  status=400)
-    url = await _go2rtc_relay(camera_id, build_authenticated_url(camera))
-    return web.json_response(await _hw_picture_test(camera_id, url, list(cand)))
+    main = build_authenticated_url(camera)
+    small = _hw_small_stream(camera, main)
+    url = await _go2rtc_relay(camera_id, main)
+    small = await _go2rtc_relay(camera_id, small) if small else None
+    return web.json_response(await _hw_picture_test(camera_id, url, list(cand), small))
 
 
 def _http_digest_header(www_auth: str, method: str, uri: str, u: str, p: str) -> str:
@@ -576,6 +606,12 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             "-i", ffmpeg_url,
             "-an", "-vf", vf_used,
             "-vcodec", "mjpeg", "-pix_fmt", "yuvj420p",
+            # 3.7.3 (B44): each decoded picture once. go2rtc's copy of a stream
+            # carries no frame rate, so ffmpeg assumed 100 a second and, with
+            # no fps filter (Enhanced View at full speed), repeated its first
+            # picture faster than new ones got through: 1,850 identical JPEGs
+            # in 2 min ("More than 1000 frames duplicated"), a grey picture.
+            "-fps_mode", "passthrough",
             "-q:v", jpeg_q, "-f", "image2pipe", "pipe:1",
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
@@ -918,8 +954,13 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         _HW_FROZEN[camera_id] = hw_run
                         await _stop_proc(proc, timeout=3)
                         if first_time:
+                            small = _hw_small_stream(CAMERAS.get(camera_id, camera),
+                                                     state.get("ffmpeg_url_used") or url)
+                            if small:
+                                small = await _go2rtc_relay(camera_id, small)
                             asyncio.create_task(_hw_picture_test(
-                                camera_id, state.get("ffmpeg_url_used") or url, list(hw_args_run)))
+                                camera_id, state.get("ffmpeg_url_used") or url, list(hw_args_run),
+                                small))
                         proc     = await _launch_snap(native_res=native_res)
                         state["proc"] = proc
                         stderr_t.cancel()
@@ -1524,6 +1565,24 @@ async def http_snap_loop(camera_id: str, camera: dict) -> None:
 
 
 SNAP_MAX_AGE_S = 10.0      # 3.0.1 (B20): an older picture is not shown on a card
+SNAP_HOLD_S = 2.0          # 3.7.3 (B42): the longest wait for a newer picture
+
+
+async def _snap_hold(request: web.Request, state: dict) -> None:
+    """3.7.3 (B42): with ?after=N, wait until the camera has a picture newer than N.
+
+    Cards asked every 125 ms whatever the camera delivered: about 40
+    requests a second for five DVR channels that each give about 0.8
+    pictures a second. N is the X-Frame-Count of the picture the card shows;
+    a count that went down (a new loop) answers at once.
+    """
+    after = request.rel_url.query.get("after", "")
+    if not after.isdigit():
+        return
+    after_n = int(after)
+    deadline = time.monotonic() + SNAP_HOLD_S
+    while state.get("frame_count", 0) == after_n and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
 
 
 async def handle_snapshot(request: web.Request) -> web.Response:
@@ -1563,6 +1622,7 @@ async def handle_snapshot(request: web.Request) -> web.Response:
         # the normal _snap_last_access update below.
         _snap_last_access[camera_id] = time.monotonic()
         state = _snap_state(camera_id)
+        await _snap_hold(request, state)
         frame = state.get("frame")
         if frame:
             # Build step-label headers so the JS info bar can show the current
@@ -1660,6 +1720,7 @@ async def handle_snapshot(request: web.Request) -> web.Response:
                 return web.Response(status=503, text="No frame yet — starting up")
             await asyncio.sleep(0.05)
 
+    await _snap_hold(request, state)
     frame = state["frame"]
     age   = time.monotonic() - state["frame_time"]
     # 3.0.1 (B20): a card showed events minutes after they happened. A
@@ -1678,6 +1739,7 @@ async def handle_snapshot(request: web.Request) -> web.Response:
             "Cache-Control":    "no-cache, no-store, must-revalidate",
             "Pragma":           "no-cache",
             "X-Accel-Buffering": "no",
+            "X-Frame-Count":    str(state.get("frame_count", 0)),   # 3.7.3 (B42)
         },
     )
 

@@ -3566,7 +3566,8 @@ async def test_320():
     check("AC5 C6: the card draws a live player and no still-picture fallback",
           "data-nosnap" in cd._JS and "img.dataset.nosnap" in cd._JS)
     check("AC6 C5: Enhanced View asks for sound; cards stay video only",
-          "el.media = 'video,audio'" in cd._JS and cd._JS.count("el.media = 'video';") == 1)
+          "el.media = rtcOnly ? 'video' : 'video,audio';" in cd._JS
+          and cd._JS.count("el.media = 'video';") == 1)
 
 
 
@@ -4303,7 +4304,7 @@ async def test_372():
     # B37: the snapshot loop drops a frozen hardware decoder for the camera
     tests = []
 
-    async def fake_test(camera_id, url, hw_args):
+    async def fake_test(camera_id, url, hw_args, small_url=None):
         tests.append((camera_id, hw_args))
         return {}
     cid = "cam1"
@@ -4415,6 +4416,130 @@ async def test_372():
     check("AK7 ... the endpoint logs a known camera and refuses anything else",
           r1.status == 200 and r2.status == 400 and r3.status == 400
           and sum("LIVE [cam1]" in l for l in CAP.lines) == 1)
+
+
+async def test_373():
+    print("\n[AL] 3.7.3")
+    cid = "cam1"
+    cd._FOCUSED_CAMERA = None; cd._FOCUS_ENGINE = None
+
+    # B42: a card's request waits for a newer picture
+    async def idle_loop(camera_id, url, camera_, native_res=False):
+        await asyncio.sleep(1000)
+
+    def req(q=""):
+        return make_mocked_request("GET", f"/snapshot/{cid}{q}", match_info={"camera_id": cid})
+    with _Swap(snap_loop=idle_loop, SNAP_HOLD_S=0.4):
+        cd.CAMERAS.clear(); cd._SNAP.clear(); cd.CAMERAS[cid] = camera()
+        st = cd._snap_state(cid)
+        st.update(frame=jpeg(b"one"), frame_time=time.monotonic(), frame_count=7)
+        t0 = time.monotonic()
+        r = await cd.handle_snapshot(req())
+        check("AL1 B42: without after, the picture at once, with its number",
+              r.status == 200 and r.headers["X-Frame-Count"] == "7" and time.monotonic() - t0 < 0.2)
+
+        async def new_picture():
+            await asyncio.sleep(0.15)
+            st.update(frame=jpeg(b"two"), frame_time=time.monotonic(), frame_count=8)
+        t0 = time.monotonic()
+        task = asyncio.create_task(new_picture())
+        r = await cd.handle_snapshot(req("?after=7"))
+        waited = time.monotonic() - t0
+        await task
+        check("AL1 ... after=7 waits for picture 8 and returns it",
+              r.body == jpeg(b"two") and r.headers["X-Frame-Count"] == "8" and 0.1 < waited < 0.35,
+              f"{waited:.2f}")
+        t0 = time.monotonic()
+        r = await cd.handle_snapshot(req("?after=8"))
+        waited = time.monotonic() - t0
+        check("AL1 ... no newer picture: the same one after the longest wait",
+              r.headers["X-Frame-Count"] == "8" and 0.35 < waited < 0.7, f"{waited:.2f}")
+        t0 = time.monotonic()
+        r = await cd.handle_snapshot(req("?after=50"))
+        check("AL1 ... a count that went down (a new loop) answers at once",
+              time.monotonic() - t0 < 0.2 and r.headers["X-Frame-Count"] == "8")
+        r = await cd.handle_snapshot(req("?after=-1"))
+        check("AL1 ... after=-1 (a redrawn card) answers at once", r.status == 200)
+        cd._FOCUSED_CAMERA = cid
+        try:
+            t0 = time.monotonic()
+            r = await cd.handle_snapshot(req("?after=8"))
+            check("AL1 ... the same for the camera in Enhanced View",
+                  r.headers["X-Frame-Count"] == "8" and time.monotonic() - t0 > 0.35)
+        finally:
+            cd._FOCUSED_CAMERA = None
+        st["task"] and st["task"].cancel()
+
+    # B43: the version in the start-up line
+    src = (Path(__file__).resolve().parent.parent / "camera_discovery.py").read_text(encoding="utf-8")
+    check("AL2 B43: the start-up line names the AnyCam version",
+          'log.info(f"AnyCam {CURRENT_VERSION} on :{PORT}' in src)
+
+    # B44: each decoded picture once
+    cam = camera(stream_codec="h264", stream_width=1920)
+    cd.CAMERAS.clear(); cd.CAMERAS[cid] = cam; cd._SNAP.clear()
+    cd._snap_last_access[cid] = time.monotonic() - 100
+    launches, _ = await run_snap(cid, cam, [lambda: FakeFfmpeg([jpeg(b"a")])])
+    a = launches[0]
+    check("AL3 B44: ffmpeg sends each decoded picture once (-fps_mode passthrough)",
+          opt(a, "-fps_mode") == "passthrough" and a.index("-fps_mode") > a.index("-i")
+          and a[-1] == "pipe:1", str(a))
+
+    # B45: the retry line
+    check("AL4 B45: the retry has its own log line",
+          cd._live_fail_line(cid, "enhanced view retry", "no video within 15 s over MSE")
+          == "LIVE [cam1]: enhanced view tries WebRTC, video only: no video within 15 s over MSE")
+
+    class Req:
+        async def json(self):
+            return {"camera_id": cid, "where": "enhanced view retry", "reason": "x"}
+    check("AL4 ... and the endpoint takes it", (await cd.api_live_fail(Req())).status == 200)
+
+    # B37: the smallest H.265 stream for the picture test
+    main = "rtsp://10.0.0.33:554/Streaming/Channels/101"
+    cam = camera(stream_profiles=[
+        {"url": main, "stream_codec": "hevc", "stream_width": 3840},
+        {"url": "rtsp://10.0.0.33:554/Streaming/Channels/103", "stream_codec": "hevc", "stream_width": 1280},
+        {"url": "rtsp://10.0.0.33:554/Streaming/Channels/102", "stream_codec": "hevc", "stream_width": 704},
+        {"url": "rtsp://10.0.0.33:554/Streaming/Channels/104", "stream_codec": "h264", "stream_width": 320}])
+    small = cd._hw_small_stream(cam, cd.build_authenticated_url(cam))
+    check("AL5 B37: the smallest other H.265 stream, with the password",
+          small and small.endswith("/Streaming/Channels/102") and "admin:" in small, str(small))
+    dvr_main = "rtsp://10.0.0.40:554/cam/realmonitor?channel=2&subtype=0"
+    dvr = camera(stream_url=dvr_main, stream_profiles=[{"url": dvr_main, "stream_codec": "hevc"}])
+    small = cd._hw_small_stream(dvr, cd.build_authenticated_url(dvr))
+    check("AL5 ... a DVR channel with only its main stream: the Dahua sub-stream",
+          small and small.endswith("channel=2&subtype=1"), str(small))
+    check("AL5 ... no smaller stream: none",
+          cd._hw_small_stream(camera(stream_profiles=[{"url": main, "stream_codec": "hevc"}]),
+                              cd.build_authenticated_url(camera())) is None)
+
+    runs = []
+
+    class P:
+        returncode = 0
+
+        def __init__(self, args):
+            self.args = args
+
+        async def communicate(self):
+            return bytes((90, 80, 70)) * 64 * 2, b""
+
+    async def fake_exec(*a, **k):
+        runs.append(a)
+        return P(a)
+    real_exec = cd.asyncio.create_subprocess_exec
+    cd.asyncio.create_subprocess_exec = fake_exec
+    try:
+        rep = await cd._hw_picture_test(cid, "rtsp://127.0.0.1:28554/main",
+                                        ["-hwaccel", "drm", "-c:v", "hevc"], "rtsp://127.0.0.1:28554/small")
+    finally:
+        cd.asyncio.create_subprocess_exec = real_exec
+    check("AL5 ... the picture test runs the hardware decoder on the small stream as a fifth way",
+          len(rep["runs"]) == 5 and rep["runs"][4]["way"] == "hardware, the camera's smallest stream"
+          and opt(runs[4], "-i") == "rtsp://127.0.0.1:28554/small" and opt(runs[4], "-hwaccel") == "drm"
+          and opt(runs[0], "-i") == "rtsp://127.0.0.1:28554/main", str([r["way"] for r in rep["runs"]]))
+    cd._HW_TEST_RESULTS.clear()
 
 
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
@@ -4543,6 +4668,7 @@ async def main():
     await test_370_rc2()
     await test_371()
     await test_372()
+    await test_373()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

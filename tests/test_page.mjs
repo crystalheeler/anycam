@@ -246,6 +246,11 @@ check('timeout is NOT remembered: next open tries live view again', !declined()[
 
 s = mount();
 advance(12000);
+s.el.video = {videoWidth: 0, readyState: 1, getVideoPlaybackQuality: () => ({totalVideoFrames: 0})};
+ev('playing');
+check('B41 Enhanced View: playing with no decoded frame does not count (Firefox MSE)',
+      live() && live().played === false);
+s.el.video = {videoWidth: 640, videoHeight: 360, readyState: 4, getVideoPlaybackQuality: () => ({totalVideoFrames: 1})};
 ev('playing');
 check('a smart-codec camera (keyframe every 12 s): first frame at 12 s plays live',
       live() && live().played === true);
@@ -259,10 +264,45 @@ document.hidden = false;
 advance(15100);
 check('visible again: watchdog then fails normally', live() === null);
 
+// 3.7.3 (B41): the size without a frame is not a first frame
+s = mount();
+s.el.video = {videoWidth: 1280, videoHeight: 720, readyState: 1,
+              getVideoPlaybackQuality: () => ({totalVideoFrames: 0})};
+advance(3000);
+check('B41 a known size with no decoded frame is not played', live().played === false);
+
+// 3.7.3 (B45): no picture over MSE: WebRTC, video only, then the classic view
+calls.fetch.length = 0;
+s = mount();
+ev('open', ['mse', 'webrtc']);
+ev('mode', 'MSE');
+advance(15100);
+const rtc = live();
+check('B45 no picture over MSE in 15 s: a second player, WebRTC and video only',
+      rtc && rtc !== s && rtc.rtcOnly === true && rtc.el.mode === 'webrtc' && rtc.el.media === 'video'
+      && s._disconnected && calls.poll.length === 0, rtc && JSON.stringify({m: rtc.el.mode, me: rtc.el.media}));
+check('B45 ... the add-on log is told', calls.fetch.some(u => /\/api\/live_fail$/.test(u)));
+rtc.el.ondisconnect = () => {}; rtc.el.remove = () => {};
+ev('open', ['webrtc']);
+advance(15100);
+check('B45 ... no picture over WebRTC either: the classic view', live() === null && calls.poll.length === 1);
+s = mount();
+ev('open', ['mse', 'webrtc']);
+ev('mode', 'WebRTC');
+advance(15100);
+check('B45 a WebRTC session with no picture goes straight to the classic view',
+      live() === null && calls.poll.length === 1);
+s = mount();
+ev('open', ['mse']);
+advance(15100);
+check('B45 a browser without WebRTC goes straight to the classic view',
+      live() === null && calls.poll.length === 1);
+
 console.log('\n[N] after the first frame');
 s = mount();
 ev('open', ['mse', 'webrtc']);
 advance(3000);
+s.el.video = {videoWidth: 640, videoHeight: 360, readyState: 4, getVideoPlaybackQuality: () => ({totalVideoFrames: 1})};
 ev('playing');
 check('playing marks the session played', live() && live().played === true);
 advance(40000);
@@ -414,6 +454,12 @@ console.log('\n[S] live cards');
   check('player pauses off screen (visibilityThreshold set)', p.visibilityThreshold === 0.01);
   check('player socket uses the card stream', p.wsURL && p.wsURL.endsWith('/go2rtc/ws?src=anycam_lorex_c0'));
   check('loading placeholder still shown while connecting', cards.lorex.ph.style.display === 'flex');
+  p.video = {videoWidth: 640, readyState: 1, getVideoPlaybackQuality: () => ({totalVideoFrames: 0})};
+  g("_cardLiveEvent('lorex', _cardLive['lorex'], 'playing')");
+  advance(1000);
+  check('B41 card: playing and a known size with no decoded frame do not count',
+        cst('lorex').played === false && p.style.opacity === '0');
+  p.video = {videoWidth: 640, videoHeight: 360, readyState: 4, getVideoPlaybackQuality: () => ({totalVideoFrames: 1})};
   g("_cardLiveEvent('lorex', _cardLive['lorex'], 'playing')");
   check('first frame: player shown, placeholder hidden', p.style.opacity === '1' && cards.lorex.ph.style.display === 'none');
   drawCard('lorex');   // renderGrid rewrote the card
@@ -921,6 +967,47 @@ console.log('\n[D3] 3.1.0 card order');
         && g('_cardDrag.after') === true, JSON.stringify(l2));
   handle.onpointercancel({type: 'pointercancel'});
   globalThis.fetch = realFetch; document.querySelectorAll = realQSA; document.getElementById = realGet;
+}
+
+// ── 3.7.3 (B42): a still-picture card asks once per new picture ─────────────
+console.log('\n[T] still-picture cards');
+{
+  const sStart = page.indexOf('/* ── Snapshot polling');
+  const sEnd = page.indexOf('/* ── Scan cancel');
+  vm.runInThisContext(page.slice(sStart, sEnd).replace(/^const /gm, 'var '));
+  const asked = [], made = [], revoked = [];
+  let count = '7';
+  const img = el('img-x', {dataset: {snap: 'x'}});
+  const ph = el('ph-x', {style: {display: 'flex'}});
+  ph.querySelector = () => ({textContent: ''});
+  const realQS = document.querySelector, realGet = document.getElementById, realFetch = globalThis.fetch;
+  const realURL = globalThis.URL;
+  document.querySelector = sel => (sel.includes('"x"') ? img : null);
+  document.getElementById = id => (id === 'ph-x' ? ph : realGet(id));
+  globalThis.URL = {createObjectURL: () => { made.push(1); return 'blob:' + made.length; },
+                    revokeObjectURL: u => revoked.push(u)};
+  globalThis.fetch = async url => { asked.push(url);
+    return {ok: true, status: 200, headers: {get: k => (k === 'X-Frame-Count' ? count : null)},
+            blob: async () => 'B'}; };
+  g("startSnap('x')"); await flush(); await flush();
+  check('B42 the first request asks for any picture (after=-1)', /\/snapshot\/x\?after=-1&t=/.test(asked[0]), asked[0]);
+  img.onload();
+  check('B42 ... the picture is shown, the placeholder hidden',
+        img.src === 'blob:1' && img.style.display === '' && ph.style.display === 'none');
+  advance(60); await flush(); await flush();
+  check('B42 the next request names the picture shown (after=7)', /after=7&/.test(asked[1]), asked[1]);
+  check('B42 ... the same picture again is not drawn again', made.length === 1);
+  count = '8';
+  advance(60); await flush(); await flush();
+  img.onload();
+  check('B42 a newer picture is drawn, the old blob freed',
+        img.src === 'blob:2' && revoked.includes('blob:1') && /after=7&/.test(asked[2]));
+  const n = asked.length;
+  g("stopSnap('x')");
+  advance(500); await flush(); await flush();
+  check('B42 stopSnap ends the requests', asked.length === n);
+  document.querySelector = realQS; document.getElementById = realGet;
+  globalThis.fetch = realFetch; globalThis.URL = realURL;
 }
 
 console.log(`\n${pass}/${pass + fail} passed`);
