@@ -93,8 +93,9 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
             padding:0 2px;line-height:1.1;font-size:1rem}}
 .card-drag:hover{{color:var(--text)}}
 .camera-card.drag-src{{opacity:.5}}
-.camera-card.drop-before{{box-shadow:-4px 0 0 var(--primary)}}
-.camera-card.drop-after{{box-shadow:4px 0 0 var(--primary)}}
+/* 3.7.0-rc2.0 (D4): a line between the cards where the dragged card lands */
+#card-drop-line{{position:fixed;display:none;z-index:50;background:var(--primary);border-radius:2px;
+                 pointer-events:none;box-shadow:0 0 6px var(--primary)}}
 .feed-placeholder{{display:flex;flex-direction:column;align-items:center;gap:6px;
                    color:var(--text-dim);font-size:.78rem;text-align:center;padding:10px}}
 .feed-placeholder svg{{opacity:.3}}
@@ -299,6 +300,8 @@ header h1{{cursor:pointer}}
 .cs-zone-name{{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .cs-zone input[type=range]{{width:100%;padding:0;border:none;background:transparent;accent-color:var(--primary)}}
 .cs-modal label.cs-check{{flex-direction:row;align-items:center;gap:8px;font-size:.84rem;color:var(--text)}}
+/* 3.7.0-rc2.0 (B28): .modal input sets width 100%, which pushed the box away from its text */
+.modal label.cs-check input[type=checkbox]{{width:auto;flex:0 0 auto;margin:0;padding:0;accent-color:var(--primary)}}
 /* 3.4.0 (C17): the drawing window over Enhanced View */
 #focus-zone-ctl{{display:flex;align-items:center;gap:10px;flex-shrink:0;font-size:.78rem;color:#ccc}}
 #focus-zone-ctl label{{display:flex;align-items:center;gap:4px;cursor:pointer}}
@@ -317,7 +320,12 @@ header h1{{cursor:pointer}}
 #zone-svg .zone-rubber{{stroke:#ffd34d;stroke-width:2;stroke-dasharray:4 4;pointer-events:none}}
 #zone-panel{{position:fixed;right:12px;top:56px;width:280px;max-height:calc(100dvh - 130px);overflow:auto;z-index:9003;
              background:rgba(20,22,28,.94);border:1px solid #333;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px;color:#ddd;font-size:.8rem}}
-#zone-panel .zp-head{{font-weight:700;font-size:.9rem}}
+#zone-panel .zp-head{{font-weight:700;font-size:.9rem;display:flex;align-items:center;justify-content:space-between;
+                      gap:8px;cursor:move;touch-action:none;user-select:none;margin:-4px -4px 0;padding:4px}}
+#zone-panel .zp-fold{{background:transparent;border:1px solid #444;border-radius:6px;color:#ddd;cursor:pointer;
+                      width:28px;height:24px;line-height:1;font-size:.9rem}}
+/* 3.7.0-rc2.0 (C22): folded, only the title bar shows */
+#zone-panel.zp-folded > :not(.zp-head){{display:none}}
 #zone-panel .zp-hint{{color:#aaa;line-height:1.4}}
 #zone-panel .zp-hint.zone-bad{{color:#ff7070}}
 #zone-panel .zp-btns{{display:flex;flex-wrap:wrap;gap:6px}}
@@ -547,8 +555,8 @@ header h1{{cursor:pointer}}
     <label class="cs-full">Recording folder<input type="text" id="cs-path" spellcheck="false"></label>
     <div class="cs-help">Under /media. For a Samba or NFS share, add it in Home Assistant
       (Settings, System, Storage, Add network storage, usage Media); it appears as
-      /media/&lt;name&gt;. To copy recordings to a server by SFTP, FTPS or FTP, use Upload.</div>
-    <button class="btn btn-ghost btn-sm" onclick="openUpload(_csCamId)">&#x21E7; Upload…</button>
+      /media/&lt;name&gt;. To copy recordings to a server by SFTP, FTPS or FTP, use Remote Storage.</div>
+    <button class="btn btn-ghost btn-sm" onclick="openUpload(_csCamId)">&#x21E7; Remote Storage</button>
     <div class="cs-error" id="cs-error"></div>
     <div class="modal-btns">
       <button class="btn btn-ghost btn-sm" id="cs-reset" onclick="resetCamSettings()" style="margin-right:auto">Defaults</button>
@@ -561,7 +569,7 @@ header h1{{cursor:pointer}}
 <!-- 3.6.0 (C14): recording upload -->
 <div class="modal-backdrop" id="upload-modal" onclick="if(event.target.id==='upload-modal')closeUpload()">
   <div class="modal cs-modal">
-    <h3 id="up-title">Upload recordings</h3>
+    <h3 id="up-title">Remote Storage</h3>
     <label id="up-mode-row" style="display:none">This camera
       <select id="up-mode" onchange="upModeShow()">
         <option value="global">Use the global destination</option>
@@ -582,7 +590,7 @@ header h1{{cursor:pointer}}
         <label>Password<input type="password" id="up-pass" autocomplete="new-password"></label>
         <label>Folder<input type="text" id="up-path" spellcheck="false"></label>
       </div>
-      <label class="cs-check"><input type="checkbox" id="up-delete" checked> Delete the local copy after the upload</label>
+      <label class="cs-check"><input type="checkbox" id="up-delete" checked> Delete the local copy after upload</label>
       <div class="cs-help" id="up-ftp-warn" style="display:none">FTP sends the password and the
         recordings unencrypted. Use SFTP or FTPS when the server offers them.</div>
       <div class="cs-help">Each recording goes to &lt;folder&gt;/&lt;camera&gt;/ once it is finished.
@@ -671,7 +679,7 @@ header h1{{cursor:pointer}}
       <span id="disk-label">Loading...</span>
       <div id="disk-bar-track"><div id="disk-bar-fill"></div></div>
     </div>
-    <button class="btn btn-secondary btn-sm" onclick="openUpload(null)" title="Upload recordings by SFTP, FTPS or FTP">&#x21E7; Upload…</button>
+    <button class="btn btn-secondary btn-sm" onclick="openUpload(null)" title="Copy recordings to a server by SFTP, FTPS or FTP">&#x21E7; Remote Storage</button>
     <button class="btn btn-secondary btn-sm" onclick="loadStorage()">&#x21BB; Refresh</button>
   </div>
   <!-- Explorer pane: nav bar + column headers + file list all inside white box -->
@@ -717,7 +725,10 @@ header h1{{cursor:pointer}}
   <canvas id="zone-still" style="display:none"></canvas>
   <svg id="zone-svg" style="display:none" xmlns="http://www.w3.org/2000/svg"></svg>
   <div id="zone-panel" style="display:none">
-    <div class="zp-head">Detection zones</div>
+    <div class="zp-head" id="zone-head" onpointerdown="zonePanelDragStart(event)" title="Drag to move">
+      <span>Detection zones</span>
+      <button class="zp-fold" id="zone-fold" onclick="zoneFold()" title="Fold or unfold" aria-label="Fold or unfold">▾</button>
+    </div>
     <div id="zone-hint" class="zp-hint"></div>
     <div id="zone-list"></div>
     <label class="zp-only"><input type="checkbox" id="zone-only" onchange="zoneOnlyChange()"> Detection in zones only</label>
@@ -742,6 +753,8 @@ header h1{{cursor:pointer}}
     <div id="focus-controls"></div>
   </div>
 </div>
+
+<div id="card-drop-line"></div>
 
 <!-- ── Toast notification ─────────────────────────────────────────────────── -->
 <div id="toast" style="display:none"></div>

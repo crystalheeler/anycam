@@ -60,12 +60,20 @@ const DOM = {
   'focus-zone-show': el('focus-zone-show', {checked: false}),
   'zone-svg': el('zone-svg', {classList: {add() {}, remove() {}, toggle() {}}, setAttribute() {},
                               setPointerCapture() {}}),
-  'zone-still': el('zone-still'), 'zone-panel': el('zone-panel'),
+  'zone-still': el('zone-still'),
+  'zone-panel': el('zone-panel', {getBoundingClientRect: () => ({left: 900, top: 56, width: 280, height: 400})}),
   'zone-hint': el('zone-hint', {classList: {toggle() {}}}), 'zone-list': el('zone-list'),
   'zone-only': el('zone-only', {checked: false}), 'zone-new': el('zone-new'),
   'zone-undo': el('zone-undo'), 'zone-close': el('zone-close'), 'zone-finish': el('zone-finish'),
   'zone-pause': el('zone-pause'), 'zone-cancel': el('zone-cancel'),
+  // 3.7.0-rc2.0 (C22, D4)
+  'zone-fold': el('zone-fold'), 'zone-head': el('zone-head', {setPointerCapture() {}}),
+  'card-drop-line': el('card-drop-line', {style: {display: 'none'}}),
 };
+// 3.7.0-rc2.0: a browser's storage, for the zone window's place
+const _store = {};
+globalThis.localStorage = {getItem: k => (k in _store ? _store[k] : null), setItem: (k, v) => { _store[k] = String(v); }};
+globalThis.innerWidth = 1200; globalThis.innerHeight = 800;
 globalThis.addEventListener = () => {};
 globalThis.HTMLElement = class { appendChild(c) { return c; } };
 globalThis.WebSocket = {CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3};
@@ -765,6 +773,33 @@ console.log('\n[C17] 3.4.0 detection zones');
   g('_focusCamId = null');
 }
 
+console.log('\n[C22] 3.7.0-rc2.0 the zone window moves and folds');
+{
+  const panel = DOM['zone-panel'], head = DOM['zone-head'];
+  const cls = new Set();
+  panel.classList = {toggle(c, on) { on ? cls.add(c) : cls.delete(c); }, contains: c => cls.has(c)};
+  g('zoneFold()');
+  check('C22 the fold button folds the window to its title bar, and the browser remembers',
+        cls.has('zp-folded') && DOM['zone-fold'].textContent === '▸'
+        && JSON.parse(localStorage.getItem('anycam.zonePanel')).folded === true);
+  g('zoneFold()');
+  check('C22 ... and unfolds it', !cls.has('zp-folded') && DOM['zone-fold'].textContent === '▾');
+  g('zonePanelDragStart')({clientX: 910, clientY: 60, pointerId: 1, button: 0, target: {}, preventDefault() {}});
+  head.onpointermove({clientX: 410, clientY: 260});
+  check('C22 the title bar drags the window', panel.style.left === '400px' && panel.style.top === '256px'
+        && panel.style.right === 'auto' && panel.style.bottom === 'auto');
+  head.onpointerup({clientX: 2000, clientY: 2000});
+  const saved = JSON.parse(localStorage.getItem('anycam.zonePanel'));
+  check('C22 ... it stays on the screen, and the place is kept for next time',
+        saved.left === 1200 - 280 && saved.top === 800 - 40 && head.onpointermove === null, JSON.stringify(saved));
+  panel.style = {};
+  g('_zonePanelRestore()');
+  check('C22 the next opening puts the window back there', panel.style.left === (1200 - 280) + 'px');
+  g('zonePanelDragStart')({clientX: 0, clientY: 0, pointerId: 2, button: 0, target: {id: 'zone-fold'}, preventDefault() {}});
+  check('C22 ... a press on the fold button is not a drag', head.onpointermove === null);
+  panel.style = {}; delete _store['anycam.zonePanel'];
+}
+
 console.log('\n[D3] 3.1.0 card order');
 {
   const take = (a, b) => page.slice(page.indexOf(a), page.indexOf(b));
@@ -806,8 +841,12 @@ console.log('\n[D3] 3.1.0 card order');
   const handle = {closest: () => B, setPointerCapture() {}};
   g('cardDragStart')({button: 0, pointerId: 1, preventDefault() {}}, handle);
   check('D3 drag: the card is marked while it moves', B.classList.has('drag-src'));
+  grid.getBoundingClientRect = () => ({left: 0, top: 0, width: 1000, height: 400});
   handle.onpointermove({clientX: 290, clientY: 10});
-  check('D3 ... the drop place is shown after the card under the pointer', C.classList.has('drop-after'));
+  const line = DOM['card-drop-line'].style;
+  check('D4 the drop place is an upright line in the gap after the card under the pointer',
+        line.display === 'block' && line.left === (200 + 100 + 8 - 2) + 'px' && line.width === '4px',
+        JSON.stringify(line));
   grid.moves = 0;
   handle.onpointerup({type: 'pointerup'});
   await flush();
@@ -821,6 +860,17 @@ console.log('\n[D3] 3.1.0 card order');
   handle.onpointermove({clientX: 10, clientY: 10});
   handle.onpointercancel({type: 'pointercancel'});
   check('D3 a cancelled drag moves nothing and sends nothing', sent.length === 1 && !B.classList.has('drag-src'));
+  check('D4 ... the line goes away when the drag ends', DOM['card-drop-line'].style.display === 'none');
+  // one column (a phone held upright): a level line above or below the card
+  grid.getBoundingClientRect = () => ({left: 0, top: 0, width: 110, height: 900});
+  C.getBoundingClientRect = () => ({left: 0, top: 300, width: 100, height: 200});
+  g('cardDragStart')({button: 0, pointerId: 3, preventDefault() {}}, handle);
+  handle.onpointermove({clientX: 50, clientY: 450});
+  const l2 = DOM['card-drop-line'].style;
+  check('D4 stacked cards: a level line below the card when the pointer is in its lower half',
+        l2.height === '4px' && l2.width === '100px' && l2.top === (300 + 200 + 8 - 2) + 'px'
+        && g('_cardDrag.after') === true, JSON.stringify(l2));
+  handle.onpointercancel({type: 'pointercancel'});
   globalThis.fetch = realFetch; document.querySelectorAll = realQSA; document.getElementById = realGet;
 }
 

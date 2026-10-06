@@ -1,3 +1,22 @@
+## 3.7.0-rc2.0
+
+Four small page changes from the 3.7.0-rc1.0 field test. Not field-tested.
+
+### Changes & improvements
+
+- **The zone window moves and folds.** Drag it by its title bar; the ▾ button folds it to the title bar. Each device remembers the place.
+- **A line shows where a dragged card lands,** in the gap between two cards. On a phone held upright the line is level.
+- **"Upload" is now "Remote Storage"** on the page.
+
+### Bugs fixed
+
+- **The "Delete the local copy" checkbox stood apart from its text.** It is now next to the text, on one line.
+
+### Known issues
+
+- **Enhanced View is black for a few seconds after you come back to the page** (B27, waits for a log).
+- **The Storage tab hides the file names on a phone held upright** (C23, the Storage tab revamp).
+
 ## 3.7.0-rc1.0
 
 The log now shows which hardware decoders the add-on can use, and says when a picture was decoded in software. Not field-tested.

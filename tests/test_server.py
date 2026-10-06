@@ -1714,8 +1714,8 @@ async def test_location_check():
         cd._HA_LOCATION.clear(); cd._HA_LOC_STATE.update(next=0.0, mismatch=False)
         cd._MOTION.clear()
     src = repo_source()
-    check("Q4 cog help no longer promises SFTP for 2.6.8; since 3.6.0 it points to Upload",
-          "SFTP, FTPS or FTP, use Upload" in src and "planned for 2.6.8" not in src)
+    check("Q4 cog help no longer promises SFTP for 2.6.8; since 3.7.0-rc2.0 it points to Remote Storage",
+          "SFTP, FTPS or FTP, use Remote Storage" in src and "planned for 2.6.8" not in src)
 
 
 # ── R. 3.0.0-rc1.0 no credentials in any log line (E4) ──────────────────────
@@ -4145,6 +4145,28 @@ async def test_370():
     cd._HW_FALLBACK.clear(); cd._HW_REPORT.clear()
 
 
+
+# ── AI. 3.7.0-rc2.0 ──────────────────────────────────────────────────────────
+async def test_370_rc2():
+    print("\n[AI] 3.7.0-rc2.0")
+    import re
+    html = cd.build_html()
+    page_text = re.sub(r"<script.*?</script>", "", html, flags=re.S)
+    visible = re.sub(r"<[^>]+>", " ", page_text)
+    check("AI1 C24: the page says Remote Storage, not Upload",
+          "Remote Storage" in visible and not re.search(r"\bUpload\b", visible)
+          and "'Remote Storage settings saved'" in cd._JS and "'Upload settings saved'" not in cd._JS)
+    check("AI2 B28: a checkbox in a dialog is not a full-width field; the label is one short line",
+          "label.cs-check input[type=checkbox]{width:auto" in html
+          and "Delete the local copy after upload</label>" in html)
+    check("AI3 C22: the zone window has a title bar to drag and a fold button",
+          'id="zone-head" onpointerdown="zonePanelDragStart(event)"' in html
+          and 'id="zone-fold" onclick="zoneFold()"' in html
+          and "#zone-panel.zp-folded > :not(.zp-head){display:none}" in html)
+    check("AI4 D4: the drop place is a line between the cards, not a lit side",
+          'id="card-drop-line"' in html and "drop-before" not in html and "drop-before" not in cd._JS)
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -4268,6 +4290,7 @@ async def main():
     await test_350()
     await test_360()
     await test_370()
+    await test_370_rc2()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 
