@@ -1,3 +1,25 @@
+## 3.7.1
+
+Cards come back at once after a short absence, older Hikvision cameras play live, and the hardware decode report is right. Not field-tested.
+
+### Changes & improvements
+
+- **Live cards stay live for 60 s while the page is hidden.** Come back from another program within a minute and the video is already playing. After a minute the streams close, as before.
+- **The hardware decode report names the fix:** when the add-on may not open the decoders, the log says to turn off Protection mode on AnyCam's Info page.
+
+### Bugs fixed
+
+- **Some cameras reset every live connection.** go2rtc asked each camera for two-way audio, which some cameras, such as older Hikvision models, refuse. AnyCam now never asks for it.
+- **The log warned that the HEVC decoder overlay was missing** on a Pi where it is present. Newer Raspberry Pi kernels name the decoder `rpi-hevc-dec`.
+- **The HEVC hardware decoder was listed as available** when the add-on was not allowed to open it.
+- **A slow network check made the scan search a fixed network** (192.168.1.0/24) instead of AnyCam's own. AnyCam now tries again, then uses its own address, and never guesses.
+
+### Known issues
+
+- **Hardware decode needs Protection mode off** for AnyCam.
+- **One Amcrest camera can get two cards,** for ports 554 and 37777 (under investigation).
+- **The Microseven waits about 30 s on "Loading feed"** while its RTSP stream is broken.
+
 ## 3.7.0
 
 AnyCam gets detection zones, sound and more live cards, one camera connection through go2rtc, and recording upload. Same code as 3.7.0-rc2.0, field-tested on test system B.

@@ -61,19 +61,47 @@ ARP_HOSTS: list[dict] = []   # [{ip, hostname}, ...]
 
 
 def get_local_subnet() -> str:
+    """The network to scan, from the default route's interface.
+
+    3.7.1 (B34): the route command is tried twice (5 s, then 15 s). If it
+    still gives nothing, the add-on's own address with a /24 mask is used.
+    Before, AnyCam fell back to a fixed 192.168.1.0/24 and scanned a
+    network the cameras were not on (2026-10-06, test system C). An empty
+    string means the network is unknown; the scan stops and says so.
+    """
+    for timeout in (5, 15):
+        try:
+            r = subprocess.run(["ip", "route", "show", "default"],
+                               capture_output=True, text=True, timeout=timeout)
+            m = re.search(r"dev\s+(\S+)", r.stdout)
+            if m:
+                r2 = subprocess.run(["ip", "addr", "show", m.group(1)],
+                                    capture_output=True, text=True, timeout=timeout)
+                m2 = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+/\d+)", r2.stdout)
+                if m2:
+                    return str(ipaddress.ip_interface(m2.group(1)).network)
+        except Exception as e:
+            log.warning(f"Subnet: {e}")
+    own = _own_ipv4()
+    if own:
+        net = str(ipaddress.ip_interface(f"{own}/24").network)
+        log.warning(f"Subnet: the route check gave no answer — scanning {net}, "
+                    f"from the add-on's own address {own}")
+        return net
+    log.error("Subnet: AnyCam could not find its network")
+    return ""
+
+
+def _own_ipv4() -> str | None:
+    """The address the add-on uses toward other networks; no packet is sent."""
+    import socket
     try:
-        r = subprocess.run(["ip", "route", "show", "default"],
-                           capture_output=True, text=True, timeout=5)
-        m = re.search(r"dev\s+(\S+)", r.stdout)
-        if m:
-            r2 = subprocess.run(["ip", "addr", "show", m.group(1)],
-                                capture_output=True, text=True, timeout=5)
-            m2 = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+/\d+)", r2.stdout)
-            if m2:
-                return str(ipaddress.ip_interface(m2.group(1)).network)
-    except Exception as e:
-        log.warning(f"Subnet: {e}")
-    return "192.168.1.0/24"
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))        # TEST-NET-1: routing only, nothing sent
+            addr = s.getsockname()[0]
+    except OSError:
+        return None
+    return None if addr.startswith(("127.", "0.")) else addr
 
 
 def get_default_gateway() -> str | None:
@@ -1433,6 +1461,8 @@ async def run_scan() -> None:
 
     try:
         subnet  = await loop.run_in_executor(_THREAD_POOL, get_local_subnet)
+        if not subnet:      # 3.7.1 (B34): never guess a network
+            raise RuntimeError("AnyCam could not find its network; try the scan again")
         gateway = await loop.run_in_executor(_THREAD_POOL, get_default_gateway)
         log.info(f"Subnet: {subnet}  Gateway: {gateway}")
 
