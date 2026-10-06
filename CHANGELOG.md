@@ -1,3 +1,35 @@
+## 3.7.0
+
+AnyCam gets detection zones, sound and more live cards, one camera connection through go2rtc, and recording upload. Same code as 3.7.0-rc2.0, field-tested on test system B.
+
+### Changes & improvements
+
+- **Detection zones.** Draw up to 6 areas on a camera's picture, each with its own sensitivity, so a small, far movement can record. Slow movement in a zone records too.
+- **More cards play live.** MJPEG cameras, wide streams on a computer, and cameras that speak WebRTC or RTSP over WebSocket.
+- **Sound in Enhanced View,** muted at the start, with a Sound button.
+- **One connection per camera stream.** Cards, the classic view, motion detection and recordings read the camera through go2rtc.
+- **Remote Storage.** Recordings can go to a server by SFTP, FTPS or FTP, for all cameras or for one. Passwords are stored encrypted.
+- **Drag cards into your own order.** Every viewer sees the same order.
+- **Cameras in appliances** (a litter box camera, a robot vacuum) get an information card.
+- **H.265 and the browser.** A browser that cannot play H.265 gets the camera's H.264 stream, or a plain message.
+- **A DVR is walked for the channels it reports,** not always 16.
+- **Show in Sidebar and Auto update are on** after the first start.
+- **Removed: five settings** that did nothing useful or broke cameras (Low FPS, Skip Non-Reference Frames, Limit Threads, Stagger Poll, Fast Stream Start), and the Classic button.
+
+### Bugs fixed
+
+- **Cards showed pictures that were minutes old.**
+- **A camera's saved streams went out of date** when its settings changed; AnyCam now reads them again.
+- **Adding a camera by hand with WebRTC failed,** and one password-entry step did not pace rate-limited cameras.
+- **The log link failed** for a store install; **scan progress** jumped.
+
+### Known issues
+
+- **Hardware decode falls back to software,** and the start-up log wrongly says the HEVC decoder overlay is missing (B11).
+- **Enhanced View is black for a few seconds** after you come back to the page.
+- **The Storage tab hides the file names** on a phone held upright.
+- **The Microseven is not tested** with this release.
+
 ## 3.7.0-rc2.0
 
 Four small page changes from the 3.7.0-rc1.0 field test. Not field-tested.

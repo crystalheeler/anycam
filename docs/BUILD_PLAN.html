@@ -156,7 +156,7 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <p class="eyebrow">AnyCam · Home Assistant add-on</p>
 <h1>AnyCam Build Plan</h1>
 <p class="meta">the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.</p>
-<p class="meta"><span class="mono">28 September 2026; updated 5 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0, 3.6.0-rc1.0, 3.7.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist. · 6 open · 122 done</span></p>
+<p class="meta"><span class="mono">28 September 2026; updated 6 October 2026. Current release: 3.7.0, published 2026-10-06 (the code of 3.7.0-rc2.0, field-tested by CrystalHeeler on 2026-10-05). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0, 3.6.0-rc1.0, 3.7.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist. · 6 open · 122 done</span></p>
 </header>
 <nav class="bars" aria-label="Open items per group">
 <a class="bar g-a" style="--n:0" href="#group-a" title="Field tests: 0 open"><b>A · 0</b><span>Field tests</span></a>
@@ -177,12 +177,11 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <li class="g-b"><span class="id">B6</span><span class="t"><a href="#B6">Test the Microseven once it is unlocked, and make AnyCam robust to cameras that lock out</a></span><span class="x">Retitled by CrystalHeeler, 2026-10-03. When CrystalHeeler has unlocked the camera: field-test that it behaves as expected (scan, password entry with the 5 s pacing, card, Enhanced View, no new lockout over a day). Then review the code: detect the locked state (accepts the connection, returns no valid answer), stop connecting to it, and tell the user on the card to power-cycle the camera. No phase until it is unlocked</span></li>
 <li class="g-c"><span class="id">C23</span><span class="t"><a href="#C23">Storage tab revamp</a></span><span class="x">CrystalHeeler sends the revamp list; then a design discussion before any code</span></li>
 </ul></div>
-<div class="panel"><h2>Next up: field tests</h2><ol class="order">
-<li><span><strong>Field-test 3.7.0-rc1.0;</strong> on a fault, install an earlier release candidate to narrow it down. 2026-10-05, CrystalHeeler: 3.7.0-rc1.0 installed and working; some minor visual glitches, and a UI rearrangement to come. CrystalHeeler sends the log and the changes later.</span></li>
-<li><span><strong><a href="#B11">B11</a>:</strong> send the 3.7.0-rc1.0 start-up log (the "HW device" lines) for the hardware decode fix.</span></li>
-<li><span><strong>New tasks from the 3.7.0-rc1.0 test, 2026-10-05:</strong> <a href="#B28">B28</a>, <a href="#C22">C22</a>, <a href="#C24">C24</a> and <a href="#D4">D4</a> built in 3.7.0-rc2.0 (CrystalHeeler's order, 2026-10-05), not field-tested. Open: <a href="#B27">B27</a> (log), <a href="#C23">C23</a> (Storage revamp list), <a href="#C25">C25</a> (design).</span></li>
+<div class="panel"><h2>Next up</h2><ol class="order">
+<li><span><strong><a href="#B11">B11</a>:</strong> CrystalHeeler turns AnyCam's Protection mode off as a test and sends the "HW device" lines; also fix the false overlay warning.</span></li>
+<li><span><strong>Open, waiting on CrystalHeeler:</strong> <a href="#B27">B27</a> (a log), <a href="#C23">C23</a> (the Storage tab revamp list), <a href="#C25">C25</a> (a design).</span></li>
 </ol>
-<p class="order-note">All phases of the untested run CrystalHeeler ordered on 2026-10-04 are built: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0, 3.6.0-rc1.0 and 3.7.0-rc1.0, each its own commit, tag and zip, none pushed. Each audit report lists its field test.</p>
+<p class="order-note">3.7.0 is published (2026-10-06): the code of 3.7.0-rc2.0, which CrystalHeeler tested and accepted on 2026-10-05. The release candidates 3.0.1-rc1.0 to 3.7.0-rc2.0 are pushed.</p>
 </div></div>
 <section data-all-only id="phases"><div class="ghead" style="--g:var(--st-you-fg)"><h2>Phases after 3.0.0</h2><span class="gcount">8 versions</span></div>
 <p class="order-note">Agreed with CrystalHeeler on 2026-10-03. Mode, CrystalHeeler 2026-10-04: every phase is built untested, one after another, each as its own release candidate with its own local commit, tag and zip; nothing is pushed or published without an order. CrystalHeeler tests the latest and installs an earlier one to narrow down a fault. An item marked Discuss gets its design discussion at the start of its phase. Rule 7 still applies: the version and scope are confirmed before each build.</p>

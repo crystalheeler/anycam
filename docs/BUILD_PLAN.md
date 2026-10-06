@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** 28 September 2026; updated 5 October 2026. Current release: 3.0.0, published 2026-10-02 (the code of 3.0.0-rc1.5). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0, 3.6.0-rc1.0, 3.7.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
+**Compiled:** 28 September 2026; updated 6 October 2026. Current release: 3.7.0, published 2026-10-06 (the code of 3.7.0-rc2.0, field-tested by CrystalHeeler on 2026-10-05). Built, not field-tested, not pushed: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0, 3.6.0-rc1.0, 3.7.0-rc1.0. The release candidates 3.0.0-rc1.0 to 3.0.0-rc1.5 are pushed, not published, all field-tested. The history was rewritten on 2026-10-02 (privacy scrub); older commit hashes no longer exist.
 **Purpose:** the open task list that CLAUDE.md rule 7 says to consult before every build. Update it as items close.
 
 **Sources swept:** CLAUDE.md; session memory; this project's chat history; `docs/legacy/MoreToDo.txt`; the four transcripts in `docs/legacy/*.docx`; the plan documents in `docs/`; every deferred, known-issue and out-of-scope note in `CHANGELOG.md`; the 2.6.x audit reports; field logs; and the source itself. Each item was checked against the current code. Items that turned out to be done are listed at the end, so they can come off the older lists.
@@ -11,13 +11,12 @@ A readable, colour-coded version, `docs/BUILD_PLAN.html`, is generated from this
 
 ---
 
-## Next up: field tests
+## Next up
 
-All phases of the untested run CrystalHeeler ordered on 2026-10-04 are built: 3.0.1-rc1.0, 3.1.0-rc1.0, 3.2.0-rc1.0, 3.3.0-rc1.0, 3.4.0-rc1.0, 3.5.0-rc1.0, 3.6.0-rc1.0 and 3.7.0-rc1.0, each its own commit, tag and zip, none pushed. Each audit report lists its field test.
+3.7.0 is published (2026-10-06): the code of 3.7.0-rc2.0, which CrystalHeeler tested and accepted on 2026-10-05. The release candidates 3.0.1-rc1.0 to 3.7.0-rc2.0 are pushed.
 
-1. **Field-test 3.7.0-rc1.0;** on a fault, install an earlier release candidate to narrow it down. 2026-10-05, CrystalHeeler: 3.7.0-rc1.0 installed and working; some minor visual glitches, and a UI rearrangement to come. CrystalHeeler sends the log and the changes later.
-2. **B11:** send the 3.7.0-rc1.0 start-up log (the "HW device" lines) for the hardware decode fix.
-3. **New tasks from the 3.7.0-rc1.0 test, 2026-10-05:** B28, C22, C24 and D4 built in 3.7.0-rc2.0 (CrystalHeeler's order, 2026-10-05), not field-tested. Open: B27 (log), C23 (Storage revamp list), C25 (design).
+1. **B11:** CrystalHeeler turns AnyCam's Protection mode off as a test and sends the "HW device" lines; also fix the false overlay warning.
+2. **Open, waiting on CrystalHeeler:** B27 (a log), C23 (the Storage tab revamp list), C25 (a design).
 
 ---
 
