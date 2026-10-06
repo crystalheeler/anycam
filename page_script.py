@@ -152,49 +152,83 @@ const _snapErrSince = {};  // camId → time of the first error in the run
 // unavailable" only after 90 s of errors.
 const SNAP_UNAVAILABLE_MS = 90000;
 
+// 3.7.3 (B42): the add-on holds a request that names the picture the card
+// shows (?after=N, its X-Frame-Count) until it has a newer one, up to 2 s.
+// So a card asks once per new picture: about once a second for an
+// HTTP-polled DVR channel, not 8 times. Pictures arrive with fetch, as
+// blobs; a stopped run (stopSnap, a newer startSnap) drops its answer.
+const _snapGen   = {};   // camId → run number
+const _snapShown = {};   // camId → {n, url}: the picture on the card
+const SNAP_NEXT_MS = 50;       // after a picture; the add-on does the waiting
+const SNAP_NEXT_NO_COUNT_MS = 125;   // an answer without X-Frame-Count
+
 function startSnap(camId) {
   stopSnap(camId);
   _snapErrors[camId] = 0;
-  const poll = () => {
+  const gen = _snapGen[camId];
+  const next = ms => { if (_snapGen[camId] === gen) _snapTimers[camId] = setTimeout(poll, ms); };
+  const failed = display => {
+    _snapErrors[camId] = (_snapErrors[camId] || 0) + 1;
+    const errs = _snapErrors[camId];
+    console.warn('[AnyCam] snapshot error #' + errs + ' for ' + camId);
+    if (!_snapErrSince[camId]) _snapErrSince[camId] = Date.now();
+    const unavailable = Date.now() - _snapErrSince[camId] >= SNAP_UNAVAILABLE_MS;
+    if (errs >= 3) {
+      // After 3 consecutive errors, show the placeholder
+      display.style.display = 'none';
+      const ph = document.getElementById('ph-' + camId);
+      if (ph) {
+        ph.querySelector('span').textContent =
+          unavailable ? 'Stream unavailable' : 'Loading feed, please wait…';
+        ph.style.display = 'flex';
+      }
+    }
+    // Back off: 500ms for first few errors, 2s after 5 errors
+    next(errs > 5 ? 2000 : 500);
+  };
+  const poll = async () => {
     const display = document.querySelector('[data-snap="' + camId + '"]');
     if (!display) { stopSnap(camId); return; }   // card was removed
-    const loader = new Image();
-    loader.onload = () => {
+    const shown = _snapShown[camId] || {n: -1, url: ''};
+    // A redrawn card has a new, empty image: ask for a picture at once.
+    const onCard = shown.url && display.src === shown.url;
+    let r = null, blob = null, n = NaN;
+    try {
+      r = await fetch(BASE + '/snapshot/' + camId + '?after=' + (onCard ? shown.n : -1)
+                      + '&t=' + Date.now());
+      if (_snapGen[camId] !== gen) return;
+      if (r.ok && r.status === 200) {
+        n = parseInt(r.headers.get('X-Frame-Count'), 10);
+        if (onCard && n === shown.n) { next(SNAP_NEXT_MS); return; }   // nothing newer yet
+        blob = await r.blob();
+      }
+    } catch (e) {}
+    if (_snapGen[camId] !== gen) return;
+    if (!blob) { failed(display); return; }
+    const url = URL.createObjectURL(blob);
+    display.onload = () => {
+      if (_snapGen[camId] !== gen) return;
       _snapErrors[camId] = 0;
       delete _snapErrSince[camId];
+      if (shown.url && shown.url !== url) URL.revokeObjectURL(shown.url);
+      _snapShown[camId] = {n: Number.isNaN(n) ? -1 : n, url};
       // Show img, hide placeholder
-      display.src         = loader.src;
       display.style.display = '';
       const ph = document.getElementById('ph-' + camId);
       if (ph) ph.style.display = 'none';
-      // Next poll: 125ms (~8fps) matches server vf=fps=8
-      _snapTimers[camId] = setTimeout(poll, 125);
+      next(Number.isNaN(n) ? SNAP_NEXT_NO_COUNT_MS : SNAP_NEXT_MS);
     };
-    loader.onerror = () => {
-      _snapErrors[camId] = (_snapErrors[camId] || 0) + 1;
-      const errs = _snapErrors[camId];
-      console.warn('[AnyCam] snapshot error #' + errs + ' for ' + camId);
-      if (!_snapErrSince[camId]) _snapErrSince[camId] = Date.now();
-      const failed = Date.now() - _snapErrSince[camId] >= SNAP_UNAVAILABLE_MS;
-      if (errs >= 3) {
-        // After 3 consecutive errors, show the placeholder
-        display.style.display = 'none';
-        const ph = document.getElementById('ph-' + camId);
-        if (ph) {
-          ph.querySelector('span').textContent =
-            failed ? 'Stream unavailable' : 'Loading feed, please wait…';
-          ph.style.display = 'flex';
-        }
-      }
-      // Back off: 500ms for first few errors, 2s after 5 errors
-      _snapTimers[camId] = setTimeout(poll, errs > 5 ? 2000 : 500);
+    display.onerror = () => {
+      URL.revokeObjectURL(url);
+      if (_snapGen[camId] === gen) failed(display);
     };
-    loader.src = BASE + '/snapshot/' + camId + '?t=' + Date.now();
+    display.src = url;
   };
   poll();   // start immediately
 }
 
 function stopSnap(camId) {
+  _snapGen[camId] = (_snapGen[camId] || 0) + 1;
   if (_snapTimers[camId]) { clearTimeout(_snapTimers[camId]); delete _snapTimers[camId]; }
 }
 
@@ -1048,6 +1082,17 @@ async function resetCamSettings() {
  * (SMART_CODEC_HELP), on screen and in the add-on log.
  */
 const GO2RTC_FIRST_FRAME_MS = 15000;
+
+// 3.7.3 (B41): has the browser decoded a picture? The size alone is not
+// enough: MSE gives it before any frame decodes (the Oak-D card in LibreWolf:
+// width 1280, readyState 1, 0 frames, black for good), and Firefox fires
+// 'playing' with no frame (Enhanced View: "Live (MSE): … · 0 fps").
+function _videoHasFrame(v) {
+  if (!v || !(v.videoWidth > 0)) return false;
+  const q = (typeof v.getVideoPlaybackQuality === 'function') ? v.getVideoPlaybackQuality() : null;
+  const frames = q ? q.totalVideoFrames : (v.webkitDecodedFrameCount || 0);
+  return frames > 0 || v.readyState >= 2;
+}
 const SMART_CODEC_HELP = 'If this camera uses H.264+, H.265+ or Smart Codec, turn it off, '
                        + 'or set its I-frame interval equal to its frame rate.';
 
@@ -1254,17 +1299,18 @@ async function _go2rtcTryFocus(camId, cam, session) {
   return true;
 }
 
-function _go2rtcMount(camId, cam, info, session) {
+// rtcOnly (3.7.3, B45): the second try, WebRTC and video only.
+function _go2rtcMount(camId, cam, info, session, rtcOnly) {
   const img  = document.getElementById('focus-img');
   const wrap = document.getElementById('focus-video');
   img.style.display  = 'none';
   wrap.innerHTML     = '';
   wrap.style.display = 'block';
   const el = document.createElement('anycam-video');
-  el.mode  = 'webrtc,mse';
-  el.media = 'video,audio';    // 3.2.0 (C5): sound too; it starts muted
+  el.mode  = rtcOnly ? 'webrtc' : 'webrtc,mse';
+  el.media = rtcOnly ? 'video' : 'video,audio';    // 3.2.0 (C5): sound too; it starts muted
   _go2rtc = {
-    el, camId, cam, session,
+    el, camId, cam, session, rtcOnly: !!rtcOnly,
     stream: info.stream,
     codec: String(info.codec || cam.stream_codec || '').toUpperCase(),
     played: false, closes: 0, modes: [], errs: {},
@@ -1277,6 +1323,7 @@ function _go2rtcMount(camId, cam, info, session) {
   const watchdog = () => {
     // A hidden tab pauses VideoRTC by design; do not blame the stream for it.
     if (document.hidden) { _go2rtcWatchdog = setTimeout(watchdog, GO2RTC_FIRST_FRAME_MS); return; }
+    if (_go2rtcRetryWebRTC(session)) return;
     _go2rtcFail(session, 'no video within ' + (GO2RTC_FIRST_FRAME_MS / 1000) + ' s', false);
   };
   _go2rtcWatchdog = setTimeout(watchdog, GO2RTC_FIRST_FRAME_MS);
@@ -1286,11 +1333,29 @@ function _go2rtcMount(camId, cam, info, session) {
   _go2rtcUpdateInfo();
 }
 
+// 3.7.3 (B45): Firefox played the Lorex H.265 channels over WebRTC in the
+// cards (video only) but not over MSE, which VideoRTC picks when Enhanced
+// View asks for sound too. With no picture in GO2RTC_FIRST_FRAME_MS, try
+// once more over WebRTC with video only, before the classic view.
+function _go2rtcRetryWebRTC(session) {
+  const g = _go2rtc;
+  if (!g || g.session !== session || g.rtcOnly || g.mode === 'WebRTC'
+      || !g.modes.includes('webrtc')) return false;
+  console.info('[AnyCam] no picture in Enhanced View for ' + g.camId + ' — trying WebRTC, video only');
+  _liveFailReport(g.camId, 'enhanced view retry',
+                  'no video within ' + (GO2RTC_FIRST_FRAME_MS / 1000) + ' s'
+                  + (g.mode === 'MSE' ? ' over MSE' : ''));
+  const camId = g.camId, cam = g.cam, info = {stream: g.stream, codec: g.codec};
+  _go2rtcUnmount();
+  _go2rtcMount(camId, cam, info, session, true);
+  return true;
+}
+
 function _go2rtcEvent(session, kind, value) {
   const g = _go2rtc;
   if (!g || g.session !== session) return;
   if (kind === 'playing') {
-    _go2rtcPlayed(g);
+    if (_videoHasFrame(g.el.video)) _go2rtcPlayed(g);   // else the 1 s check decides
   } else if (kind === 'open') {
     g.modes = Array.isArray(value) ? value : [];
   } else if (kind === 'mode') {
@@ -1334,7 +1399,7 @@ function _go2rtcStats(session) {
   g.lastFrames = frames;
   // The counter restarts when VideoRTC swaps MSE for WebRTC; skip that tick.
   g.fps = delta >= 0 ? delta : null;
-  if (!g.played && frames > 0 && v.videoWidth > 0) _go2rtcPlayed(g);
+  if (!g.played && _videoHasFrame(v)) _go2rtcPlayed(g);
   _go2rtcUpdateInfo();
 }
 
@@ -1723,7 +1788,7 @@ function _cardLiveCheck() {
     const st = _cardLive[camId];
     if (st.played) return;
     const v = st.el && st.el.video;
-    if (v && v.videoWidth > 0) { _cardLivePlayed(camId, st); return; }
+    if (_videoHasFrame(v)) { _cardLivePlayed(camId, st); return; }
     if (st.tried === undefined || !_cardLiveTrying(st)) return;
     st.tried += 1000;
     if (st.tried >= GO2RTC_FIRST_FRAME_MS)
@@ -1740,7 +1805,7 @@ function _cardLivePlayed(camId, st) {
 function _cardLiveEvent(camId, st, kind, value) {
   if (_cardLive[camId] !== st) return;
   if (kind === 'playing') {
-    _cardLivePlayed(camId, st);
+    if (_videoHasFrame(st.el && st.el.video)) _cardLivePlayed(camId, st);
   } else if (kind === 'open') {
     st.modes = Array.isArray(value) ? value : [];
   } else if (kind === 'error') {

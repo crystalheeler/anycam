@@ -217,7 +217,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.7.2"  # must match config.yaml
+CURRENT_VERSION = "3.7.3"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -2003,7 +2003,7 @@ async def main() -> None:
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    log.info(f"AnyCam on :{PORT}  ingress='{INGRESS_PATH}'")
+    log.info(f"AnyCam {CURRENT_VERSION} on :{PORT}  ingress='{INGRESS_PATH}'")   # 3.7.3 (B43)
 
     # ── Hardware decoder availability probe ───────────────────────────────────
     # Run once at startup. Checks which hw decoders ffmpeg was compiled with

@@ -448,7 +448,7 @@ def _go2rtc_card_source(camera: dict, h265: bool = True,
 
 # 3.7.2 (B40): the page reports when a card or Enhanced View gives up on
 # live view, so the add-on log shows it (before, only the browser console).
-LIVE_FAIL_WHERE = ("card", "enhanced view")
+LIVE_FAIL_WHERE = ("card", "enhanced view", "enhanced view retry")   # 3.7.3 (B45): the retry
 SMART_CODEC_HINT = ("if this camera uses H.264+, H.265+ or Smart Codec, turn it off, or set "
                     "its I-frame interval equal to its frame rate")
 
@@ -456,6 +456,8 @@ SMART_CODEC_HINT = ("if this camera uses H.264+, H.265+ or Smart Codec, turn it 
 def _live_fail_line(camera_id: str, where: str, reason: str) -> str:
     """The log line for one live view fallback."""
     reason = " ".join(str(reason).split())[:200]
+    if where == "enhanced view retry":
+        return f"LIVE [{camera_id}]: enhanced view tries WebRTC, video only: {reason}"
     then = "uses still pictures" if where == "card" else "uses the classic view"
     line = f"LIVE [{camera_id}]: {where} {then}: {reason}"
     if reason.startswith("no video within"):
@@ -464,7 +466,7 @@ def _live_fail_line(camera_id: str, where: str, reason: str) -> str:
 
 
 async def api_live_fail(request: web.Request) -> web.Response:
-    """POST /api/live_fail  body: {"camera_id", "where": "card"|"enhanced view", "reason"}."""
+    """POST /api/live_fail  body: {"camera_id", "where": one of LIVE_FAIL_WHERE, "reason"}."""
     try:
         body = await request.json()
     except (ValueError, aiohttp.ContentTypeError):
