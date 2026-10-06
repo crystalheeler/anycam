@@ -571,7 +571,7 @@ async def test_265():
     check("G4 card placeholder says Loading feed", "<span>Loading feed, please wait…</span>" in html
           and "<span>Connecting...</span>" not in html)
     check("G4 card: Stream unavailable only after 90 s", "const SNAP_UNAVAILABLE_MS = 90000;" in html)
-    check("G4 live view waits 30 s", "const GO2RTC_FIRST_FRAME_MS = 30000;" in html)
+    check("G4 live view waits 15 s (3.7.2, B40)", "const GO2RTC_FIRST_FRAME_MS = 15000;" in html)
 
 
 # ── H. 2.6.5 motion detection ────────────────────────────────────────────────
@@ -4262,6 +4262,161 @@ async def test_371():
           and "this.DISCONNECT_TIMEOUT = document.hidden ? LIVE_HIDDEN_GRACE_MS : 5000;" in cd._JS)
 
 
+async def test_372():
+    print("\n[AK] 3.7.2")
+    # B30: no grey example text in the login fields
+    html = cd.build_html()
+    check("AK1 B30: no grey 'admin' or dots in the user name and password fields",
+          'placeholder="admin"' not in html and "placeholder=\"&#x2022;" not in html
+          and 'placeholder="\u2022' not in html
+          and 'id="add-user" autocomplete="username"/>' in html
+          and 'id="locked-user" autocomplete="username">' in html)
+
+    # B36: entering the classic view counts as a request for pictures
+    started = []
+
+    async def fake_snap_loop(camera_id, url, camera_, native_res=False):
+        started.append(camera_id)
+        await asyncio.sleep(1000)
+    with _Swap(snap_loop=fake_snap_loop):
+        cd.CAMERAS.clear(); cd.CAMERAS["cam1"] = camera()
+        cd._SNAP.clear(); cd._MOTION.clear(); cd._FOCUS_ADAPTIVE.clear()
+        cd._snap_last_access["cam1"] = time.monotonic() - 664
+        await cd.handle_focus_set(make_mocked_request(
+            "POST", "/snap/focus/cam1", match_info={"camera_id": "cam1"}))
+        await asyncio.sleep(0)
+        check("AK2 B36: a classic view entered after a live card starts with a fresh request time",
+              started == ["cam1"] and time.monotonic() - cd._snap_last_access["cam1"] < 5)
+        cd._SNAP["cam1"]["task"].cancel(); await asyncio.sleep(0)
+        await cd.handle_focus_clear(make_mocked_request("DELETE", "/snap/focus"))
+
+    # B37: equal JPEG sizes in a row
+    same, last, frozen = 0, -1, False
+    for _ in range(cd.HW_FROZEN_FRAMES - 1):
+        same, last, frozen = cd._hw_frozen_step(same, last, 48806)
+    check("AK3 B37: 49 equal sizes are not yet frozen", not frozen and same == 49)
+    same, last, frozen = cd._hw_frozen_step(same, last, 48806)
+    check("AK3 ... the 50th is", frozen)
+    check("AK3 ... a different size starts the count again",
+          cd._hw_frozen_step(49, 48806, 48807) == (1, 48807, False))
+
+    # B37: the snapshot loop drops a frozen hardware decoder for the camera
+    tests = []
+
+    async def fake_test(camera_id, url, hw_args):
+        tests.append((camera_id, hw_args))
+        return {}
+    cid = "cam1"
+    real_hw = (cd.CFG_HW_DECODE, list(cd._HW_DECODER_CANDIDATES))
+    cd.CFG_HW_DECODE = True
+    cd._HW_UNAVAILABLE.discard("hevc_drm"); cd._HW_FROZEN.clear()
+    fresh = lambda: cd._snap_last_access.__setitem__(cid, time.monotonic())
+    stale = lambda: cd._snap_last_access.__setitem__(cid, time.monotonic() - 100)
+    green = [jpeg(b"g" * 40)] * 60
+    try:
+        with _Swap(_hw_picture_test=fake_test):
+            cam = camera()
+            cd.CAMERAS.clear(); cd.CAMERAS[cid] = cam; cd._SNAP.clear(); fresh()
+            CAP.lines.clear()
+            launches, _ = await run_snap(cid, cam, [
+                lambda: FakeFfmpeg(green),
+                lambda: (stale(), FakeFfmpeg([jpeg(b"s1"), jpeg(b"s22")]))[1]])
+            await asyncio.sleep(0)
+            check("AK4 B37: 50 equal pictures from hevc_drm: software at once",
+                  len(launches) == 2 and opt(launches[0], "-hwaccel") == "drm"
+                  and "-hwaccel" not in launches[1], str(launches))
+            check("AK4 ... the camera stays on software until AnyCam restarts, and the log says why",
+                  cd._HW_FROZEN.get(cid) == "hevc_drm"
+                  and any("50 pictures in a row of exactly" in l for l in CAP.lines))
+            check("AK4 ... the picture test runs once, with the hardware arguments",
+                  tests == [(cid, ["-hwaccel", "drm", "-c:v", "hevc"])], str(tests))
+            cd._SNAP.clear(); stale()
+            launches, _ = await run_snap(cid, cam, [lambda: FakeFfmpeg([jpeg(b"s")])])
+            check("AK4 ... the next start skips hevc_drm for this camera, no second test",
+                  len(launches) == 1 and opt(launches[0], "-hwaccel") != "drm" and len(tests) == 1,
+                  f"{len(launches)} {launches and launches[0]} {tests}")
+            cd._HW_FROZEN.clear(); cd._SNAP.clear(); fresh()
+            launches, _ = await run_snap(cid, cam, [
+                lambda: (stale(), FakeFfmpeg([jpeg(b"x" * (i + 1)) for i in range(60)]))[1]])
+            check("AK4 ... real pictures (sizes change) keep the hardware decoder",
+                  len(launches) == 1 and not cd._HW_FROZEN)
+    finally:
+        cd.CFG_HW_DECODE, cd._HW_DECODER_CANDIDATES[:] = real_hw[0], real_hw[1]
+        cd._HW_FROZEN.clear()
+
+    # B37: the picture test's verdicts and runs
+    px = lambda rgb: bytes(rgb) * 64
+    v = cd._hw_test_verdict(px((0, 135, 0)) * 6)
+    check("AK5 B37: an empty YUV picture reads as green", v["verdict"].startswith("green"))
+    v = cd._hw_test_verdict(px((90, 80, 70)) * 6)
+    check("AK5 ... six equal pictures read as frozen", v["verdict"].startswith("frozen") and v["frames"] == 6)
+    v = cd._hw_test_verdict(px((90, 80, 70)) + px((95, 84, 70)))
+    check("AK5 ... changing pictures read as ok", v["verdict"] == "picture ok" and v["mean_rgb"] == [92, 82, 70])
+    check("AK5 ... nothing reads as no picture", cd._hw_test_verdict(b"")["verdict"] == "no picture")
+
+    runs = []
+
+    class P:
+        def __init__(self, args):
+            self.args, self.returncode = args, 0
+
+        async def communicate(self):
+            hw = "-hwaccel" in self.args
+            out = px((0, 135, 0)) * 6 if hw else px((90, 80, 70)) + px((99, 88, 77))
+            return out, (b"[hevc @ 0x1] Hwaccel V4L2 HEVC stateless V4; devices: /dev/media0\n"
+                         b"rtsp://admin:hunter2@10.0.0.33/x: error\n")
+
+    async def fake_exec(*a, **k):
+        runs.append(a)
+        return P(a)
+    real_exec = cd.asyncio.create_subprocess_exec
+    cd.asyncio.create_subprocess_exec = fake_exec
+    try:
+        rep = await cd._hw_picture_test("cam1", "rtsp://127.0.0.1:28554/x", ["-hwaccel", "drm", "-c:v", "hevc"])
+    finally:
+        cd.asyncio.create_subprocess_exec = real_exec
+    ways = [r["way"] for r in rep["runs"]]
+    check("AK6 B37: the picture test tries software and three hardware ways",
+          ways == ["software", "hardware, as AnyCam runs it", "hardware, no pixel format filter",
+                   "hardware, drm_prime frames and hwdownload"], str(ways))
+    check("AK6 ... software ok, hardware green, in the report and the log",
+          rep["runs"][0]["verdict"] == "picture ok" and rep["runs"][1]["verdict"].startswith("green")
+          and cd._HW_TEST_RESULTS["cam1"] is rep and "cma" in rep)
+    check("AK6 ... the drm_prime way downloads the frames before the scale",
+          opt(runs[3], "-hwaccel_output_format") == "drm_prime"
+          and opt(runs[3], "-vf").startswith("hwdownload,format=yuv420p,"))
+    check("AK6 ... ffmpeg's lines are kept without the password",
+          any("Hwaccel V4L2" in n for n in rep["runs"][1]["ffmpeg"])
+          and not any("hunter2" in n for r in rep["runs"] for n in r["ffmpeg"]))
+    check("AK6 ... the test is a route, and its result is in the decoder report",
+          '"/api/diagnostics/hwtest/{camera_id}"' in (Path(__file__).resolve().parent.parent
+                                                      / "camera_discovery.py").read_text(encoding="utf-8"))
+    cd._HW_TEST_RESULTS.clear()
+
+    # B40: the add-on log hears when live view gives up
+    line = cd._live_fail_line("cam1", "card", "no video within 15 s")
+    check("AK7 B40: a timeout names the camera settings to change",
+          line.startswith("LIVE [cam1]: card uses still pictures: no video within 15 s")
+          and "Smart Codec" in line and "I-frame interval" in line)
+    check("AK7 ... other reasons carry no advice",
+          "Smart Codec" not in cd._live_fail_line("cam1", "enhanced view", "connection closed\nx"))
+
+    class Req:
+        def __init__(self, body):
+            self.body = body
+
+        async def json(self):
+            return self.body
+    cd.CAMERAS.clear(); cd.CAMERAS["cam1"] = camera()
+    CAP.lines.clear()
+    r1 = await cd.api_live_fail(Req({"camera_id": "cam1", "where": "card", "reason": "no video within 15 s"}))
+    r2 = await cd.api_live_fail(Req({"camera_id": "nope", "where": "card", "reason": "x"}))
+    r3 = await cd.api_live_fail(Req({"camera_id": "cam1", "where": "elsewhere", "reason": "x"}))
+    check("AK7 ... the endpoint logs a known camera and refuses anything else",
+          r1.status == 200 and r2.status == 400 and r3.status == 400
+          and sum("LIVE [cam1]" in l for l in CAP.lines) == 1)
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -4387,6 +4542,7 @@ async def main():
     await test_370()
     await test_370_rc2()
     await test_371()
+    await test_372()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

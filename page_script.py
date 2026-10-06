@@ -1040,8 +1040,25 @@ async function resetCamSettings() {
  * keyframe. An H.264 camera with keyframes far apart took 19 to 28 s to its
  * first frame on every connection in the 2026-09-29 log, so 12 s always
  * failed there.
+ *
+ * 3.7.2 (B40): 15 s. That camera was the Oak-D add-on, whose encoder set
+ * no keyframe interval. A camera on normal settings sends a keyframe every
+ * 1 to 2 s; Hikvision's H.264+/H.265+ every 8 to 12 s. 15 s covers those
+ * plus the connection. A timeout names the camera settings to change
+ * (SMART_CODEC_HELP), on screen and in the add-on log.
  */
-const GO2RTC_FIRST_FRAME_MS = 30000;
+const GO2RTC_FIRST_FRAME_MS = 15000;
+const SMART_CODEC_HELP = 'If this camera uses H.264+, H.265+ or Smart Codec, turn it off, '
+                       + 'or set its I-frame interval equal to its frame rate.';
+
+// 3.7.2 (B40): tell the add-on log when live view gives up.
+function _liveFailReport(camId, where, reason) {
+  try {
+    fetch(BASE + '/api/live_fail', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                    body: JSON.stringify({camera_id: camId, where, reason})})
+      .catch(() => {});
+  } catch (e) {}
+}
 const FOCUS_BLANK_POSTER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 let _go2rtc          = null;   // live session state; see _go2rtcMount
 let _go2rtcWatchdog  = null;
@@ -1076,7 +1093,27 @@ function _go2rtcLoadPlayer() {
           this.video.poster   = FOCUS_BLANK_POSTER;
           this.video.addEventListener('playing', () => this._emit('playing'));
         }
+        // 3.7.2 (B39): keep the last picture as the poster while the stream
+        // starts again, instead of about 2 s of black. The video drops its
+        // picture when ondisconnect clears it or onopen gives it a new source.
+        _keepPicture() {
+          const v = this.video;
+          if (!v || !v.videoWidth || !v.videoHeight) return;
+          try {
+            const c = document.createElement('canvas');
+            const k = Math.min(1, 1280 / v.videoWidth);
+            c.width  = Math.round(v.videoWidth * k);
+            c.height = Math.round(v.videoHeight * k);
+            c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+            v.poster = c.toDataURL('image/jpeg', 0.8);
+          } catch (e) {}
+        }
+        ondisconnect() {
+          this._keepPicture();
+          return super.ondisconnect();
+        }
         onopen() {
+          this._keepPicture();
           const modes = super.onopen();
           this.onmessage['anycam'] = msg => {
             if (msg.type === 'error') this._emit('error', String(msg.value || ''));
@@ -1403,9 +1440,11 @@ function _go2rtcFail(session, reason, remember) {
   console.warn('[AnyCam] live view failed for ' + g.camId + ': ' + reason
                + ' — using the classic view');
   if (remember) _go2rtcDeclined[g.camId] = reason;
+  _liveFailReport(g.camId, 'enhanced view', reason);
   // 3.0.1 (C10): readable text, and the fix when the browser cannot play H.265
   const readable = _readableLiveError(reason);
-  const help = readable === 'this browser cannot play H.265 video' ? ' ' + _h265Help() : '';
+  const help = readable === 'this browser cannot play H.265 video' ? ' ' + _h265Help()
+             : /^no video within/.test(readable) ? ' ' + SMART_CODEC_HELP : '';
   _go2rtcToClassic(g.camId, g.cam,
                    'Live view unavailable (' + readable + ') — using the classic view.' + help, true);
 }
@@ -1531,7 +1570,7 @@ function _cardQuery() {
 }
 
 async function _cardLiveStart(camId) {
-  const st = {el: null, played: false, modes: [], errs: {}, closes: 0, tid: 0};
+  const st = {el: null, played: false, modes: [], errs: {}, closes: 0};
   _cardLive[camId] = st;
   let info = null;
   try {
@@ -1561,7 +1600,6 @@ async function _cardLiveStart(camId) {
   if (!el.isConnected) { _cardLiveFail(camId, st, 'card is gone', false); return; }
   el.src = BASE + '/go2rtc/ws?src=' + encodeURIComponent(info.stream);
   _cardLiveArm(camId, st);
-  if (!_cardLiveTick) _cardLiveTick = setInterval(_cardLiveCheck, 1000);
 }
 
 /* ── 3.1.0 (C19): a card that plays the camera's MJPEG stream ────────────
@@ -1659,32 +1697,43 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-// Give up on a card that shows no video within GO2RTC_FIRST_FRAME_MS of
-// actually connecting. An off-screen or hidden player is not connected,
-// so the time does not count against it.
+// Give up on a card that shows no video after GO2RTC_FIRST_FRAME_MS of
+// trying. A hidden page, an open Enhanced View and a player paused off
+// screen do not count.
+// 3.7.2 (B35): a player that lost its socket and waits to reconnect (up to
+// 15 s in VideoRTC) is still trying. Before, only an open socket counted, so
+// the Oak-D card, whose stream closed after 1 to 2 s each time, never gave up.
 function _cardLiveArm(camId, st) {
-  clearTimeout(st.tid);
-  st.tid = setTimeout(() => {
-    if (_cardLive[camId] !== st || st.played) return;
-    const connected = st.kind === 'mjpeg' ? !!st.ws : !!(st.el.ws || st.el.pc);
-    if (document.hidden || _focusCamId || !connected) { _cardLiveArm(camId, st); return; }
-    _cardLiveFail(camId, st, 'no video within ' + (GO2RTC_FIRST_FRAME_MS / 1000) + ' s', false);
-  }, GO2RTC_FIRST_FRAME_MS);
+  st.tried = 0;
+  if (!_cardLiveTick) _cardLiveTick = setInterval(_cardLiveCheck, 1000);
 }
 
-// Once a second: catch a first frame in browsers that do not fire 'playing'.
+function _cardLiveTrying(st) {
+  if (document.hidden || _focusCamId) return false;
+  if (st.kind === 'mjpeg') return !!st.ws;
+  const el = st.el;
+  if (!el || !el.isConnected || el.disconnectTID) return false;
+  return !!(el.ws || el.pc) || el.wsState !== WebSocket.CLOSED || el.pcState !== WebSocket.CLOSED;
+}
+
+// Once a second: catch a first frame in browsers that do not fire 'playing',
+// and count the time each card has tried.
 function _cardLiveCheck() {
   Object.keys(_cardLive).forEach(camId => {
     const st = _cardLive[camId];
+    if (st.played) return;
     const v = st.el && st.el.video;
-    if (!st.played && v && v.videoWidth > 0) _cardLivePlayed(camId, st);
+    if (v && v.videoWidth > 0) { _cardLivePlayed(camId, st); return; }
+    if (st.tried === undefined || !_cardLiveTrying(st)) return;
+    st.tried += 1000;
+    if (st.tried >= GO2RTC_FIRST_FRAME_MS)
+      _cardLiveFail(camId, st, 'no video within ' + (GO2RTC_FIRST_FRAME_MS / 1000) + ' s', false);
   });
 }
 
 function _cardLivePlayed(camId, st) {
   if (st.played) return;
   st.played = true;
-  clearTimeout(st.tid);
   _cardLiveShow(camId);
 }
 
@@ -1712,7 +1761,7 @@ function _cardLiveEvent(camId, st, kind, value) {
 function _cardLiveFail(camId, st, reason, remember) {
   if (_cardLive[camId] !== st) return;
   console.info('[AnyCam] card ' + camId + ' uses snapshots: ' + reason);
-  clearTimeout(st.tid);
+  if (!/^card (removed|is gone)$/.test(reason)) _liveFailReport(camId, 'card', reason);
   if (st.kind === 'mjpeg') _cardMjpegClose(st);
   if (st.el) {
     st.el.onanycam = null;
@@ -3079,9 +3128,9 @@ function credFormHTML(cam) {
   if (cam.status !== 'needs_credentials' || ['webrtc','wsrtsp'].includes(cam.display)) return '';
   return '<div class="cred-form">'
     + '<label>USERNAME</label>'
-    + '<input type="text" id="u_' + cam.id + '" placeholder="admin" autocomplete="username">'
+    + '<input type="text" id="u_' + cam.id + '" autocomplete="username">'
     + '<label>PASSWORD</label>'
-    + '<input type="password" id="p_' + cam.id + '" placeholder="••••••••"'
+    + '<input type="password" id="p_' + cam.id + '"'
     + ' autocomplete="current-password"'
     + ' onkeydown="if(event.key===\'Enter\')submitCreds(' + jsArg(cam.id) + ')">'
     + '<div class="cred-error" id="err_' + cam.id + '"></div>'

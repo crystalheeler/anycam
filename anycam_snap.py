@@ -60,6 +60,118 @@ def _hw_fallback_line(line: str) -> bool:
     return any(w in low for w in HW_FALLBACK_WORDS) and any(s in low for s in HW_FALLBACK_SUBJECTS)
 
 
+# ── 3.7.2 (B37): a hardware decoder that gives one unchanging picture ──────
+# 2026-10-06 field log, Protection mode off: hevc_drm gave its first frame in
+# 4.9 s, then 2,183 JPEGs of exactly 48,806 bytes each: a green screen. A
+# camera's sensor noise changes the JPEG size of every real picture, so
+# HW_FROZEN_FRAMES equal sizes in a row mean the hardware output is wrong.
+# The camera then decodes in software until AnyCam restarts, and
+# _hw_picture_test runs once to find which conversion gives a real picture.
+HW_FROZEN_FRAMES = 50
+_HW_FROZEN: dict[str, str] = {}              # camera_id -> hw label that froze
+_HW_TEST_RESULTS: dict[str, dict] = {}       # camera_id -> last _hw_picture_test report
+HW_TEST_PIXELS = 8 * 8 * 3                   # one 8x8 RGB picture
+HW_TEST_WORDS = ("hwaccel", "v4l2", "drm", "sand", "error", "fail", "invalid",
+                 "cannot", "not supported", "impossible")
+
+
+def _hw_frozen_step(same: int, last_len: int, frame_len: int) -> tuple[int, int, bool]:
+    """Count equal JPEG sizes in a row. Returns (count, size, frozen)."""
+    same = same + 1 if frame_len == last_len else 1
+    return same, frame_len, same >= HW_FROZEN_FRAMES
+
+
+def _hw_test_verdict(raw: bytes) -> dict:
+    """Judge the 8x8 RGB pictures of one _hw_picture_test run."""
+    n = len(raw) // HW_TEST_PIXELS
+    if n == 0:
+        return {"frames": 0, "verdict": "no picture"}
+    pics = [raw[i * HW_TEST_PIXELS:(i + 1) * HW_TEST_PIXELS] for i in range(n)]
+    mean = [round(sum(p[c::3][k] for p in pics for k in range(64)) / (64 * n)) for c in range(3)]
+    changes = any(max(abs(a - b) for a, b in zip(p, pics[0])) > 2 for p in pics[1:])
+    r, g, b = mean
+    if g > 90 and r < 40 and b < 40:
+        verdict = "green (empty picture)"
+    elif n > 1 and not changes:
+        verdict = "frozen (the same picture every time)"
+    else:
+        verdict = "picture ok"
+    return {"frames": n, "mean_rgb": mean, "changes": changes, "verdict": verdict}
+
+
+def _cma_info() -> str:
+    """The kernel's contiguous memory, which the Pi's HEVC decoder allocates from."""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as f:
+            vals = {k: v.strip() for k, _, v in (ln.partition(":") for ln in f)
+                    if k in ("CmaTotal", "CmaFree")}
+    except OSError as ex:
+        return f"unknown ({ex})"
+    return ", ".join(f"{k} {v}" for k, v in vals.items()) or "not reported"
+
+
+async def _hw_picture_test(camera_id: str, url: str, hw_args: list[str]) -> dict:
+    """3.7.2 (B37): decode a few pictures each way and say which ways give a real one.
+
+    Software is the reference. The hardware ways: as AnyCam runs it; with
+    the frames kept in the decoder's own memory and downloaded by the
+    hwdownload filter; and with no pixel-format filter before the scale.
+    Each run reduces six pictures, half a second apart, to 8x8 pixels.
+    """
+    variants = [("software", [], "format=yuvj420p,"),
+                ("hardware, as AnyCam runs it", hw_args, "format=yuvj420p,"),
+                ("hardware, no pixel format filter", hw_args, "")]
+    if hw_args[:2] == ["-hwaccel", "drm"]:
+        variants.append(("hardware, drm_prime frames and hwdownload",
+                         hw_args[:2] + ["-hwaccel_output_format", "drm_prime"] + hw_args[2:],
+                         "hwdownload,format=yuv420p,"))
+    report = {"camera": camera_id, "cma": await asyncio.to_thread(_cma_info), "runs": []}
+    log.info(f"HW TEST [{camera_id}]: kernel memory for the decoder: {report['cma']}")
+    for name, args, pre in variants:
+        cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-v", "verbose",
+               "-rtsp_transport", "tcp", "-timeout", "8000000", *args, "-i", url, "-an",
+               "-vf", f"{pre}fps=2,scale=8:8:flags=area,format=rgb24",
+               "-frames:v", "6", "-f", "rawvideo", "pipe:1"]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        except OSError as ex:
+            report["runs"].append({"way": name, "verdict": f"ffmpeg did not start: {ex}"})
+            continue
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=25)
+        except asyncio.TimeoutError:
+            await _stop_proc(proc)
+            out, err = b"", b"(no answer in 25 s)"
+        notes = [_strip_creds(ln.strip())[:160]
+                 for ln in (err or b"").decode("utf-8", "replace").splitlines()
+                 if any(w in ln.lower() for w in HW_TEST_WORDS)][:6]
+        run = {"way": name, **_hw_test_verdict(out or b""), "ffmpeg": notes}
+        report["runs"].append(run)
+        log.info(f"HW TEST [{camera_id}]: {name}: {run['verdict']} ({run['frames']} pictures"
+                 + (f", mean colour {run['mean_rgb']}" if run.get("mean_rgb") else "") + ")"
+                 + (f" ffmpeg: {' | '.join(notes)}" if notes else ""))
+    _HW_TEST_RESULTS[camera_id] = report
+    return report
+
+
+async def api_diagnostics_hwtest(request: web.Request) -> web.Response:
+    """GET /api/diagnostics/hwtest/{camera_id} (3.7.2, B37) — run _hw_picture_test now."""
+    camera_id = request.match_info["camera_id"]
+    camera = CAMERAS.get(camera_id)
+    if not camera or not camera.get("stream_url"):
+        return web.json_response({"error": "no such camera with a stream"}, status=404)
+    codec = (camera.get("stream_codec") or "").lower()
+    target = "hevc" if codec in ("hevc", "h265") else "h264" if codec == "h264" else ""
+    cand = next((a for _l, c, a in _HW_DECODER_CANDIDATES if c == target), None)
+    if cand is None:
+        return web.json_response({"error": f"no hardware decoder for codec {codec or '?'}"},
+                                 status=400)
+    url = await _go2rtc_relay(camera_id, build_authenticated_url(camera))
+    return web.json_response(await _hw_picture_test(camera_id, url, list(cand)))
+
+
 def _http_digest_header(www_auth: str, method: str, uri: str, u: str, p: str) -> str:
     """Build an HTTP Digest Authorization header value.
 
@@ -566,6 +678,8 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                             continue
                         if cand_label in hw_skip_session:
                             continue
+                        if _HW_FROZEN.get(camera_id) == cand_label:
+                            continue    # 3.7.2 (B37): its pictures froze
                         hw_label = cand_label
                         hw_args  = list(cand_args)
                         break
@@ -580,6 +694,9 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             state["proc"] = proc
             hw_tried       = bool(hw_label)
             hw_started_at  = time.monotonic() if hw_tried else None
+            hw_run         = hw_label        # 3.7.2 (B37): "" once in software
+            hw_args_run    = hw_args
+            same_n, last_len, frozen = 0, -1, False
             _HW_FALLBACK.pop(camera_id, None)     # 3.7.0 (B11): this launch only
             stderr_t = asyncio.create_task(_drain_stderr(proc, f"SNAP:{camera_id}"))
             buf      = b""
@@ -670,6 +787,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                                 _drain_stderr(proc, f"SNAP:{camera_id}"))
                             buf      = b""
                             hw_tried = False
+                            hw_run   = ""
                             continue
                         log.warning(f"SNAP [{camera_id}]: "
                                     f"30s read timeout after {frames} frames")
@@ -706,6 +824,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                                 _drain_stderr(proc, f"SNAP:{camera_id}"))
                             buf      = b""
                             hw_tried = False
+                            hw_run   = ""
                             continue
                         # 2.3.1: distinguish focus-leave kill (clean shutdown,
                         # we caused it) from natural EOF (ffmpeg actually died).
@@ -784,6 +903,35 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
 
                         _motion_on_frame(camera_id, frame)
 
+                        if hw_run and camera_id not in _HW_FALLBACK:
+                            same_n, last_len, frozen = _hw_frozen_step(same_n, last_len, len(frame))
+                            if frozen:
+                                break
+
+                    # 3.7.2 (B37): the hardware gave one unchanging picture
+                    if frozen:
+                        log.warning(f"SNAP [{camera_id}]: {hw_run} gave {HW_FROZEN_FRAMES} "
+                                    f"pictures in a row of exactly {last_len} bytes: the "
+                                    f"hardware picture is wrong. Decoding this camera in "
+                                    f"software until AnyCam restarts")
+                        first_time = camera_id not in _HW_FROZEN
+                        _HW_FROZEN[camera_id] = hw_run
+                        await _stop_proc(proc, timeout=3)
+                        if first_time:
+                            asyncio.create_task(_hw_picture_test(
+                                camera_id, state.get("ffmpeg_url_used") or url, list(hw_args_run)))
+                        proc     = await _launch_snap(native_res=native_res)
+                        state["proc"] = proc
+                        stderr_t.cancel()
+                        stderr_t = asyncio.create_task(_drain_stderr(proc, f"SNAP:{camera_id}"))
+                        buf      = b""
+                        hw_tried = False
+                        hw_run   = ""
+                        frozen   = False
+                        frames   = 0          # a new ffmpeg: count its pictures
+                        state["current_run_frames"] = 0
+                        _motion_reset_prev(camera_id)
+
             except asyncio.CancelledError:
                 log.info(f"SNAP [{camera_id}]: task cancelled")
                 raise
@@ -793,8 +941,9 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 stderr_t.cancel()
                 # 2.6.6 (B9): most exits here follow EOF; see _stop_proc.
                 await _stop_proc(proc, exited_grace=0.5, timeout=3)
-                try: await asyncio.wait_for(stderr_t, timeout=2)
-                except Exception: pass
+                # 3.7.2: asyncio.wait, not wait_for: a reader cancelled before
+                # it ran raises CancelledError, which read as this loop cancelled.
+                await asyncio.wait({stderr_t}, timeout=2)
 
             # Before restarting, check idle
             last   = _snap_last_access.get(camera_id, 0)

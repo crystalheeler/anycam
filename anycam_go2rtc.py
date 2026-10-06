@@ -446,6 +446,37 @@ def _go2rtc_card_source(camera: dict, h265: bool = True,
     return best[1], best[2], "ok"
 
 
+# 3.7.2 (B40): the page reports when a card or Enhanced View gives up on
+# live view, so the add-on log shows it (before, only the browser console).
+LIVE_FAIL_WHERE = ("card", "enhanced view")
+SMART_CODEC_HINT = ("if this camera uses H.264+, H.265+ or Smart Codec, turn it off, or set "
+                    "its I-frame interval equal to its frame rate")
+
+
+def _live_fail_line(camera_id: str, where: str, reason: str) -> str:
+    """The log line for one live view fallback."""
+    reason = " ".join(str(reason).split())[:200]
+    then = "uses still pictures" if where == "card" else "uses the classic view"
+    line = f"LIVE [{camera_id}]: {where} {then}: {reason}"
+    if reason.startswith("no video within"):
+        line += f" ({SMART_CODEC_HINT})"
+    return line
+
+
+async def api_live_fail(request: web.Request) -> web.Response:
+    """POST /api/live_fail  body: {"camera_id", "where": "card"|"enhanced view", "reason"}."""
+    try:
+        body = await request.json()
+    except (ValueError, aiohttp.ContentTypeError):
+        return web.json_response({"error": "JSON body required"}, status=400)
+    camera_id = str(body.get("camera_id", ""))
+    where = body.get("where")
+    if camera_id not in CAMERAS or where not in LIVE_FAIL_WHERE:
+        return web.json_response({"error": "unknown camera or place"}, status=400)
+    log.info(_live_fail_line(camera_id, where, body.get("reason", "")))
+    return web.json_response({"status": "ok"})
+
+
 async def api_go2rtc_card(request: web.Request) -> web.Response:
     """GET /api/go2rtc/card/{camera_id} — prepare a live card (2.6.6, C1).
 
