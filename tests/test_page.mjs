@@ -209,27 +209,54 @@ ev('close');
 check('second unexpected close: fall back', live() === null && calls.poll.length === 1);
 check('dropped connection is NOT remembered', !declined()['cam1']);
 
-console.log('\n[M] watchdog (30 s since 2.6.5)');
+// 3.7.2 (B39): the last picture stays while a stream starts again
+{
+  const v = new AnyCamVideo();
+  v.video = {videoWidth: 640, videoHeight: 360, poster: 'blank', src: 'blob:live', srcObject: null};
+  const realCreate = document.createElement;
+  const drawn = [];
+  document.createElement = tag => tag === 'canvas'
+    ? {getContext: () => ({drawImage: (...a) => drawn.push(a)}), toDataURL: () => 'data:image/jpeg;base64,LAST'}
+    : realCreate(tag);
+  v.ondisconnect();
+  check('B39 a closing stream leaves its last picture as the poster',
+        v.video.poster === 'data:image/jpeg;base64,LAST' && v.video.src === '' && drawn.length === 1
+        && drawn[0][3] === 640 && drawn[0][4] === 360);
+  v.video = {videoWidth: 0, videoHeight: 0, poster: 'blank'};
+  v._keepPicture();
+  check('B39 ... no picture yet: the poster stays as it was', v.video.poster === 'blank');
+  v.video = {videoWidth: 3840, videoHeight: 2160, poster: 'blank'};
+  drawn.length = 0;
+  v._keepPicture();
+  check('B39 ... a 4K picture is kept at 1280 wide', drawn[0][3] === 1280 && drawn[0][4] === 720);
+  document.createElement = realCreate;
+}
+
+console.log('\n[M] watchdog (15 s since 3.7.2, B40)');
 s = mount();
-advance(29900);
-check('no fall back at 29.9 s', live() !== null);
+advance(14900);
+check('no fall back at 14.9 s', live() !== null);
 advance(200);
-check('falls back once 30 s pass with no video', live() === null && calls.poll.length === 1);
-check('reason names the timeout', (calls.toast[0] || [''])[0].includes('no video within 30 s'));
+check('falls back once 15 s pass with no video', live() === null && calls.poll.length === 1);
+check('reason names the timeout', (calls.toast[0] || [''])[0].includes('no video within 15 s'));
+check('B40 the message names the camera settings to change',
+      (calls.toast[0] || [''])[0].includes('H.265+ or Smart Codec'));
+check('B40 the add-on log is told', calls.fetch.some(u => /\/api\/live_fail$/.test(u)));
 check('timeout is NOT remembered: next open tries live view again', !declined()['cam1']);
 
 s = mount();
-advance(23000);
+advance(12000);
 ev('playing');
-check('the Oak-D camera case: first frame at 23 s plays live', live() && live().played === true);
+check('a smart-codec camera (keyframe every 12 s): first frame at 12 s plays live',
+      live() && live().played === true);
 check('loading message hidden on the first frame', loading() === 'none');
 
 s = mount();
 document.hidden = true;
-advance(30100);
+advance(15100);
 check('hidden tab: watchdog re-arms instead of failing', live() !== null);
 document.hidden = false;
-advance(30100);
+advance(15100);
 check('visible again: watchdog then fails normally', live() === null);
 
 console.log('\n[N] after the first frame');
@@ -435,6 +462,27 @@ console.log('\n[S] live cards');
   check('after the retry time: live again', g("cardLiveAttach('slow')") === true);
   await flush(); await flush();
 
+  // 3.7.2 (B35): a player whose socket closed and that waits to reconnect is still trying
+  cardInfo = {ok: true, stream: 'anycam_oak_c0'};
+  drawCard('oak');
+  g("cardLiveAttach('oak')"); await flush(); await flush();
+  const so = cst('oak');
+  so.el.wsState = WebSocket.CONNECTING;   // VideoRTC between a close and its reconnect
+  advance(14000);
+  check('B35 a player waiting to reconnect: still trying at 14 s', cst('oak') === so);
+  advance(2000);
+  check('B35 ... still pictures once 15 s of trying pass', !cst('oak') && snaps.includes('oak'));
+  check('B35 ... and the add-on log is told', fetched.some(u => /\/api\/live_fail$/.test(u)));
+  cardInfo = {ok: true, stream: 'anycam_off_c0'};
+  drawCard('off');
+  g("cardLiveAttach('off')"); await flush(); await flush();
+  const sf = cst('off');
+  sf.el.ws = {}; sf.el.disconnectTID = 7;  // scrolled off screen: VideoRTC's 5 s wait
+  advance(20000);
+  check('B35 a player paused off screen does not count', cst('off') === sf);
+  g("_cardLiveFail('off', _cardLive['off'], 'card removed', false)");
+  delete cards.off;
+
   delete cards.lorex;
   g('cardLivePrune()');
   check('card removed: its player is dropped', !cst('lorex') && p._removed);
@@ -475,6 +523,7 @@ console.log('\n[S] live cards');
     check('C19 ... Enhanced View closes the MJPEG stream', sockets[0].closed && !sm.ws);
     g('cardLivePauseAll(false)');
     check('C19 ... and opens it again after', sockets.length === 2 && sm.ws === sockets[1]);
+    check('B39 an MJPEG card keeps its last picture while its stream opens again', im.src === 'blob:2');
     sockets[1].onmessage({data: 'error: no picture from the camera in 15 s'});
     check('C19 ... an error from the add-on: still pictures, retried later',
           snaps.includes('mj') && !cst('mj') && sockets[1].closed && g("_cardLiveOff['mj'].retryAt") > 0);

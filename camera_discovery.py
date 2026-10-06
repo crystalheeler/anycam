@@ -52,7 +52,7 @@ from anycam_motion import (
 import anycam_go2rtc
 from anycam_go2rtc import (
     _go2rtc_profile_source, _go2rtc_register, _go2rtc_stream_name, _go2rtc_supervisor,
-    api_go2rtc_card, handle_go2rtc_player_js, handle_go2rtc_ws,
+    api_go2rtc_card, api_live_fail, handle_go2rtc_player_js, handle_go2rtc_ws,
 )
 # 3.0.0-rc1.3 (E1): anycam_probe.
 import anycam_probe
@@ -86,7 +86,7 @@ from anycam_focus import (
 # 3.0.0-rc1.5 (E1): anycam_snap.
 import anycam_snap
 from anycam_snap import (
-    _drain_stderr, _stop_proc, api_logs,
+    _drain_stderr, _stop_proc, api_diagnostics_hwtest, api_logs,
     handle_snap_status, handle_snapshot, snap_loop,
 )
 # 3.0.0-rc1.5 (E1): anycam_credentials.
@@ -217,7 +217,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.7.1"  # must match config.yaml
+CURRENT_VERSION = "3.7.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1465,12 +1465,14 @@ def make_app() -> web.Application:
     # itself when go2rtc is not running.
     app.router.add_get(   "/api/go2rtc/focus/{camera_id}",        api_go2rtc_focus)
     app.router.add_get(   "/api/go2rtc/card/{camera_id}",         api_go2rtc_card)
+    app.router.add_post(  "/api/live_fail",                       api_live_fail)
     app.router.add_get(   "/go2rtc/ws",                           handle_go2rtc_ws)
     app.router.add_get(   "/go2rtc/video-rtc.js",                 handle_go2rtc_player_js)
     app.router.add_post(  "/api/log_level",                        api_set_log_level)
     app.router.add_get(   "/api/logs",                            api_logs)
     app.router.add_get(   "/api/self",                            api_self)
     app.router.add_get(   "/api/diagnostics/hw",                  api_diagnostics_hw)
+    app.router.add_get(   "/api/diagnostics/hwtest/{camera_id}",  api_diagnostics_hwtest)
     app.router.add_route("*", "/api/card_order",                     api_card_order)
     app.router.add_route("*", "/api/upload/settings",                api_upload_settings)
     app.router.add_post(  "/api/upload/test",                        api_upload_test)
@@ -1596,6 +1598,8 @@ async def api_diagnostics_hw(request: web.Request) -> web.Response:
         "unavailable": sorted(_HW_UNAVAILABLE),
         "candidates": [label for label, _c, _a in _HW_DECODER_CANDIDATES],
         "software_fallback": dict(anycam_snap._HW_FALLBACK),
+        "frozen_hardware": dict(anycam_snap._HW_FROZEN),          # 3.7.2 (B37)
+        "picture_tests": dict(anycam_snap._HW_TEST_RESULTS),
     })
 
 

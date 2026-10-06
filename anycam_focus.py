@@ -204,6 +204,10 @@ async def handle_focus_set(request: web.Request) -> web.Response:
         # buffer (X-Focus-Frames). The cancelled task cannot add to
         # frame_count: it stops at its next await.
         state["focus_frame_base"] = state.get("frame_count", 0)
+        # 3.7.2 (B36): a live card asks for no pictures, so the last request
+        # can be minutes old; the new loop's idle check then stopped it at
+        # once ("idle 664s — stopping") and the view sat on "Loading".
+        _snap_last_access[camera_id] = time.monotonic()
         state["task"] = asyncio.create_task(
             snap_loop(camera_id, url, camera, native_res=True))
     return web.json_response({"status": "ok", "focused": camera_id})

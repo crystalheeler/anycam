@@ -1,3 +1,27 @@
+## 3.7.2
+
+Cards that cannot play live now fall back to still pictures, cards keep their last picture while a stream restarts, and a broken hardware picture switches to software. Not field-tested.
+
+### Changes & improvements
+
+- **Cards keep their last picture** while a live stream starts again, instead of going black.
+- **Live view gives up after 15 s, not 30 s,** when no picture arrives. The message and the add-on log name the camera settings to check: H.264+, H.265+, Smart Codec and the I-frame interval.
+- **The add-on log shows when a card or Enhanced View gives up on live view,** with the reason.
+- **The login fields have no grey "admin" or dots.** An empty user name box now looks empty.
+- **A hardware picture test** decodes a few pictures in software and in three hardware ways, and logs which ways give a real picture (`/api/diagnostics/hwtest/<camera>`).
+
+### Bugs fixed
+
+- **A card whose live stream kept closing stayed black for good.** It now shows still pictures after 15 s and tries live view again later.
+- **The classic Enhanced View could stop at once and show "Loading" forever** when a live card had been open for a while.
+- **Hardware HEVC decode could give a frozen green picture.** After 50 identical pictures, AnyCam decodes that camera in software and runs the picture test one time.
+
+### Known issues
+
+- **Hardware HEVC decode on the Pi gives a green picture** with Protection mode off. AnyCam falls back to software; the fix waits for the picture test results.
+- **The Microseven waits on "Loading feed"** while its RTSP stream is broken, now for up to 15 s.
+- **One Amcrest camera can get two cards** (under investigation).
+
 ## 3.7.1
 
 Cards come back at once after a short absence, older Hikvision cameras play live, and the hardware decode report is right. Not field-tested.

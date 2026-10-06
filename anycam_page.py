@@ -503,9 +503,9 @@ header h1{{cursor:pointer}}
       <input type="text" id="add-path" placeholder="/stream  or  /cam/realmonitor?channel=1"/>
     </div>
     <div class="field"><label>USERNAME <span style="font-weight:400;color:var(--text-dim)">(optional)</span></label>
-      <input type="text" id="add-user" autocomplete="username" placeholder="admin"/></div>
+      <input type="text" id="add-user" autocomplete="username"/></div>
     <div class="field"><label>PASSWORD <span style="font-weight:400;color:var(--text-dim)">(optional)</span></label>
-      <input type="password" id="add-pass" autocomplete="current-password" placeholder="&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;"/></div>
+      <input type="password" id="add-pass" autocomplete="current-password"/></div>
   </div>
   <div id="add-error"></div>
   <div style="display:flex;gap:10px;margin-top:12px">
@@ -654,9 +654,9 @@ header h1{{cursor:pointer}}
     <div class="locked-list" id="locked-list"></div>
     <div class="locked-cred-form">
       <label>USERNAME</label>
-      <input type="text" id="locked-user" placeholder="admin" autocomplete="username">
+      <input type="text" id="locked-user" autocomplete="username">
       <label>PASSWORD</label>
-      <input type="password" id="locked-pass" placeholder="&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;"
+      <input type="password" id="locked-pass"
         autocomplete="current-password"
         onkeydown="if(event.key==='Enter')submitLockedCreds()">
       <div class="cred-error" id="locked-err"></div>
