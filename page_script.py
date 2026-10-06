@@ -896,8 +896,9 @@ async function openUpload(camId) {
   _upCam = camId || null;
   if (_csCamId) closeCamSettings();
   const cam = _upCam && cameras.find(c => c.id === _upCam);
+  // 3.7.0-rc2.0 (C24): the page calls it Remote Storage
   document.getElementById('up-title').textContent = _upCam
-    ? 'Upload — ' + (cam ? displayName(cam) : _upCam) : 'Upload recordings: global destination';
+    ? 'Remote Storage — ' + (cam ? displayName(cam) : _upCam) : 'Remote Storage: global destination';
   document.getElementById('up-error').textContent = '';
   document.getElementById('up-status').textContent = '';
   document.getElementById('upload-modal').classList.add('open');
@@ -929,7 +930,7 @@ function _upFill() {
   const g = d.global;
   document.getElementById('up-global-note').textContent = g
     ? 'Global destination: ' + g.protocol.toUpperCase() + ' ' + g.host + g.path
-    : 'No global destination is set (Storage tab, Upload).';
+    : 'No global destination is set (Storage tab, Remote Storage).';
   const st = d.status || {};
   document.getElementById('up-status').textContent = (d.queue ? d.queue + ' recording(s) waiting to upload. ' : '')
     + (st.last_error ? 'Last error: ' + st.last_error : '');
@@ -974,7 +975,7 @@ async function saveUpload() {
     _upData = d;
   } catch (e) { err.textContent = 'Could not save: ' + e; return false; }
   closeUpload();
-  showToast('Upload settings saved');
+  showToast('Remote Storage settings saved');
   return true;
 }
 
@@ -984,7 +985,7 @@ async function removeUpload() {
     if (!ok) { document.getElementById('up-error').textContent = d.error || 'Could not remove'; return; }
   } catch (e) { return; }
   closeUpload();
-  showToast('Global upload destination removed');
+  showToast('Global Remote Storage destination removed');
 }
 
 // Save first, so the test uses what is on the form.
@@ -2121,9 +2122,68 @@ async function zoneEditOpen() {
   svg.ondblclick = e => { e.preventDefault(); zoneFinish(true); };
   svg.oncontextmenu = _zoneContext;
   document.getElementById('zone-panel').style.display = 'flex';
+  _zonePanelRestore();
   document.getElementById('zone-only').checked = _ze.zonesOnly;
   _zoneLayout();
   _zoneList();
+}
+
+/* 3.7.0-rc2.0 (C22): the zone window moves by its title bar and folds to
+ * it, so it does not cover the part of the picture being drawn on. Each
+ * device keeps the place and the fold in its own browser storage. */
+const ZONE_PANEL_KEY = 'anycam.zonePanel';
+
+function _zonePanelSaved() {
+  try { return JSON.parse(localStorage.getItem(ZONE_PANEL_KEY) || 'null') || {}; }
+  catch (e) { return {}; }
+}
+
+function _zonePanelStore(v) {
+  try { localStorage.setItem(ZONE_PANEL_KEY, JSON.stringify({..._zonePanelSaved(), ...v})); }
+  catch (e) {}
+}
+
+function _zonePanelPlace(left, top) {
+  const panel = document.getElementById('zone-panel');
+  const r = panel.getBoundingClientRect();
+  const vw = window.innerWidth || 1024, vh = window.innerHeight || 768;
+  left = Math.min(Math.max(0, left), Math.max(0, vw - r.width));
+  top = Math.min(Math.max(0, top), Math.max(0, vh - 40));
+  Object.assign(panel.style, {left: left + 'px', top: top + 'px', right: 'auto', bottom: 'auto',
+                              width: r.width + 'px'});
+  return [left, top];
+}
+
+function _zonePanelRestore() {
+  const panel = document.getElementById('zone-panel');
+  const v = _zonePanelSaved();
+  panel.classList.toggle('zp-folded', !!v.folded);
+  document.getElementById('zone-fold').textContent = v.folded ? '▸' : '▾';
+  if (typeof v.left === 'number' && typeof v.top === 'number') _zonePanelPlace(v.left, v.top);
+}
+
+function zoneFold() {
+  const panel = document.getElementById('zone-panel');
+  const folded = !panel.classList.contains('zp-folded');
+  panel.classList.toggle('zp-folded', folded);
+  document.getElementById('zone-fold').textContent = folded ? '▸' : '▾';
+  _zonePanelStore({folded});
+}
+
+function zonePanelDragStart(ev) {
+  if (ev.target && ev.target.id === 'zone-fold') return;
+  if (ev.button !== undefined && ev.button !== 0) return;
+  const head = document.getElementById('zone-head');
+  const r = document.getElementById('zone-panel').getBoundingClientRect();
+  const dx = ev.clientX - r.left, dy = ev.clientY - r.top;
+  ev.preventDefault();
+  try { head.setPointerCapture(ev.pointerId); } catch (e) {}
+  head.onpointermove = e => _zonePanelPlace(e.clientX - dx, e.clientY - dy);
+  head.onpointerup = head.onpointercancel = e => {
+    head.onpointermove = head.onpointerup = head.onpointercancel = null;
+    const [left, top] = _zonePanelPlace(e.clientX - dx, e.clientY - dy);
+    _zonePanelStore({left, top});
+  };
 }
 
 function _zoneTeardown() {
@@ -2773,10 +2833,32 @@ function cardDragStart(ev, handle) {
   handle.onpointerup = handle.onpointercancel = e => _cardDragEnd(e, handle);
 }
 
+// 3.7.0-rc2.0 (D4): a line in the gap between two cards shows where the
+// card lands, like a text cursor. Cards side by side get an upright line;
+// cards stacked in one column (a phone held upright) get a level line.
+function _cardStacked(target) {
+  const grid = target.parentNode;
+  const g = grid && grid.getBoundingClientRect ? grid.getBoundingClientRect() : null;
+  return !!(g && target.getBoundingClientRect().width > g.width * 0.6);
+}
+
 function _cardDragMark(target, after) {
-  document.querySelectorAll('.camera-card.drop-before,.camera-card.drop-after')
-    .forEach(c => c.classList.remove('drop-before', 'drop-after'));
-  if (target) target.classList.add(after ? 'drop-after' : 'drop-before');
+  const line = document.getElementById('card-drop-line');
+  if (!line) return;
+  if (!target) { line.style.display = 'none'; return; }
+  const r = target.getBoundingClientRect();
+  const cs = (typeof getComputedStyle === 'function' && target.parentNode)
+    ? getComputedStyle(target.parentNode) : null;
+  const gap = parseFloat(cs && (cs.columnGap || cs.gap)) || 16;
+  if (_cardStacked(target)) {
+    const y = after ? r.top + r.height + gap / 2 : r.top - gap / 2;
+    Object.assign(line.style, {display: 'block', left: r.left + 'px', top: (y - 2) + 'px',
+                               width: r.width + 'px', height: '4px'});
+  } else {
+    const x = after ? r.left + r.width + gap / 2 : r.left - gap / 2;
+    Object.assign(line.style, {display: 'block', left: (x - 2) + 'px', top: r.top + 'px',
+                               width: '4px', height: r.height + 'px'});
+  }
 }
 
 function _cardDragMove(ev) {
@@ -2786,7 +2868,8 @@ function _cardDragMove(ev) {
   if (!target || target === _cardDrag.card) { _cardDrag.target = null; _cardDragMark(null); return; }
   const r = target.getBoundingClientRect();
   _cardDrag.target = target;
-  _cardDrag.after = ev.clientX > r.left + r.width / 2;
+  _cardDrag.after = _cardStacked(target) ? ev.clientY > r.top + r.height / 2
+                                         : ev.clientX > r.left + r.width / 2;
   _cardDragMark(target, _cardDrag.after);
 }
 
