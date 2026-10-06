@@ -179,9 +179,9 @@ def test_pure():
     url0, _, r0 = cd._go2rtc_profile_source(legacy, 0)
     url1, _, r1 = cd._go2rtc_profile_source(legacy, 1)
     check("pre-stream_profiles camera: main resolves",
-          url0 is not None and url0.endswith("@10.0.0.73:8765/live"), str(url0))
+          url0 is not None and url0.endswith("@10.0.0.73:8765/live#backchannel=0"), str(url0))
     check("pre-stream_profiles camera: sub resolves",
-          url1 is not None and url1.endswith("@10.0.0.73:8765/sub"), str(url1))
+          url1 is not None and url1.endswith("@10.0.0.73:8765/sub#backchannel=0"), str(url1))
 
 
 # ── fake go2rtc ───────────────────────────────────────────────────────────────
@@ -845,7 +845,7 @@ async def test_cards():
         cd.COMMUNITY_ENDPOINT = ""
     url, codec, reason = cd._go2rtc_card_source(lorex)
     check("I1 Lorex channel (only a 3840-wide main known): the DVR sub-stream",
-          url and url.endswith("/cam/realmonitor?channel=7&subtype=1") and reason == "ok", str(url))
+          url and url.endswith("/cam/realmonitor?channel=7&subtype=1#backchannel=0") and reason == "ok", str(url))
     check("I1 ... with the camera password added", url and TRICKY_PASS in unquote(url))
     hik = camera(stream_width=2560,
                  stream_profiles=[{"url": "rtsp://10.0.0.33:554/Streaming/Channels/101",
@@ -859,11 +859,11 @@ async def test_cards():
                  stream_url="rtsp://192.168.50.73:8765/stream", stream_width=1280, stream_profiles=[])
     url, codec, reason = cd._go2rtc_card_source(oak)
     check("I3 Oak-D (1280 H.264, one stream): plays its main stream",
-          url and url.endswith("192.168.50.73:8765/stream") and codec == "h264", str(url))
+          url and url.endswith("192.168.50.73:8765/stream#backchannel=0") and codec == "h264", str(url))
     two = camera(stream_profiles=[{"url": "rtsp://10.0.0.9:554/main", "stream_codec": "h264", "stream_width": 3840},
                                   {"url": "rtsp://10.0.0.9:554/sub", "stream_codec": "h264", "stream_width": 640}])
     url, _, _ = cd._go2rtc_card_source(two)
-    check("I4 main 3840 + sub 640: the sub-stream", url and url.endswith("/sub"), str(url))
+    check("I4 main 3840 + sub 640: the sub-stream", url and url.endswith("/sub#backchannel=0"), str(url))
     check("I5 card and Enhanced View use different go2rtc names",
           cd._go2rtc_stream_name("lorex7", 0, kind="c") != cd._go2rtc_stream_name("lorex7", 0)
           and cd._go2rtc_stream_name("lorex7", 0, kind="c").endswith("_c0"))
@@ -3289,7 +3289,7 @@ async def test_301():
     u1, c1, _ = cd._go2rtc_card_source(camx)
     u2, c2, _ = cd._go2rtc_card_source(camx, h265=False)
     check("AA10 C10: a card plays its smallest stream; without H.265, the H.264 one",
-          u1.endswith("/main") and c1 == "hevc" and u2.endswith("/sub") and c2 == "h264", f"{u1} {u2}")
+          u1.endswith("/main#backchannel=0") and c1 == "hevc" and u2.endswith("/sub#backchannel=0") and c2 == "h264", f"{u1} {u2}")
     camx["stream_profiles"] = camx["stream_profiles"][:1]
     u3, c3, why = cd._go2rtc_card_source(camx, h265=False)
     check("AA10 ... only H.265: no live card, and the reason says why",
@@ -3314,7 +3314,7 @@ async def test_310():
     u_phone, _, why = cd._go2rtc_card_source(wide)
     u_pc, c_pc, _ = cd._go2rtc_card_source(wide, wide=True)
     check("AB1 C19: a 2560-wide stream: still pictures on a phone, live on a computer",
-          u_phone is None and "small enough" in why and u_pc and u_pc.endswith("/main") and c_pc == "h264")
+          u_phone is None and "small enough" in why and u_pc and u_pc.endswith("/main#backchannel=0") and c_pc == "h264")
 
     # C19: which cameras have an MJPEG stream for a live card
     m1 = camera(id="m1", protocol="MJPEG", stream_url="http://10.0.0.22:81/videostream.cgi",
@@ -3537,10 +3537,10 @@ async def test_320():
     with _Swap(_match_stream_db=lambda c: None):
         wsrc2, _, _ = cd._go2rtc_card_source(ws)
     check("AC2 C6: an RTSP-over-WebSocket camera: the brand's RTSP path, carried by the WebSocket",
-          wsrc == "rtsp://10.0.0.51:554/Streaming/Channels/101#transport=ws://10.0.0.51:80/rtspoverwebsocket",
+          wsrc == "rtsp://10.0.0.51:554/Streaming/Channels/101#transport=ws://10.0.0.51:80/rtspoverwebsocket#backchannel=0",
           str(wsrc))
     check("AC2 ... an unknown brand asks for the root path",
-          wsrc2 == "rtsp://10.0.0.51:554/#transport=ws://10.0.0.51:80/rtspoverwebsocket", str(wsrc2))
+          wsrc2 == "rtsp://10.0.0.51:554/#transport=ws://10.0.0.51:80/rtspoverwebsocket#backchannel=0", str(wsrc2))
     bad, _, why = cd._go2rtc_card_source(dict(wrtc, signaling_url="ftp://x"))
     check("AC3 C6: a bad signalling address is refused, with the reason",
           bad is None and "signalling" in why)
@@ -3584,14 +3584,14 @@ async def test_330():
         cd._GO2RTC_STREAMS.clear(); cd._GO2RTC_STREAM_CAM.clear(); cd._RELAY_FAILS.clear()
         r1 = await cd._go2rtc_relay(cid, main)
         r2 = await cd._go2rtc_relay(cid, main)
-        name = cd._go2rtc_shared_name(cid, main)
+        name = cd._go2rtc_shared_name(cid, main + "#backchannel=0")     # 3.7.1 (B31)
         check("AD1 C4: ffmpeg reads the camera through go2rtc's RTSP server on 127.0.0.1",
               r1 == f"rtsp://anycam:{cd._GO2RTC_RTSP_PASS}@127.0.0.1:28554/{name}", r1)
         check("AD1 ... two users of one stream: one go2rtc stream, so one camera connection",
-              r2 == r1 and len(fake.puts) == 1 and fake.registered.get(name) == main)
+              r2 == r1 and len(fake.puts) == 1 and fake.registered.get(name) == main + "#backchannel=0")
         check("AD2 C4: the stream name holds no password, and never changes its source",
               TRICKY_PASS not in name and "admin" not in name
-              and cd._go2rtc_shared_name(cid, main) == name
+              and cd._go2rtc_shared_name(cid, main + "#backchannel=0") == name
               and cd._go2rtc_shared_name(cid, main.replace("101", "102")) != name)
         other = await cd._go2rtc_relay("cam2", main)
         check("AD2 ... the same address on another camera card is another stream",
@@ -4167,6 +4167,101 @@ async def test_370_rc2():
           'id="card-drop-line"' in html and "drop-before" not in html and "drop-before" not in cd._JS)
 
 
+
+# ── AJ. 3.7.1 ────────────────────────────────────────────────────────────────
+async def test_371():
+    print("\n[AJ] 3.7.1")
+    # B31: no two-way audio requests to any camera
+    src = cd._go2rtc_rtsp_src("rtsp://u:p@10.0.0.9:554/Streaming/Channels/101")
+    check("AJ1 B31: every RTSP source for go2rtc asks for no two-way audio",
+          src.endswith("/Streaming/Channels/101#backchannel=0")
+          and cd._go2rtc_rtsp_src(src) == src
+          and cd._go2rtc_rtsp_src("webrtc:http://10.0.0.9/whep") == "webrtc:http://10.0.0.9/whep")
+    relay_fail = await cd._go2rtc_relay("x", "http://10.0.0.9/snap.jpg")
+    check("AJ1 ... ffmpeg never gets go2rtc's option on a direct address",
+          relay_fail == "http://10.0.0.9/snap.jpg")
+
+    # B34: never a fixed network
+    import subprocess as _sp
+    real_run, real_own = cd.anycam_scan.subprocess.run, cd._own_ipv4
+    tries = []
+
+    def slow(cmd, **kw):
+        tries.append(kw.get("timeout"))
+        raise _sp.TimeoutExpired(cmd, kw.get("timeout"))
+    try:
+        cd.anycam_scan.subprocess.run = slow
+        with _Swap(_own_ipv4=lambda: "10.0.0.37"):
+            net = cd.get_local_subnet()
+        with _Swap(_own_ipv4=lambda: None):
+            none = cd.get_local_subnet()
+    finally:
+        cd.anycam_scan.subprocess.run = real_run
+    check("AJ2 B34: a route check that times out is tried again with more time",
+          tries[:2] == [5, 15], str(tries))
+    check("AJ2 ... then the add-on's own address with a /24, never 192.168.1.0/24",
+          net == "10.0.0.0/24" and none == "", f"{net} {none!r}")
+    with _Swap(get_local_subnet=lambda: ""):
+        await cd.run_scan()
+    check("AJ2 ... an unknown network stops the scan with a message",
+          "could not find its network" in cd.SCAN_STATE["message"] and not cd.SCAN_STATE["running"],
+          cd.SCAN_STATE["message"])
+    cd.SCAN_STATE.update(message="Idle. Click Scan to begin.")
+
+    # B11: the HEVC decoder's newer name, and the Protection mode advice
+    import glob as _glob
+    real = (_glob.glob, cd.os.open, cd.os.close, cd.Path.read_text)
+    devs = {"/dev/video*": ["/dev/video19"], "/dev/media*": ["/dev/media0"], "/dev/dri/renderD*": []}
+
+    def blocked_open(path, flags):
+        raise PermissionError(1, "Operation not permitted")
+
+    def name_read(self, *a, **k):
+        if self.name == "name" and "video4linux" in self.parts:
+            return "rpi-hevc-dec\n"
+        return real[3](self, *a, **k)
+    try:
+        _glob.glob = lambda pat: devs.get(pat, [])
+        cd.os.open, cd.os.close = blocked_open, (lambda fd: None)
+        cd.Path.read_text = name_read
+        rep_ = cd._hw_device_report()
+    finally:
+        _glob.glob, cd.os.open, cd.os.close, cd.Path.read_text = real
+    check("AJ3 B11: rpi-hevc-dec is the HEVC decoder; no false overlay warning",
+          rep_["rpivid"] and not any("dtoverlay" in n for n in rep_["notes"]), str(rep_["notes"]))
+    check("AJ3 ... a blocked device names the fix: Protection mode off",
+          any("Protection mode" in n for n in rep_["notes"]))
+    real_exists = cd.os.path.exists
+    real_create = cd.asyncio.create_subprocess_exec
+
+    class P:
+        returncode = 0
+
+        async def communicate(self):
+            return b" drm\n v4l2m2m\n", b""
+    async def fake_exec(*a, **k):
+        return P()
+    try:
+        cd.os.path.exists = lambda p: p in ("/dev/video19", "/dev/media0") or real_exists(p)
+        cd.asyncio.create_subprocess_exec = fake_exec
+        cd._HW_UNAVAILABLE.clear(); CAP.lines.clear()
+        with _Swap(_hw_device_report=lambda: rep_, CFG_HW_DECODE=True,
+                   _HW_DECODER_CANDIDATES=[("hevc_drm", "hevc", ["-hwaccel", "drm"])]):
+            await cd._probe_hw_decoders()
+    finally:
+        cd.os.path.exists = real_exists
+        cd.asyncio.create_subprocess_exec = real_create
+    check("AJ4 B11: hevc_drm is not called available when the add-on may not open its devices",
+          "hevc_drm" in cd._HW_UNAVAILABLE
+          and any("Protection mode is on" in l for l in CAP.lines), str(CAP.lines[-3:]))
+    cd._HW_UNAVAILABLE.clear(); cd._HW_REPORT.clear()
+
+    # B27: a hidden page keeps live streams for 60 s
+    check("AJ5 B27: a hidden page keeps its live streams 60 s; off screen, 5 s as before",
+          "const LIVE_HIDDEN_GRACE_MS = 60000;" in cd._JS
+          and "this.DISCONNECT_TIMEOUT = document.hidden ? LIVE_HIDDEN_GRACE_MS : 5000;" in cd._JS)
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -4291,6 +4386,7 @@ async def main():
     await test_360()
     await test_370()
     await test_370_rc2()
+    await test_371()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

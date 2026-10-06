@@ -1085,6 +1085,14 @@ function _go2rtcLoadPlayer() {
           this._emit('open', modes);
           return modes;
         }
+        // 3.7.1 (B27): a page hidden for less than LIVE_HIDDEN_GRACE_MS keeps
+        // its streams, so coming back from another program shows live video at
+        // once, not ~2 s of black while each stream starts again. Off screen
+        // and Enhanced View's pause keep VideoRTC's own 5 s.
+        disconnectedCallback() {
+          this.DISCONNECT_TIMEOUT = document.hidden ? LIVE_HIDDEN_GRACE_MS : 5000;
+          return super.disconnectedCallback();
+        }
         onclose() {
           // VideoRTC closes the socket on purpose after a WebRTC handoff, and
           // marks wsState CLOSED first. Report only closes it did not intend.
@@ -1628,7 +1636,10 @@ function _cardMjpegClose(st) {
 }
 
 // A hidden page or an open Enhanced View closes the MJPEG streams, as
-// VideoRTC does for the other live cards.
+// VideoRTC does for the other live cards. 3.7.1 (B27): a hidden page closes
+// them only after LIVE_HIDDEN_GRACE_MS.
+const LIVE_HIDDEN_GRACE_MS = 60000;
+let _mjpegHideTID = 0;
 function _cardMjpegPause(pause) {
   Object.keys(_cardLive).forEach(camId => {
     const st = _cardLive[camId];
@@ -1638,7 +1649,15 @@ function _cardMjpegPause(pause) {
     else if (st.el && st.el.isConnected) _cardMjpegOpen(camId, st);
   });
 }
-document.addEventListener('visibilitychange', () => _cardMjpegPause(document.hidden || !!_focusCamId));
+document.addEventListener('visibilitychange', () => {
+  clearTimeout(_mjpegHideTID);
+  _mjpegHideTID = 0;
+  if (document.hidden && !_focusCamId) {
+    _mjpegHideTID = setTimeout(() => { _mjpegHideTID = 0; _cardMjpegPause(true); }, LIVE_HIDDEN_GRACE_MS);
+  } else {
+    _cardMjpegPause(document.hidden || !!_focusCamId);
+  }
+});
 
 // Give up on a card that shows no video within GO2RTC_FIRST_FRAME_MS of
 // actually connecting. An off-screen or hidden player is not connected,

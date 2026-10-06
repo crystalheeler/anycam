@@ -217,7 +217,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.7.0"  # must match config.yaml
+CURRENT_VERSION = "3.7.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1557,7 +1557,9 @@ def _hw_device_report() -> dict:
     names = " ".join(d["name"].lower() for d in devices)
     report = {
         "devices": devices,
-        "rpivid": "rpivid" in names,                         # the HEVC decoder (C9)
+        # the HEVC decoder (C9). 3.7.1 (B11): newer Raspberry Pi kernels name
+        # it rpi-hevc-dec, not rpivid; 3.7.0 then warned of a missing overlay.
+        "rpivid": "rpivid" in names or "rpi-hevc-dec" in names,
         "bcm2835_codec": "bcm2835-codec-decode" in names,    # the H.264 decoder
         "blocked": [d["device"] for d in devices if d["opens"] != "yes"],
     }
@@ -1568,8 +1570,11 @@ def _hw_device_report() -> dict:
         notes.append("no rpivid HEVC decoder: on a Pi 4, add dtoverlay=rpivid-v4l2 to "
                      "/boot/firmware/config.txt and restart the Pi")
     if report["blocked"]:
+        # 3.7.1 (B11): confirmed 2026-10-06 on test system B: with the
+        # add-on's Protection mode off, every device opens.
         notes.append("the add-on may not open " + ", ".join(report["blocked"])
-                     + "; hardware decode on these falls back to software")
+                     + "; hardware decode on these falls back to software. To allow it, "
+                     "turn off Protection mode on AnyCam's Info page and restart AnyCam")
     report["notes"] = notes
     return report
 
@@ -1698,6 +1703,15 @@ async def _probe_hw_decoders() -> None:
             if hwaccel_name == "drm":
                 rpivid_loaded = (os.path.exists("/dev/video19")
                                  and os.path.exists("/dev/media0"))
+                # 3.7.1 (B11): present is not enough; the add-on must also
+                # be allowed to open them, or ffmpeg decodes in software.
+                blocked = [d for d in ("/dev/video19", "/dev/media0")
+                           if d in _HW_REPORT.get("blocked", [])]
+                if rpivid_loaded and blocked:
+                    _HW_UNAVAILABLE.add(label)
+                    log.info(f"  {label}: unavailable (the add-on may not open "
+                             f"{', '.join(blocked)}: Protection mode is on)")
+                    continue
                 if not rpivid_loaded:
                     _HW_UNAVAILABLE.add(label)
                     reason = ("rpivid not loaded — /dev/video19 or "

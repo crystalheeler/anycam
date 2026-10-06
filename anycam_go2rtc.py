@@ -230,8 +230,9 @@ async def _go2rtc_relay(camera_id: str, url: str | None) -> str | None:
     if (not url or not url.lower().startswith(("rtsp://", "rtsps://")) or not _GO2RTC_READY
             or _RELAY_FAILS.get(camera_id, 0) >= RELAY_FAIL_LIMIT):
         return url
-    name = _go2rtc_shared_name(camera_id, url)
-    if not await _go2rtc_register(name, url, camera_id):
+    src = _go2rtc_rtsp_src(url)               # 3.7.1 (B31)
+    name = _go2rtc_shared_name(camera_id, src)
+    if not await _go2rtc_register(name, src, camera_id):
         return url
     return (f"rtsp://{GO2RTC_RTSP_USER}:{_GO2RTC_RTSP_PASS}@{GO2RTC_API_HOST}:"
             f"{GO2RTC_RTSP_PORT}/{name}")
@@ -303,7 +304,8 @@ def _go2rtc_native_source(camera: dict) -> tuple[str | None, str, str]:
         entry = _match_stream_db(camera) or {}
         path = (entry.get("rtsp") or ["/"])[0]
         rtsp = f"rtsp://{camera.get('ip', '')}:{entry.get('port') or 554}{path}"
-        return f"{build_authenticated_url(camera, url=rtsp) or rtsp}#transport={ws}", "", "ok"
+        return (_go2rtc_rtsp_src(f"{build_authenticated_url(camera, url=rtsp) or rtsp}#transport={ws}"),
+                "", "ok")
     return None, "", "this camera is not a WebRTC or WebSocket stream"
 
 
@@ -323,6 +325,21 @@ def _go2rtc_profiles(camera: dict) -> list[dict]:
     return profiles
 
 
+def _go2rtc_rtsp_src(url: str) -> str:
+    """3.7.1 (B31): an RTSP source for go2rtc, without two-way audio.
+
+    go2rtc asks every RTSP camera for its ONVIF backchannel (two-way audio)
+    unless the source ends in #backchannel=0; its README calls that option
+    "important for some glitchy cameras". Two older Hikvision cameras reset
+    go2rtc's connection about once a second (2026-10-06, about 900 resets),
+    while AnyCam's own probes and ffprobe worked. AnyCam never sends audio
+    to a camera, so every RTSP source carries it.
+    """
+    if url.lower().startswith(("rtsp://", "rtsps://")) and "#backchannel=" not in url:
+        return url + "#backchannel=0"
+    return url
+
+
 def _go2rtc_relay_url(camera: dict, raw: str | None,
                       codec: str) -> tuple[str | None, str, str]:
     """Check one RTSP URL can be relayed; return (auth url, codec, reason)."""
@@ -339,7 +356,7 @@ def _go2rtc_relay_url(camera: dict, raw: str | None,
     url = build_authenticated_url(camera, url=raw)
     if not url:
         return None, codec, "no stream URL for this profile"
-    return url, codec, "ok"
+    return _go2rtc_rtsp_src(url), codec, "ok"
 
 
 async def _go2rtc_register(name: str, src: str, camera_id: str) -> bool:
