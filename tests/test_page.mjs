@@ -293,6 +293,11 @@ advance(15100);
 check('B45 a WebRTC session with no picture goes straight to the classic view',
       live() === null && calls.poll.length === 1);
 s = mount();
+ev('open', ['mse', 'webrtc']);
+advance(15100);
+check('B46 no stream reached MSE (the camera failed): straight to the classic view, no WebRTC try',
+      live() === null && calls.poll.length === 1);
+s = mount();
 ev('open', ['mse']);
 advance(15100);
 check('B45 a browser without WebRTC goes straight to the classic view',

@@ -25,7 +25,9 @@ from anycam_probe import (
     probe_rtsp,
 )
 import anycam_focus
-from anycam_go2rtc import _go2rtc_relay, _go2rtc_relay_result, _go2rtc_relayed
+from anycam_go2rtc import (
+    _go2rtc_relay, _go2rtc_relay_result, _go2rtc_relayed, _rtsp_stuck, _rtsp_stuck_mark,
+)
 
 log = logging.getLogger("anycam")
 
@@ -393,6 +395,17 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     _prefer_ffmpeg   = (native_res and _has_rtsp) or (_has_rtsp and _rtsp_probe_ok)
     if camera.get("http_snap_url") and not _prefer_ffmpeg:
         await http_snap_loop(camera_id, camera)
+        return
+    # 3.7.4 (B6, B32): a camera whose RTSP is stuck gets no ffmpeg at all.
+    if camera.get("http_snap_url") and _rtsp_stuck(camera_id):
+        log.info(f"SNAP [{camera_id}]: the camera's RTSP is stuck — HTTP snapshots")
+        if native_res:
+            _snap_state(camera_id)["http_snap_active"] = True
+        try:
+            await http_snap_loop(camera_id, camera)
+        finally:
+            if native_res:
+                _snap_state(camera_id)["http_snap_active"] = False
         return
 
     state        = _snap_state(camera_id)
@@ -1177,6 +1190,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                             f"SNAP [{camera_id}]: {why} — RTSP non-functional, "
                             f"falling back to HTTP snap loop for this focus session"
                         )
+                        _rtsp_stuck_mark(camera_id, why)    # 3.7.4 (B6, B32)
                         # Mark state so JS can disable resolution/fps controls
                         _snap_state(camera_id)["http_snap_active"] = True
                         state["http_snap_fired"] = True

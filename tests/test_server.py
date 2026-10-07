@@ -140,11 +140,11 @@ def test_pure():
     raw = cd._go2rtc_config()
     conf = json.loads(raw)
     check("config is inline JSON (starts with '{')", raw.startswith("{"))
-    check("config: exact module allowlist",
-          conf["app"]["modules"] == ["api", "ws", "rtsp", "webrtc", "mp4"],
+    check("config: exact module allowlist (3.7.4, B47: ffmpeg for the copy source)",
+          conf["app"]["modules"] == ["api", "ws", "rtsp", "webrtc", "mp4", "ffmpeg"],
           str(conf["app"]["modules"]))
-    check("config: exec/echo/expr/ffmpeg absent",
-          not {"exec", "echo", "expr", "ffmpeg"} & set(conf["app"]["modules"]))
+    check("config: exec/echo/expr absent (no shell commands as sources)",
+          not {"exec", "echo", "expr"} & set(conf["app"]["modules"]))
     check("config: API on 127.0.0.1:28984",
           conf["api"]["listen"] == "127.0.0.1:28984", conf["api"]["listen"])
     check("config: RTSP server on 127.0.0.1 only, with a password (3.3.0, C4)",
@@ -4247,7 +4247,8 @@ async def test_371():
         cd.asyncio.create_subprocess_exec = fake_exec
         cd._HW_UNAVAILABLE.clear(); CAP.lines.clear()
         with _Swap(_hw_device_report=lambda: rep_, CFG_HW_DECODE=True,
-                   _HW_DECODER_CANDIDATES=[("hevc_drm", "hevc", ["-hwaccel", "drm"])]):
+                   _HW_DECODER_CANDIDATES=[("hevc_drm", "hevc", ["-hwaccel", "drm"])],
+                   HW_NOT_AUTOMATIC={}):
             await cd._probe_hw_decoders()
     finally:
         cd.os.path.exists = real_exists
@@ -4542,6 +4543,190 @@ async def test_373():
     cd._HW_TEST_RESULTS.clear()
 
 
+async def test_374():
+    print("\n[AM] 3.7.4")
+    # B47: an ffmpeg copy source for the Microseven's brand only
+    ms = camera(id="ms", ip="10.0.0.22", manufacturer="Hipcam/Microseven",
+                stream_url="rtsp://10.0.0.22:554/11", stream_codec="h264",
+                stream_profiles=[{"url": "rtsp://10.0.0.22:554/11", "stream_codec": "h264"}])
+    hik = camera(manufacturer="Hikvision")
+    src, codec, reason = cd._go2rtc_relay_url(ms, ms["stream_url"], "h264")
+    check("AM1 B47: the Microseven's go2rtc source is an ffmpeg copy, video and audio",
+          src == "ffmpeg:" + cd.build_authenticated_url(ms) + "#video=copy#audio=copy"
+          and reason == "ok", str(src))
+    check("AM1 ... the password stays encoded, so its '#' cannot cut the source short",
+          src.count("#") == 2 and "%23" in src)
+    src_h, _, _ = cd._go2rtc_relay_url(hik, hik["stream_url"], "hevc")
+    check("AM1 ... every other camera keeps its direct source (#backchannel=0)",
+          src_h == cd.build_authenticated_url(hik) + "#backchannel=0", str(src_h))
+    check("AM1 ... a camera's own live_ffmpeg_copy wins over its brand",
+          cd._go2rtc_ffmpeg_copy(dict(ms, live_ffmpeg_copy=False)) is False
+          and cd._go2rtc_ffmpeg_copy(dict(hik, live_ffmpeg_copy=True)) is True)
+    registered = []
+
+    async def fake_register(name, src_, camera_id):
+        registered.append((name, src_))
+        return True
+    with _Swap(_go2rtc_register=fake_register):
+        real_ready = cd._GO2RTC_READY
+        cd._GO2RTC_READY = True
+        try:
+            cd.CAMERAS.clear(); cd.CAMERAS["ms"] = ms
+            cd._RELAY_FAILS.clear()
+            relay = await cd._go2rtc_relay("ms", cd.build_authenticated_url(ms))
+        finally:
+            cd._GO2RTC_READY = real_ready
+    check("AM1 ... the classic view's relay reads the same ffmpeg copy stream",
+          registered and registered[0][1].startswith("ffmpeg:rtsp://")
+          and registered[0][0] == cd._go2rtc_shared_name("ms", src)
+          and relay.endswith("/" + registered[0][0]), str(registered))
+    conf = json.loads(cd._go2rtc_config())
+    check("AM1 ... go2rtc loads ffmpeg, and still no exec, echo or expr",
+          "ffmpeg" in conf["app"]["modules"] and conf["ffmpeg"] == {"bin": "ffmpeg"}
+          and not {"exec", "echo", "expr"} & set(conf["app"]["modules"]))
+
+    # B37 option A: hevc_drm is never picked automatically
+    real_exists = cd.os.path.exists
+    real_create = cd.asyncio.create_subprocess_exec
+
+    class P:
+        returncode = 0
+
+        async def communicate(self):
+            return b" drm\n v4l2m2m\n", b""
+
+    async def fake_exec(*a, **k):
+        return P()
+    try:
+        cd.os.path.exists = lambda p: p in ("/dev/video19", "/dev/media0") or real_exists(p)
+        cd.asyncio.create_subprocess_exec = fake_exec
+        cd._HW_UNAVAILABLE.clear(); CAP.lines.clear()
+        with _Swap(_hw_device_report=lambda: {"devices": [], "blocked": [], "notes": []},
+                   CFG_HW_DECODE=True,
+                   _HW_DECODER_CANDIDATES=[("hevc_drm", "hevc", ["-hwaccel", "drm", "-c:v", "hevc"])]):
+            cd._HW_REPORT.clear()
+            await cd._probe_hw_decoders()
+    finally:
+        cd.os.path.exists = real_exists
+        cd.asyncio.create_subprocess_exec = real_create
+    check("AM2 B37: hevc_drm is not used, even with its devices open, and the log says why",
+          "hevc_drm" in cd._HW_UNAVAILABLE
+          and any("hevc_drm: not used" in l and "B37" in l for l in CAP.lines), str(CAP.lines[-3:]))
+    check("AM2 ... the picture test can still run it by hand",
+          any(lbl == "hevc_drm" for lbl, _c, _a in cd._HW_DECODER_CANDIDATES))
+    cd._HW_UNAVAILABLE.clear(); cd._HW_REPORT.clear()
+
+    # B6 + B32: a stuck camera
+    answers = []
+
+    async def fake_answers(camera_):
+        return answers.pop(0) if answers else False
+    cd.CAMERAS.clear(); cd.CAMERAS["ms"] = ms; cd.CAMERAS[hik["id"]] = hik
+    cd._RTSP_STUCK.clear(); cd._RTSP_SIGNS_SEEN.clear()
+    with _Swap(_rtsp_answers=fake_answers, RTSP_STUCK_RECHECK_S=0.05):
+        cd._rtsp_stuck_sign("ms", "webrtc/offer: streams: read tcp 10.0.0.5:1->10.0.0.22:554: "
+                                  "read: connection reset by peer")
+        check("AM3 B6/B32: one dropped connection is not yet stuck", not cd._rtsp_stuck("ms"))
+        cd._rtsp_stuck_sign("ms", "no video within 15 s")
+        check("AM3 ... a failure without a dropped connection does not count", not cd._rtsp_stuck("ms"))
+        CAP.lines.clear()
+        cd._rtsp_stuck_sign("ms", "streams: read: connection reset by peer")
+        check("AM3 ... the second within 2 minutes: stuck, and the log says to power-cycle it",
+              cd._rtsp_stuck("ms") and any("cut the camera's power" in l for l in CAP.lines))
+        real_ready = cd._GO2RTC_READY
+        cd._GO2RTC_READY = True
+        try:
+            r = await cd.api_go2rtc_card(make_mocked_request("GET", "/api/go2rtc/card/ms",
+                                                             match_info={"camera_id": "ms"}))
+            card = json.loads(r.body)
+            r = await cd.api_go2rtc_focus(make_mocked_request("GET", "/api/go2rtc/focus/ms",
+                                                              match_info={"camera_id": "ms"}))
+            focus = json.loads(r.body)
+        finally:
+            cd._GO2RTC_READY = real_ready
+        check("AM3 ... the card gets no live stream, tries again later, and says why",
+              card["ok"] is False and card["retry"] is True and "power-cycle" in card["reason"], str(card))
+        check("AM3 ... Enhanced View goes to the classic view at once", focus["ok"] is False, str(focus))
+        check("AM3 ... the camera list carries the flag for the card's badge",
+              cd._safe_cam(ms)["rtsp_stuck"] is True and cd._safe_cam(hik)["rtsp_stuck"] is False
+              and "Power-cycle camera" in cd._JS and "cam.rtsp_stuck" in cd._JS)
+        http_calls = []
+
+        async def fake_http(c, cam_):
+            http_calls.append(c)
+        launches = []
+
+        async def no_exec(*a, **k):
+            launches.append(a)
+            raise OSError("no ffmpeg in this test")
+        cd.asyncio.create_subprocess_exec, real_create = no_exec, cd.asyncio.create_subprocess_exec
+        try:
+            with _Swap(http_snap_loop=fake_http):
+                ms_http = dict(ms, http_snap_url="http://10.0.0.22/tmpfs/snap.jpg", rtsp_probe_ok=True)
+                cd.CAMERAS["ms"] = ms_http
+                cd._SNAP.clear(); cd._HW_PROBED.set()
+                await asyncio.wait_for(cd.snap_loop("ms", cd.build_authenticated_url(ms_http),
+                                                    ms_http, native_res=True), timeout=5)
+        finally:
+            cd.asyncio.create_subprocess_exec = real_create
+        check("AM3 ... the classic view uses HTTP snapshots, with no ffmpeg",
+              http_calls == ["ms"] and launches == [], str(launches))
+        answers[:] = [False, True]
+        for _ in range(60):
+            await asyncio.sleep(0.02)
+            if not cd._rtsp_stuck("ms"):
+                break
+        check("AM3 ... a quiet check that finds the camera answering ends the state",
+              not cd._rtsp_stuck("ms") and any("answers again" in l for l in CAP.lines))
+    cd._RTSP_STUCK.clear(); cd._RTSP_SIGNS_SEEN.clear()
+
+    # B6: the quiet check is one request with the password, inside the cooldown
+    seen = []
+
+    def fake_validate(host, port, urls, user, pw, timeout, meta, label):
+        seen.append((host, port, urls, user, pw))
+        return {urls[0]: True}
+
+    async def no_wait(ip, secs, label=""):
+        seen.append(("wait", ip, secs))
+    with _Swap(_validate_rtsp_urls_single_socket=fake_validate, _throttle_wait_if_needed=no_wait):
+        ok = await cd._rtsp_answers(ms)
+    check("AM3 ... the check: one connection with the password, after the brand's cooldown",
+          ok is True and seen[0] == ("wait", "10.0.0.22", 5.0)
+          and seen[1] == ("10.0.0.22", 554, ["rtsp://10.0.0.22:554/11"], "admin", TRICKY_PASS), str(seen))
+
+    # B46: the WebRTC retry only after MSE had the stream
+    check("AM4 B46: the retry needs the MSE mode", "g.mode !== 'MSE'" in cd._JS)
+
+    # B47: go2rtc's API asks every caller for its password, local ones included
+    conf = json.loads(cd._go2rtc_config())
+    check("AM5 B47: go2rtc's API needs a password from local programs too",
+          conf["api"]["local_auth"] is True and conf["api"]["username"] == "anycam"
+          and len(conf["api"]["password"]) >= 24)
+    seen_auth = []
+
+    async def streams(request):
+        seen_auth.append(request.headers.get("Authorization", ""))
+        return web.Response(text="ok")
+    app = web.Application()
+    app.router.add_route("*", "/api/streams", streams)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 28984).start()
+    try:
+        cd._GO2RTC_STREAMS.clear()
+        ok = await cd._go2rtc_register("anycam_test_auth", "rtsp://10.0.0.9/x#backchannel=0", "cam1")
+    finally:
+        await runner.cleanup()
+        cd._GO2RTC_STREAMS.clear()
+    want = aiohttp.BasicAuth("anycam", conf["api"]["password"]).encode()
+    check("AM5 ... AnyCam's own requests carry it (stream registration)",
+          ok and len(seen_auth) == 2 and all(h == want for h in seen_auth), str(seen_auth))
+    src = (Path(__file__).resolve().parent.parent / "anycam_go2rtc.py").read_text(encoding="utf-8")
+    check("AM5 ... and every go2rtc session in the code is the one with the password",
+          src.count("aiohttp.ClientSession(") == 1 and src.count("_go2rtc_session(") >= 4)
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -4669,6 +4854,7 @@ async def main():
     await test_371()
     await test_372()
     await test_373()
+    await test_374()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

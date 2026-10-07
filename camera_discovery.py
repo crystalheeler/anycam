@@ -217,7 +217,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.7.3"  # must match config.yaml
+CURRENT_VERSION = "3.7.4"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -320,6 +320,16 @@ _HW_DECODER_CANDIDATES: list[tuple[str, str, list[str]]] = [
     ("hevc_vaapi",   "hevc", ["-hwaccel", "vaapi", "-c:v", "hevc"]),
     ("h264_vaapi",   "h264", ["-hwaccel", "vaapi", "-c:v", "h264"]),
 ]
+# 3.7.4 (B37, CrystalHeeler's option A): candidates AnyCam never picks by
+# itself. hevc_drm gave a green picture ("Decode fail", "Error parsing NAL
+# unit") for every camera and size tried on both test systems in October
+# 2026: 3840x2160, 2560x1440 and 704x480, with 127 to 211 MB of decoder
+# memory free. /api/diagnostics/hwtest/<camera> still runs it by hand, so a
+# later Home Assistant OS can be checked before it is used again.
+HW_NOT_AUTOMATIC: dict[str, str] = {
+    "hevc_drm": "the Pi's HEVC hardware decoder gives a green picture with this "
+                "kernel and ffmpeg (build plan B37); H.265 decodes in software",
+}
 
 # ── Shared thread pool for all run_in_executor calls ─────────────────────────
 # Using a named, bounded pool instead of None (default) gives us:
@@ -981,6 +991,7 @@ def _safe_cam(cam: dict) -> dict:
     for f in ("stream_width", "stream_height"):
         s.setdefault(f, None)
     s.setdefault("stream_fps", None)
+    s["rtsp_stuck"] = anycam_go2rtc._rtsp_stuck(s.get("id", ""))   # 3.7.4 (B6, B32)
     s.pop("credentials", None)
     return s
 
@@ -1684,6 +1695,10 @@ async def _probe_hw_decoders() -> None:
     available: list[str] = []
     vaapi_state: tuple[bool, str] | None = None     # 3.0.1 (B12): tested once
     for label, codec, args in _HW_DECODER_CANDIDATES:
+        if label in HW_NOT_AUTOMATIC:
+            _HW_UNAVAILABLE.add(label)
+            log.info(f"  {label}: not used ({HW_NOT_AUTOMATIC[label]})")
+            continue
         is_hwaccel = "-hwaccel" in args
 
         if is_hwaccel:

@@ -1339,12 +1339,14 @@ function _go2rtcMount(camId, cam, info, session, rtcOnly) {
 // once more over WebRTC with video only, before the classic view.
 function _go2rtcRetryWebRTC(session) {
   const g = _go2rtc;
-  if (!g || g.session !== session || g.rtcOnly || g.mode === 'WebRTC'
+  // 3.7.4 (B46): only when MSE received the stream. With no stream at all
+  // (the camera failed), a WebRTC try fails too and only delays the
+  // classic view (the Microseven, 2026-10-06: 4 s for nothing).
+  if (!g || g.session !== session || g.rtcOnly || g.mode !== 'MSE'
       || !g.modes.includes('webrtc')) return false;
   console.info('[AnyCam] no picture in Enhanced View for ' + g.camId + ' — trying WebRTC, video only');
   _liveFailReport(g.camId, 'enhanced view retry',
-                  'no video within ' + (GO2RTC_FIRST_FRAME_MS / 1000) + ' s'
-                  + (g.mode === 'MSE' ? ' over MSE' : ''));
+                  'no video within ' + (GO2RTC_FIRST_FRAME_MS / 1000) + ' s over MSE');
   const camId = g.camId, cam = g.cam, info = {stream: g.stream, codec: g.codec};
   _go2rtcUnmount();
   _go2rtcMount(camId, cam, info, session, true);
@@ -3416,6 +3418,12 @@ function cardHTML(cam) {
   const notCamBtn =
     '<button class="btn btn-ghost btn-sm" onclick="markNotCamera(' + jsArg(cam.id) + ')"'
     + ' title="Permanently hide — not a camera">🚫 Not a Camera</button>';
+  // 3.7.4 (B6, B32): the camera accepts connections but its live stream
+  // does not answer; only a power cycle has cleared that so far.
+  const stuckBdg = cam.rtsp_stuck
+    ? '<span class="badge" style="background:#3a2a10;color:var(--orange)" title="The camera'
+      + "'" + 's live stream does not answer, so this card shows still pictures. Cut the camera'
+      + "'" + 's power for 10 s; AnyCam checks again every 5 minutes.">⚠ Power-cycle camera</span>' : '';
   const upgradeBdg = cam.upgrade_missing
     ? '<span class="badge" style="background:#3a2a10;color:var(--orange)">⚠ Not found after upgrade</span>' : '';
   const hevcPlusBdg = cam.hevc_plus_warning && !cam.has_sub_stream
@@ -3460,8 +3468,8 @@ function cardHTML(cam) {
           + ' onclick="event.stopPropagation();openCamSettings(' + jsArg(cam.id) + ')">' + COG_SVG + '</button>'
         : '')
     + '</div>'
-    + ((uncBdg + upgradeBdg + hevcPlusBdg + lockedBdg)
-        ? '<div class="badges">' + uncBdg + upgradeBdg + hevcPlusBdg + lockedBdg + '</div>'
+    + ((uncBdg + stuckBdg + upgradeBdg + hevcPlusBdg + lockedBdg)
+        ? '<div class="badges">' + uncBdg + stuckBdg + upgradeBdg + hevcPlusBdg + lockedBdg + '</div>'
         : '')
     + identityHTML(cam)
     + credFormHTML(cam)
