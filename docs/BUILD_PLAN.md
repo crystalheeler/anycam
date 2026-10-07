@@ -29,25 +29,6 @@
 
 ---
 
-## Phases 3.0.1 to 3.7.0: done
-
-All eight phases are released in 3.7.0 (2026-10-06). Each phase's release candidate has its own tag and audit report.
-
-| Version | Theme | Items |
-|---|---|---|
-| 3.0.1 | Fixes, then the Firefox message | B2, C10, B20, B23, B24, B26, B12, B8, F10, C11 (also B3), C20 |
-| 3.1.0 | Cards | B25, C19, D3 |
-| 3.2.0 | Live view | C5, C6 |
-| 3.3.0 | One connection per camera | C4, B15 |
-| 3.4.0 | Detection zones | C17 |
-| 3.5.0 | Discovery and DVRs | D1, D2 |
-| 3.6.0 | Recording upload | C14 |
-| 3.7.0 | Hardware decode diagnostics, page changes | B11 and C9 (diagnostics), B28, C22, C24, D4 |
-
-Outside the phases: B6 waits until CrystalHeeler unlocks the Microseven.
-
----
-
 ## A. Field tests
 
 | # | Status | Item | Why / source | Next step |
