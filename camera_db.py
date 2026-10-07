@@ -1370,6 +1370,10 @@ CAMERA_DB: list[dict] = [
                  "(sub) /13 /h264major /h264minor; HTTP snap at "
                  "/tmpfs/snap.jpg. Per-IP TCP rate-limit on RTSP port — "
                  "single-socket multi-method probing required.",
+        # 3.7.4 (B47): live view through an ffmpeg copy; go2rtc builds an
+        # invalid video description from this firmware's parameter sets
+        # (Microseven MYM74K-HX, firmware v1.0.12, H.264 and H.265).
+        "live_ffmpeg_copy": True,
         # ─── rc2 throttle fields ───────────────────────────────────────
         "throttle_type":            "rate_limit_per_ip_tcp",
         "throttle_type_confidence": "HIGH",

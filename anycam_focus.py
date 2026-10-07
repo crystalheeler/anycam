@@ -57,6 +57,8 @@ async def api_go2rtc_focus(request: web.Request) -> web.Response:
     except ValueError:
         return web.json_response({"ok": False, "reason": "bad profile index"},
                                  status=400)
+    if anycam_go2rtc._rtsp_stuck(camera_id):    # 3.7.4 (B6, B32): no RTSP to it
+        return web.json_response({"ok": False, "reason": anycam_go2rtc.RTSP_STUCK_REASON})
     src, codec, reason = _go2rtc_profile_source(camera, prof_idx)
     if not src:
         return web.json_response({"ok": False, "reason": reason, "codec": codec})

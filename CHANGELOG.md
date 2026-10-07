@@ -1,3 +1,24 @@
+## 3.7.4
+
+The Microseven gets live view, a camera whose stream gets stuck is handled calmly, and the Pi's broken HEVC hardware decoder is no longer used. Not field-tested.
+
+### Changes & improvements
+
+- **Microseven live view.** These cameras now play through an ffmpeg copy that repairs their stream description, without decoding.
+- **A stuck camera is left alone.** When a camera accepts connections but its live stream never answers, AnyCam stops connecting to it. It shows the camera's still pictures, and the card says "Power-cycle camera". AnyCam checks again every 5 minutes and turns live view back on by itself.
+- **H.265 decodes in software from the start.** The Pi's HEVC hardware decoder gave green pictures on every camera tested, so AnyCam no longer uses it.
+- **go2rtc's API now asks every caller for a password,** programs on the same Pi included.
+
+### Bugs fixed
+
+- **The Microseven never played live** in any browser. go2rtc built an invalid video description from its stream.
+- **Enhanced View retried over WebRTC when the camera itself had failed,** which only delayed the classic view.
+
+### Known issues
+
+- **Other programs on the Pi can read camera video** through go2rtc's local RTSP server, which does not ask local programs for its password.
+- **One Amcrest camera can get two cards** (under investigation).
+
 ## 3.7.3
 
 Live view now gives up when no picture really arrives, Firefox gets a second try over WebRTC, the classic view shows real pictures, and cards on still pictures ask far less often. Not field-tested.
