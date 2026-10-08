@@ -52,7 +52,7 @@ from anycam_motion import (
 import anycam_go2rtc
 from anycam_go2rtc import (
     _go2rtc_profile_source, _go2rtc_register, _go2rtc_stream_name, _go2rtc_supervisor,
-    api_go2rtc_card, api_live_fail, handle_go2rtc_player_js, handle_go2rtc_ws,
+    api_go2rtc_card, api_live_fail, api_live_repair, handle_go2rtc_player_js, handle_go2rtc_ws,
 )
 # 3.0.0-rc1.3 (E1): anycam_probe.
 import anycam_probe
@@ -81,7 +81,7 @@ from anycam_page import (
 # 3.0.0-rc1.5 (E1): anycam_focus.
 import anycam_focus
 from anycam_focus import (
-    api_go2rtc_focus, handle_focus_clear, handle_focus_set,
+    api_go2rtc_focus, api_quality_switch, handle_focus_clear, handle_focus_set,
 )
 # 3.0.0-rc1.5 (E1): anycam_snap.
 import anycam_snap
@@ -217,7 +217,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.7.4"  # must match config.yaml
+CURRENT_VERSION = "3.7.5-rc1.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -992,6 +992,7 @@ def _safe_cam(cam: dict) -> dict:
         s.setdefault(f, None)
     s.setdefault("stream_fps", None)
     s["rtsp_stuck"] = anycam_go2rtc._rtsp_stuck(s.get("id", ""))   # 3.7.4 (B6, B32)
+    s["quality_switch"] = bool(anycam_go2rtc._classic_sub_stream(cam))   # 3.7.5-rc1.0 (B51)
     s.pop("credentials", None)
     return s
 
@@ -1477,6 +1478,8 @@ def make_app() -> web.Application:
     app.router.add_get(   "/api/go2rtc/focus/{camera_id}",        api_go2rtc_focus)
     app.router.add_get(   "/api/go2rtc/card/{camera_id}",         api_go2rtc_card)
     app.router.add_post(  "/api/live_fail",                       api_live_fail)
+    app.router.add_post(  "/api/live_repair",                     api_live_repair)
+    app.router.add_post(  "/api/cameras/{camera_id}/quality_switch", api_quality_switch)
     app.router.add_get(   "/go2rtc/ws",                           handle_go2rtc_ws)
     app.router.add_get(   "/go2rtc/video-rtc.js",                 handle_go2rtc_player_js)
     app.router.add_post(  "/api/log_level",                        api_set_log_level)

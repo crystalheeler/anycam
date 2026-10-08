@@ -1,3 +1,23 @@
+## 3.7.5-rc1.0
+
+A release candidate for the Microseven's live view, with a Quality Switch for 4K cameras in the classic view. Not field-tested.
+
+### Changes & improvements
+
+- **Any camera whose stream the browser cannot read is repaired automatically.** AnyCam passes it through an ffmpeg copy, keeps that choice, and tries live view again.
+- **Quality Switch in the classic view.** Off: full size, with keyframes only when the Pi cannot keep up. On: the camera's sub-stream, smaller but smoother. Shown only when the camera has a sub-stream.
+- **The classic view no longer greys out when the Pi falls behind.** It switches to keyframes only.
+
+### Bugs fixed
+
+- **The Microseven's ffmpeg copy never started** (3.7.4). go2rtc runs it through a module AnyCam did not load.
+- **A camera was marked "Power-cycle camera" after a go2rtc failure** that was not the camera's fault.
+
+### Known issues
+
+- **Other programs on the Pi can read camera video** through go2rtc's local RTSP server.
+- **One Amcrest camera can get two cards** (under investigation).
+
 ## 3.7.4
 
 The Microseven gets live view, a camera whose stream gets stuck is handled calmly, and the Pi's broken HEVC hardware decoder is no longer used. Not field-tested.

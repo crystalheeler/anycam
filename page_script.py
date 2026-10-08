@@ -1096,6 +1096,22 @@ function _videoHasFrame(v) {
 const SMART_CODEC_HELP = 'If this camera uses H.264+, H.265+ or Smart Codec, turn it off, '
                        + 'or set its I-frame interval equal to its frame rate.';
 
+// 3.7.5-rc1.0 (B47, general): the browser could not read the camera's
+// stream description (Chrome: "Invalid video decoder config", "Unrecognized
+// video codec profile", "stream parsing failed"). The add-on then passes
+// that camera through an ffmpeg copy, which rebuilds the description, and
+// live view tries again once. Any brand; the add-on keeps the choice.
+const DESCRIPTION_ERROR_RE = /decoder config|codec profile|parsing failed|append_failed|could not parse|demuxer_error/i;
+async function _liveRepair(camId, reason) {
+  try {
+    const r = await fetch(BASE + '/api/live_repair', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({camera_id: camId, reason})});
+    const d = await r.json();
+    return !!(d && d.switched);
+  } catch (e) { return false; }
+}
+
 // 3.7.2 (B40): tell the add-on log when live view gives up.
 function _liveFailReport(camId, where, reason) {
   try {
@@ -1137,6 +1153,11 @@ function _go2rtcLoadPlayer() {
           // app) draws a large gray play icon until the first frame.
           this.video.poster   = FOCUS_BLANK_POSTER;
           this.video.addEventListener('playing', () => this._emit('playing'));
+          // 3.7.5-rc1.0 (B47): the browser's own reason when it cannot use the stream
+          this.video.addEventListener('error', () => {
+            const e = this.video.error;
+            this._emit('decode', e ? (e.message || ('media error ' + e.code)) : '');
+          });
         }
         // 3.7.2 (B39): keep the last picture as the poster while the stream
         // starts again, instead of about 2 s of black. The video drops its
@@ -1363,6 +1384,18 @@ function _go2rtcEvent(session, kind, value) {
   } else if (kind === 'mode') {
     g.mode = value;
     _go2rtcUpdateInfo();
+  } else if (kind === 'decode') {
+    console.warn('[AnyCam] live view: the browser cannot use the stream: ' + value);
+    if (g.played || g.repairTried || !DESCRIPTION_ERROR_RE.test(value || '')) return;
+    g.repairTried = true;
+    const camId = g.camId, cam = g.cam;
+    _liveRepair(camId, value).then(switched => {
+      if (!switched || !_go2rtc || _go2rtc.session !== session) return;
+      _go2rtcUnmount();
+      _go2rtcTryFocus(camId, cam, session).then(ok => {
+        if (!ok && session === _focusSession) _go2rtcToClassic(camId, cam, '', false);
+      });
+    });
   } else if (kind === 'error') {
     console.warn('[AnyCam] go2rtc: ' + value);
     if (g.played) return;   // VideoRTC recovers on its own once it has played
@@ -1810,6 +1843,16 @@ function _cardLiveEvent(camId, st, kind, value) {
     if (_videoHasFrame(st.el && st.el.video)) _cardLivePlayed(camId, st);
   } else if (kind === 'open') {
     st.modes = Array.isArray(value) ? value : [];
+  } else if (kind === 'decode') {
+    if (st.played || st.repairTried || !DESCRIPTION_ERROR_RE.test(value || '')) return;
+    st.repairTried = true;
+    _liveRepair(camId, value).then(switched => {
+      if (!switched || _cardLive[camId] !== st) return;
+      _cardLiveFail(camId, st, 'switching to an ffmpeg copy of the stream', false);
+      delete _cardLiveOff[camId];
+      stopSnap(camId);
+      cardLiveAttach(camId);
+    });
   } else if (kind === 'error') {
     if (st.played) return;   // VideoRTC recovers on its own once it has played
     const failed = st.modes.find(m => value.startsWith(m));
@@ -1890,6 +1933,33 @@ async function openFocus(camId) {
   _startFocusPoll(camId, cam);
 }
 
+/* ── 3.7.5-rc1.0 (B51): the classic view's Quality Switch ────────────────
+ * Shown only when the camera has a sub-stream (header X-Quality-Switch:
+ * "on" or "off"; empty means none). Off: full size, keyframes only when the
+ * Pi cannot keep up. On: the sub-stream, smaller but at its full rate. */
+function _qualitySwitch(camId, state) {
+  const box = document.getElementById('focus-controls');
+  if (!box || box.dataset.quality === state) return;
+  box.dataset.quality = state;
+  box.dataset.sound = '';
+  box.innerHTML = !state ? ''
+    : '<label class="qswitch" title="Switch to a lower resolution but smoother video stream">'
+      + '<span class="qrow"><input type="checkbox" id="quality-switch"'
+      + (state === 'on' ? ' checked' : '')
+      + ' onchange="setQualitySwitch(' + jsArg(camId) + ', this.checked)"> Quality Switch</span>'
+      + '<span class="qsub">Switch to a lower resolution but smoother video stream</span></label>';
+}
+
+async function setQualitySwitch(camId, smooth) {
+  const box = document.getElementById('focus-controls');
+  if (box) box.dataset.quality = smooth ? 'on' : 'off';
+  try {
+    await fetch(BASE + '/api/cameras/' + encodeURIComponent(camId) + '/quality_switch',
+                {method: 'POST', headers: {'Content-Type': 'application/json'},
+                 body: JSON.stringify({smooth: !!smooth})});
+  } catch (e) {}
+}
+
 async function _startFocusPoll(camId, cam) {
   _focusCamId = camId;
   const img   = document.getElementById('focus-img');
@@ -1942,7 +2012,7 @@ async function _startFocusPoll(camId, cam) {
     const realFps  = _liveFps  !== null ? _liveFps + ' fps' : 'measuring…';
     const stepRes  = _stepRes  || '…';
     const stepFpsS = _stepFps  !== null
-      ? (_stepFps === 'uncapped' ? 'uncapped' : _stepFps + ' fps')
+      ? (/^\d+$/.test(_stepFps) ? _stepFps + ' fps' : _stepFps)
       : '…';
     // Only show Adapted Quality when using ffmpeg (rtsp mode): in http
     // fallback mode there is no quality ladder.
@@ -2016,6 +2086,7 @@ async function _startFocusPoll(camId, cam) {
           _stepRes = stepRes;
         }
         if (stepFps) _stepFps = stepFps;
+        _qualitySwitch(camId, resp.headers.get('X-Quality-Switch') || '');   // 3.7.5-rc1.0 (B51)
         const httpFallback = (snapMode === 'http');
         // 2.4.0-rc3.2: surface the fallback transition as a visible toast.
         // We reuse the focus-warning element that already exists for the
