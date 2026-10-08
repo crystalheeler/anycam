@@ -216,6 +216,7 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .qswitch{{display:flex;flex-direction:column;gap:2px;font-size:13px;color:#ddd;cursor:pointer}}
 .qswitch .qrow{{display:flex;align-items:center;gap:6px}}
 .qswitch .qsub{{font-size:11px;color:#999}}
+.qswitch .qfail{{color:var(--orange)}}
 #focus-close{{position:absolute;top:6px;right:14px;background:transparent;border:2.5px solid #e03;color:#e03;font-size:1rem;font-weight:bold;width:32px;height:32px;border-radius:50%;cursor:pointer;z-index:9002;line-height:1;display:flex;align-items:center;justify-content:center}}
 #focus-close:hover{{background:#e03;color:#fff}}
 #focus-loading{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:9001;color:#ddd;font-size:1rem;text-align:center;pointer-events:none}}

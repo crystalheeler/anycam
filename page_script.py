@@ -1942,12 +1942,17 @@ function _qualitySwitch(camId, state) {
   if (!box || box.dataset.quality === state) return;
   box.dataset.quality = state;
   box.dataset.sound = '';
+  // 3.7.5-rc2.0: "failed" — the sub-stream gave no picture, so the view
+  // stays at full size; the switch says so instead of doing nothing visible.
   box.innerHTML = !state ? ''
     : '<label class="qswitch" title="Switch to a lower resolution but smoother video stream">'
       + '<span class="qrow"><input type="checkbox" id="quality-switch"'
-      + (state === 'on' ? ' checked' : '')
+      + (state === 'on' || state === 'failed' ? ' checked' : '')
       + ' onchange="setQualitySwitch(' + jsArg(camId) + ', this.checked)"> Quality Switch</span>'
-      + '<span class="qsub">Switch to a lower resolution but smoother video stream</span></label>';
+      + (state === 'failed'
+         ? '<span class="qsub qfail">The smoother stream gave no picture, so this view stays at full size</span>'
+         : '<span class="qsub">Switch to a lower resolution but smoother video stream</span>')
+      + '</label>';
 }
 
 async function setQualitySwitch(camId, smooth) {

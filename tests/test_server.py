@@ -72,6 +72,7 @@ cd._FERNET = Fernet(Fernet.generate_key())   # never touch /data/secret.key
 # keep it in the scratch folder, never in /data (C:\data on Windows).
 cd.DATA_DIR = SCRATCH
 cd.RUNTIME_FILE = SCRATCH / "runtime.json"
+cd.REMOVED_FILE = SCRATCH / "removed_cameras.json"   # 3.7.5-rc2.0
 
 
 def _scene_jpegs():
@@ -4864,6 +4865,121 @@ async def test_375():
     cd._SNAP.clear(); cd.CAMERAS.clear()
 
 
+async def test_375_rc2():
+    print("\n[AO] 3.7.5-rc2.0")
+    # ONVIF never goes to an RTSP port
+    check("AO1 B53: with no saved ONVIF address, ONVIF goes to port 80, never the RTSP port",
+          cd._onvif_media_url("10.0.0.22", 554, "") == "http://10.0.0.22:80/onvif/media"
+          and cd._onvif_media_url("10.0.0.22", 8080, "") == "http://10.0.0.22:8080/onvif/media"
+          and cd._onvif_media_url("10.0.0.22", 554, "http://10.0.0.22:8080/onvif/device_service")
+          == "http://10.0.0.22:8080/onvif/media")
+
+    # known cameras are not probed; a removed one comes back from its kept details
+    saved_ok = camera(id="ok", ip="10.0.0.50", user_saved=True, status="ready")
+    saved_nocreds = camera(id="nc", ip="10.0.0.51", user_saved=True, credentials=None, status="needs_credentials")
+    saved = {"ok": saved_ok, "nc": saved_nocreds}
+    check("AO2 B53: a saved camera with a working stream is known; one still needing a password is not",
+          cd._scan_known_camera("10.0.0.50", saved) is saved_ok
+          and cd._scan_known_camera("10.0.0.51", saved) is None
+          and cd._scan_known_camera("10.0.0.99", saved) is None)
+
+    cd.CAMERAS.clear(); cd.REMOVED_CAMERAS.clear()
+    gone = camera(id="10.0.0.60_onvif_Main", ip="10.0.0.60", user_saved=True, status="ready",
+                  name="Porch", live_ffmpeg_copy=True, classic_smooth=True,
+                  stream_profiles=[{"url": "rtsp://admin:x@10.0.0.60:554/11", "stream_codec": "h264"}])
+    cd.CAMERAS[gone["id"]] = gone
+    with _Swap(save_cameras=lambda: None):
+        r = await cd.api_delete_camera(make_mocked_request(
+            "DELETE", f"/api/cameras/{gone['id']}", match_info={"camera_id": gone["id"]}))
+    kept = cd.REMOVED_CAMERAS.get(gone["id"]) or {}
+    check("AO3 B53: removing a card keeps its details, without the password, for the next scan",
+          r.status == 200 and gone["id"] not in cd.CAMERAS and kept.get("name") == "Porch"
+          and kept.get("credentials") is None and kept.get("user_saved") is False
+          and kept.get("status") == "needs_credentials" and "admin:" not in json.dumps(kept)
+          and "live_ffmpeg_copy" not in kept and cd.REMOVED_FILE.exists())
+    published = []
+    real_pub = cd.PENDING_CAMERAS
+    with _Swap(_publish_scan_card=lambda c: published.append(c)):
+        back = cd._scan_restore_removed("10.0.0.60", {})
+    check("AO3 ... a scan that finds the address gives the card back, unprobed",
+          len(back) == 1 and published and published[0]["id"] == gone["id"]
+          and published[0]["status"] == "needs_credentials")
+    with _Swap(_publish_scan_card=lambda c: published.append(c)):
+        none = cd._scan_restore_removed("10.0.0.60", {"x": camera(id="x", ip="10.0.0.60")})
+    check("AO3 ... once the camera is set up again, the kept copy is dropped",
+          none == [] and gone["id"] not in cd.REMOVED_CAMERAS)
+    cd.REMOVED_CAMERAS.clear()
+
+    # the scan's host loop skips a known camera without probing it
+    src = (Path(__file__).resolve().parent.parent / "anycam_scan.py").read_text(encoding="utf-8")
+    check("AO4 B53: every scan pass checks for known and removed cameras before probing",
+          src.count("_scan_known_camera(ip, saved)") >= 2 and src.count("_scan_restore_removed(ip, saved)") >= 3)
+    check("AO4 ... the start-up check waits out the brand cooldown before its RTSP request",
+          'f"verify {cam.get(\'name\', ip)}")' in src)
+
+    # Quality Switch says when its stream fails
+    cid = "msq"
+    cam = camera(id=cid, ip="10.0.0.22", stream_url="rtsp://10.0.0.22:554/11", classic_smooth=True,
+                 stream_profiles=[{"url": "rtsp://10.0.0.22:554/11", "stream_width": 3840},
+                                  {"url": "rtsp://10.0.0.22:554/12", "stream_width": 1280}])
+    cd.CAMERAS.clear(); cd.CAMERAS[cid] = cam; cd._SNAP.clear()
+    st = cd._snap_state(cid)
+    st.update(frame=jpeg(b"f"), frame_time=time.monotonic(), smooth_failed=True)
+    cd._FOCUSED_CAMERA = cid
+    try:
+        h = (await cd.handle_snapshot(make_mocked_request("GET", f"/snapshot/{cid}",
+                                                          match_info={"camera_id": cid}))).headers
+    finally:
+        cd._FOCUSED_CAMERA = None
+    check("AO5 the Quality Switch reports a sub-stream that gave no picture",
+          h["X-Quality-Switch"] == "failed" and "gave no picture, so this view stays at full size" in cd._JS)
+    cd._SNAP.clear(); cd.CAMERAS.clear()
+
+    # B53 through the real scan: a known camera and a removed one are not probed
+    probed = []
+
+    def nmap(ips):
+        return [{"ip": ip, "hostname": ip, "mac_addr": "", "mac_vendor": "",
+                 "open_ports": [{"port": port, "service": svc, "product": ""}]}
+                for ip, port, svc in (("10.0.0.22", 554, "rtsp"), ("10.0.0.33", 554, "rtsp"),
+                                      ("10.0.0.50", 80, "http"))]
+
+    async def probe(ip, port, hostname, initial, prev, verdict, reason, loop, host_meta=None):
+        probed.append((ip, port))
+        return None
+    world = _Swap(
+        get_local_subnet=lambda: "10.0.0.0/26", get_default_gateway=lambda: "10.0.0.1",
+        discover_live_hosts=lambda subnet: {"10.0.0.22", "10.0.0.33", "10.0.0.50"},
+        onvif_discover=lambda timeout: [{"ip": "10.0.0.33", "name": "IPCAM", "onvif_scopes": "",
+                                         "xaddrs": "http://10.0.0.33:8080/onvif/device_service"}],
+        ssdp_discover=lambda timeout: [], mdns_discover=lambda timeout: [],
+        broad_nmap_scan=lambda ips: [], focused_nmap_scan=nmap, _probe_host_port=probe,
+        find_rtsp_path=lambda *a, **k: probed.append(("find", a[0])),
+        probe_http_identity=lambda *a, **k: {}, _rtsp_options_fingerprint=lambda *a, **k: {},
+        save_cameras=lambda: None, save_removed=lambda: None)
+    keep = (dict(cd.CAMERAS), set(cd.BLACKLIST), cd.SCAN_OPTIONS.get("broad_sweep"))
+    cd.CAMERAS.clear(); cd.BLACKLIST.clear(); cd.REMOVED_CAMERAS.clear()
+    cd.CAMERAS["ms"] = camera(id="ms", ip="10.0.0.22", user_saved=True, status="ready",
+                              stream_url="rtsp://10.0.0.22:554/11")
+    cd.REMOVED_CAMERAS["10.0.0.33_onvif_Main"] = dict(
+        camera(id="10.0.0.33_onvif_Main", ip="10.0.0.33", name="Back yard"),
+        credentials=None, user_saved=False, status="needs_credentials", remembered=True)
+    cd.SCAN_OPTIONS["broad_sweep"] = False
+    try:
+        with world:
+            await cd.run_scan()
+        check("AO6 B53, real scan: the known camera and the removed one are not probed; others are",
+              probed == [("10.0.0.50", 80)], str(probed))
+        check("AO6 ... the saved card stays and the removed card comes back from its kept details",
+              "ms" in cd.CAMERAS and cd.CAMERAS.get("10.0.0.33_onvif_Main", {}).get("name") == "Back yard"
+              and cd.CAMERAS["10.0.0.33_onvif_Main"]["status"] == "needs_credentials", str(sorted(cd.CAMERAS)))
+    finally:
+        cd.CAMERAS.clear(); cd.CAMERAS.update(keep[0])
+        cd.BLACKLIST.clear(); cd.BLACKLIST.update(keep[1])
+        cd.SCAN_OPTIONS["broad_sweep"] = keep[2]
+        cd.REMOVED_CAMERAS.clear()
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -4993,6 +5109,7 @@ async def main():
     await test_373()
     await test_374()
     await test_375()
+    await test_375_rc2()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

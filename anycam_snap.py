@@ -1766,7 +1766,8 @@ async def handle_snapshot(request: web.Request) -> web.Response:
                 step_res, step_fps = "sub-stream", "full rate"
             cam_q = CAMERAS.get(camera_id, {})
             q_switch = ("" if not _classic_sub_stream(cam_q)
-                        else "on" if cam_q.get("classic_smooth") else "off")
+                        else "failed" if cam_q.get("classic_smooth") and state.get("smooth_failed")
+                        else "on" if cam_q.get("classic_smooth") else "off")   # 3.7.5-rc2.0
             return web.Response(body=frame, content_type="image/jpeg",
                                 headers={"Cache-Control": "no-cache",
                                          "X-Frame-Source": "focus",

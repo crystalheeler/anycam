@@ -207,6 +207,7 @@ BLACKLIST_FILE = DATA_DIR / "blacklist.json"
 RUNTIME_FILE   = DATA_DIR / "runtime.json"
 OUI_CACHE_FILE  = DATA_DIR / "oui_cache.json"
 FEEDBACK_FILE   = DATA_DIR / "not_camera_feedback.json"
+REMOVED_FILE    = DATA_DIR / "removed_cameras.json"   # 3.7.5-rc2.0 (B53)
 
 # IEEE OUI CSV download URL (official source, ~37k entries, refreshed periodically)
 OUI_CSV_URL      = "https://standards-oui.ieee.org/oui/oui.csv"
@@ -217,7 +218,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.7.5-rc1.0"  # must match config.yaml
+CURRENT_VERSION = "3.7.5-rc2.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -516,6 +517,10 @@ async def _throttle_wait_if_needed(ip: str, throttle_s: float,
 
 # IPs/cam-ids the user has explicitly dismissed (loaded from disk)
 BLACKLIST: set = set()
+# 3.7.5-rc2.0 (B53): cameras the user removed, kept without their password.
+# A later scan that finds the same address gives the card back from here
+# instead of probing the camera again (camera_id -> camera record).
+REMOVED_CAMERAS: dict = {}
 
 
 def _snap_state(camera_id: str) -> dict:
@@ -665,6 +670,39 @@ def _publish_scan_card(cam: dict) -> None:
         anycam_scan.PENDING_CAMERAS[cam["id"]] = cam
     else:
         CAMERAS[cam["id"]] = cam
+
+
+def load_removed() -> None:
+    """3.7.5-rc2.0 (B53): read the removed-cameras store."""
+    if not REMOVED_FILE.exists():
+        return
+    try:
+        REMOVED_CAMERAS.update({c["id"]: c for c in json.loads(REMOVED_FILE.read_text())})
+    except (ValueError, KeyError, TypeError, OSError) as e:
+        log.warning(f"Load removed cameras: {e}")
+
+
+def save_removed() -> None:
+    DATA_DIR.mkdir(exist_ok=True)
+    REMOVED_FILE.write_text(json.dumps(list(REMOVED_CAMERAS.values()), indent=2))
+
+
+def _remember_removed(cam: dict) -> None:
+    """Keep a removed camera's details, without its password, for the next scan."""
+    keep = {k: v for k, v in cam.items()
+            if k not in ("credentials", "user_saved", "upgrade_missing", "upgrade_missing_version",
+                         "live_ffmpeg_copy", "classic_smooth")}
+    if keep.get("stream_url"):
+        keep["stream_url"] = _strip_creds(keep["stream_url"])
+    if keep.get("sub_stream_url"):
+        keep["sub_stream_url"] = _strip_creds(keep["sub_stream_url"])
+    for prof in keep.get("stream_profiles") or []:
+        if isinstance(prof, dict) and prof.get("url"):
+            prof["url"] = _strip_creds(prof["url"])
+    keep.update(status="needs_credentials", requires_credentials=True, credentials=None,
+                user_saved=False, remembered=True)
+    REMOVED_CAMERAS[keep["id"]] = keep
+    save_removed()
 
 
 def load_blacklist() -> None:
@@ -1105,8 +1143,14 @@ async def api_rename_camera(request: web.Request) -> web.Response:
 async def api_delete_camera(request: web.Request) -> web.Response:
 
     cid = request.match_info["camera_id"]
-    CAMERAS.pop(cid, None)
+    cam = CAMERAS.pop(cid, None)
     save_cameras()
+    # 3.7.5-rc2.0 (B53): the camera becomes scannable again; its details are
+    # kept (no password), so the next scan gives the card back without probing.
+    if cam and cam.get("ip"):
+        _remember_removed(json.loads(json.dumps(cam)))
+        log.info(f"Removed {cid}; its details are kept, so a scan brings the card back "
+                 f"without probing the camera")
     return web.json_response({"status": "ok"})
 
 async def api_confirm_camera(request: web.Request) -> web.Response:
@@ -1978,6 +2022,7 @@ async def main() -> None:
 
     load_cameras()
     load_blacklist()
+    load_removed()          # 3.7.5-rc2.0 (B53)
     load_feedback()
     load_oui_db()   # Load cached OUI DB synchronously (fast, from disk)
 

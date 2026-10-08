@@ -2618,6 +2618,9 @@ def onvif_get_snapshot_uri(onvif_url: str, token: str,
         return None
 
 
+ONVIF_NOT_PORTS = (554, 8554, 10554, 1935)     # RTSP and RTMP ports
+
+
 def _onvif_media_url(ip: str, port: int, xaddrs: str) -> str:
     """
     Build the ONVIF media service URL from the XAddrs field.
@@ -2656,5 +2659,11 @@ def _onvif_media_url(ip: str, port: int, xaddrs: str) -> str:
         if chosen is None:
             chosen = candidates[0].strip() if candidates else xaddrs
         return chosen.rstrip("/").replace("device_service", "media").replace("Device", "Media")
+    # 3.7.5-rc2.0 (B53): never send ONVIF (HTTP) to an RTSP port. With no
+    # saved XAddrs, the re-check built http://camera:554/onvif/media from the
+    # camera's RTSP port; the Microseven answered "RTSP/1.0 400 Bad Request"
+    # twice and was stuck minutes later (2026-10-07). Port 80 is ONVIF's default.
+    if port in ONVIF_NOT_PORTS:
+        port = 80
     scheme = "https" if port in (443, 8443) else "http"
     return f"{scheme}://{ip}:{port}/onvif/media"
