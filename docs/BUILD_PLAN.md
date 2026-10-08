@@ -1,18 +1,18 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 6 October 2026. Current release: 3.7.0, published 2026-10-06. Built and pushed, not published: 3.7.1, 3.7.2, 3.7.3. Built, not pushed: 3.7.4.
+**Compiled:** Updated 6 October 2026. Current release: 3.7.0, published 2026-10-06. Built and pushed, not published: 3.7.1, 3.7.2, 3.7.3, 3.7.4 (3.7.4 pushed 2026-10-07).
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.
 
 ---
 
-## Next up: field-test 3.7.4
+## Next up: 3.7.5-rc1.0
 
-1. **Built, not pushed (2026-10-07):** 3.7.4 with B47, B46, B6 and B32 (one feature), B37 option A, and go2rtc's API password for local programs. Built and pushed, not published: 3.7.1, 3.7.2, 3.7.3.
-2. **Field test 3.7.4 (update in place, no uninstall):** the Microseven plays live in Chrome and LibreWolf; the start-up log says "hevc_drm: not used"; a Lorex channel in LibreWolf's classic view starts in software with no green. If the Microseven gets stuck: its card shows "Power-cycle camera" and still pictures, and after a power cycle live view returns within 5 minutes.
+1. **3.7.5-rc1.0, agreed with CrystalHeeler 2026-10-07 (an rc in case the Microseven still fails):** B49 (A2: load go2rtc's exec module), B47 made general (AnyCam switches any camera to the ffmpeg copy when the browser cannot read its stream description), B50, and B51 (keyframes only when decoding falls behind, measured; a "Quality Switch" toggle for the sub-stream, shown only when one is found). In work.
+2. **Built and pushed, not published:** 3.7.1, 3.7.2, 3.7.3, 3.7.4.
 3. **3.7.4 field result (2026-10-07 evening, both test systems):** "hevc_drm: not used" works; B47 failed (B49); a false "stuck" mark followed (B50); LibreWolf's classic view of a Lorex channel now moves but greys out every 5 to 10 s (B51).
-4. **Waiting on CrystalHeeler:** decisions on B49 and B51; the push order; B48 (a decision); B29 (sound test); B33 (investigation); C23; C25.
+4. **Waiting on CrystalHeeler:** B48 (a decision); B29 (sound test); B33 (investigation); C23; C25.
 
 ---
 
