@@ -231,10 +231,11 @@ CONTRACTS = {
     # 2.6.3 — go2rtc security controls. go2rtc's API can add an `exec:`
     # source and run commands on the host, and this addon has full_access,
     # so each control below is pinned to fail the release if it is removed.
-    # Exact module allowlist: adding exec, echo or expr fails here. 3.7.4
-    # (B47, CrystalHeeler's design A): ffmpeg, for copy sources, with the API
-    # password required from every caller, local ones included.
-    "_go2rtc_config":        ['{"modules": ["api", "ws", "rtsp", "webrtc", "mp4", "ffmpeg"]}',
+    # Exact module allowlist: adding echo or expr fails here. 3.7.4 (B47,
+    # CrystalHeeler's design A): ffmpeg, for copy sources; 3.7.5-rc1.0 (B49,
+    # CrystalHeeler's A2): exec, which ffmpeg sources run through. Both rest
+    # on the API password required from every caller, local ones included.
+    "_go2rtc_config":        ['{"modules": ["api", "ws", "rtsp", "webrtc", "mp4", "ffmpeg", "exec"]}',
                               '"username": GO2RTC_API_USER, "password": _GO2RTC_API_PASS',
                               '"local_auth": True',
                               # 3.3.0 (C4): the RTSP server on 127.0.0.1, with a password

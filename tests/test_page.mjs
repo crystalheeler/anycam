@@ -303,6 +303,23 @@ advance(15100);
 check('B45 a browser without WebRTC goes straight to the classic view',
       live() === null && calls.poll.length === 1);
 
+// 3.7.5-rc1.0 (B47, general): the browser cannot read the stream description
+calls.fetch.length = 0;
+s = mount();
+ev('open', ['mse', 'webrtc']);
+ev('decode', 'media error 4');
+await flush();
+check('B47 a decode error that is not about the description asks for no repair',
+      !calls.fetch.some(u => /live_repair/.test(u)) && live() === s);
+globalThis.__nextInfo = {switched: true};
+ev('decode', 'CHUNK_DEMUXER_ERROR_APPEND_FAILED: Invalid video decoder config: codec: hevc');
+await flush(); await flush(); await flush();
+check('B47 a description error asks the add-on for the ffmpeg copy, then live view starts again',
+      calls.fetch.some(u => /\/api\/live_repair$/.test(u)) && s._disconnected
+      && calls.fetch.some(u => /\/api\/go2rtc\/focus\/cam1/.test(u)), JSON.stringify(calls.fetch));
+globalThis.__nextInfo = undefined;
+g('_go2rtcUnmount()');
+
 console.log('\n[N] after the first frame');
 s = mount();
 ev('open', ['mse', 'webrtc']);

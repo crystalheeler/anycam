@@ -213,6 +213,9 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 #focus-bar{{position:absolute;bottom:0;left:0;right:0;height:52px;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:space-between;padding:0 16px;gap:12px;z-index:9001;border-top:1px solid #333}}
 #focus-info{{font-size:.78rem;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}}
 #focus-controls{{display:flex;align-items:center;gap:12px;flex-shrink:0}}
+.qswitch{{display:flex;flex-direction:column;gap:2px;font-size:13px;color:#ddd;cursor:pointer}}
+.qswitch .qrow{{display:flex;align-items:center;gap:6px}}
+.qswitch .qsub{{font-size:11px;color:#999}}
 #focus-close{{position:absolute;top:6px;right:14px;background:transparent;border:2.5px solid #e03;color:#e03;font-size:1rem;font-weight:bold;width:32px;height:32px;border-radius:50%;cursor:pointer;z-index:9002;line-height:1;display:flex;align-items:center;justify-content:center}}
 #focus-close:hover{{background:#e03;color:#fff}}
 #focus-loading{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:9001;color:#ddd;font-size:1rem;text-align:center;pointer-events:none}}

@@ -29,7 +29,7 @@ log = logging.getLogger("anycam")
 NEEDS = (
     'CAMERAS', 'CARD_MAX_WIDTH', '_ANSI_ESCAPE_RE', '_THREAD_POOL',
     '_brand_throttle_seconds', '_dahua_sub_stream', '_identify_camera_brand',
-    '_match_stream_db', '_mjpeg_source',
+    '_match_stream_db', '_mjpeg_source', 'save_cameras',
     '_streams_refresh',
     '_strip_creds', '_throttle_wait_if_needed', 'build_authenticated_url',
 )
@@ -86,9 +86,13 @@ def _go2rtc_config() -> str:
     """
     return json.dumps({
         # 3.7.4 (B47): ffmpeg, for the copy source of _go2rtc_camera_src.
-        # Sources come only from AnyCam (_go2rtc_register); the browser can
-        # name only streams AnyCam registered (handle_go2rtc_ws).
-        "app":    {"modules": ["api", "ws", "rtsp", "webrtc", "mp4", "ffmpeg"]},
+        # 3.7.5-rc1.0 (B49): and exec, which go2rtc runs every ffmpeg: source
+        # through ("unsupported scheme: exec:ffmpeg ..." without it, test
+        # system A, 2026-10-07). exec can run any command as a source, so
+        # sources come only from AnyCam: the API needs its password from
+        # every caller (local_auth), and the browser can name only streams
+        # AnyCam registered (handle_go2rtc_ws).
+        "app":    {"modules": ["api", "ws", "rtsp", "webrtc", "mp4", "ffmpeg", "exec"]},
         "ffmpeg": {"bin": "ffmpeg"},
         "api":    {"listen": f"{GO2RTC_API_HOST}:{GO2RTC_API_PORT}",
                    "username": GO2RTC_API_USER, "password": _GO2RTC_API_PASS,
@@ -383,6 +387,84 @@ def _go2rtc_ffmpeg_copy(camera: dict | None) -> bool:
     return bool((_identify_camera_brand(dict(camera)) or {}).get("live_ffmpeg_copy"))
 
 
+# 3.7.5-rc1.0 (B47, general): a browser that cannot read a camera's stream
+# description says so ("Invalid video decoder config", "Unrecognized video
+# codec profile", "stream parsing failed"); the page reports it, and AnyCam
+# switches that camera to the ffmpeg copy for good, whatever its brand.
+DESCRIPTION_ERRORS = ("decoder config", "codec profile", "parsing failed", "append_failed",
+                      "could not parse", "demuxer_error")
+
+
+def _description_error(reason: str) -> bool:
+    low = reason.lower()
+    return any(w in low for w in DESCRIPTION_ERRORS)
+
+
+async def api_live_repair(request: web.Request) -> web.Response:
+    """POST /api/live_repair  body: {"camera_id", "reason"} — use the ffmpeg copy for this camera."""
+    try:
+        body = await request.json()
+    except (ValueError, aiohttp.ContentTypeError):
+        return web.json_response({"error": "JSON body required"}, status=400)
+    camera_id = str(body.get("camera_id", ""))
+    reason = " ".join(str(body.get("reason", "")).split())[:200]
+    camera = CAMERAS.get(camera_id)
+    if not camera or not _description_error(reason):
+        return web.json_response({"error": "unknown camera or reason"}, status=400)
+    if _go2rtc_ffmpeg_copy(camera):
+        return web.json_response({"switched": False})
+    camera["live_ffmpeg_copy"] = True
+    save_cameras()
+    log.warning(f"LIVE [{camera_id}]: the browser could not read this camera's stream "
+                f"description ({reason}); AnyCam passes its stream through an ffmpeg copy "
+                f"from now on, and live view tries again")
+    return web.json_response({"switched": True})
+
+
+# 3.7.5-rc1.0 (B51): the camera's smoother, smaller stream, for the classic
+# view's Quality Switch. From the camera's own streams first (any brand),
+# then from its brand's stream table when the table's first two paths are a
+# main/sub pair by one of these swaps, then the Dahua/Lorex DVR rule.
+SUB_STREAM_SWAPS = (("main", "sub"), ("Main", "Sub"), ("subtype=0", "subtype=1"), ("101", "102"),
+                    ("/11", "/12"), ("stream1", "stream2"), ("video1", "video2"),
+                    ("profile1", "profile2"), ("Primary", "Secondary"), ("track1", "track2"),
+                    ("live1s1", "live1s2"), ("av0_0", "av0_1"), ("/ch01/0", "/ch01/1"))
+
+
+def _classic_sub_stream(camera: dict) -> str | None:
+    """The camera's sub-stream address (without password), or None."""
+    main = camera.get("stream_url") or ""
+    if not main.lower().startswith(("rtsp://", "rtsps://")):
+        return None
+    plain = _strip_creds(main)
+    main_w = camera.get("stream_width") or 0
+    best = None
+    for prof in camera.get("stream_profiles") or []:
+        u = prof.get("url") or ""
+        codec = (prof.get("stream_codec") or "").lower()
+        if (not u.lower().startswith(("rtsp://", "rtsps://")) or _strip_creds(u) == plain
+                or codec in ("mjpeg", "jpeg")):
+            continue
+        w = prof.get("stream_width") or 0
+        if main_w and w and w >= main_w:
+            continue
+        if best is None or w > best[0]:
+            best = (w, u)          # the largest stream below the main one
+    if best:
+        return best[1]
+    sub = _dahua_sub_stream(main)
+    if sub:
+        return sub
+    parts = urlsplit(main)
+    path = parts.path + (f"?{parts.query}" if parts.query else "")
+    paths = (_match_stream_db(camera) or {}).get("rtsp") or []
+    if len(paths) > 1 and path == paths[0]:
+        for a, b in SUB_STREAM_SWAPS:
+            if a in paths[0] and paths[0].replace(a, b, 1) == paths[1]:
+                return f"{parts.scheme}://{parts.netloc}{paths[1]}"
+    return None
+
+
 def _go2rtc_camera_src(camera: dict | None, url: str) -> str:
     """The go2rtc source for an authenticated RTSP address of this camera."""
     if _go2rtc_ffmpeg_copy(camera) and url.lower().startswith(("rtsp://", "rtsps://")):
@@ -506,6 +588,8 @@ def _go2rtc_card_source(camera: dict, h265: bool = True,
 # RTSP_STUCK_RECHECK_S ends the state when the camera answers again.
 RTSP_STUCK_SIGNS = ("connection reset by peer", "broken pipe", "i/o timeout",
                     "connection refused")
+# 3.7.5-rc1.0 (B50): reasons that name AnyCam's or go2rtc's own fault, never the camera's
+RTSP_NOT_CAMERA = ("unsupported scheme", "exec:", "127.0.0.1:28554")
 RTSP_STUCK_REPORTS = 2           # live view reports with a sign, within ...
 RTSP_STUCK_WINDOW_S = 120.0
 RTSP_STUCK_RECHECK_S = 300.0
@@ -522,6 +606,11 @@ def _rtsp_stuck_mark(camera_id: str, why: str) -> None:
     """Record that this camera's RTSP is stuck, and start its quiet check."""
     if camera_id in _RTSP_STUCK or camera_id not in CAMERAS:
         return
+    # 3.7.5-rc1.0 (B50): a failure through go2rtc is AnyCam's own (2026-10-07:
+    # go2rtc could not run the ffmpeg copy, and the Microseven was marked stuck).
+    if _RELAY_FAILS.get(camera_id, 0):
+        log.info(f"LIVE [{camera_id}]: not marked stuck: the failures came through go2rtc ({why})")
+        return
     _RTSP_STUCK[camera_id] = {"since": time.monotonic(), "why": why}
     log.warning(f"LIVE [{camera_id}]: the camera's live stream (RTSP) is not answering ({why}). "
                 f"AnyCam stops connecting to it and shows its HTTP snapshots if it has them; "
@@ -532,7 +621,8 @@ def _rtsp_stuck_mark(camera_id: str, why: str) -> None:
 
 def _rtsp_stuck_sign(camera_id: str, reason: str) -> None:
     """Count a live view failure that shows the camera dropping connections."""
-    if not any(sign in reason.lower() for sign in RTSP_STUCK_SIGNS):
+    low = reason.lower()
+    if not any(sign in low for sign in RTSP_STUCK_SIGNS) or any(n in low for n in RTSP_NOT_CAMERA):
         return
     now = time.monotonic()
     seen = [t for t in _RTSP_SIGNS_SEEN.get(camera_id, []) if now - t < RTSP_STUCK_WINDOW_S]

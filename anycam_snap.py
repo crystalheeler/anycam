@@ -26,7 +26,8 @@ from anycam_probe import (
 )
 import anycam_focus
 from anycam_go2rtc import (
-    _go2rtc_relay, _go2rtc_relay_result, _go2rtc_relayed, _rtsp_stuck, _rtsp_stuck_mark,
+    _classic_sub_stream, _go2rtc_relay, _go2rtc_relay_result, _go2rtc_relayed, _rtsp_stuck,
+    _rtsp_stuck_mark,
 )
 
 log = logging.getLogger("anycam")
@@ -70,11 +71,25 @@ def _hw_fallback_line(line: str) -> bool:
 # The camera then decodes in software until AnyCam restarts, and
 # _hw_picture_test runs once to find which conversion gives a real picture.
 HW_FROZEN_FRAMES = 50
+# 3.7.5-rc1.0 (B51): the classic view decodes only keyframes when software
+# decoding cannot keep up. It starts so for H.265 at this width or more (the
+# Pi made about 4.5 pictures a second from a 7 a second 3840x2160 stream,
+# 2026-10-07, and pictures decoded without their reference came out grey),
+# and switches so whenever it makes less than CLASSIC_KEEP_UP of the
+# stream's rate over CLASSIC_RATE_WINDOW_S, for any codec and size.
+CLASSIC_KEYFRAMES_WIDTH = 3840
+CLASSIC_KEEP_UP = 0.8
+CLASSIC_RATE_WINDOW_S = 10.0
 _HW_FROZEN: dict[str, str] = {}              # camera_id -> hw label that froze
 _HW_TEST_RESULTS: dict[str, dict] = {}       # camera_id -> last _hw_picture_test report
 HW_TEST_PIXELS = 8 * 8 * 3                   # one 8x8 RGB picture
 HW_TEST_WORDS = ("hwaccel", "v4l2", "drm", "sand", "error", "fail", "invalid",
                  "cannot", "not supported", "impossible", "video:")   # video: the codec line
+
+
+def _classic_lagging(pictures: int, span_s: float, expected_fps: float) -> bool:
+    """3.7.5-rc1.0 (B51): True when decoding made less than CLASSIC_KEEP_UP of the stream's rate."""
+    return bool(expected_fps) and span_s > 0 and pictures / span_s < CLASSIC_KEEP_UP * expected_fps
 
 
 def _hw_frozen_step(same: int, last_len: int, frame_len: int) -> tuple[int, int, bool]:
@@ -531,18 +546,40 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 log.info(f"SNAP [{camera_id}]: adaptive focus — switching to "
                          f"profile[{prof_idx}] for tier {tier_idx}")
             ffmpeg_url = tier_url or url
+            # 3.7.5-rc1.0 (B51): the Quality Switch, then keyframes only
+            sub = (_classic_sub_stream(cam_now)
+                   if cam_now.get("classic_smooth") and not state.get("smooth_failed") else None)
+            prof_w_n = prof.get("stream_width") or stream_w or 0
+            if (not sub and hw_label == "sw" and is_hevc and prof_w_n >= CLASSIC_KEYFRAMES_WIDTH
+                    and "classic_keyframes" not in state):
+                state["classic_keyframes"] = True
+                log.info(f"SNAP [{camera_id}]: {prof_w_n}-wide H.265 in software — keyframes only "
+                         f"(sharp, about one picture a second)")
+            state["classic_expected_fps"] = min(
+                [f for f in (prof.get("stream_fps") or cam_now.get("stream_fps"), tier_fps) if f] or [0])
 
             # vf filter: fps cap only — NO scale filter (post-decode scaling
             # doesn't reduce CPU; only using a lower camera profile does).
             prof_w    = prof.get("stream_width")  or stream_w or "?"
             prof_h    = prof.get("stream_height") or "?"
             res_label = f"{prof_w}x{prof_h}"
-            if tier_fps is None:
+            if sub:
+                ffmpeg_url = build_authenticated_url(cam_now, url=sub) or ffmpeg_url
+                vf_used   = "format=yuvj420p"
+                fps_label = "quality switch: sub-stream"
+                state["classic_mode"] = "smooth"
+            elif state.get("classic_keyframes"):
+                vf_used   = "format=yuvj420p"
+                fps_label = "keyframes only"
+                state["classic_mode"] = "keyframes"
+            elif tier_fps is None:
                 vf_used   = "format=yuvj420p"
                 fps_label = f"adaptive:uncapped profile[{prof_idx}] ({res_label})"
+                state["classic_mode"] = "full"
             else:
                 vf_used   = f"fps={tier_fps},format=yuvj420p"
                 fps_label = f"adaptive:{tier_fps}fps profile[{prof_idx}] ({res_label})"
+                state["classic_mode"] = "full"
             ada["run_start"] = time.monotonic()
         elif is_hevc and stream_w >= 3840:
             # 3.0.1 (B20): the Pi decodes 3840x2160 H.265 in software slower
@@ -746,6 +783,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             hw_run         = hw_label        # 3.7.2 (B37): "" once in software
             hw_args_run    = hw_args
             same_n, last_len, frozen = 0, -1, False
+            rate_t0, rate_n, lagging = time.monotonic(), 0, False   # 3.7.5-rc1.0 (B51)
             _HW_FALLBACK.pop(camera_id, None)     # 3.7.0 (B11): this launch only
             stderr_t = asyncio.create_task(_drain_stderr(proc, f"SNAP:{camera_id}"))
             buf      = b""
@@ -880,6 +918,12 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         # The flag is set in handle_focus_clear right before the
                         # proc.kill() that triggers this EOF — log it differently
                         # so the warning channel doesn't carry a false alarm.
+                        if (frames == 0 and state.get("classic_mode") == "smooth"
+                                and not state.get("focus_leave_kill")):
+                            # 3.7.5-rc1.0 (B51): the sub-stream did not play
+                            state["smooth_failed"] = True
+                            log.warning(f"SNAP [{camera_id}]: the sub-stream gave no picture — "
+                                        f"full size for this view")
                         if state.get("focus_leave_kill"):
                             log.info(f"SNAP [{camera_id}]: ffmpeg killed "
                                      f"by focus-leave after {frames} frames "
@@ -956,6 +1000,34 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                             same_n, last_len, frozen = _hw_frozen_step(same_n, last_len, len(frame))
                             if frozen:
                                 break
+
+                        # 3.7.5-rc1.0 (B51): software decoding falling behind
+                        if native_res and not hw_run and state.get("classic_mode") == "full":
+                            rate_n += 1
+                            span = time.monotonic() - rate_t0
+                            if span >= CLASSIC_RATE_WINDOW_S:
+                                lagging = _classic_lagging(rate_n, span,
+                                                           state.get("classic_expected_fps") or 0)
+                                rate_t0, rate_n = time.monotonic(), 0
+                                if lagging:
+                                    break
+
+                    # 3.7.5-rc1.0 (B51): keyframes only from now on in this view
+                    if lagging:
+                        lagging = False
+                        state["classic_keyframes"] = True
+                        log.info(f"SNAP [{camera_id}]: the Pi decodes fewer pictures than the camera "
+                                 f"sends — keyframes only for this view")
+                        await _stop_proc(proc, timeout=3)
+                        proc     = await _launch_snap(native_res=native_res)
+                        state["proc"] = proc
+                        stderr_t.cancel()
+                        stderr_t = asyncio.create_task(_drain_stderr(proc, f"SNAP:{camera_id}"))
+                        buf      = b""
+                        hw_tried = False
+                        frames   = 0
+                        state["current_run_frames"] = 0
+                        _motion_reset_prev(camera_id)
 
                     # 3.7.2 (B37): the hardware gave one unchanging picture
                     if frozen:
@@ -1686,6 +1758,15 @@ async def handle_snapshot(request: web.Request) -> web.Response:
                 ph       = prof.get("stream_height") or cam_now.get("stream_height") or "?"
                 step_res = f"{pw}x{ph}"
                 step_fps = "uncapped" if t_fps is None else str(t_fps)
+            # 3.7.5-rc1.0 (B51): what the classic view decodes, and the switch
+            mode = state.get("classic_mode")
+            if mode == "keyframes":
+                step_fps = "keyframes only"
+            elif mode == "smooth":
+                step_res, step_fps = "sub-stream", "full rate"
+            cam_q = CAMERAS.get(camera_id, {})
+            q_switch = ("" if not _classic_sub_stream(cam_q)
+                        else "on" if cam_q.get("classic_smooth") else "off")
             return web.Response(body=frame, content_type="image/jpeg",
                                 headers={"Cache-Control": "no-cache",
                                          "X-Frame-Source": "focus",
@@ -1695,7 +1776,8 @@ async def handle_snapshot(request: web.Request) -> web.Response:
                                          "X-Focus-Frames":  str(state.get("frame_count", 0)
                                                                - state.get("focus_frame_base", 0)),
                                          "X-Step-Res":      step_res,
-                                         "X-Step-FPS":      step_fps})
+                                         "X-Step-FPS":      step_fps,
+                                         "X-Quality-Switch": q_switch})
         return web.Response(status=204)  # no frame yet — JS will retry
 
     # Card view always uses the main stream_url for thumbnail polling.

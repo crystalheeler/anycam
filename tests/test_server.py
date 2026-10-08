@@ -140,11 +140,11 @@ def test_pure():
     raw = cd._go2rtc_config()
     conf = json.loads(raw)
     check("config is inline JSON (starts with '{')", raw.startswith("{"))
-    check("config: exact module allowlist (3.7.4, B47: ffmpeg for the copy source)",
-          conf["app"]["modules"] == ["api", "ws", "rtsp", "webrtc", "mp4", "ffmpeg"],
+    check("config: exact module allowlist (3.7.5-rc1.0, B47/B49: ffmpeg and the exec it runs through)",
+          conf["app"]["modules"] == ["api", "ws", "rtsp", "webrtc", "mp4", "ffmpeg", "exec"],
           str(conf["app"]["modules"]))
-    check("config: exec/echo/expr absent (no shell commands as sources)",
-          not {"exec", "echo", "expr"} & set(conf["app"]["modules"]))
+    check("config: echo/expr absent; exec only behind the API password (local_auth)",
+          not {"echo", "expr"} & set(conf["app"]["modules"]) and conf["api"]["local_auth"] is True)
     check("config: API on 127.0.0.1:28984",
           conf["api"]["listen"] == "127.0.0.1:28984", conf["api"]["listen"])
     check("config: RTSP server on 127.0.0.1 only, with a password (3.3.0, C4)",
@@ -4581,9 +4581,9 @@ async def test_374():
           and registered[0][0] == cd._go2rtc_shared_name("ms", src)
           and relay.endswith("/" + registered[0][0]), str(registered))
     conf = json.loads(cd._go2rtc_config())
-    check("AM1 ... go2rtc loads ffmpeg, and still no exec, echo or expr",
-          "ffmpeg" in conf["app"]["modules"] and conf["ffmpeg"] == {"bin": "ffmpeg"}
-          and not {"exec", "echo", "expr"} & set(conf["app"]["modules"]))
+    check("AM1 ... go2rtc loads ffmpeg and exec (B49), and still no echo or expr",
+          {"ffmpeg", "exec"} <= set(conf["app"]["modules"]) and conf["ffmpeg"] == {"bin": "ffmpeg"}
+          and not {"echo", "expr"} & set(conf["app"]["modules"]))
 
     # B37 option A: hevc_drm is never picked automatically
     real_exists = cd.os.path.exists
@@ -4727,6 +4727,143 @@ async def test_374():
           src.count("aiohttp.ClientSession(") == 1 and src.count("_go2rtc_session(") >= 4)
 
 
+async def test_375():
+    print("\n[AN] 3.7.5-rc1.0")
+    # B47 general: any camera switches to the ffmpeg copy on a description error
+    class Req:
+        def __init__(self, body):
+            self.body = body
+
+        async def json(self):
+            return self.body
+    cam = camera(id="gen", manufacturer="SomeNewBrand")
+    cd.CAMERAS.clear(); cd.CAMERAS["gen"] = cam
+    saved = []
+    with _Swap(save_cameras=lambda: saved.append(1)):
+        r0 = await cd.api_live_repair(Req({"camera_id": "gen", "reason": "no video within 15 s"}))
+        CAP.lines.clear()
+        r1 = await cd.api_live_repair(Req({"camera_id": "gen", "reason":
+                                           "CHUNK_DEMUXER_ERROR_APPEND_FAILED: Unrecognized video codec profile"}))
+        r2 = await cd.api_live_repair(Req({"camera_id": "gen", "reason": "Invalid video decoder config"}))
+    check("AN1 B47: a stream description error switches any brand to the ffmpeg copy, saved",
+          r1.status == 200 and json.loads(r1.body)["switched"] is True and cam["live_ffmpeg_copy"] is True
+          and saved == [1] and any("ffmpeg copy" in l for l in CAP.lines))
+    check("AN1 ... other reasons do not switch, and a second report changes nothing",
+          r0.status == 400 and json.loads(r2.body)["switched"] is False)
+    src, _, _ = cd._go2rtc_relay_url(cam, cam["stream_url"], "hevc")
+    check("AN1 ... its go2rtc source is now the copy", src.startswith("ffmpeg:rtsp://"), src)
+    check("AN1 ... the page reports the browser's reason and retries once",
+          "this._emit('decode'" in cd._JS and "/api/live_repair" in cd._JS
+          and "DESCRIPTION_ERROR_RE" in cd._JS)
+
+    # B50: go2rtc's own failures never mark a camera stuck
+    cd._RTSP_STUCK.clear(); cd._RTSP_SIGNS_SEEN.clear()
+    cd.CAMERAS.clear(); cd.CAMERAS["gen"] = cam
+    cd._RELAY_FAILS["gen"] = 3
+    cd._rtsp_stuck_mark("gen", "3 consecutive 0-frame failures in enhanced view")
+    check("AN2 B50: failures through go2rtc do not mark the camera stuck", not cd._rtsp_stuck("gen"))
+    cd._RELAY_FAILS.clear()
+    for _ in range(3):
+        cd._rtsp_stuck_sign("gen", "streams: unsupported scheme: exec:ffmpeg ... connection reset by peer")
+    check("AN2 ... nor do live view failures that name go2rtc's own fault", not cd._rtsp_stuck("gen"))
+    cd._RTSP_STUCK.clear(); cd._RTSP_SIGNS_SEEN.clear()
+
+    # B51: the sub-stream, found generally
+    p = lambda u, w, c="h264": {"url": u, "stream_width": w, "stream_codec": c}
+    a = camera(stream_url="rtsp://10.0.0.5:554/a", stream_width=3840,
+               stream_profiles=[p("rtsp://10.0.0.5:554/a", 3840), p("rtsp://10.0.0.5:554/b", 1920),
+                                p("rtsp://10.0.0.5:554/c", 640), p("http://10.0.0.5/m.jpg", 320, "mjpeg")])
+    check("AN3 B51: the largest of the camera's own smaller streams",
+          cd._classic_sub_stream(a) == "rtsp://10.0.0.5:554/b")
+    dvr = camera(stream_url="rtsp://10.0.0.6:554/cam/realmonitor?channel=7&subtype=0", stream_profiles=[])
+    check("AN3 ... a DVR channel: its subtype=1 stream",
+          cd._classic_sub_stream(dvr) == "rtsp://10.0.0.6:554/cam/realmonitor?channel=7&subtype=1")
+    rl = camera(manufacturer="Reolink", name="Reolink", stream_url="rtsp://10.0.0.7:554/h264Preview_01_main",
+                stream_profiles=[])
+    hik = camera(manufacturer="Hikvision", name="Hikvision", stream_profiles=[])
+    check("AN3 ... otherwise the brand table's main/sub pair (Reolink, Hikvision)",
+          cd._classic_sub_stream(rl) == "rtsp://10.0.0.7:554/h264Preview_01_sub"
+          and cd._classic_sub_stream(hik) == "rtsp://10.0.0.33:554/Streaming/Channels/102",
+          f"{cd._classic_sub_stream(rl)} {cd._classic_sub_stream(hik)}")
+    gv = camera(manufacturer="GeoVision", name="GeoVision", stream_url="rtsp://10.0.0.8:554/CH001.sdp",
+                stream_profiles=[])
+    check("AN3 ... no switch when the table's second path is not a sub-stream (another channel)",
+          cd._classic_sub_stream(gv) is None, str(cd._classic_sub_stream(gv)))
+    check("AN3 ... the camera list says whether the switch exists",
+          cd._safe_cam(a)["quality_switch"] is True and cd._safe_cam(gv)["quality_switch"] is False)
+
+    # B51: falling behind
+    check("AN4 B51: under 80% of the stream's rate is falling behind",
+          cd._classic_lagging(45, 10.0, 7) is True and cd._classic_lagging(60, 10.0, 7) is False
+          and cd._classic_lagging(10, 10.0, 0) is False)
+
+    # B51: the classic view's modes
+    cid = "lorex7"
+    lx = camera(id=cid, stream_url="rtsp://10.0.0.6:554/cam/realmonitor?channel=7&subtype=0",
+                stream_codec="hevc", stream_width=3840, stream_fps=7,
+                stream_profiles=[{"url": "rtsp://10.0.0.6:554/cam/realmonitor?channel=7&subtype=0",
+                                  "stream_codec": "hevc", "stream_width": 3840, "stream_fps": 7}])
+    cd.CAMERAS.clear(); cd.CAMERAS[cid] = lx
+    real_hw = cd.CFG_HW_DECODE
+    cd.CFG_HW_DECODE = False
+    try:
+        cd._SNAP.clear(); cd._FOCUS_ADAPTIVE.clear()
+        cd._FOCUSED_CAMERA = cid
+        cd._snap_last_access[cid] = time.monotonic()
+        launches, _ = await run_snap(cid, lx, [
+            lambda: (cd._snap_last_access.__setitem__(cid, time.monotonic() - 100),
+                     FakeFfmpeg([jpeg(b"k")]))[1]], native_res=True)
+        a0 = launches[0]
+        check("AN5 B51: a 3840-wide H.265 classic view in software starts keyframes only, full size",
+              opt(a0, "-skip_frame") == "nokey" and "subtype=0" in opt(a0, "-i")
+              and cd._SNAP[cid].get("classic_mode") == "keyframes", str(a0))
+        lx["classic_smooth"] = True
+        cd._SNAP.clear(); cd._FOCUS_ADAPTIVE.clear()
+        cd._snap_last_access[cid] = time.monotonic()
+        launches, _ = await run_snap(cid, lx, [
+            lambda: (cd._snap_last_access.__setitem__(cid, time.monotonic() - 100),
+                     FakeFfmpeg([jpeg(b"s")]))[1]], native_res=True)
+        a1 = launches[0]
+        check("AN5 ... the Quality Switch on: the sub-stream, every picture",
+              "subtype=1" in opt(a1, "-i") and "-skip_frame" not in a1
+              and cd._SNAP[cid].get("classic_mode") == "smooth", str(a1))
+    finally:
+        cd.CFG_HW_DECODE = real_hw
+        cd._FOCUSED_CAMERA = None
+
+    # B51: the switch endpoint and its header
+    cd._SNAP.clear()
+    with _Swap(save_cameras=lambda: None):
+        r = await cd.api_quality_switch(make_mocked_request(
+            "POST", f"/api/cameras/{cid}/quality_switch", match_info={"camera_id": cid}))
+    check("AN6 B51: the switch needs a JSON body", r.status == 400)
+
+    class JReq:
+        match_info = {"camera_id": "gv"}
+
+        async def json(self):
+            return {"smooth": True}
+    cd.CAMERAS["gv"] = gv
+    with _Swap(save_cameras=lambda: None):
+        r = await cd.api_quality_switch(JReq())
+    check("AN6 ... a camera with no sub-stream cannot switch on", r.status == 400)
+    st = cd._snap_state(cid)
+    st.update(frame=jpeg(b"f"), frame_time=time.monotonic(), classic_mode="keyframes")
+    lx["classic_smooth"] = False
+    cd._FOCUSED_CAMERA = cid
+    try:
+        h = (await cd.handle_snapshot(make_mocked_request("GET", f"/snapshot/{cid}",
+                                                          match_info={"camera_id": cid}))).headers
+    finally:
+        cd._FOCUSED_CAMERA = None
+    check("AN6 ... the classic view's answer offers the switch and names the mode",
+          h["X-Quality-Switch"] == "off" and h["X-Step-FPS"] == "keyframes only", str(dict(h)))
+    check("AN6 ... the page shows the toggle with its text only when offered",
+          "Quality Switch" in cd._JS and "Switch to a lower resolution but smoother video stream" in cd._JS
+          and "X-Quality-Switch" in cd._JS)
+    cd._SNAP.clear(); cd.CAMERAS.clear()
+
+
 # ── F. supervisor with a real subprocess ─────────────────────────────────────
 FAKE_BIN =Path(__file__).resolve().parent / "fake_go2rtc.py"
 FAKE_BIN.write_text(textwrap.dedent('''
@@ -4855,6 +4992,7 @@ async def main():
     await test_372()
     await test_373()
     await test_374()
+    await test_375()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 
