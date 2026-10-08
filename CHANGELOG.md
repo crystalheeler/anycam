@@ -1,3 +1,24 @@
+## 3.7.5-rc2.0
+
+A release candidate that stops AnyCam's own start-up checks from upsetting fragile cameras. Not field-tested.
+
+### Changes & improvements
+
+- **A scan leaves cameras AnyCam already has alone.** A saved camera with a working stream is no longer probed on a restart, an update or a rescan.
+- **Removed cameras come back without probing.** Removing a card makes the camera scannable again, and AnyCam keeps its details (not its password), so a later scan gives the card back without walking its paths.
+- **The Quality Switch says when its smoother stream gives no picture.**
+
+### Bugs fixed
+
+- **ONVIF requests went to a camera's RTSP port** when no ONVIF address was saved. The Microseven was stuck minutes after it received them.
+- **The start-up check opened the camera's stream without waiting out its cooldown.**
+
+### Known issues
+
+- **The ffmpeg copy is untested on an unlocked Microseven camera.**
+- **Other programs on the Pi can read camera video** through go2rtc's local RTSP server.
+- **One Amcrest camera can get two cards** (under investigation).
+
 ## 3.7.5-rc1.0
 
 A release candidate for the Microseven's live view, with a Quality Switch for 4K cameras in the classic view. Not field-tested.
