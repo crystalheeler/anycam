@@ -1,0 +1,849 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The repository copy of the B54 flow comparison. It loads mermaid from a CDN
+     to draw the two charts, so it needs an internet connection when opened as a file. -->
+<title>B54 Flow Comparison</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Mono:wght@400&display=swap">
+<style>
+/* Layout: a compact header (title, legend, section buttons), then two chart panels side by side,
+   each filling half of the remaining window height. Charts pan and zoom inside their panel. */
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --fg: #1d2430; --muted: #5b6676; --line: #d9dee6;
+  --accent: #1f5fa8; --btn: #eef1f5; --btn-on: #1f5fa8; --btn-on-fg: #ffffff;
+  --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12161d; --panel: #1a2029; --fg: #e3e8ef; --muted: #9aa6b6; --line: #2e3744;
+  --accent: #7fb0ea; --btn: #232b36; --btn-on: #7fb0ea; --btn-on-fg: #0d1520; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12161d; --panel: #1a2029; --fg: #e3e8ef; --muted: #9aa6b6; --line: #2e3744;
+  --accent: #7fb0ea; --btn: #232b36; --btn-on: #7fb0ea; --btn-on-fg: #0d1520; color-scheme: dark }
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 14px; line-height: 1.4;
+  display: flex; flex-direction: column; padding: 8px 16px 12px; gap: 8px; }
+header { display: grid; gap: 6px; flex: none; }
+.top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
+h1 { font-size: 18px; margin: 0; text-wrap: balance; }
+.sub { color: var(--muted); font-size: 13px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.sw { width: 13px; height: 13px; border-radius: 3px; display: inline-block; border: 1.5px solid; }
+.sections { display: flex; flex-wrap: wrap; gap: 4px; }
+button { font: inherit; font-size: 12px; color: var(--fg); background: var(--btn); border: 1px solid var(--line);
+  border-radius: 5px; padding: 3px 9px; cursor: pointer; min-height: 26px; }
+button:hover { border-color: var(--accent); }
+button[aria-pressed="true"] { background: var(--btn-on); color: var(--btn-on-fg); border-color: var(--btn-on); }
+details { font-size: 13px; }
+details summary { cursor: pointer; color: var(--accent); }
+details ul { margin: 4px 0 0; padding-left: 20px; display: grid; gap: 2px; max-width: 120ch; }
+.panes { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.pane { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.pane-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line); flex: none; }
+.pane-head h2 { font-size: 14px; margin: 0; flex: 1; }
+.pane-head .tools { display: flex; gap: 4px; }
+.pane-head .tools button { min-width: 28px; padding: 2px 7px; }
+.panes.solo { grid-template-columns: 1fr; }
+.panes.solo .pane:not(.on) { display: none; }
+.vp { flex: 1; min-height: 0; overflow: hidden; position: relative; cursor: grab; touch-action: none; }
+.vp.drag { cursor: grabbing; }
+.stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.card { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px 10px; }
+.card-title { font-weight: 600; font-size: 15px; margin-bottom: 6px; white-space: nowrap; }
+.card svg { display: block; max-width: none !important; }
+.msg { padding: 16px; color: var(--muted); }
+.hint { font-size: 12px; color: var(--muted); }
+@media (max-width: 900px) {
+  body { display: block; height: auto; }
+  .panes { grid-template-columns: 1fr; }
+  .pane { height: 78dvh; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <h1>B54 Flow Comparison</h1>
+    <span class="sub">Every branch AnyCam takes from start-up to a ready card. Left: 3.7.5-rc2.0 code, read 2026-10-09. Right: the B54 design, not built.</span>
+  </div>
+  <div class="legend">
+    <span><i class="sw" style="background:#f8d0cc;border-color:#b3261e"></i>B54 changes or removes this</span>
+    <span><i class="sw" style="background:#cdebd8;border-color:#2e7d4f"></i>New in B54</span>
+    <span><i class="sw" style="background:#fbe7b5;border-color:#a86b00;border-style:dashed"></i>Open question: only if you agree</span>
+    <span><i class="sw" style="background:#dbe9f7;border-color:#1f5fa8"></i>Card result</span>
+    <span><i class="sw" style="background:#eceff3;border-color:#8a94a3"></i>No card</span>
+    <span><i class="sw" style="background:#ffffff;border-color:#5b6676;border-style:dashed"></i>Runs a box shown elsewhere</span>
+    <span><i class="sw" style="background:#f1f1f1;border-color:#999;border-style:dotted"></i>Never runs today: no brand sets it</span>
+  </div>
+  <div class="sections" role="group" aria-label="Zoom both charts to a section">
+    <button data-sec="ALL" aria-pressed="true">Whole chart</button>
+    <button data-sec="S0">1 Start-up</button>
+    <button data-sec="S1">2 Discovery</button>
+    <button data-sec="S2">3 Port check</button>
+    <button data-sec="S3">4 Each host</button>
+    <button data-sec="S4">5 Each port</button>
+    <button data-sec="S5">6 RTSP walk</button>
+    <button data-sec="S6">7 Later passes</button>
+    <button data-sec="S7">8 Merge cards</button>
+    <button data-sec="S8">9 Password entry</button>
+    <button data-sec="S9">10 DVR channels</button>
+    <button data-sec="S10">11 Deep Re-Probe, manual add</button>
+  </div>
+  <details>
+    <summary>What B54 changes, in 7 lines</summary>
+    <ul>
+      <li><b>Scan, ONVIF first:</b> a device that answered WS-Discovery gets one GetProfiles request with no login. A login prompt gives a "needs password" card, and the host gets no RTSP walk.</li>
+      <li><b>Scan, brand paths stop the walk:</b> when the brand is known, its paths go first, and the first 401 stops the walk. A 200 gives a ready card.</li>
+      <li><b>Scan, full walk:</b> only for a camera with no ONVIF and no brand match. It also stops at the first 401.</li>
+      <li><b>Removed:</b> the "5 answers of 401 with the same realm" early stop, and the ONVIF pass's identity page, RTSP check and walk on port 554.</li>
+      <li><b>Password entry, the 0/1/2 rule:</b> 2 streams from ONVIF: stop. 1: check the brand paths, no full walk. 0 after ONVIF and the brand paths: full walk. Any check stops at 2 streams.</li>
+      <li><b>DVR:</b> each channel gets its main and sub-stream checked (2 per channel). <b>Deep Re-Probe:</b> one full walk of every path, on request.</li>
+      <li><b>Open question:</b> once ONVIF or a brand path has identified the camera, are its other ports left alone? Today each extra web port gets about 44 requests.</li>
+    </ul>
+  </details>
+</header>
+
+<div class="panes">
+  <section class="pane" id="pane-now">
+    <div class="pane-head"><h2>Today (3.7.5-rc2.0)</h2>
+      <div class="tools"><button data-z="in" aria-label="Zoom in">+</button><button data-z="out" aria-label="Zoom out">−</button><button data-z="fit">Fit</button><button data-z="solo" aria-pressed="false">Full width</button></div></div>
+    <div class="vp"><div class="stage"></div><div class="msg">Drawing the chart…</div></div>
+  </section>
+  <section class="pane" id="pane-b54">
+    <div class="pane-head"><h2>After B54 (proposed)</h2>
+      <div class="tools"><button data-z="in" aria-label="Zoom in">+</button><button data-z="out" aria-label="Zoom out">−</button><button data-z="fit">Fit</button><button data-z="solo" aria-pressed="false">Full width</button></div></div>
+    <div class="vp"><div class="stage"></div><div class="msg">Drawing the chart…</div></div>
+  </section>
+</div>
+<div class="hint">Scroll, pinch or double-click to zoom in (Shift + double-click zooms out). Drag to move. A section button zooms both charts to the same section.</div>
+
+<script type="text/plain" class="src" data-chart="now" data-sec="S0" data-title="1 · Start-up and scan triggers">
+flowchart TD
+  T_mode{{"Start-up mode?"}}
+  T_mode -- "new install" --> T_scan(["Network scan starts"])
+  T_mode -- "routine restart" --> T_idle["No scan; saved cards load"]:::none
+  T_mode -- "after an update" --> T_ver["Verification of each saved camera"]
+  T_btn(["Scan button"]) --> T_scan
+  T_ver --> T_v1{{"ONVIF card with<br/>a password?"}}
+  T_v1 -- "yes" --> T_v2["ONVIF login again:<br/>profiles and stream URIs"]
+  T_v2 -- "failed" --> T_v3
+  T_v1 -- "no" --> T_v3{{"Protocol?"}}
+  T_v3 -- "RTSP, DVR, ONVIF" --> T_v4["Wait out the brand cooldown;<br/>DESCRIBE the saved URL"]
+  T_v4 -- "OK, no codec saved" --> T_v4b["ffprobe for the codec"]
+  T_v4 -- "failed" --> T_v5["RTSP OPTIONS on the port"]
+  T_v3 -- "MJPEG, HLS, RTMP" --> T_v6["Quick probe of that protocol"]
+  T_v5 -- "failed" --> T_v7["GET the saved snapshot URL"]
+  T_v2 -- "found" --> T_vdone["All saved cameras checked"]
+  T_v4 -- "OK" --> T_vdone
+  T_v4b --> T_vdone
+  T_v5 -- "OK" --> T_vdone
+  T_v6 --> T_vdone
+  T_v7 --> T_vdone
+  T_vdone --> T_scan
+  T_scan --> T_goS0_0(["→ box 2"]):::ext
+</script>
+<script type="text/plain" class="src" data-chart="now" data-sec="S1" data-title="2 · Discovery">
+flowchart TD
+  T_d0{{"Local subnet found?"}}
+  T_d0 -- "no" --> T_derr["Scan stops with an error"]:::none
+  T_d0 -- "yes" --> T_d1["At the same time: ARP sweep,<br/>WS-Discovery, SSDP, mDNS (5 s each)"]
+  T_d1 --> T_d2{{"ARP found fewer<br/>than 3 hosts?"}}
+  T_d2 -- "yes" --> T_d3["Add an ICMP ping sweep"]
+  T_d2 -- "no" --> T_d4
+  T_d3 --> T_d4["Live hosts: ARP + multicast answers + this machine,<br/>minus blacklist, gateway, 172.x and 169.254.x"]
+  T_d4 --> T_goS1_0(["→ box 3"]):::ext
+</script>
+<script type="text/plain" class="src" data-chart="now" data-sec="S2" data-title="3 · Port check">
+flowchart TD
+  T_n1["nmap: 54 camera ports, 15 s per host"]
+  T_n1 --> T_n2{{"Any port open?"}}
+  T_n2 -- "no" --> T_n3["Log line only<br/>(MAC kept for the appliance pass)"]:::none
+  T_n2 -- "yes" --> T_goS2_0(["→ box 4"]):::ext
+</script>
+<script type="text/plain" class="src" data-chart="now" data-sec="S3" data-title="4 · Each host with open ports">
+flowchart TD
+  T_h0(["Next host"])
+  T_h0 --> T_h1["Classify: camera, not camera, uncertain<br/>(used only by the last card decision)"]
+  T_h1 --> T_h2{{"Saved camera with a<br/>working stream here?"}}
+  T_h2 -- "yes" --> T_hk["Skip the host"]:::none
+  T_h2 -- "no" --> T_h3{{"Removed card for<br/>this address?"}}
+  T_h3 -- "yes" --> T_hr["Card given back, no probing"]:::card
+  T_h3 -- "no" --> T_h4["Port order: 554, 8554, 10554 first"]
+  T_h4 --> T_goS3_0(["→ box 5, each port"]):::ext
+  T_h0 -- "all hosts done" --> T_goS3_1(["→ box 7"]):::ext
+</script>
+<script type="text/plain" class="src" data-chart="now" data-sec="S4" data-title="5 · Each open port">
+flowchart TD
+  T_p1{{"Blacklisted, or a<br/>'not a camera' report?"}}
+  T_p1 -- "yes" --> T_pskip["Skip the port"]:::none
+  T_p1 -- "no" --> T_p2["Protocol guess from the port number"]
+  T_p2 --> T_p3{{"Host already spoke RTSP, and<br/>port is not 554, 8554, 10554?"}}
+  T_p3 -- "yes" --> T_p3b["Treat the port as HTTP"]
+  T_p3 -- "no" --> T_p4
+  T_p3b --> T_p4{{"Port 554?"}}
+  T_p4 -- "yes" --> T_p5["RTSP OPTIONS: Server, realm, methods"]
+  T_p4 -- "no" --> T_p6
+  T_p5 --> T_p6["Brand identification"]
+  T_p6 --> T_p7{{"Protocol?"}}
+  T_p7 -- "RTSP or DVR" --> T_r1["RTSP walk, no login (box 6)"]:::ext
+  T_r1 -- "found" --> T_cr["Card ready (RTSP)"]:::card
+  T_r1 -- "nothing" --> T_r2{{"Saved password?"}}
+  T_r2 -- "yes" --> T_r3["RTSP walk with the saved login"]:::ext
+  T_r3 -- "found" --> T_cr
+  T_r3 -- "nothing" --> T_cpw["Card: needs password"]:::card
+  T_r2 -- "no" --> T_cpw
+  T_p7 -- "RTMP" --> T_m1["RTMP handshake"]
+  T_m1 -- "OK" --> T_crm["Card ready (RTMP)"]:::card
+  T_m1 -- "fails" --> T_noc["No card"]:::none
+  T_p7 -- "HTTP, ONVIF, other" --> T_w1["17 MJPEG paths<br/>(again with a saved login)"]:::ask
+  T_w1 -- "found" --> T_cmj["Card ready (MJPEG)"]:::card
+  T_w1 -- "nothing" --> T_w2["11 HLS paths<br/>(again with a saved login)"]:::ask
+  T_w2 -- "found" --> T_chl["Card ready (HLS)"]:::card
+  T_w2 -- "nothing" --> T_w3{{"Skip RTSP here? Host spoke RTSP,<br/>or a rate-limited brand sent a reset"}}
+  T_w3 -- "no" --> T_w4["RTSP walk on this web port,<br/>no login (box 6)"]:::chg
+  T_w4 -- "found" --> T_cr
+  T_w4 -- "nothing" --> T_w5
+  T_w3 -- "yes" --> T_w5["9 WebRTC paths"]:::ask
+  T_w5 -- "found" --> T_cwr["Info card (WebRTC)"]:::card
+  T_w5 -- "nothing" --> T_w6["7 WebSocket-RTSP paths"]:::ask
+  T_w6 -- "found" --> T_cws["Info card (WS-RTSP)"]:::card
+  T_w6 -- "nothing" --> T_w7{{"Verdict?"}}
+  T_w7 -- "camera" --> T_cpw
+  T_w7 -- "uncertain" --> T_w8{{"RTSP speaker, or brand plus<br/>RTSP, ONVIF or name evidence?"}}
+  T_w8 -- "yes" --> T_cpw
+  T_w8 -- "brand, no evidence" --> T_sup["Card suppressed"]:::none
+  T_w8 -- "no" --> T_noc
+  T_w7 -- "not camera" --> T_noc
+</script>
+<script type="text/plain" class="src" data-chart="now" data-sec="S5" data-title="6 · RTSP walk (find_rtsp_path)">
+flowchart TD
+  T_rw0(["RTSP walk starts"])
+  T_rw0 --> T_rw1{{"Brand has no RTSP?"}}
+  T_rw1 -- "yes" --> T_rwn["Nothing found"]:::none
+  T_rw1 -- "no" --> T_rw2["Path list: DVR channel recipe (to 16 channels),<br/>then brand paths, then 25 universal paths"]:::chg
+  T_rw2 --> T_l1["Layer 1, one connection.<br/>Next path: OPTIONS, then DESCRIBE"]
+  T_to["25 s socket timeout for<br/>session-capped brands"]:::dead
+  T_to -.- T_l1
+  T_l1 --> T_l2{{"Answer?"}}
+  T_l2 -- "connection reset" --> T_lr["Reset noted; Layer 1 ends"]
+  T_l2 -- "400, 404, other" --> T_ln["Next path"]
+  T_l2 -- "401, no login" --> T_l3{{"5 in a row with<br/>the same realm?"}}:::chg
+  T_l3 -- "yes" --> T_lb["Early stop; state saved<br/>for Deep Re-Probe"]:::chg
+  T_l3 -- "no" --> T_ln
+  T_l2 -- "401, with login" --> T_l4["DESCRIBE again with<br/>Digest or Basic login"]
+  T_l4 -- "not 200" --> T_ln
+  T_l4 -- "not 200, DVR lockout brand" --> T_lr
+  T_l4 -- "200" --> T_l5
+  T_l2 -- "200" --> T_l5{{"SDP has video?<br/>DVR: channel populated?"}}
+  T_l5 -- "no" --> T_ln
+  T_l5 -- "yes" --> T_l6["SETUP (TCP, then UDP), TEARDOWN"]
+  T_l6 -- "fails" --> T_ln
+  T_l6 -- "reset" --> T_lr
+  T_l6 -- "OK" --> T_l7{{"Collecting locked<br/>streams?"}}
+  T_l7 -- "yes: keep walking" --> T_ln
+  T_l7 -- "no" --> T_rwf["Stream found"]:::card
+  T_ln -- "more paths" --> T_l1
+  T_ln -- "list ends" --> T_l8{{"Found in Layer 1?"}}
+  T_lr --> T_l8
+  T_lb --> T_l8
+  T_l8 -- "yes" --> T_rwf
+  T_l8 -- "no" --> T_ax["Retry with ?Axis-Orig-Sw=true"]:::dead
+  T_ax -.-> T_l9
+  T_l8 -- "no" --> T_l9{{"Layer 2 allowed?"}}
+  T_l9 -- "rate-limited brand" --> T_rwn
+  T_l9 -- "brand or host skips Layer 2" --> T_rwn
+  T_l9 -- "Layer 1 stopped on 401s" --> T_rwn
+  T_l9 -- "never heard RTSP" --> T_rwn
+  T_l9 -- "yes" --> T_l10["Layer 2: a new connection per path,<br/>5 s apart"]
+  T_l10 -- "found" --> T_rwf
+  T_l10 -- "10 failures in a row, or list ends" --> T_rwn
+</script>
+<script type="text/plain" class="src" data-chart="now" data-sec="S6" data-title="7 · Later passes">
+flowchart TD
+  T_b0{{"Broad sweep on, and<br/>silent hosts left?"}}
+  T_b0 -- "yes" --> T_b1["nmap -sV, ports 0 to 10000, 90 s per host"]
+  T_b1 --> T_b2["Each host: known and removed skip;<br/>each port: the port probe (box 5)"]:::ext
+  T_b0 -- "no" --> T_a0
+  T_b2 --> T_a0["Appliance pass: each MAC seen"]
+  T_a0 --> T_a1{{"MAC of an appliance<br/>with a camera?"}}
+  T_a1 -- "yes, card exists" --> T_a2["Note added to the card"]
+  T_a1 -- "yes, no card" --> T_a3["Info card (appliance)"]:::card
+  T_a1 -- "no" --> T_o0
+  T_a2 --> T_o0
+  T_a3 --> T_o0
+  T_o0["ONVIF pass: each WS-Discovery answer<br/>(not the gateway, not blacklisted)"]
+  T_o0 --> T_o1{{"Card for this address?"}}
+  T_o1 -- "yes" --> T_o2["Mark ONVIF, save XAddrs"]
+  T_o1 -- "no, removed card" --> T_o1b["Card given back"]:::card
+  T_o1 -- "no" --> T_o3["GET the identity page on port 80"]:::chg
+  T_o3 --> T_o4["RTSP OPTIONS on 554;<br/>realm used for the brand"]:::chg
+  T_o4 --> T_o5{{"Saved password?"}}:::chg
+  T_o5 -- "no" --> T_o6["RTSP walk on 554, no login (box 6)"]:::chg
+  T_o6 -- "found" --> T_o7["Card ready (ONVIF, no-login RTSP)"]:::card
+  T_o6 -- "nothing" --> T_o8["Card: ONVIF, needs password"]:::card
+  T_o5 -- "yes" --> T_o8
+  T_o2 --> T_q0
+  T_o1b --> T_q0
+  T_o7 --> T_q0
+  T_o8 --> T_q0
+  T_q0{{"SSDP camera answer<br/>with no card?"}}
+  T_q0 -- "yes" --> T_q1["Card: needs password (HTTP)"]:::card
+  T_q0 -- "no" --> T_goS6_0(["→ box 8"]):::ext
+  T_q1 --> T_goS6_1(["→ box 8"]):::ext
+</script>
+<script type="text/plain" class="src" data-chart="now" data-sec="S7" data-title="8 · Merge duplicate cards">
+flowchart TD
+  T_x0["Group cards by address. Best: ready, saved,<br/>has a stream, protocol rank, lowest port"]
+  T_x0 --> T_x1{{"Each other card?"}}
+  T_x1 -- "saved or ready" --> T_xk["Keep"]
+  T_x1 -- "best streams; this needs<br/>a password or is info" --> T_xs["Remove"]:::none
+  T_x1 -- "this is HTTP, best is not;<br/>this needs a password or is info" --> T_xs
+  T_x1 -- "both HTTP; this needs a password" --> T_xs
+  T_x1 -- "anything else" --> T_xk
+  T_xk --> T_x2["Save cards; scan ends"]
+  T_xs --> T_x2
+</script>
+<script type="text/plain" class="src" data-chart="now" data-sec="S8" data-title="9 · Password entry">
+flowchart TD
+  T_u0(["User enters a password"])
+  T_sr(["Saved streams fail<br/>(at most once in 6 h)"]) -- "saved password" --> T_u0
+  T_u0 --> T_u1{{"ONVIF card?"}}
+  T_u1 -- "yes" --> T_u2["ONVIF GetProfiles with the login<br/>(SOAP 1.2, then 1.1)"]
+  T_u2 -- "0 profiles" --> T_u10
+  T_u2 -- "1 or more" --> T_u3["GetStreamUri for each profile"]
+  T_u3 -- "no stream URIs" --> T_u10
+  T_u3 --> T_u4["One connection: check each profile URL;<br/>ffprobe each, cooldown between"]
+  T_u4 --> T_u5{{"2 work, or 1 plus a<br/>no-login stream?"}}:::chg
+  T_u5 -- "no" --> T_u6["Brand paths on one connection;<br/>ffprobe each that answers"]:::chg
+  T_u5 -- "yes" --> T_u7
+  T_u6 --> T_u7["Snapshot URL: brand table,<br/>else ONVIF GetSnapshotUri"]
+  T_u7 --> T_u8["Rank by resolution, drop duplicates;<br/>card ready"]:::card
+  T_u8 --> T_u9["Codec check: ffprobe, up to 3 tries"]
+  T_u1 -- "no" --> T_u10{{"Protocol?"}}
+  T_u10 -- "RTSP, DVR, ONVIF" --> T_u11{{"Card port is not 554?"}}
+  T_u11 -- "yes" --> T_u12["RTSP walk on 554 with the login"]:::chg
+  T_u11 -- "no" --> T_u13
+  T_u12 -- "nothing" --> T_u13["RTSP walk on the card's port<br/>with the login"]:::chg
+  T_u13 -- "nothing" --> T_u14{{"XAddrs name<br/>another port?"}}
+  T_u14 -- "yes" --> T_u15["RTSP walk on that port<br/>with the login"]:::chg
+  T_u14 -- "no" --> T_uf["Fails: the card asks<br/>for the password again"]:::none
+  T_u15 -- "nothing" --> T_uf
+  T_u10 -- "MJPEG" --> T_u16["17 MJPEG paths with the login"]
+  T_u10 -- "HLS" --> T_u17["11 HLS paths with the login"]
+  T_u16 -- "nothing" --> T_uf
+  T_u17 -- "nothing" --> T_uf
+  T_u12 -- "found" --> T_u18
+  T_u13 -- "found" --> T_u18
+  T_u15 -- "found" --> T_u18
+  T_u16 -- "found" --> T_u18
+  T_u17 -- "found" --> T_u18
+  T_u18["ffprobe the stream found"] --> T_u19{{"Brand paths known,<br/>RTSP or DVR?"}}
+  T_u19 -- "yes" --> T_u20["Brand paths on one connection; ffprobe each;<br/>lowest resolution becomes the sub-stream"]:::chg
+  T_u19 -- "no" --> T_u21
+  T_u20 --> T_u21{{"Locked streams saved?"}}
+  T_u21 -- "yes" --> T_u22["Each: cooldown, DESCRIBE, ffprobe"]
+  T_u21 -- "no" --> T_u23
+  T_u22 --> T_u23["Snapshot URL from the brand table;<br/>stream list; card ready"]:::card
+  T_u23 --> T_u24{{"DVR channel brand?"}}
+  T_u24 -- "yes" --> T_goS8_0(["→ box 10"]):::ext
+</script>
+<script type="text/plain" class="src" data-chart="now" data-sec="S9" data-title="10 · DVR channels">
+flowchart TD
+  T_dv0["Ask the DVR its channel count<br/>(2 HTTP requests)"]
+  T_dv0 -- "answer N" --> T_dv1["Channels 1 to N"]
+  T_dv0 -- "no answer" --> T_dv2["Channels 1 to 16"]
+  T_dv1 --> T_dv3["Each other channel: new connection,<br/>main stream only; SDP must have video"]:::chg
+  T_dv2 --> T_dv3
+  T_dv3 --> T_dv4["One card per populated channel;<br/>snapshot loop starts"]:::card
+</script>
+<script type="text/plain" class="src" data-chart="now" data-sec="S10" data-title="11 · Deep Re-Probe and manual add">
+flowchart TD
+  T_dr0(["Deep Re-Probe button"]) --> T_dr1{{"Saved early stop,<br/>under 30 min old?"}}:::chg
+  T_dr1 -- "no, or older" --> T_dr2["Full RTSP walk, Layers 1 and 2,<br/>no login (box 6)"]:::ext
+  T_dr1 -- "yes" --> T_dr3["Resume Layer 1 on the remaining paths;<br/>each 401 path saved as a locked stream"]:::chg
+  T_dr3 -- "found, or Layer 2 not skipped" --> T_dr6
+  T_dr3 -- "nothing; Layer 2 was skipped" --> T_dr4["Layer 2: brand and universal paths,<br/>5 s apart, stop after 10 failures"]:::chg
+  T_dr2 --> T_dr6["Card ready, or a list of locked streams"]:::card
+  T_dr4 --> T_dr6
+  T_ma0(["Add camera by hand"]) --> T_ma1{{"Protocol?"}}
+  T_ma1 -- "RTSP with a path" --> T_ma2["DESCRIBE that path"]
+  T_ma2 -- "fails" --> T_ma3["RTSP walk with the login (box 6)"]:::ext
+  T_ma1 -- "RTSP, no path" --> T_ma3
+  T_ma1 -- "MJPEG, HLS, RTMP" --> T_ma4["That protocol's probe"]
+  T_ma1 -- "WebRTC, WS-RTSP" --> T_ma5["Info card, no probe"]:::card
+  T_ma2 -- "OK" --> T_ma6["Card ready, or an error"]:::card
+  T_ma3 --> T_ma6
+  T_ma4 --> T_ma6
+</script>
+
+<script type="text/plain" class="src" data-chart="b54" data-sec="S0" data-title="1 · Start-up and scan triggers (unchanged)">
+flowchart TD
+  A_mode{{"Start-up mode?"}}
+  A_mode -- "new install" --> A_scan(["Network scan starts"])
+  A_mode -- "routine restart" --> A_idle["No scan; saved cards load"]:::none
+  A_mode -- "after an update" --> A_ver["Verification of each saved camera"]
+  A_btn(["Scan button"]) --> A_scan
+  A_ver --> A_v1{{"ONVIF card with<br/>a password?"}}
+  A_v1 -- "yes" --> A_v2["ONVIF login again:<br/>profiles and stream URIs"]
+  A_v2 -- "failed" --> A_v3
+  A_v1 -- "no" --> A_v3{{"Protocol?"}}
+  A_v3 -- "RTSP, DVR, ONVIF" --> A_v4["Wait out the brand cooldown;<br/>DESCRIBE the saved URL"]
+  A_v4 -- "OK, no codec saved" --> A_v4b["ffprobe for the codec"]
+  A_v4 -- "failed" --> A_v5["RTSP OPTIONS on the port"]
+  A_v3 -- "MJPEG, HLS, RTMP" --> A_v6["Quick probe of that protocol"]
+  A_v5 -- "failed" --> A_v7["GET the saved snapshot URL"]
+  A_v2 -- "found" --> A_vdone["All saved cameras checked"]
+  A_v4 -- "OK" --> A_vdone
+  A_v4b --> A_vdone
+  A_v5 -- "OK" --> A_vdone
+  A_v6 --> A_vdone
+  A_v7 --> A_vdone
+  A_vdone --> A_scan
+  A_scan --> A_goS0_0(["→ box 2"]):::ext
+</script>
+<script type="text/plain" class="src" data-chart="b54" data-sec="S1" data-title="2 · Discovery (unchanged)">
+flowchart TD
+  A_d0{{"Local subnet found?"}}
+  A_d0 -- "no" --> A_derr["Scan stops with an error"]:::none
+  A_d0 -- "yes" --> A_d1["At the same time: ARP sweep,<br/>WS-Discovery, SSDP, mDNS (5 s each)"]
+  A_d1 --> A_d2{{"ARP found fewer<br/>than 3 hosts?"}}
+  A_d2 -- "yes" --> A_d3["Add an ICMP ping sweep"]
+  A_d2 -- "no" --> A_d4
+  A_d3 --> A_d4["Live hosts: ARP + multicast answers + this machine,<br/>minus blacklist, gateway, 172.x and 169.254.x"]
+  A_d4 --> A_goS1_0(["→ box 3"]):::ext
+</script>
+<script type="text/plain" class="src" data-chart="b54" data-sec="S2" data-title="3 · Port check (unchanged)">
+flowchart TD
+  A_n1["nmap: 54 camera ports, 15 s per host"]
+  A_n1 --> A_n2{{"Any port open?"}}
+  A_n2 -- "no" --> A_n3["Log line only<br/>(MAC kept for the appliance pass)"]:::none
+  A_n2 -- "yes" --> A_goS2_0(["→ box 4"]):::ext
+</script>
+<script type="text/plain" class="src" data-chart="b54" data-sec="S3" data-title="4 · Each host with open ports">
+flowchart TD
+  A_h0(["Next host"])
+  A_h0 --> A_h1["Classify: camera, not camera, uncertain<br/>(used only by the last card decision)"]
+  A_h1 --> A_h2{{"Saved camera with a<br/>working stream here?"}}
+  A_h2 -- "yes" --> A_hk["Skip the host"]:::none
+  A_h2 -- "no" --> A_h3{{"Removed card for<br/>this address?"}}
+  A_h3 -- "yes" --> A_hr["Card given back, no probing"]:::card
+  A_h3 -- "no" --> A_h5{{"Answered<br/>WS-Discovery?"}}:::new
+  A_h5 -- "yes" --> A_o1["ONVIF GetProfiles, no login<br/>(1 request, +1 for the older SOAP form)"]:::new
+  A_o1 -- "asks for a login" --> A_o2["Card: ONVIF, needs password.<br/>No RTSP walk on this host"]:::new
+  A_o1 -- "gives profiles" --> A_o3["GetStreamUri; check the streams<br/>on one connection"]:::new
+  A_o3 --> A_o4["Card ready (ONVIF)"]:::card
+  A_o2 --> A_q{{"Probe its other ports?"}}:::ask
+  A_o4 --> A_q
+  A_q -- "no (proposed)" --> A_hd["Host done"]:::ask
+  A_q -- "yes, as today" --> A_h4
+  A_o1 -- "no answer" --> A_h4
+  A_h5 -- "no" --> A_h4["Port order: 554, 8554, 10554 first"]
+  A_h4 --> A_goS3_0(["→ box 5, each port"]):::ext
+  A_h0 -- "all hosts done" --> A_goS3_1(["→ box 7"]):::ext
+</script>
+<script type="text/plain" class="src" data-chart="b54" data-sec="S4" data-title="5 · Each open port">
+flowchart TD
+  A_p1{{"Blacklisted, or a<br/>'not a camera' report?"}}
+  A_p1 -- "yes" --> A_pskip["Skip the port"]:::none
+  A_p1 -- "no" --> A_p2["Protocol guess from the port number"]
+  A_p2 --> A_p3{{"Host already spoke RTSP, and<br/>port is not 554, 8554, 10554?"}}
+  A_p3 -- "yes" --> A_p3b["Treat the port as HTTP"]
+  A_p3 -- "no" --> A_p4
+  A_p3b --> A_p4{{"Port 554?"}}
+  A_p4 -- "yes" --> A_p5["RTSP OPTIONS: Server, realm, methods"]
+  A_p4 -- "no" --> A_p6
+  A_p5 --> A_p6["Brand identification"]
+  A_p6 --> A_p7{{"Protocol?"}}
+  A_p7 -- "RTSP or DVR" --> A_r1["RTSP walk, no login (box 6)"]:::ext
+  A_r1 -- "found" --> A_cr["Card ready (RTSP)"]:::card
+  A_r1 -- "401: password needed" --> A_cpw["Card: needs password"]:::card
+  A_r1 -- "nothing" --> A_r2{{"Saved password?"}}
+  A_r2 -- "yes" --> A_r3["RTSP walk with the saved login"]:::ext
+  A_r3 -- "found" --> A_cr
+  A_r3 -- "nothing" --> A_cpw
+  A_r2 -- "no" --> A_cpw
+  A_p7 -- "RTMP" --> A_m1["RTMP handshake"]
+  A_m1 -- "OK" --> A_crm["Card ready (RTMP)"]:::card
+  A_m1 -- "fails" --> A_noc["No card"]:::none
+  A_p7 -- "HTTP, ONVIF, other" --> A_p8{{"Host already identified<br/>by ONVIF or a brand path?"}}:::ask
+  A_p8 -- "yes (proposed)" --> A_pskip2["Skip the port"]:::ask
+  A_p8 -- "no, or not agreed" --> A_w1["17 MJPEG paths<br/>(again with a saved login)"]
+  A_w1 -- "found" --> A_cmj["Card ready (MJPEG)"]:::card
+  A_w1 -- "nothing" --> A_w2["11 HLS paths<br/>(again with a saved login)"]
+  A_w2 -- "found" --> A_chl["Card ready (HLS)"]:::card
+  A_w2 -- "nothing" --> A_w3{{"Skip RTSP here? Host spoke RTSP,<br/>a rate-limited brand sent a reset,<br/>or a 401 already identified it"}}:::new
+  A_w3 -- "no" --> A_w4["RTSP walk on this web port,<br/>no login (box 6)"]:::ext
+  A_w4 -- "found" --> A_cr
+  A_w4 -- "401" --> A_cpw
+  A_w4 -- "nothing" --> A_w5
+  A_w3 -- "yes" --> A_w5["9 WebRTC paths"]
+  A_w5 -- "found" --> A_cwr["Info card (WebRTC)"]:::card
+  A_w5 -- "nothing" --> A_w6["7 WebSocket-RTSP paths"]
+  A_w6 -- "found" --> A_cws["Info card (WS-RTSP)"]:::card
+  A_w6 -- "nothing" --> A_w7{{"Verdict?"}}
+  A_w7 -- "camera" --> A_cpw
+  A_w7 -- "uncertain" --> A_w8{{"RTSP speaker, or brand plus<br/>RTSP, ONVIF or name evidence?"}}
+  A_w8 -- "yes" --> A_cpw
+  A_w8 -- "brand, no evidence" --> A_sup["Card suppressed"]:::none
+  A_w8 -- "no" --> A_noc
+  A_w7 -- "not camera" --> A_noc
+</script>
+<script type="text/plain" class="src" data-chart="b54" data-sec="S5" data-title="6 · RTSP walk">
+flowchart TD
+  A_rw0(["RTSP walk starts"])
+  A_rw0 --> A_rw1{{"Brand has no RTSP?"}}
+  A_rw1 -- "yes" --> A_rwn["Nothing found"]:::none
+  A_rw1 -- "no" --> A_rw2{{"Brand identified?"}}:::new
+  A_rw2 -- "yes" --> A_bp["Brand paths first (DVR: channel recipe),<br/>then the 25 universal paths"]:::new
+  A_rw2 -- "no" --> A_fw["Full walk: the 25 universal paths"]:::new
+  A_bp --> A_l1["Layer 1, one connection.<br/>Next path: OPTIONS, then DESCRIBE"]
+  A_fw --> A_l1
+  A_to["25 s socket timeout for<br/>session-capped brands"]:::dead
+  A_to -.- A_l1
+  A_l1 --> A_l2{{"Answer?"}}
+  A_l2 -- "connection reset" --> A_lr["Reset noted; Layer 1 ends"]
+  A_l2 -- "400, 404, other" --> A_ln["Next path"]
+  A_l2 -- "401, no login, scan" --> A_l3["Stop: the camera needs a password"]:::new
+  A_l2 -- "401, no login, Deep Re-Probe" --> A_l3b["Save as a locked stream"]
+  A_l3b --> A_ln
+  A_l2 -- "401, with login" --> A_l4["DESCRIBE again with<br/>Digest or Basic login"]
+  A_l4 -- "not 200" --> A_ln
+  A_l4 -- "not 200, DVR lockout brand" --> A_lr
+  A_l4 -- "200" --> A_l5
+  A_l2 -- "200" --> A_l5{{"SDP has video?<br/>DVR: channel populated?"}}
+  A_l5 -- "no" --> A_ln
+  A_l5 -- "yes" --> A_l6["SETUP (TCP, then UDP), TEARDOWN"]
+  A_l6 -- "fails" --> A_ln
+  A_l6 -- "reset" --> A_lr
+  A_l6 -- "OK" --> A_l7{{"Enough streams?"}}:::new
+  A_l7 -- "scan: 1 no-login stream;<br/>locked streams collected as today" --> A_rwf["Stream found"]:::card
+  A_l7 -- "password entry: 2 found" --> A_rwf
+  A_l7 -- "password entry: 1 so far" --> A_ln
+  A_ln -- "more paths" --> A_l1
+  A_ln -- "list ends" --> A_l8{{"Found in Layer 1?"}}
+  A_lr --> A_l8
+  A_l8 -- "yes" --> A_rwf
+  A_l8 -- "no" --> A_ax["Retry with ?Axis-Orig-Sw=true"]:::dead
+  A_ax -.-> A_l9
+  A_l8 -- "no" --> A_l9{{"Layer 2 allowed?"}}
+  A_l9 -- "rate-limited brand" --> A_rwn
+  A_l9 -- "brand or host skips Layer 2" --> A_rwn
+  A_l9 -- "never heard RTSP" --> A_rwn
+  A_l9 -- "yes" --> A_l10["Layer 2: a new connection per path,<br/>5 s apart"]
+  A_l10 -- "found" --> A_rwf
+  A_l10 -- "10 failures in a row, or list ends" --> A_rwn
+</script>
+<script type="text/plain" class="src" data-chart="b54" data-sec="S6" data-title="7 · Later passes">
+flowchart TD
+  A_b0{{"Broad sweep on, and<br/>silent hosts left?"}}
+  A_b0 -- "yes" --> A_b1["nmap -sV, ports 0 to 10000, 90 s per host"]
+  A_b1 --> A_b2["Each host: known and removed skip,<br/>ONVIF first (box 4); each port: box 5"]:::ext
+  A_b0 -- "no" --> A_a0
+  A_b2 --> A_a0["Appliance pass: each MAC seen"]
+  A_a0 --> A_a1{{"MAC of an appliance<br/>with a camera?"}}
+  A_a1 -- "yes, card exists" --> A_a2["Note added to the card"]
+  A_a1 -- "yes, no card" --> A_a3["Info card (appliance)"]:::card
+  A_a1 -- "no" --> A_o0
+  A_a2 --> A_o0
+  A_a3 --> A_o0
+  A_o0["ONVIF pass: each WS-Discovery answer<br/>(not the gateway, not blacklisted)"]
+  A_o0 --> A_oa{{"Card for this address?"}}
+  A_oa -- "yes" --> A_ob["Mark ONVIF, save XAddrs"]
+  A_oa -- "no, removed card" --> A_oc["Card given back"]:::card
+  A_oa -- "no" --> A_od["ONVIF GetProfiles, no login"]:::new
+  A_od -- "asks for a login" --> A_oe["Card: ONVIF, needs password"]:::card
+  A_od -- "gives profiles" --> A_of["GetStreamUri; card ready (ONVIF)"]:::card
+  A_od -- "no answer" --> A_og["Card: ONVIF, needs password,<br/>as today"]:::card
+  A_ob --> A_q0
+  A_oc --> A_q0
+  A_oe --> A_q0
+  A_of --> A_q0
+  A_og --> A_q0
+  A_q0{{"SSDP camera answer<br/>with no card?"}}
+  A_q0 -- "yes" --> A_q1["Card: needs password (HTTP)"]:::card
+  A_q0 -- "no" --> A_goS6_0(["→ box 8"]):::ext
+  A_q1 --> A_goS6_1(["→ box 8"]):::ext
+</script>
+<script type="text/plain" class="src" data-chart="b54" data-sec="S7" data-title="8 · Merge duplicate cards (unchanged)">
+flowchart TD
+  A_x0["Group cards by address. Best: ready, saved,<br/>has a stream, protocol rank, lowest port"]
+  A_x0 --> A_x1{{"Each other card?"}}
+  A_x1 -- "saved or ready" --> A_xk["Keep"]
+  A_x1 -- "best streams; this needs<br/>a password or is info" --> A_xs["Remove"]:::none
+  A_x1 -- "this is HTTP, best is not;<br/>this needs a password or is info" --> A_xs
+  A_x1 -- "both HTTP; this needs a password" --> A_xs
+  A_x1 -- "anything else" --> A_xk
+  A_xk --> A_x2["Save cards; scan ends"]
+  A_xs --> A_x2
+</script>
+<script type="text/plain" class="src" data-chart="b54" data-sec="S8" data-title="9 · Password entry: the 0/1/2 rule">
+flowchart TD
+  A_u0(["User enters a password"])
+  A_sr(["Saved streams fail<br/>(at most once in 6 h)"]) -- "saved password" --> A_u0
+  A_u0 --> A_u1{{"ONVIF card?"}}
+  A_u1 -- "yes" --> A_u2["ONVIF GetProfiles with the login<br/>(SOAP 1.2, then 1.1)"]
+  A_u2 -- "1 or more" --> A_u3["GetStreamUri for each profile"]
+  A_u3 --> A_u4["One connection: check each profile URL;<br/>ffprobe each, cooldown between"]
+  A_u4 --> A_u5{{"Working streams<br/>from ONVIF?"}}:::new
+  A_u5 -- "2 or more: stop" --> A_u7
+  A_u5 -- "1" --> A_u6["Brand paths with the login,<br/>stop at the 2nd stream; no full walk"]:::new
+  A_u5 -- "0" --> A_k1
+  A_u2 -- "0 profiles" --> A_k1
+  A_u3 -- "no stream URIs" --> A_k1
+  A_u1 -- "no" --> A_u10{{"Protocol?"}}
+  A_u10 -- "RTSP, DVR, ONVIF" --> A_k1["Brand paths with the login,<br/>stop at 2 streams"]:::new
+  A_k1 -- "1 or 2 found" --> A_u18
+  A_k1 -- "0 found" --> A_k2["Full walk with the login: on 554, then the<br/>card's port, then an XAddrs port; stop at 2"]:::new
+  A_k2 -- "found" --> A_u18
+  A_k2 -- "nothing" --> A_uf["Fails: the card asks<br/>for the password again"]:::none
+  A_u10 -- "MJPEG" --> A_u16["17 MJPEG paths with the login"]
+  A_u10 -- "HLS" --> A_u17["11 HLS paths with the login"]
+  A_u16 -- "nothing" --> A_uf
+  A_u17 -- "nothing" --> A_uf
+  A_u16 -- "found" --> A_u18
+  A_u17 -- "found" --> A_u18
+  A_u6 --> A_u7
+  A_u18["ffprobe each stream found"] --> A_u21{{"Locked streams saved?"}}
+  A_u21 -- "yes" --> A_u22["Each: cooldown, DESCRIBE, ffprobe"]
+  A_u21 -- "no" --> A_u7
+  A_u22 --> A_u7["Snapshot URL: brand table,<br/>else ONVIF GetSnapshotUri"]
+  A_u7 --> A_u8["Rank by resolution, drop duplicates;<br/>card ready"]:::card
+  A_u8 --> A_u9["Codec check: ffprobe, up to 3 tries"]
+  A_u8 --> A_u24{{"DVR channel brand?"}}
+  A_u24 -- "yes" --> A_goS8_0(["→ box 10"]):::ext
+</script>
+<script type="text/plain" class="src" data-chart="b54" data-sec="S9" data-title="10 · DVR channels">
+flowchart TD
+  A_dv0["Ask the DVR its channel count<br/>(2 HTTP requests)"]
+  A_dv0 -- "answer N" --> A_dv1["Channels 1 to N"]
+  A_dv0 -- "no answer" --> A_dv2["Channels 1 to 16"]
+  A_dv1 --> A_dv3["Each other channel: main and sub-stream,<br/>stop at 2; SDP must have video"]:::new
+  A_dv2 --> A_dv3
+  A_dv3 --> A_dv4["One card per populated channel;<br/>snapshot loop starts"]:::card
+</script>
+<script type="text/plain" class="src" data-chart="b54" data-sec="S10" data-title="11 · Deep Re-Probe and manual add">
+flowchart TD
+  A_dr0(["Deep Re-Probe button"]) --> A_dr2["Full walk of every path, Layers 1 and 2,<br/>no early stop; each 401 path saved as a locked stream"]:::new
+  A_dr2 --> A_dr6["Card ready, or a list of locked streams"]:::card
+  A_ma0(["Add camera by hand"]) --> A_ma1{{"Protocol?"}}
+  A_ma1 -- "RTSP with a path" --> A_ma2["DESCRIBE that path"]
+  A_ma2 -- "fails" --> A_ma3["RTSP walk with the login (box 6)"]:::ext
+  A_ma1 -- "RTSP, no path" --> A_ma3
+  A_ma1 -- "MJPEG, HLS, RTMP" --> A_ma4["That protocol's probe"]
+  A_ma1 -- "WebRTC, WS-RTSP" --> A_ma5["Info card, no probe"]:::card
+  A_ma2 -- "OK" --> A_ma6["Card ready, or an error"]:::card
+  A_ma3 --> A_ma6
+  A_ma4 --> A_ma6
+</script>
+<script type="text/plain" id="classdefs">
+classDef default fill:#ffffff,stroke:#5b6676,color:#1d2430
+classDef card fill:#dbe9f7,stroke:#1f5fa8,color:#0d1b2c
+classDef none fill:#eceff3,stroke:#8a94a3,color:#3a4350
+classDef chg fill:#f8d0cc,stroke:#b3261e,stroke-width:2px,color:#3b0d09
+classDef new fill:#cdebd8,stroke:#2e7d4f,stroke-width:2px,color:#0b2416
+classDef ask fill:#fbe7b5,stroke:#a86b00,stroke-width:2px,stroke-dasharray:6 3,color:#2e1f00
+classDef ext fill:#ffffff,stroke:#5b6676,stroke-width:1.5px,stroke-dasharray:6 3,color:#1d2430
+classDef dead fill:#f1f1f1,stroke:#999999,stroke-dasharray:2 3,color:#777777
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>
+(function () {
+  const dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+    && document.documentElement.dataset.theme !== "light";
+  const CLASSDEFS = document.getElementById("classdefs").textContent;
+  const GAP = 18;
+  const panels = [];
+
+  // Split a sequence of card heights into k contiguous columns with the smallest tallest column.
+  function partition(hs, k) {
+    const n = hs.length;
+    let best = null;
+    (function rec(start, left, cuts) {
+      if (left === 1) {
+        const all = cuts.concat([[start, n]]);
+        const tall = Math.max(...all.map(([a, b]) => hs.slice(a, b).reduce((x, y) => x + y + GAP, -GAP)));
+        if (!best || tall < best.tall) best = { tall, cols: all };
+        return;
+      }
+      for (let end = start + 1; end <= n - left + 1; end++) rec(end, left - 1, cuts.concat([[start, end]]));
+    })(0, Math.min(k, n), []);
+    return best.cols;
+  }
+
+  // One panel: section cards placed in columns inside a stage that pans and zooms.
+  function makePanel(pane, cards) {
+    const vp = pane.querySelector(".vp");
+    const stage = pane.querySelector(".stage");
+    pane.querySelector(".msg").remove();
+    cards.forEach(c => stage.appendChild(c.el));
+    cards.forEach(c => { c.w = c.el.offsetWidth; c.h = c.el.offsetHeight; });
+    let W = 0, H = 0, s = 1, x = 0, y = 0;
+
+    // Try 1 to 6 columns; keep the one that lets the whole chart show at the largest scale.
+    function layout() {
+      const vw = vp.clientWidth, vh = vp.clientHeight;
+      let pick = null;
+      for (let k = 1; k <= Math.min(6, cards.length); k++) {
+        const cols = partition(cards.map(c => c.h), k);
+        const widths = cols.map(([a, b]) => Math.max(...cards.slice(a, b).map(c => c.w)));
+        const w = widths.reduce((p, q) => p + q, 0) + GAP * (cols.length - 1);
+        const h = Math.max(...cols.map(([a, b]) => cards.slice(a, b).reduce((p, c) => p + c.h + GAP, -GAP)));
+        const sc = Math.min(vw / w, vh / h);
+        if (!pick || sc > pick.sc) pick = { sc, cols, widths, w, h };
+      }
+      let left = 0;
+      pick.cols.forEach(([a, b], i) => {
+        let top = 0;
+        cards.slice(a, b).forEach(c => {
+          c.x = left; c.y = top;
+          c.el.style.left = left + "px"; c.el.style.top = top + "px";
+          top += c.h + GAP;
+        });
+        left += pick.widths[i] + GAP;
+      });
+      W = pick.w; H = pick.h;
+      stage.style.width = W + "px"; stage.style.height = H + "px";
+    }
+    const apply = () => { stage.style.transform = `translate(${x}px, ${y}px) scale(${s})`; };
+    const clamp = v => Math.min(6, Math.max(0.02, v));
+    function fitRect(rx, ry, rw, rh) {
+      const pad = 10, vw = vp.clientWidth, vh = vp.clientHeight;
+      s = clamp(Math.min((vw - 2 * pad) / rw, (vh - 2 * pad) / rh));
+      x = (vw - rw * s) / 2 - rx * s;
+      y = (vh - rh * s) / 2 - ry * s;
+      apply();
+    }
+    function zoomAt(mx, my, k) {
+      const ns = clamp(s * k);
+      x = mx - (mx - x) * ns / s;
+      y = my - (my - y) * ns / s;
+      s = ns;
+      apply();
+    }
+    function show(id) {
+      layout();
+      const c = cards.find(c => c.sec === id);
+      if (!c) return fitRect(0, 0, W, H);
+      if (!pane.classList.contains("on")) return fitRect(c.x, c.y, c.w, c.h);
+      // Full width: fit the section to the panel width, top aligned; drag down for the rest.
+      const pad = 10, vw = vp.clientWidth;
+      s = clamp(Math.min((vw - 2 * pad) / c.w, 1.2));
+      x = (vw - c.w * s) / 2 - c.x * s;
+      y = pad - c.y * s;
+      apply();
+    }
+    vp.addEventListener("wheel", e => {
+      e.preventDefault();
+      const r = vp.getBoundingClientRect();
+      zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0015));
+    }, { passive: false });
+    const pts = new Map();
+    let last = null, lastDist = 0;
+    vp.addEventListener("pointerdown", e => {
+      vp.setPointerCapture(e.pointerId);
+      pts.set(e.pointerId, [e.clientX, e.clientY]);
+      vp.classList.add("drag");
+      last = [e.clientX, e.clientY];
+      if (pts.size === 2) { const [p, q] = [...pts.values()]; lastDist = Math.hypot(p[0] - q[0], p[1] - q[1]); }
+    });
+    vp.addEventListener("pointermove", e => {
+      if (!pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, [e.clientX, e.clientY]);
+      if (pts.size === 2) {
+        const [p, q] = [...pts.values()];
+        const d = Math.hypot(p[0] - q[0], p[1] - q[1]);
+        const r = vp.getBoundingClientRect();
+        if (lastDist) zoomAt((p[0] + q[0]) / 2 - r.left, (p[1] + q[1]) / 2 - r.top, d / lastDist);
+        lastDist = d;
+        return;
+      }
+      x += e.clientX - last[0]; y += e.clientY - last[1];
+      last = [e.clientX, e.clientY];
+      apply();
+    });
+    const up = e => {
+      pts.delete(e.pointerId);
+      if (pts.size < 2) lastDist = 0;
+      if (pts.size === 1) last = [...pts.values()][0];
+      if (!pts.size) vp.classList.remove("drag");
+    };
+    vp.addEventListener("dblclick", e => {
+      const r = vp.getBoundingClientRect();
+      zoomAt(e.clientX - r.left, e.clientY - r.top, e.shiftKey ? 0.5 : 2);
+    });
+    vp.addEventListener("pointerup", up);
+    vp.addEventListener("pointercancel", up);
+    pane.querySelectorAll("[data-z]").forEach(b => b.addEventListener("click", () => {
+      const z = b.dataset.z;
+      if (z === "solo") return;
+      if (z === "fit") show("ALL"); else zoomAt(vp.clientWidth / 2, vp.clientHeight / 2, z === "in" ? 1.4 : 1 / 1.4);
+    }));
+    show("ALL");
+    return { show };
+  }
+
+  let current = "ALL";
+  document.querySelectorAll("button[data-sec]").forEach(b => b.addEventListener("click", () => {
+    current = b.dataset.sec;
+    document.querySelectorAll("button[data-sec]").forEach(o => o.setAttribute("aria-pressed", String(o === b)));
+    panels.forEach(p => p.show(current));
+  }));
+  // Full width: show one chart across the whole window, then fit both again.
+  const panes = document.querySelector(".panes");
+  document.querySelectorAll('[data-z="solo"]').forEach(b => b.addEventListener("click", () => {
+    const pane = b.closest(".pane");
+    const on = !pane.classList.contains("on");
+    document.querySelectorAll(".pane").forEach(p => p.classList.toggle("on", on && p === pane));
+    document.querySelectorAll('[data-z="solo"]').forEach(o => o.setAttribute("aria-pressed", String(on && o === b)));
+    panes.classList.toggle("solo", on);
+    panels.forEach(p => p.show(current));
+  }));
+  let resizeTimer = 0;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => panels.forEach(p => p.show(current)), 150);
+  });
+
+  async function draw() {
+    if (!window.mermaid) {
+      document.querySelectorAll(".msg").forEach(m => { m.textContent = "The drawing library did not load. This page needs an internet connection."; });
+      return;
+    }
+    mermaid.initialize({ startOnLoad: false, theme: dark ? "dark" : "default", maxTextSize: 200000,
+      flowchart: { htmlLabels: true, curve: "basis", nodeSpacing: 18, rankSpacing: 28, padding: 6 } });
+    for (const [paneId, chart] of [["pane-now", "now"], ["pane-b54", "b54"]]) {
+      const pane = document.getElementById(paneId);
+      const cards = [];
+      let failed = "";
+      for (const src of document.querySelectorAll(`script.src[data-chart="${chart}"]`)) {
+        const id = `c-${chart}-${src.dataset.sec}`;
+        try {
+          const { svg } = await mermaid.render(id, src.textContent + "\n" + CLASSDEFS);
+          const el = document.createElement("div");
+          el.className = "card";
+          el.innerHTML = `<div class="card-title"></div>${svg}`;
+          el.querySelector(".card-title").textContent = src.dataset.title;
+          const sv = el.querySelector("svg");
+          const vb = sv.viewBox.baseVal;
+          sv.setAttribute("width", vb.width);
+          sv.setAttribute("height", vb.height);
+          cards.push({ sec: src.dataset.sec, el });
+        } catch (err) {
+          failed += ` ${src.dataset.title}: ${err.message}`;
+          document.querySelectorAll(`#d${id}, #${id}`).forEach(n => n.remove());
+        }
+      }
+      if (failed) { pane.querySelector(".msg").textContent = "Some sections could not be drawn:" + failed; continue; }
+      panels.push(makePanel(pane, cards));
+    }
+  }
+  draw();
+})();
+</script>
+</body>
+</html>
