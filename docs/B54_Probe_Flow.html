@@ -1,0 +1,256 @@
+<title>AnyCam Probe Flow</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one reading column; each camera is a section with its chart in a scrollable frame and a hit table beside the notes. */
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --fg: #1d2430; --muted: #5b6676; --line: #d9dee6;
+  --accent: #1f5fa8; --hit: #b5480f; --stop: #2e7d4f;
+  --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12161d; --panel: #1a2029; --fg: #e3e8ef; --muted: #9aa6b6; --line: #2e3744;
+  --accent: #7fb0ea; --hit: #f0915a; --stop: #6cc893; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12161d; --panel: #1a2029; --fg: #e3e8ef; --muted: #9aa6b6; --line: #2e3744;
+  --accent: #7fb0ea; --hit: #f0915a; --stop: #6cc893; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 15px; line-height: 1.55;
+  padding-inline: 16px; padding-block: 24px 48px; }
+main { max-width: 1040px; margin: 0 auto; display: grid; gap: 28px; }
+h1 { font-size: 26px; margin: 0; text-wrap: balance; }
+h2 { font-size: 20px; margin: 0; text-wrap: balance; }
+h3 { font-size: 15px; margin: 0; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+p { margin: 0; max-width: 70ch; }
+.lede { display: grid; gap: 10px; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px; display: grid; gap: 14px; min-width: 0; }
+.chart { overflow-x: auto; border-top: 1px solid var(--line); padding-top: 12px; }
+.chart pre { margin: 0; background: transparent; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+.tablewrap { overflow-x: auto; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 13px; }
+td.n { text-align: right; font-family: var(--mono); white-space: nowrap; }
+code { font-family: var(--mono); font-size: 13px; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 14px; height: 14px; border-radius: 3px; display: inline-block; border: 1px solid var(--line); }
+.notes { display: grid; gap: 6px; font-size: 14px; }
+.notes li { max-width: 80ch; }
+.tag { font-family: var(--mono); font-size: 12px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); }
+.new { color: var(--hit); font-weight: 600; }
+</style>
+
+<main>
+<div class="lede">
+  <h1>AnyCam Probe Flow</h1>
+  <p>Every request each camera would receive under the proposed B54 design, from the first network scan to the last path of a full walk. One chart per camera. Proposed, not built.</p>
+  <p>A <b>hit</b> is one request the camera itself receives. Multicast queries go to the whole network at once, and a camera only answers them; they are shown but not counted as hits. Requests on one RTSP connection are counted one by one.</p>
+  <div class="legend">
+    <span><i class="sw" style="background:#f6c9a8"></i>Hit on the camera</span>
+    <span><i class="sw" style="background:#d6e4f5"></i>Multicast or local step (no hit)</span>
+    <span><i class="sw" style="background:#cdebd8"></i>Stop: done for this stage</span>
+    <span><i class="sw" style="background:#eceff3"></i>Decision</span>
+  </div>
+</div>
+
+<section>
+  <h2>Totals</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Camera</th><th>Scan today (up to)</th><th>Scan, proposed</th><th>Password entry, proposed</th></tr></thead>
+    <tbody>
+      <tr><td>Amcrest (test system C)</td><td class="n">~140</td><td class="n">2–3</td><td class="n">~19</td></tr>
+      <tr><td>Hikvision PTZ (test system A)</td><td class="n">~210</td><td class="n">2–3</td><td class="n">~17</td></tr>
+      <tr><td>Microseven (test system A)</td><td class="n">~170</td><td class="n">2–3</td><td class="n">~19</td></tr>
+      <tr><td>Lorex DVR, 8 channels (test system B)</td><td class="n">not counted</td><td class="n">2–3</td><td class="n">~70</td></tr>
+      <tr><td>Reolink RLC-810A (not tried; research)</td><td class="n">~215</td><td class="n">2–3</td><td class="n">15–18</td></tr>
+    </tbody>
+  </table></div>
+  <p style="font-size:14px;color:var(--muted)">Every column also includes 1 ARP request and 54 TCP port checks, the same for every device on the network; the totals above leave them out. "Today" is worked out from the scan code's own path tables and the field logs: for each extra open web port the scan currently tries 17 MJPEG, 11 HLS, 9 WebRTC and 7 WebSocket paths (44 requests), plus up to 11 identity pages. Password-entry totals count a stream check (ffprobe) as about 5 requests. The Lorex DVR's scan today expands a channel list per DVR recipe, which these tables cannot count reliably.</p>
+</section>
+
+<section id="amcrest">
+  <h2>Amcrest camera (test system C)</h2>
+  <p>Seen in the field: RTSP on 554, Dahua's admin port 37777 (the second card of B33). <span class="tag">assumed</span> ONVIF on port 80 with a login, and 2 ONVIF profiles (main and sub), as Amcrest ships them.</p>
+  <div class="chart"><pre class="mermaid">
+flowchart TD
+  A1["ARP request (who has this address)"]:::hit --> A2["WS-Discovery, SSDP, mDNS queries (multicast)"]:::local
+  A2 --> A3["Port check: 54 TCP connection attempts&lt;br/&gt;open: 80, 554, 37777"]:::hit
+  A3 --> K{"Known camera or removed card?"}:::dec
+  K -- "known" --> KS["No more hits (3.7.5-rc2.0)"]:::stop
+  K -- "removed" --> KR["Card given back from kept details, no hits"]:::stop
+  K -- "new" --> O{"Answered WS-Discovery?"}:::dec
+  O -- "yes (ONVIF on 80)" --> O1["ONVIF GetProfiles, no login&lt;br/&gt;1 request (+1 if it wants the older SOAP form)"]:::hit
+  O1 -- "login needed" --> S1["Card: needs password&lt;br/&gt;ports 80 and 37777 not probed (new)"]:::stop
+  S1 --> P["User enters password"]:::local
+  P --> P1["ONVIF GetProfiles, with login: 1 request"]:::hit
+  P1 -- "2 profiles" --> P2["ONVIF GetStreamUri x2: 2 requests&lt;br/&gt;/cam/realmonitor?channel=1#amp;subtype=0 and #amp;subtype=1"]:::hit
+  P2 --> P3["One RTSP connection: OPTIONS, DESCRIBE (login challenge),&lt;br/&gt;DESCRIBE subtype=0 → 200, DESCRIBE subtype=1 → 200: 4 requests"]:::hit
+  P3 -- "2 streams confirmed" --> P4["Stream details: 2 ffprobe sessions (~10 requests)"]:::hit
+  P4 --> P5["Snapshot address check: GET /cgi-bin/snapshot.cgi&lt;br/&gt;1–2 requests (digest login)"]:::hit
+  P5 --> DONE["Card ready: main + sub"]:::stop
+  O -- "no" --> F["RTSP OPTIONS on 554: 1 request; brand from MAC + answer"]:::hit
+  F --> B1["DESCRIBE /cam/realmonitor?channel=1#amp;subtype=0: 1 request"]:::hit
+  B1 -- "401" --> S1
+  B1 -. "400 / 404" .-> FW["Full walk (see the Full walk chart)"]:::dec
+  classDef hit fill:#f6c9a8,stroke:#b5480f,color:#1d1208
+  classDef local fill:#d6e4f5,stroke:#1f5fa8,color:#0d1b2c
+  classDef stop fill:#cdebd8,stroke:#2e7d4f,color:#0b2416
+  classDef dec fill:#eceff3,stroke:#5b6676,color:#1d2430
+  </pre></div>
+  <ul class="notes">
+    <li>Port 37777 is never probed once ONVIF has identified the camera, so the duplicate card of B33 cannot appear. B33 itself stays under your investigation.</li>
+    <li>If ONVIF were off on this camera, the right-hand branch identifies it from its brand path with 2 hits.</li>
+  </ul>
+</section>
+
+<section id="hikvision">
+  <h2>Hikvision PTZ, DS-2DE4A425IW-DE (test system A)</h2>
+  <p>Seen in the field: ports 80, 443, 554, 8000, 8443; it answers WS-Discovery; its ONVIF returns 0 profiles even with the right login (CLAUDE.md); its RTSP OPTIONS answer has no Server header and no realm.</p>
+  <div class="chart"><pre class="mermaid">
+flowchart TD
+  A1["ARP request"]:::hit --> A2["WS-Discovery, SSDP, mDNS queries (multicast)&lt;br/&gt;answers WS-Discovery as HIKVISION DS-2DE4A425IW-DE"]:::local
+  A2 --> A3["Port check: 54 TCP connection attempts&lt;br/&gt;open: 80, 443, 554, 8000, 8443"]:::hit
+  A3 --> K{"Known camera or removed card?"}:::dec
+  K -- "known" --> KS["No more hits"]:::stop
+  K -- "removed" --> KR["Card given back, no hits"]:::stop
+  K -- "new" --> O1["ONVIF GetProfiles, no login: 1 request (+1)"]:::hit
+  O1 -- "login needed" --> S1["Card: needs password&lt;br/&gt;80, 443, 8000, 8443 not probed (new)"]:::stop
+  S1 --> P["User enters password"]:::local
+  P --> P1["ONVIF GetProfiles, with login: 1 request"]:::hit
+  P1 -- "0 profiles" --> R{"Rule: 0 from ONVIF → brand paths"}:::dec
+  R --> P3["One RTSP connection: OPTIONS, DESCRIBE (challenge),&lt;br/&gt;DESCRIBE /Streaming/Channels/101 → 200,&lt;br/&gt;DESCRIBE /Streaming/Channels/102 → 200: 4 requests"]:::hit
+  P3 -- "2 confirmed: stop" --> P4["Stream details: 2 ffprobe sessions (~10 requests)"]:::hit
+  P4 --> P5["Snapshot check: GET /ISAPI/Streaming/channels/101/picture&lt;br/&gt;1–2 requests"]:::hit
+  P5 --> DONE["Card ready: 2560x1440 main + 704x480 sub"]:::stop
+  P3 -. "neither path answers 200" .-> P6["Next brand path /Streaming/Channels/103, then the full walk"]:::dec
+  classDef hit fill:#f6c9a8,stroke:#b5480f,color:#1d1208
+  classDef local fill:#d6e4f5,stroke:#1f5fa8,color:#0d1b2c
+  classDef stop fill:#cdebd8,stroke:#2e7d4f,color:#0b2416
+  classDef dec fill:#eceff3,stroke:#5b6676,color:#1d2430
+  </pre></div>
+  <ul class="notes">
+    <li>Today the scan also walks up to 31 RTSP paths and probes four web ports with about 55 requests each.</li>
+    <li>If the camera uses H.265+, ffmpeg warns and AnyCam's existing H.265+ note appears; that does not add requests.</li>
+  </ul>
+</section>
+
+<section id="microseven">
+  <h2>Microseven MYM74K-HX (test system A)</h2>
+  <p>Seen in the field: ports 80, 443, 554, 8080; ONVIF on 8080 (answers WS-Discovery as IPCAM); 2 ONVIF profiles, <code>/11</code> (3840x2160) and <code>/12</code> (1280x720); HTTP snapshot <code>/tmpfs/snap.jpg</code>. A second connection inside 5 s is reset, so every connection below waits 5 s after the one before.</p>
+  <div class="chart"><pre class="mermaid">
+flowchart TD
+  A1["ARP request"]:::hit --> A2["WS-Discovery, SSDP, mDNS queries (multicast)&lt;br/&gt;answers WS-Discovery: ONVIF at port 8080"]:::local
+  A2 --> A3["Port check: 54 TCP connection attempts&lt;br/&gt;open: 80, 443, 554, 8080"]:::hit
+  A3 --> K{"Known camera or removed card?"}:::dec
+  K -- "known" --> KS["No more hits"]:::stop
+  K -- "removed" --> KR["Card given back, no hits"]:::stop
+  K -- "new" --> O1["ONVIF GetProfiles on 8080, no login: 1 request (+1)"]:::hit
+  O1 -- "login needed" --> S1["Card: needs password&lt;br/&gt;80, 443, 554 not probed (new)"]:::stop
+  S1 --> P["User enters password"]:::local
+  P --> P1["ONVIF GetProfiles, with login: 1 request"]:::hit
+  P1 -- "2 profiles" --> P2["ONVIF GetStreamUri x2 (5 s apart): /11 and /12"]:::hit
+  P2 -- "wait 5 s" --> P3["One RTSP connection: OPTIONS, DESCRIBE (challenge),&lt;br/&gt;DESCRIBE /11 → 200, DESCRIBE /12 → 200: 4 requests"]:::hit
+  P3 -- "2 confirmed: stop; wait 5 s" --> P4["Stream details: 2 ffprobe sessions, 5 s apart (~10 requests)"]:::hit
+  P4 -- "wait 5 s" --> P5["Snapshot check: GET /tmpfs/snap.jpg: 1–2 requests"]:::hit
+  P5 --> DONE["Card ready: /11 main, /12 sub, HTTP snapshot"]:::stop
+  classDef hit fill:#f6c9a8,stroke:#b5480f,color:#1d1208
+  classDef local fill:#d6e4f5,stroke:#1f5fa8,color:#0d1b2c
+  classDef stop fill:#cdebd8,stroke:#2e7d4f,color:#0b2416
+  classDef dec fill:#eceff3,stroke:#5b6676,color:#1d2430
+  </pre></div>
+  <ul class="notes">
+    <li>Today, at start-up and on rescans: 28 RTSP paths on 554 (about 20 answered "400 Bad Request"), and about 44 requests on each of ports 80, 443 and 8080. The camera was stuck within minutes both times this ran.</li>
+    <li>If the camera allows ONVIF without a login, the scan reads both stream addresses at once, and password entry skips straight to the RTSP check.</li>
+  </ul>
+</section>
+
+<section id="lorex">
+  <h2>Lorex DVR, D861A8B-Z, 8 channels (test system B)</h2>
+  <p>Seen in the field: answers WS-Discovery; ONVIF returns 0 profiles (the service is off in its firmware); digest login with realm "Login to …"; channels 2 to 8 have cameras; it locks out after 10 failed logins; channel snapshots at <code>/cgi-bin/snapshot.cgi?channel=N</code>.</p>
+  <div class="chart"><pre class="mermaid">
+flowchart TD
+  A1["ARP request"]:::hit --> A2["WS-Discovery, SSDP, mDNS queries (multicast)"]:::local
+  A2 --> A3["Port check: 54 TCP connection attempts&lt;br/&gt;open: 80, 554 and its other service ports"]:::hit
+  A3 --> K{"Known camera or removed card?"}:::dec
+  K -- "known" --> KS["No more hits"]:::stop
+  K -- "removed" --> KR["Cards given back, no hits"]:::stop
+  K -- "new" --> O1["ONVIF GetProfiles, no login: 1 request (+1)"]:::hit
+  O1 -- "login needed" --> S1["Card: needs password&lt;br/&gt;other ports not probed (new)"]:::stop
+  S1 --> P["User enters password"]:::local
+  P --> P1["ONVIF GetProfiles, with login: 1 request"]:::hit
+  P1 -- "0 profiles" --> C1["DVR channel count (3.5.0, D1):&lt;br/&gt;HTTP devVideoInput getCollect, 2 requests (digest)"]:::hit
+  C1 -- "8 channels" --> P3["One RTSP connection: OPTIONS, DESCRIBE (challenge),&lt;br/&gt;then per channel N = 1 to 8:&lt;br/&gt;DESCRIBE channel=N#amp;subtype=0, DESCRIBE channel=N#amp;subtype=1&lt;br/&gt;18 requests in all"]:::hit
+  P3 -- "channel 1: not found" --> E1["No card for channel 1"]:::stop
+  P3 -- "channels 2-8: 2 confirmed each" --> P4["Stream details: 7 ffprobe sessions (~35 requests)"]:::hit
+  P4 --> P5["Snapshot checks: GET /cgi-bin/snapshot.cgi?channel=N&lt;br/&gt;7 channels, 1–2 requests each"]:::hit
+  P5 --> DONE["7 channel cards ready: 3840x2160 main + sub each"]:::stop
+  classDef hit fill:#f6c9a8,stroke:#b5480f,color:#1d1208
+  classDef local fill:#d6e4f5,stroke:#1f5fa8,color:#0d1b2c
+  classDef stop fill:#cdebd8,stroke:#2e7d4f,color:#0b2416
+  classDef dec fill:#eceff3,stroke:#5b6676,color:#1d2430
+  </pre></div>
+  <ul class="notes">
+    <li>Every request after password entry uses the right login, so none counts toward the DVR's 10-failure lock-out.</li>
+    <li>The per-channel rule "2 confirmed, stop" is the 0/1/2 rule applied to each channel, because each channel is its own camera.</li>
+  </ul>
+</section>
+
+<section id="reolink">
+  <h2>Reolink RLC-810A, wired 4K (not tried; research data)</h2>
+  <p>From AnyCam's brand table and its throttle research: RTSP paths <code>/h264Preview_01_main</code> and <code>/h264Preview_01_sub</code>; ONVIF on port 8000, which some firmware ships switched off; a fast restart can draw "bad CSeq" errors without a 5 s pause; snapshots through <code>/cgi-bin/api.cgi?cmd=Snap</code> with the login in the request. <span class="tag">assumed</span> open ports 80, 443, 554, 1935, 8000, 9000 (Reolink defaults).</p>
+  <div class="chart"><pre class="mermaid">
+flowchart TD
+  A1["ARP request"]:::hit --> A2["WS-Discovery, SSDP, mDNS queries (multicast)"]:::local
+  A2 --> A3["Port check: 54 TCP connection attempts&lt;br/&gt;open: 80, 443, 554, 1935, 8000, 9000"]:::hit
+  A3 --> K{"Known camera or removed card?"}:::dec
+  K -- "known / removed" --> KS["No hits (or card given back)"]:::stop
+  K -- "new" --> O{"Answered WS-Discovery?"}:::dec
+  O -- "yes: ONVIF on 8000" --> O1["ONVIF GetProfiles, no login: 1 request (+1)"]:::hit
+  O1 -- "login needed" --> S1["Card: needs password&lt;br/&gt;other ports not probed (new)"]:::stop
+  O -- "no: ONVIF off" --> F["RTSP OPTIONS on 554: 1 request&lt;br/&gt;brand Reolink from the MAC address"]:::hit
+  F --> B1["DESCRIBE /h264Preview_01_main: 1 request"]:::hit
+  B1 -- "401" --> S1
+  B1 -. "400 / 404 (RTSP off in firmware)" .-> B2["DESCRIBE /h264Preview_01_sub, then /Preview_01_main;&lt;br/&gt;then the full walk"]:::dec
+  S1 --> P["User enters password"]:::local
+  P --> Q{"ONVIF on?"}:::dec
+  Q -- "yes" --> P1["ONVIF GetProfiles 1 + GetStreamUri x2: 3 requests"]:::hit
+  P1 -- "2 profiles" --> P3["One RTSP connection: OPTIONS, DESCRIBE (challenge),&lt;br/&gt;DESCRIBE main → 200, DESCRIBE sub → 200: 4 requests"]:::hit
+  Q -- "no" --> P3
+  P3 -- "2 confirmed: stop" --> P4["Stream details: 2 ffprobe sessions, 5 s after the check (~10 requests)"]:::hit
+  P4 --> P5["Snapshot check: GET /cgi-bin/api.cgi?cmd=Snap...: 1 request"]:::hit
+  P5 --> DONE["Card ready: main + sub"]:::stop
+  classDef hit fill:#f6c9a8,stroke:#b5480f,color:#1d1208
+  classDef local fill:#d6e4f5,stroke:#1f5fa8,color:#0d1b2c
+  classDef stop fill:#cdebd8,stroke:#2e7d4f,color:#0b2416
+  classDef dec fill:#eceff3,stroke:#5b6676,color:#1d2430
+  </pre></div>
+  <ul class="notes">
+    <li>The 5 s pause after the RTSP check comes from the research note on "bad CSeq" errors; AnyCam would apply it as it does for the Microseven.</li>
+    <li>If RTSP is switched off in the camera, port 554 is closed: the scan then checks its web ports for MJPEG and HLS (the current 44-request set), as it must for any camera without RTSP.</li>
+  </ul>
+</section>
+
+<section id="fullwalk">
+  <h2>Full walk</h2>
+  <p>Only for a camera that no brand matched and that has no ONVIF, or when ONVIF and the brand paths found nothing after login. One RTSP connection, the 25 universal paths in this order.</p>
+  <div class="chart"><pre class="mermaid">
+flowchart TD
+  W0["One RTSP connection: OPTIONS (1 request)"]:::hit --> W{"When?"}:::dec
+  W -- "at scan time (no login)" --> SC["DESCRIBE each path in order;&lt;br/&gt;stop at the first 401 or 200&lt;br/&gt;2 to 26 requests"]:::hit
+  SC -- "401 or 200" --> SS["Card: needs password (or ready)"]:::stop
+  W -- "after login" --> PW["DESCRIBE each path with the login;&lt;br/&gt;stop when 2 answer 200&lt;br/&gt;up to 27 requests"]:::hit
+  PW --> PS["Card ready with the paths found"]:::stop
+  SC --- L
+  PW --- L
+  L["Order: /stream · /stream1 · /stream2 · /live · /live/ch00_0 · /live/main ·&lt;br/&gt;/h264 · /h264/ch1/main/av_stream · /video · /video1 · /cam ·&lt;br/&gt;/cam/realmonitor?channel=1#amp;subtype=0 · /Streaming/Channels/101 ·&lt;br/&gt;/Streaming/Channels/1 · /av0_0 · /av0_1 · /11 · /12 · /MediaInput/h264 ·&lt;br/&gt;/ch0_unicast.sdp · /onvif1 · /profile1/media.smp · /channel1 ·&lt;br/&gt;/mpeg4/media.amp · /"]:::local
+  classDef hit fill:#f6c9a8,stroke:#b5480f,color:#1d1208
+  classDef local fill:#d6e4f5,stroke:#1f5fa8,color:#0d1b2c
+  classDef stop fill:#cdebd8,stroke:#2e7d4f,color:#0b2416
+  classDef dec fill:#eceff3,stroke:#5b6676,color:#1d2430
+  </pre></div>
+  <ul class="notes">
+    <li>Deep Re-Probe keeps walking every path on request, as today.</li>
+    <li><span class="new">New in these charts, not yet agreed:</span> once ONVIF or a brand path has identified a camera, its other open ports are not probed. Today each extra web port gets about 44 requests (MJPEG, HLS, WebRTC, WebSocket paths) plus identity pages, and the cards they make are later merged away.</li>
+  </ul>
+</section>
+</main>
