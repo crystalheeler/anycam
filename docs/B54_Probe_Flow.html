@@ -1,3 +1,11 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The repository copy of the B54 probe-flow page. The Artifact viewer draws the
+     mermaid charts itself; opened as a file, this page loads mermaid to draw them
+     (needs an internet connection). -->
 <title>AnyCam Probe Flow</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Mono:wght@400;600&display=swap">
 <style>
@@ -40,6 +48,8 @@ code { font-family: var(--mono); font-size: 13px; }
 .new { color: var(--hit); font-weight: 600; }
 </style>
 
+</head>
+<body>
 <main>
 <div class="lede">
   <h1>AnyCam Probe Flow</h1>
@@ -254,3 +264,11 @@ flowchart TD
   </ul>
 </section>
 </main>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>
+  const dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "default" });
+</script>
+</body>
+</html>
