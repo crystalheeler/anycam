@@ -68,7 +68,7 @@ details ul { margin: 4px 0 0; padding-left: 20px; display: grid; gap: 2px; max-w
 <header>
   <div class="top">
     <h1>B54 Flow Comparison</h1>
-    <span class="sub">Every branch AnyCam takes from start-up to a ready card. Left: 3.7.5-rc2.0 code, read 2026-10-09. Right: the B54 design, not built.</span>
+    <span class="sub">Every branch AnyCam takes from start-up to a ready card. Left: 3.7.5-rc2.0 code, read 2026-10-09. Right: the B54 design as decided on 2026-10-09, not built.</span>
   </div>
   <div class="legend">
     <span><i class="sw" style="background:#f8d0cc;border-color:#b3261e"></i>B54 changes or removes this</span>
@@ -94,7 +94,7 @@ details ul { margin: 4px 0 0; padding-left: 20px; display: grid; gap: 2px; max-w
     <button data-sec="S10">11 Deep Re-Probe, manual add</button>
   </div>
   <details>
-    <summary>What B54 changes, in 7 lines</summary>
+    <summary>What B54 changes, in 10 lines</summary>
     <ul>
       <li><b>Scan, ONVIF first:</b> a device that answered WS-Discovery gets one GetProfiles request with no login. A login prompt gives a "needs password" card, and the host gets no RTSP walk.</li>
       <li><b>Scan, brand paths stop the walk:</b> when the brand is known, its paths go first, and the first 401 stops the walk. A 200 gives a ready card.</li>
@@ -102,7 +102,10 @@ details ul { margin: 4px 0 0; padding-left: 20px; display: grid; gap: 2px; max-w
       <li><b>Removed:</b> the "5 answers of 401 with the same realm" early stop, and the ONVIF pass's identity page, RTSP check and walk on port 554.</li>
       <li><b>Password entry, the 0/1/2 rule:</b> 2 streams from ONVIF: stop. 1: check the brand paths, no full walk. 0 after ONVIF and the brand paths: full walk. Any check stops at 2 streams.</li>
       <li><b>DVR:</b> each channel gets its main and sub-stream checked (2 per channel). <b>Deep Re-Probe:</b> one full walk of every path, on request.</li>
-      <li><b>Open question:</b> once ONVIF or a brand path has identified the camera, are its other ports left alone? Today each extra web port gets about 44 requests.</li>
+      <li><b>Other ports:</b> once ONVIF or a brand path has identified the camera, its other ports get no probes (today about 44 requests per extra web port).</li>
+      <li><b>Layer 2:</b> out of the scan; it stays for password entry and Deep Re-Probe. Layer 1 reopens one connection on <code>Connection: close</code>, reads replies strictly and sends a User-Agent.</li>
+      <li><b>Login rule:</b> stop at the first login the camera rejects, for every brand. After one success, a later 401 skips that path (at most 2). The card says "Password rejected or camera locked".</li>
+      <li><b>Brand fixes:</b> the Hikvision NVR entry gets <code>skip_layer2</code>; the Axis query retry runs, as its own field.</li>
     </ul>
   </details>
 </header>
@@ -114,7 +117,7 @@ details ul { margin: 4px 0 0; padding-left: 20px; display: grid; gap: 2px; max-w
     <div class="vp"><div class="stage"></div><div class="msg">Drawing the chart…</div></div>
   </section>
   <section class="pane" id="pane-b54">
-    <div class="pane-head"><h2>After B54 (proposed)</h2>
+    <div class="pane-head"><h2>After B54 (decided, not built)</h2>
       <div class="tools"><button data-z="in" aria-label="Zoom in">+</button><button data-z="out" aria-label="Zoom out">−</button><button data-z="fit">Fit</button><button data-z="solo" aria-pressed="false">Full width</button></div></div>
     <div class="vp"><div class="stage"></div><div class="msg">Drawing the chart…</div></div>
   </section>
@@ -199,17 +202,17 @@ flowchart TD
   T_p7 -- "RTMP" --> T_m1["RTMP handshake"]
   T_m1 -- "OK" --> T_crm["Card ready (RTMP)"]:::card
   T_m1 -- "fails" --> T_noc["No card"]:::none
-  T_p7 -- "HTTP, ONVIF, other" --> T_w1["17 MJPEG paths<br/>(again with a saved login)"]:::ask
+  T_p7 -- "HTTP, ONVIF, other" --> T_w1["17 MJPEG paths<br/>(again with a saved login)"]:::chg
   T_w1 -- "found" --> T_cmj["Card ready (MJPEG)"]:::card
-  T_w1 -- "nothing" --> T_w2["11 HLS paths<br/>(again with a saved login)"]:::ask
+  T_w1 -- "nothing" --> T_w2["11 HLS paths<br/>(again with a saved login)"]:::chg
   T_w2 -- "found" --> T_chl["Card ready (HLS)"]:::card
   T_w2 -- "nothing" --> T_w3{{"Skip RTSP here? Host spoke RTSP,<br/>or a rate-limited brand sent a reset"}}
   T_w3 -- "no" --> T_w4["RTSP walk on this web port,<br/>no login (box 6)"]:::chg
   T_w4 -- "found" --> T_cr
   T_w4 -- "nothing" --> T_w5
-  T_w3 -- "yes" --> T_w5["9 WebRTC paths"]:::ask
+  T_w3 -- "yes" --> T_w5["9 WebRTC paths"]:::chg
   T_w5 -- "found" --> T_cwr["Info card (WebRTC)"]:::card
-  T_w5 -- "nothing" --> T_w6["7 WebSocket-RTSP paths"]:::ask
+  T_w5 -- "nothing" --> T_w6["7 WebSocket-RTSP paths"]:::chg
   T_w6 -- "found" --> T_cws["Info card (WS-RTSP)"]:::card
   T_w6 -- "nothing" --> T_w7{{"Verdict?"}}
   T_w7 -- "camera" --> T_cpw
@@ -234,7 +237,7 @@ flowchart TD
   T_l2 -- "401, no login" --> T_l3{{"5 in a row with<br/>the same realm?"}}:::chg
   T_l3 -- "yes" --> T_lb["Early stop; state saved<br/>for Deep Re-Probe"]:::chg
   T_l3 -- "no" --> T_ln
-  T_l2 -- "401, with login" --> T_l4["DESCRIBE again with<br/>Digest or Basic login"]
+  T_l2 -- "401, with login" --> T_l4["DESCRIBE again with<br/>Digest or Basic login"]:::chg
   T_l4 -- "not 200" --> T_ln
   T_l4 -- "not 200, DVR lockout brand" --> T_lr
   T_l4 -- "200" --> T_l5
@@ -258,7 +261,7 @@ flowchart TD
   T_l9 -- "brand or host skips Layer 2" --> T_rwn
   T_l9 -- "Layer 1 stopped on 401s" --> T_rwn
   T_l9 -- "never heard RTSP" --> T_rwn
-  T_l9 -- "yes" --> T_l10["Layer 2: a new connection per path,<br/>5 s apart"]
+  T_l9 -- "yes" --> T_l10["Layer 2: a new connection per path,<br/>5 s apart"]:::chg
   T_l10 -- "found" --> T_rwf
   T_l10 -- "10 failures in a row, or list ends" --> T_rwn
 </script>
@@ -436,10 +439,8 @@ flowchart TD
   A_o1 -- "asks for a login" --> A_o2["Card: ONVIF, needs password.<br/>No RTSP walk on this host"]:::new
   A_o1 -- "gives profiles" --> A_o3["GetStreamUri; check the streams<br/>on one connection"]:::new
   A_o3 --> A_o4["Card ready (ONVIF)"]:::card
-  A_o2 --> A_q{{"Probe its other ports?"}}:::ask
-  A_o4 --> A_q
-  A_q -- "no (proposed)" --> A_hd["Host done"]:::ask
-  A_q -- "yes, as today" --> A_h4
+  A_o2 --> A_hd["Host done: other ports not probed"]:::new
+  A_o4 --> A_hd
   A_o1 -- "no answer" --> A_h4
   A_h5 -- "no" --> A_h4["Port order: 554, 8554, 10554 first"]
   A_h4 --> A_goS3_0(["→ box 5, each port"]):::ext
@@ -469,9 +470,9 @@ flowchart TD
   A_p7 -- "RTMP" --> A_m1["RTMP handshake"]
   A_m1 -- "OK" --> A_crm["Card ready (RTMP)"]:::card
   A_m1 -- "fails" --> A_noc["No card"]:::none
-  A_p7 -- "HTTP, ONVIF, other" --> A_p8{{"Host already identified<br/>by ONVIF or a brand path?"}}:::ask
-  A_p8 -- "yes (proposed)" --> A_pskip2["Skip the port"]:::ask
-  A_p8 -- "no, or not agreed" --> A_w1["17 MJPEG paths<br/>(again with a saved login)"]
+  A_p7 -- "HTTP, ONVIF, other" --> A_p8{{"Host already identified<br/>by ONVIF or a brand path?"}}:::new
+  A_p8 -- "yes" --> A_pskip2["Skip the port"]:::new
+  A_p8 -- "no" --> A_w1["17 MJPEG paths<br/>(again with a saved login)"]
   A_w1 -- "found" --> A_cmj["Card ready (MJPEG)"]:::card
   A_w1 -- "nothing" --> A_w2["11 HLS paths<br/>(again with a saved login)"]
   A_w2 -- "found" --> A_chl["Card ready (HLS)"]:::card
@@ -500,7 +501,9 @@ flowchart TD
   A_rw1 -- "no" --> A_rw2{{"Brand identified?"}}:::new
   A_rw2 -- "yes" --> A_bp["Brand paths first (DVR: channel recipe),<br/>then the 25 universal paths"]:::new
   A_rw2 -- "no" --> A_fw["Full walk: the 25 universal paths"]:::new
-  A_bp --> A_l1["Layer 1, one connection.<br/>Next path: OPTIONS, then DESCRIBE"]
+  A_bp --> A_l1["Layer 1, one connection, with a User-Agent<br/>and a strict reply reader.<br/>Next path: OPTIONS, then DESCRIBE"]:::new
+  A_l2 -- "Connection: close" --> A_lre["Reopen one connection;<br/>continue the walk"]:::new
+  A_lre --> A_l1
   A_fw --> A_l1
   A_to["25 s socket timeout for<br/>session-capped brands"]:::dead
   A_to -.- A_l1
@@ -511,8 +514,9 @@ flowchart TD
   A_l2 -- "401, no login, Deep Re-Probe" --> A_l3b["Save as a locked stream"]
   A_l3b --> A_ln
   A_l2 -- "401, with login" --> A_l4["DESCRIBE again with<br/>Digest or Basic login"]
-  A_l4 -- "not 200" --> A_ln
-  A_l4 -- "not 200, DVR lockout brand" --> A_lr
+  A_l4 -- "401: login rejected,<br/>or 401 with no challenge" --> A_lrej["Stop: password rejected<br/>or camera locked"]:::new
+  A_l4 -- "401 after an earlier success:<br/>skip the path (at most 2)" --> A_ln
+  A_l4 -- "404, 400, other" --> A_ln
   A_l4 -- "200" --> A_l5
   A_l2 -- "200" --> A_l5{{"SDP has video?<br/>DVR: channel populated?"}}
   A_l5 -- "no" --> A_ln
@@ -527,13 +531,14 @@ flowchart TD
   A_ln -- "list ends" --> A_l8{{"Found in Layer 1?"}}
   A_lr --> A_l8
   A_l8 -- "yes" --> A_rwf
-  A_l8 -- "no" --> A_ax["Retry with ?Axis-Orig-Sw=true"]:::dead
-  A_ax -.-> A_l9
+  A_l8 -- "no, Axis" --> A_ax["Axis: one more pass with<br/>?Axis-Orig-Sw=true (own field)"]:::new
+  A_ax --> A_l9
   A_l8 -- "no" --> A_l9{{"Layer 2 allowed?"}}
+  A_l9 -- "scan: never" --> A_rwn
   A_l9 -- "rate-limited brand" --> A_rwn
-  A_l9 -- "brand or host skips Layer 2" --> A_rwn
+  A_l9 -- "brand or host skips Layer 2<br/>(now also the Hikvision NVR)" --> A_rwn
   A_l9 -- "never heard RTSP" --> A_rwn
-  A_l9 -- "yes" --> A_l10["Layer 2: a new connection per path,<br/>5 s apart"]
+  A_l9 -- "password entry or<br/>Deep Re-Probe" --> A_l10["Layer 2: a new connection per path,<br/>5 s apart"]
   A_l10 -- "found" --> A_rwf
   A_l10 -- "10 failures in a row, or list ends" --> A_rwn
 </script>
@@ -599,7 +604,7 @@ flowchart TD
   A_k1 -- "1 or 2 found" --> A_u18
   A_k1 -- "0 found" --> A_k2["Full walk with the login: on 554, then the<br/>card's port, then an XAddrs port; stop at 2"]:::new
   A_k2 -- "found" --> A_u18
-  A_k2 -- "nothing" --> A_uf["Fails: the card asks<br/>for the password again"]:::none
+  A_k2 -- "nothing, or login rejected" --> A_uf["Fails: #quot;Password rejected or camera locked#quot;;<br/>Hikvision, Reolink, Tapo, Foscam: ask the<br/>web interface for a lock"]:::new
   A_u10 -- "MJPEG" --> A_u16["17 MJPEG paths with the login"]
   A_u10 -- "HLS" --> A_u17["11 HLS paths with the login"]
   A_u16 -- "nothing" --> A_uf
