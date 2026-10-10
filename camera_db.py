@@ -272,6 +272,12 @@ CAMERA_DB: list[dict] = [
                               "query param. SRTP/SRTCP supported on newer "
                               "firmware. RTSPS on rtsps:// URL."),
         "request_behaviors_confidence":"HIGH",
+        # 3.8.0-rc1.0 (B54): the Companion retry as its own field. Before, it
+        # hung on throttle_type == "requires_query_param", which this entry
+        # could not hold (its throttle_type is unique_profile_cap), so the
+        # retry never ran. find_rtsp_path makes one more pass with this
+        # query only when the first pass found nothing.
+        "rtsp_query_retry": "?Axis-Orig-Sw=true",
     },
     {
         "name": "Hanwha / Samsung Techwin",
@@ -1853,6 +1859,13 @@ CAMERA_DB: list[dict] = [
         # being misclassified as a Hikvision NVR.
         "onvif_scopes": [],
         "default_ports": [554, 80, 8000, 443],
+        # 3.8.0-rc1.0 (B54): the flag the Hikvision camera entry's comment
+        # said this entry already had. Like the cameras, the NVR answers 401
+        # to every path, so Layer 2 would only repeat the 401s for about 45 s
+        # (and, with a wrong password, add failed logins). Deep Re-Probe
+        # still runs Layer 2.
+        "skip_layer2":            True,
+        "skip_layer2_confidence": "HIGH",
         "notes": ("Hikvision multi-channel NVR/DVR. DS-7xxx series NVRs and "
                   "DS-77xxx HUHI/HQHI/HGHI Turbo HD DVRs. HiLook is a "
                   "Hikvision sub-brand using identical RTSP format. Some "

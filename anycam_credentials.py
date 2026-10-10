@@ -100,7 +100,8 @@ def _match_stream_db_slug(camera: dict) -> str | None:
 async def _probe_db_streams(ip: str, port: int, creds: str | None,
                              db_entry: dict,
                              existing_urls: set[str],
-                             camera: dict | None = None) -> list[dict]:
+                             camera: dict | None = None,
+                             max_new: int = 0) -> list[dict]:
     """
     Probe RTSP paths from a STREAM_DB entry.
     Returns list of {url, width, height, codec} dicts for responding paths,
@@ -163,6 +164,8 @@ async def _probe_db_streams(ip: str, port: int, creds: str | None,
     for url in urls_to_validate:
         if not url_results.get(url, False):
             continue
+        if max_new and len(results) >= max_new:      # 3.8.0-rc1.0 (B54): 0/1/2 rule
+            break
         try:
             if throttle_s > 0:
                 await _throttle_wait_if_needed(ip, throttle_s,
@@ -172,6 +175,37 @@ async def _probe_db_streams(ip: str, port: int, creds: str | None,
         except Exception:
             pass
     return results
+
+# ── 3.8.0-rc1.0 (B54): the login rule's message ────────────────────────────
+LOGIN_REJECTED_TEXT = "Password rejected or camera locked."
+
+
+async def _lock_hint(camera: dict) -> str:
+    """When the camera itself says it is locked, its unlock time.
+
+    Only Hikvision is asked, because it answers without a login: its
+    /ISAPI/Security/userCheck reply carries lockStatus and unlockTime. Reolink,
+    Tapo and Foscam report a lock only to a request that carries the password,
+    which would add one more failed login, so they are not asked.
+    """
+    brand = (camera.get("manufacturer") or "").lower()
+    ip = camera.get("ip", "")
+    if "hikvision" not in brand or not ip:
+        return ""
+    import aiohttp
+    try:
+        timeout = aiohttp.ClientTimeout(total=4)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"http://{ip}/ISAPI/Security/userCheck") as resp:
+                body = await resp.text(errors="replace")
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        return ""
+    if not re.search(r"<lockStatus>\s*lock", body, re.IGNORECASE):
+        return ""
+    m = re.search(r"<unlockTime>\s*(\d+)", body)
+    return (f" The camera says it is locked for {m.group(1)} more seconds."
+            if m else " The camera says it is locked.")
+
 
 # 2.5.0-rc1.2: post-cred-auth channel enumeration on channel_iterate
 # brands. Tracks which (camera_id) we've already enumerated so a
@@ -409,6 +443,39 @@ async def _enumerate_dvr_channels_after_auth(camera_id: str) -> None:
     populated_channels: list[str] = []
     new_cards: list[str] = []
 
+    # 3.8.0-rc1.0 (B54): each populated channel is its own camera, so the
+    # 0/1/2 rule applies per channel: its sub-stream is checked too, one
+    # connection per URL as above. The parent channel gets the same check
+    # when the password step found no sub-stream for it.
+    sub_ok: dict[str, str] = {}
+    sub_st = recipe.get("subtype_sub")
+    if sub_st is not None:
+        sub_channels = [_extract_channel_from_rtsp_url(u) for u, ok in walk_result.items() if ok]
+        if not cam.get("sub_stream_url"):
+            sub_channels.append(primary_ch)
+        for ch in [c for c in sub_channels if c]:
+            try:
+                sub_path = template.format(ch=int(ch), st=sub_st)
+            except (KeyError, IndexError, ValueError):
+                continue
+            sub_url = (f"rtsp://{quote(username, safe='')}:{quote(password, safe='')}"
+                       f"@{ip}:{port}{sub_path}")
+            try:
+                one = await loop.run_in_executor(
+                    _THREAD_POOL, _validate_rtsp_urls_single_socket,
+                    ip, port, [sub_url], username, password, 6.0,
+                    enum_meta, f"channel-enum:{camera_id}(ch{ch} sub)")
+            except Exception as e:
+                log.debug(f"  channel enum sub-stream ch{ch} raised: {e}")
+                one = {}
+            if isinstance(one, dict) and one.get(sub_url):
+                sub_ok[ch] = _strip_creds(sub_url)
+            await asyncio.sleep(0.1)
+        log.info(f"  Channel enumeration: sub-streams found for channel(s) "
+                 f"{sorted(sub_ok, key=lambda c: int(c) if c.isdigit() else 999)}")
+        if sub_ok.get(primary_ch) and not cam.get("sub_stream_url"):
+            cam["sub_stream_url"] = sub_ok[primary_ch]
+
     for url, probe_ok in walk_result.items():
         if not probe_ok:
             continue
@@ -434,6 +501,7 @@ async def _enumerate_dvr_channels_after_auth(camera_id: str) -> None:
         new_cam.update({
             "id":             new_id,
             "stream_url":     _strip_creds(url),
+            "sub_stream_url": sub_ok.get(ch),          # 3.8.0-rc1.0 (B54)
             "channel":        ch,
             "name":           f"{brand_entry.get('name', 'DVR')} ch{ch}",
             "status":         "ready",
@@ -750,9 +818,12 @@ async def api_set_credentials(request: web.Request) -> web.Response:
             have_main_n_sub  = (onvif_working >= 2) or (onvif_working >= 1 and have_unauth)
 
             if db_entry and not have_main_n_sub:
+                # 3.8.0-rc1.0 (B54): the 0/1/2 rule. One stream from ONVIF:
+                # the brand paths add at most one more (no full walk).
                 existing = {c["url"] for c in stream_candidates}
                 db_streams = await _probe_db_streams(ip, port, enc_creds,
-                                                     db_entry, existing, camera)
+                                                     db_entry, existing, camera,
+                                                     max_new=1 if onvif_working == 1 else 0)
                 if db_streams:
                     log.info(f"  DB probe found {len(db_streams)} extra stream(s)")
                     for s in db_streams:
@@ -1003,31 +1074,36 @@ async def api_set_credentials(request: web.Request) -> web.Response:
                                      f"(Camera rate-limited, ~30 seconds)")
             log.info(f"  Brand has rate_limit_per_ip_tcp ({throttle_s:.0f}s) — "
                      f"pacing ffprobe and db_probe")
-        # rc2.1: try standard RTSP port 554 BEFORE stored port when they
-        # differ. Prevents the Hikvision-NVR-probed-on-port-80 case where
-        # find_rtsp_path Layer 1 would burn 30-45s grinding paths against
-        # the HTTP/ONVIF port before falling through to 554. The Layer 2
-        # fast-bail ALSO covers this (skips when Layer 1 sees no RTSP
-        # responses), but trying 554 first short-circuits even Layer 1.
-        url = None
+        # 3.8.0-rc1.0 (B54): the 0/1/2 rule. The brand's paths first, on
+        # port 554, then the card's port, then an XAddrs port; the full walk
+        # only when the brand paths found nothing. Each walk stops at 2
+        # streams, and at the first login the camera rejects.
+        targets: list[tuple[str, int]] = []
         if port != 554:
-            log.info(f"  Trying direct RTSP on {ip}:554 (standard RTSP port, "
-                     f"before stored port {port})")
-            url = await loop.run_in_executor(
-                _THREAD_POOL, find_rtsp_path, ip, 554, username, password, camera)
-        if not url:
-            log.info(f"  Trying direct RTSP on {ip}:{port}")
-            url = await loop.run_in_executor(
-                _THREAD_POOL, find_rtsp_path, ip, port, username, password, camera)
-        if not url and camera.get("xaddrs"):
+            targets.append((ip, 554))
+        targets.append((ip, port))
+        if camera.get("xaddrs"):
             parsed = urlparse(camera["xaddrs"])
-            rtsp_port = parsed.port or 554
-            if rtsp_port != 554 and rtsp_port != port:
-                log.info(f"  Trying RTSP via xaddrs {ip}:{rtsp_port}")
+            x_port = parsed.port or 554
+            if (parsed.hostname or ip, x_port) not in targets:
+                targets.append((parsed.hostname or ip, x_port))
+        wmeta = dict(camera)
+        for phase in ("brand", "universal"):
+            for host_t, port_t in targets:
+                log.info(f"  Trying RTSP on {host_t}:{port_t} ({phase} paths)")
                 url = await loop.run_in_executor(
-                    _THREAD_POOL, find_rtsp_path, parsed.hostname or ip,
-                    rtsp_port, username, password, camera)
-        log.info(f"  RTSP result: {_strip_creds(url) if url else 'None'}")
+                    _THREAD_POOL, lambda: find_rtsp_path(host_t, port_t, username, password,
+                                                         wmeta, want_streams=2, path_set=phase))
+                if url or wmeta.get("login_rejected"):
+                    break
+            if url or wmeta.get("login_rejected"):
+                break
+        for k in ("manufacturer", "server_header"):
+            if wmeta.get(k) and not camera.get(k):
+                camera[k] = wmeta[k]
+        walk_found = [u for u in (wmeta.get("walk_found") or []) if u != url]
+        log.info(f"  RTSP result: {_strip_creds(url) if url else 'None'}"
+                 + (f" (+{len(walk_found)} more)" if walk_found else ""))
     elif proto == "MJPEG":
         url = await loop.run_in_executor(
             _THREAD_POOL, probe_mjpeg_http, ip, port, username, password)
@@ -1036,7 +1112,10 @@ async def api_set_credentials(request: web.Request) -> web.Response:
             _THREAD_POOL, probe_hls, ip, port, username, password)
 
     if not url:
-        log.warning(f"Credential attempt FAILED for {camera_id} — no working stream found")
+        rejected = proto in ("RTSP", "DVR", "ONVIF") and bool(wmeta.get("login_rejected"))
+        log.warning(f"Credential attempt FAILED for {camera_id} — "
+                    + ("the camera rejected the login (password wrong, or the camera is locked)"
+                       if rejected else "no working stream found"))
         # 2.4.0-rc2.1 — Issue 4: restore needs_credentials state before
         # returning 401. The handler entry mutated camera["status"] to
         # "authenticating_throttled" (rate_limit_per_ip_tcp brands only)
@@ -1051,6 +1130,9 @@ async def api_set_credentials(request: web.Request) -> web.Response:
         if camera.get("status") == "authenticating_throttled":
             camera["status"] = "needs_credentials"
             camera.pop("status_text", None)
+        if rejected:
+            return web.json_response({"error": LOGIN_REJECTED_TEXT + await _lock_hint(camera)},
+                                     status=401)
         return web.json_response({"error": "Could not connect with those credentials."}, status=401)
 
     # 2.3.0: pace ffprobe on rate_limit brands (it opens its own RTSP socket)
@@ -1095,58 +1177,24 @@ async def api_set_credentials(request: web.Request) -> web.Response:
     else:
         log.debug(f"  HTTP snap URL: not available (no DB snap entry for this camera)")
 
-    if db_entry and proto in ("RTSP", "DVR"):
-        db_streams = await _probe_db_streams(ip, port, enc_creds,
-                                             db_entry, {url}, camera)
-        # 2.4.0-rc2.6: PRESERVE the main stream URL we found pre-cred-
-        # auth. Previously this code sorted ALL candidates (main + DB-
-        # probed sub-streams) by resolution and replaced `url` with
-        # whichever came out on top — which on Hikvision DS-2DE
-        # produced incorrect results: probe_stream_details on
-        # /Streaming/Channels/101 returned 704x480 (sub-stream
-        # resolution), then DB probe on /102 returned the same data,
-        # sorting was unstable, and /102 ended up as primary while
-        # /101 (the actual 4MP main stream) became the "sub". Then
-        # snap_loop streamed the wrong URL at the wrong resolution.
-        # The fix: the pre-cred main URL is locked as primary. DB-
-        # probed streams are PURE ADDITIONS to the profile list, never
-        # replacements. The picked sub_url is the lowest-resolution of
-        # the DB-probed additions only.
-        primary_url = url
-        primary_details = dict(details)
-        # 2.4.0-rc2.9: capture sub_url's probed details (codec/res/fps)
-        # so they can be carried into stream_profiles. rc2.6/rc2.7/rc2.8
-        # all hardcoded sub_url's stream_profiles entry to None across
-        # the board, which is why "Stream 2" showed in the dropdown
-        # instead of "704x480 MJPEG" — the DB probe had captured the
-        # data, but it was being thrown away at this step.
-        # (sub_details is hoisted above to function scope to handle the
-        # case where this if-block doesn't execute at all.)
-        if db_streams:
-            # All DB-probed candidates become alternative profiles;
-            # never replace primary. Sub-stream picked from these.
-            additions = list(db_streams)
-            # Lowest-res addition becomes sub (for adaptive snap_loop)
-            additions.sort(key=lambda c:
-                (c.get("stream_width") or 0) * (c.get("stream_height") or 0))
-            if additions:
-                _sub_pick = additions[0]
-                sub_url = _sub_pick["url"]
-                # Strip the "url" key so what remains is the pure
-                # details dict (codec/width/height/fps/profile).
-                sub_details = {k: v for k, v in _sub_pick.items()
-                               if k != "url"}
-            if sub_url and sub_url != primary_url:
-                log.info(f"  DB probe found sub stream: "
-                         f"{_strip_creds(sub_url)}")
-            elif sub_url == primary_url:
-                # Defensive: if DB probe returned the SAME URL as
-                # primary, don't double-count it as sub.
-                sub_url = None
-                sub_details = {}
-        # Restore primary
-        url = primary_url
-        details = primary_details
+    # 3.8.0-rc1.0 (B54): no second pass over the brand paths. The walk tried
+    # them first and stopped at 2 streams: the second one is the sub-stream
+    # (on a DVR, only when it is on the same channel as the first).
+    if proto in ("RTSP", "DVR", "ONVIF"):
+        for cand in walk_found:
+            if (_extract_channel_from_rtsp_url(cand) or "") != (_extract_channel_from_rtsp_url(url) or ""):
+                log.info(f"  second stream {_strip_creds(cand)} is another channel — not a sub-stream")
+                continue
+            sub_url = cand
+            sub_auth = build_authenticated_url(dict(camera, credentials=enc_creds), url=cand) or cand
+            if _t_s > 0:
+                await _throttle_wait_if_needed(ip, _t_s, "sub-stream ffprobe")
+            try:
+                sub_details = await probe_stream_details(sub_auth, "RTSP")
+            except Exception as e:
+                log.debug(f"  probe_stream_details on the sub-stream: {e}")
+            log.info(f"  Sub-stream from the walk: {_strip_creds(sub_url)}")
+            break
 
     # 2.4.0-rc2.6: post-auth validation of locked-stream candidates
     # (Fix 3 + Fix 4 followup). After creds accepted, walk through
@@ -1472,28 +1520,11 @@ async def api_clear_credentials(request: web.Request) -> web.Response:
 async def api_deep_reprobe(request: web.Request) -> web.Response:
     """User-invoked deep re-probe of a single camera card.
 
-    Resumes Layer 1 from where rc2.4's early-bail left off, then runs
-    the full Layer 2 multi-socket walk if it was skipped. Designed as
-    the escape hatch for the rc2.4 aggressive Layer 1/Layer 2 skip
-    heuristics: when we early-bail Layer 1 after 5 consecutive same-
-    realm 401s and skip Layer 2, the user may legitimately want to
-    verify that no firmware-quirk path exists. This handler delivers
-    that verification on demand.
-
-    State machine (driven by cam.early_bail_reason):
-      • "layer1_consecutive_401s" — Layer 1 bailed early but Layer 2
-        was still attempted and bailed normally. Resume Layer 1 on
-        cam.early_bail_paths_remaining.
-      • "layer1_then_layer2_skipped_401s" — Layer 1 bailed early AND
-        Layer 2 was skipped (rc2.4 default). Resume Layer 1 on
-        remaining paths, THEN run full Layer 2 walk.
-      • unset/missing — no early bail recorded. Run a fresh full
-        Layer 1 + Layer 2 walk.
-
-    Staleness check: if cam.early_bail_at is older than 30 minutes,
-    discard the saved state and run a fresh full probe instead. Avoids
-    resuming a walk against a host that's been rebooted, repurposed,
-    or replaced since the original scan.
+    3.8.0-rc1.0 (B54): one full walk of every path with no early stop: Layer 1
+    keeps each 401 path as a locked stream, then Layer 2 runs (also on
+    skip_layer2 brands; never on rate-limited ones, which reset a second
+    connection). The 2.4.0-rc2.4 resume of an early-stopped walk is gone,
+    because the scan no longer stops early on same-realm 401s.
 
     Concurrency: cam.deep_reprobe_in_progress flag suppresses
     overlapping invocations. Frontend disables the button while the
@@ -1512,30 +1543,11 @@ async def api_deep_reprobe(request: web.Request) -> web.Response:
 
     ip   = cam["ip"]
     port = cam["port"]
-    bail_reason     = cam.get("early_bail_reason", "")
-    paths_remaining = cam.get("early_bail_paths_remaining", []) or []
-    bail_at         = cam.get("early_bail_at", "")
-
-    # Staleness — 30 minutes
-    stale = False
-    if bail_at:
-        try:
-            bail_dt = datetime.datetime.fromisoformat(bail_at)
-            age_s = (datetime.datetime.utcnow() - bail_dt).total_seconds()
-            if age_s > 1800:
-                stale = True
-                log.info(f"  Deep Re-Probe: cached bail state for {cid} "
-                         f"is stale ({age_s:.0f}s old) — running fresh "
-                         f"full probe instead of resuming")
-        except Exception:
-            stale = True
-
     cam["deep_reprobe_in_progress"] = True
     save_cameras()
 
     loop = asyncio.get_event_loop()
-    log.info(f"Deep Re-Probe started: {cid} (reason={bail_reason!r}, "
-             f"remaining={len(paths_remaining)} paths, stale={stale})")
+    log.info(f"Deep Re-Probe started: {cid}")
 
     # Build host_meta from camera record so brand-aware logic still
     # works inside the resumed walk
@@ -1559,172 +1571,19 @@ async def api_deep_reprobe(request: web.Request) -> web.Response:
     new_locked: list[dict] = []
 
     try:
-        # Decide: resume Layer 1, run Layer 2, or both. If the cached
-        # state is stale OR no early-bail was recorded, do a fresh full
-        # find_rtsp_path call (which itself runs Layer 1 + Layer 2).
-        run_resume_layer1 = (
-            not stale
-            and bail_reason in ("layer1_consecutive_401s",
-                                "layer1_then_layer2_skipped_401s")
-            and bool(paths_remaining)
-        )
-        # 2.4.0-rc2.9: REVERTING rc2.8's Fix 5. rc2.8 dropped the rc2.5
-        # expansion that forced Stage B (Layer 2) to run during Deep Re-
-        # Probe on skip_layer2 brands. Reasoning at the time was that
-        # skip_layer2 brands "guaranteed" failure on Layer 2. But the
-        # user explicitly wanted Deep Re-Probe to be the catch-everything
-        # safety net — overriding ALL skip flags including skip_layer2 —
-        # specifically for the rare firmware-quirk cases where Layer 2's
-        # fresh-socket-per-path semantics could reveal something Layer 1
-        # missed. Three documented scenarios:
-        #   1. Sub-stream paths that only respond on a fresh socket
-        #      (some cheap firmwares have buggy session state where
-        #      the second DESCRIBE on a single socket returns garbage,
-        #      but a fresh socket returns clean 200/401).
-        #   2. Servers that close the socket after first 401 (older
-        #      Foscam-family clones); Layer 1 walk prematurely ends,
-        #      Layer 2 re-opens and continues.
-        #   3. Token-bucket throttles that reset between sockets —
-        #      single-socket walk hits the throttle, multi-socket walk
-        #      with 5s cooldown doesn't.
-        # The 45s Layer 2 wait on Hikvision Deep Re-Probe is the
-        # accepted cost of this safety net. User-requested behavior.
-        brand_has_skip_layer2 = False
-        try:
-            _be = _identify_camera_brand(host_meta)
-            brand_has_skip_layer2 = bool(
-                _be and _be.get("skip_layer2", False))
-        except Exception:
-            pass
-        run_layer2_followup = (
-            not stale
-            and (bail_reason == "layer1_then_layer2_skipped_401s"
-                 or (bail_reason == "layer1_consecutive_401s"
-                     and brand_has_skip_layer2))
-        )
-        if not run_resume_layer1 and not run_layer2_followup:
-            # Fresh full probe — let find_rtsp_path do its thing
-            log.info(f"  Deep Re-Probe stage: full fresh probe (Layer 1 + "
-                     f"Layer 2)")
-            # Clear any stale early-bail state so the new walk doesn't
-            # re-trigger the rc2.4 short-circuits with old data.
-            for k in ("early_bail_reason", "early_bail_realm",
-                      "early_bail_paths_tried", "early_bail_paths_remaining",
-                      "early_bail_at"):
-                host_meta.pop(k, None)
-            found_url = await loop.run_in_executor(
-                _THREAD_POOL, find_rtsp_path, ip, port, "", "", host_meta)
-            new_locked = host_meta.get("locked_streams", []) or []
-        else:
-            # Stage A: resume Layer 1 walk on the unwalked paths.
-            # Run with collect_locked=True so 401s on the remaining
-            # paths surface as locked-stream candidates the user can
-            # later unlock by entering credentials.
-            if run_resume_layer1:
-                log.info(f"  Deep Re-Probe Stage A: resume Layer 1 "
-                         f"({len(paths_remaining)} paths remaining)")
-                expected_realm = host_meta.get("rtsp_auth_realm", "") or ""
-                # 2.4.0-rc2.6: identify brand recipe to filter locked
-                # candidates by paths the brand actually serves. Without
-                # this, Hikvision (and similar 401-everything cameras)
-                # produce 26+ bogus locked candidates that include
-                # paths from completely different brand recipes
-                # (Foscam, Dahua, etc.). With it, only paths matching
-                # the brand's known stream URLs surface as candidates.
-                _stage_a_brand_paths: list[str] = []
-                try:
-                    _stage_a_be = _identify_camera_brand(host_meta)
-                    if _stage_a_be:
-                        _cam_with_brand = dict(host_meta)
-                        _cam_with_brand["manufacturer"] = _stage_a_be.get(
-                            "name", "")
-                        _stage_a_sdb = _match_stream_db(_cam_with_brand)
-                        if _stage_a_sdb:
-                            _stage_a_brand_paths = list(
-                                _stage_a_sdb.get("rtsp", []))
-                except Exception:
-                    pass
-                # 2.4.0-rc2.5: deep_reprobe_mode=True disables the
-                # early-bail counter (we want a full walk) and
-                # bypasses the found_working_url gate on locked-
-                # stream collection (so 401s get surfaced as
-                # candidates even when no unauth stream exists).
-                found_a, _looks_rtsp = await loop.run_in_executor(
-                    _THREAD_POOL, _probe_rtsp_paths_single_socket,
-                    ip, port, paths_remaining, "", "",
-                    6.0, "", f"deep-reprobe:{cid}", host_meta,
-                    True, expected_realm, True,  # deep_reprobe_mode
-                    _stage_a_brand_paths,  # brand_recipe_paths
-                )
-                if found_a:
-                    found_url = found_a
-                    log.info(f"  Deep Re-Probe Stage A → "
-                             f"found working stream: {found_a}")
-                # Pick up any locked streams Stage A captured
-                stage_a_locked = host_meta.get("locked_streams", []) or []
-                # Merge with whatever was on the camera before
-                existing_locked = cam.get("locked_streams", []) or []
-                seen_paths = {l.get("path") for l in existing_locked}
-                for l in stage_a_locked:
-                    if l.get("path") not in seen_paths:
-                        existing_locked.append(l)
-                        seen_paths.add(l.get("path"))
-                new_locked = existing_locked
-                log.info(f"  Deep Re-Probe Stage A: found "
-                         f"{len(stage_a_locked)} locked candidate(s) "
-                         f"on resumed paths")
-
-            # Stage B: full Layer 2 multi-socket walk if it was
-            # skipped during the original scan. Even if Stage A
-            # already found a working stream, we still skip Stage B
-            # in that case (no need to grind).
-            if run_layer2_followup and not found_url:
-                log.info(f"  Deep Re-Probe Stage B: running Layer 2 "
-                         f"(skipped during original scan)")
-                # Build the full ordered path list the same way
-                # find_rtsp_path does, so Layer 2 walks the canonical
-                # candidate set — not just the remaining-from-Stage-A
-                # list.
-                brand_entry: dict | None = None
-                try:
-                    brand_entry = _identify_camera_brand(host_meta)
-                except Exception:
-                    pass
-                brand_name = (brand_entry or {}).get("name", "")
-                db_paths_b: list[str] = []
-                if brand_name:
-                    cam_with_brand = dict(host_meta)
-                    cam_with_brand["manufacturer"] = brand_name
-                    sdb = _match_stream_db(cam_with_brand)
-                    if sdb:
-                        db_paths_b = list(sdb.get("rtsp", []))
-                seen_b: set[str] = set()
-                ordered_b: list[str] = []
-                for p in db_paths_b + RTSP_PATHS:
-                    if p not in seen_b:
-                        seen_b.add(p)
-                        ordered_b.append(p)
-                # Inline a Layer-2-only walk (5s cooldown, bail-after-10)
-                def _layer2_only() -> str | None:
-                    consec = 0
-                    for i, path in enumerate(ordered_b):
-                        if i > 0:
-                            time.sleep(5.0)
-                        url2 = f"rtsp://{ip}:{port}{path}"
-                        if probe_rtsp(url2, "", "", timeout=6.0):
-                            log.info(f"  RTSP OK (Deep Re-Probe Layer 2): "
-                                     f"{url2}")
-                            return url2
-                        consec += 1
-                        if consec >= 10:
-                            log.info(f"  Deep Re-Probe Layer 2 bailing "
-                                     f"after {consec} consecutive failures")
-                            break
-                    return None
-                found_b = await loop.run_in_executor(
-                    _THREAD_POOL, _layer2_only)
-                if found_b:
-                    found_url = found_b
+        # 3.8.0-rc1.0 (B54): one full walk of every path, no early stop,
+        # each 401 path kept as a locked stream, then Layer 2 (also on
+        # skip_layer2 brands, never on rate-limited ones). The scan no longer
+        # stops early on same-realm 401s, so there is no state to resume.
+        log.info(f"  Deep Re-Probe: full walk, Layers 1 and 2")
+        found_url = await loop.run_in_executor(
+            _THREAD_POOL, lambda: find_rtsp_path(ip, port, "", "", host_meta, deep=True))
+        new_locked = list(cam.get("locked_streams", []) or [])
+        seen_paths = {l.get("path") for l in new_locked}
+        for l in host_meta.get("locked_streams", []) or []:
+            if l.get("path") not in seen_paths:
+                new_locked.append(l)
+                seen_paths.add(l.get("path"))
 
         # Update the camera record with the outcome
         if found_url:

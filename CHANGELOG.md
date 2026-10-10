@@ -1,3 +1,28 @@
+## 3.8.0-rc1.0
+
+A smaller, gentler scan: AnyCam asks a camera as little as it must to identify it, then reads its streams once a password is entered. Not field-tested.
+
+### Changes & improvements
+
+- **The scan stops as soon as it knows a camera is there.** A device that answers ONVIF discovery gets one request with no login; a camera's own stream paths are tried before the universal list; the first "needs a password" answer ends the walk.
+- **An identified camera's other ports are left alone.** Before, each extra web port drew dozens more requests.
+- **Password entry looks for two streams, then stops.** It reads them through ONVIF, then the camera's own paths, then a full search only if those find nothing.
+- **A wrong password is tried once.** The scan and password entry stop at the first login a camera rejects, so a typo no longer locks the camera out. The card says "Password rejected or camera locked".
+- **Each camera on a DVR gets its own main and sub stream.**
+- **Deep Re-Probe still searches every path** on request.
+
+### Bugs fixed
+
+- **The scan could search a camera far longer than needed,** trying its universal path list and a second round of connections even after the camera had said it wanted a password.
+- **A Hikvision recorder was searched with a second round of connections** its firmware answers the same way; it is now skipped, as the matching comment always said it should be.
+- **An Axis Companion camera's stream was never found;** its retry step did not run.
+
+### Known issues
+
+- **Live view is untested on an unlocked Microseven camera.**
+- **Other programs on the Pi can read camera video** through go2rtc's local RTSP server.
+- **One Amcrest camera can get two cards** (under investigation).
+
 ## 3.7.5
 
 Live view that recovers by itself, a Quality Switch for 4K cameras, calmer handling of stuck and fragile cameras, and scans that leave known cameras alone. Same code as 3.7.5-rc2.0. Not field-tested.

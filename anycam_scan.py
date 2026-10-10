@@ -17,6 +17,7 @@ import struct
 import subprocess
 import time
 import uuid
+from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 
 from anycam_host import H
@@ -25,8 +26,9 @@ from anycam_brand import (
     CAMERA_KEYWORDS, NON_CAMERA_KEYWORDS, appliance_camera, lookup_oui,
 )
 from anycam_probe import (
-    _onvif_media_url, _rtsp_options_fingerprint, find_rtsp_path, onvif_get_profiles,
-    onvif_get_stream_uri, probe_hls, probe_hls_quick, probe_http_identity,
+    _onvif_media_url, _rtsp_options_fingerprint, _validate_rtsp_urls_single_socket,
+    find_rtsp_path, onvif_get_profiles, onvif_probe_no_login,
+    onvif_get_stream_uri, probe_hls, probe_hls_quick,
     probe_mjpeg_http, probe_mjpeg_quick, probe_rtmp, probe_rtsp,
     probe_rtsp_options, probe_webrtc, probe_ws_rtsp,
 )
@@ -1257,8 +1259,9 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
         return cam
 
     if initial_protocol in ("RTSP", "DVR"):
+        # 3.8.0-rc1.0 (B54): a scan walk stops at the first 401, no Layer 2
         url = await loop.run_in_executor(
-            _THREAD_POOL, find_rtsp_path, ip, port, "", "", host_meta)
+            _THREAD_POOL, lambda: find_rtsp_path(ip, port, "", "", host_meta, scan=True))
         if url:
             # 2.4.0-rc2.9: probe stream details on the discovered URL so
             # the focus-view dropdown can label this entry as "1920x1080
@@ -1272,8 +1275,8 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
             return await _enrich_with_details(cam, url, "RTSP")
         if saved_u:
             url = await loop.run_in_executor(
-                _THREAD_POOL, find_rtsp_path, ip, port,
-                saved_u, saved_p, host_meta)
+                _THREAD_POOL, lambda: find_rtsp_path(ip, port, saved_u, saved_p,
+                                                     host_meta, scan=True))
             if url:
                 cam = base("RTSP", url, "ready")
                 cam["credentials"] = prev_creds
@@ -1330,7 +1333,7 @@ async def _probe_host_port(ip: str, port: int, hostname: str,
                      f"status (no alt-port Layer 1 walk needed)")
         else:
             url = await loop.run_in_executor(
-                _THREAD_POOL, find_rtsp_path, ip, port, "", "", host_meta)
+                _THREAD_POOL, lambda: find_rtsp_path(ip, port, "", "", host_meta, scan=True))
             if url:
                 cam = base("RTSP", url, "ready")
                 return await _enrich_with_details(cam, url, "RTSP")
@@ -1472,6 +1475,88 @@ class _ScanProgress:
             save_runtime(rt)
 
 
+def _onvif_card(ip: str, onvif: dict, meta: dict, prev: dict, reason: str) -> dict:
+    """3.8.0-rc1.0 (B54): the "needs password" card of an ONVIF camera."""
+    return {
+        "id": f"{ip}_onvif", "ip": ip, "hostname": onvif.get("name", ip),
+        "port": 80, "protocol": "ONVIF",
+        "stream_url": prev.get("stream_url", ""),
+        "requires_credentials": True,
+        "credentials": prev.get("credentials"),
+        "name": prev.get("name", onvif.get("name", ip)),
+        "xaddrs": onvif.get("xaddrs", ""),
+        "status": "needs_credentials",
+        "onvif": True, "user_saved": bool(prev), "display": "proxy",
+        "verdict": "camera", "verdict_reason": reason,
+        "manufacturer":  meta.get("manufacturer", ""),
+        "mac_addr":      meta.get("mac_addr", ""),
+        "mac_vendor":    meta.get("mac_vendor", ""),
+        "onvif_scopes":  onvif.get("onvif_scopes", ""),
+        "locked_streams": [],
+    }
+
+
+async def _scan_onvif_first(ip: str, onvif: dict, meta: dict, prev: dict,
+                            loop: asyncio.AbstractEventLoop) -> dict | None:
+    """3.8.0-rc1.0 (B54): ask a device that answered WS-Discovery for its
+    ONVIF profiles, with no login, before any other probe.
+
+    A login prompt identifies an ONVIF camera that needs a password: the card
+    asks for it, and the host gets no RTSP walk and no other probe. Profiles
+    without a login give a ready card when a stream plays without one. None
+    when ONVIF did not answer: the scan goes on as before.
+    """
+    try:
+        _identify_camera_brand(meta)
+    except Exception as e:
+        log.debug(f"  brand-id (ONVIF first) {ip}: {e}")
+    media_url = _onvif_media_url(ip, 80, onvif.get("xaddrs", ""))
+    answer, profiles = await loop.run_in_executor(_THREAD_POOL, onvif_probe_no_login, media_url)
+    if answer == "login":
+        log.info(f"  ONVIF {ip}: asks for a login — card needs a password; no RTSP walk, "
+                 f"its other ports are not probed")
+        return _onvif_card(ip, onvif, meta, prev, "ONVIF asks for a login")
+    if answer != "profiles":
+        return None
+    urls: list[str] = []
+    for prof in profiles:
+        uri = await loop.run_in_executor(_THREAD_POOL, onvif_get_stream_uri,
+                                         media_url, prof["token"], "", "")
+        if uri and uri not in urls:
+            urls.append(uri)
+    if urls:
+        try:
+            rtsp_port = urlparse(urls[0]).port or 554
+        except ValueError:
+            rtsp_port = 554
+        await _throttle_wait_if_needed(ip, _brand_throttle_seconds(meta), f"ONVIF streams {ip}")
+        ok = await loop.run_in_executor(_THREAD_POOL, _validate_rtsp_urls_single_socket,
+                                        ip, rtsp_port, urls, "", "", 6.0, None,
+                                        f"{ip}/onvif-no-login")
+        good = [u for u in urls if ok.get(u)]
+        if good:
+            log.info(f"  ONVIF {ip}: {len(profiles)} profile(s) without a login, "
+                     f"{len(good)} stream(s) play — card ready")
+            return {
+                "id": f"{ip}_onvif", "ip": ip, "hostname": onvif.get("name", ip),
+                "port": rtsp_port, "protocol": "RTSP",
+                "stream_url": good[0],
+                "sub_stream_url": good[-1] if len(good) > 1 else None,
+                "requires_credentials": False, "credentials": None,
+                "name": prev.get("name", onvif.get("name", ip)),
+                "xaddrs": onvif.get("xaddrs", ""),
+                "status": "ready", "rtsp_probe_ok": True,
+                "onvif": True, "user_saved": bool(prev), "display": "proxy",
+                "verdict": "camera", "verdict_reason": "ONVIF, no login",
+                "manufacturer": meta.get("manufacturer", ""),
+                "mac_addr": meta.get("mac_addr", ""), "mac_vendor": meta.get("mac_vendor", ""),
+                "onvif_scopes": onvif.get("onvif_scopes", ""), "locked_streams": [],
+            }
+    log.info(f"  ONVIF {ip}: profiles without a login, but no stream plays without one "
+             f"— card needs a password")
+    return _onvif_card(ip, onvif, meta, prev, "ONVIF discovered")
+
+
 async def run_scan() -> None:
     """
     4-stage network camera discovery:
@@ -1589,6 +1674,7 @@ async def run_scan() -> None:
 
         # 3.0.1 (B8): one unit per probed host and per ONVIF-only device
         units3 = max(len(nmap_results) + len(onvif_results), 1)
+        onvif_by_ip = {r["ip"]: r for r in onvif_results}     # 3.8.0-rc1.0 (B54)
         for idx, host in enumerate(nmap_results):
             if SCAN_CANCELLED:
                 break
@@ -1609,6 +1695,22 @@ async def run_scan() -> None:
                 log.info(f"  {ip}: removed camera '{restored[0].get('name', ip)}' — card given back "
                          f"from its kept details, not probed")
                 continue
+            # 3.8.0-rc1.0 (B54): ONVIF first, with no login. An answer
+            # identifies the camera, and its ports get no probes.
+            onvif_hit = onvif_by_ip.get(ip)
+            if onvif_hit:
+                ometa = {"ip": ip, "hostname": onvif_hit.get("name", hostname),
+                         "name": onvif_hit.get("name", ""),
+                         "mac_addr": host.get("mac_addr", ""),
+                         "mac_vendor": host.get("mac_vendor", ""),
+                         "vendor": host.get("mac_vendor", ""),
+                         "onvif_scopes": onvif_hit.get("onvif_scopes", ""),
+                         "verdict_reason": reason}
+                ocard = await _scan_onvif_first(ip, onvif_hit, ometa,
+                                                saved.get(f"{ip}_onvif", {}), loop)
+                if ocard:
+                    _publish_scan_card(ocard)
+                    continue
             # 2.4.0-rc2.4: port-ordering optimization. Probe canonical
             # RTSP ports (554, 8554, 10554) FIRST — if any of them
             # establishes RTSP-speaker status (returns RTSP-format
@@ -1787,6 +1889,15 @@ async def run_scan() -> None:
                                               host_meta=host_meta)
                 if cam:
                     _publish_scan_card(cam)
+                # 3.8.0-rc1.0 (B54): a 401 or a working stream on this port
+                # identified the camera; its other ports get no probes.
+                if host_meta.get("rtsp_needs_password") or (
+                        cam and cam.get("protocol") == "RTSP" and cam.get("status") == "ready"):
+                    rest = len(open_ports_sorted) - pidx - 1
+                    if rest:
+                        log.info(f"  {ip}: identified on port {port} — its other "
+                                 f"{rest} port(s) are not probed")
+                    break
                 # 2.4.0-rc2.4: detect RTSP-speaker status from any of the
                 # signals find_rtsp_path / fingerprint pre-probe wrote
                 # to host_meta. If the host responded RTSP/-format on
@@ -1860,6 +1971,11 @@ async def run_scan() -> None:
                                                   host_meta=host_meta)
                     if cam:
                         _publish_scan_card(cam)
+                    # 3.8.0-rc1.0 (B54): identified; its other ports get no probes
+                    if host_meta.get("rtsp_needs_password") or (
+                            cam and cam.get("protocol") == "RTSP" and cam.get("status") == "ready"):
+                        log.info(f"  {ip}: identified on port {port} — its other ports are not probed")
+                        break
 
         # 3.0.1 (B2): an appliance camera (by its MAC) gets an information
         # card. If the probing above already gave it a card (a login form,
@@ -1915,12 +2031,6 @@ async def run_scan() -> None:
             else:
                 cid  = f"{ip}_onvif"
                 prev = saved.get(cid, {})
-                # Try unauthenticated RTSP first — some cameras (e.g. Microseven
-                # with "RTSP Authentication" disabled) serve streams openly even
-                # though their ONVIF/HTTP ports require auth. If unauth RTSP
-                # works AND the user hasn't already saved creds, skip the cred
-                # prompt entirely and create a ready card right away.
-                unauth_url = ""
                 # rc2.1: pull mac_vendor + nmap_product from the focused
                 # scan results (built above into scan_meta_by_ip). This
                 # gives the ONVIF flow the OUI vendor signal it needs to
@@ -1945,166 +2055,13 @@ async def run_scan() -> None:
                     # nmap_results due to its own TCP rate-limit).
                     "onvif_scopes": onvif.get("onvif_scopes", ""),
                 }
-                # rc2.2: HTTP identity probe before RTSP. Catches cameras
-                # whose ONVIF returns only a generic name and whose MAC
-                # OUI isn't available (Microseven case — empirically
-                # verified to return `Server: Hipcam` HTTP header and
-                # `<title>Microseven Cameras...</title>` page title, both
-                # of which match the Hipcam/Microseven CAMERA_DB entry).
-                # Runs on port 80 first, then xaddrs port if different.
-                # Doesn't fail loudly if the camera has HTTP disabled —
-                # rc2.1.1 walker Server-header capture is the fallback.
-                try:
-                    http_id = await loop.run_in_executor(
-                        _THREAD_POOL, probe_http_identity, ip, 80, 4)
-                    if http_id.get("server"):
-                        onvif_meta["server_header"] = http_id["server"]
-                    if http_id.get("title"):
-                        onvif_meta["page_title"] = http_id["title"]
-                    if http_id.get("manufacturer"):
-                        # probe_http_identity already matched against
-                        # CAMERA_DB — adopt directly rather than re-running
-                        onvif_meta["manufacturer"] = http_id["manufacturer"]
-                        log.info(f"  HTTP identity {ip}: "
-                                 f"{http_id['manufacturer']!r} "
-                                 f"(server={http_id.get('server','')!r}, "
-                                 f"title={http_id.get('title','')!r})")
-                    elif http_id.get("server") or http_id.get("title"):
-                        log.info(f"  HTTP identity {ip}: unmatched "
-                                 f"(server={http_id.get('server','')!r}, "
-                                 f"title={http_id.get('title','')!r})")
-                except Exception as e:
-                    log.debug(f"  HTTP identity probe failed for {ip}: {e}")
-
-                # 2.4.0-rc1.0: RTSP OPTIONS fingerprint.
-                # One TCP open to port 554, one OPTIONS request, capture
-                # the Server header, auth realm/scheme, and Public methods.
-                # Populates onvif_meta so _identify_camera_brand can score
-                # on rtsp_realm_regex, and the Identity panel can display
-                # realm + RTSP server header.
-                # Worst-case cost: ~3s timeout per dead host. Zero risk to
-                # throttled/lockout-protected hosts (OPTIONS doesn't auth).
-                try:
-                    rtsp_fp = await loop.run_in_executor(
-                        _THREAD_POOL, _rtsp_options_fingerprint, ip, 554)
-                    if rtsp_fp.get("server_header"):
-                        onvif_meta["rtsp_server_header"] = rtsp_fp["server_header"]
-                    if rtsp_fp.get("auth_realm"):
-                        onvif_meta["rtsp_auth_realm"] = rtsp_fp["auth_realm"]
-                    if rtsp_fp.get("auth_scheme"):
-                        onvif_meta["rtsp_auth_scheme"] = rtsp_fp["auth_scheme"]
-                    if rtsp_fp.get("public_methods"):
-                        onvif_meta["rtsp_public_methods"] = ",".join(
-                            rtsp_fp["public_methods"])
-                    if rtsp_fp.get("looks_like_rtsp"):
-                        log.info(
-                            f"  RTSP fingerprint {ip}: status="
-                            f"{rtsp_fp.get('status')}, "
-                            f"server={rtsp_fp.get('server_header','')!r}, "
-                            f"realm={rtsp_fp.get('auth_realm','')!r}, "
-                            f"elapsed={rtsp_fp.get('elapsed_ms',0):.0f}ms")
-                    elif rtsp_fp.get("error"):
-                        log.debug(
-                            f"  RTSP fingerprint {ip}: {rtsp_fp['error']}")
-
-                    # Re-run brand identification — _identify_camera_brand
-                    # now has the realm available and may upgrade an earlier
-                    # weak match (or identify a brand we missed entirely).
-                    if onvif_meta.get("rtsp_auth_realm"):
-                        _identify_camera_brand(onvif_meta, force=True)
-                except Exception as e:
-                    log.debug(f"  RTSP fingerprint probe failed for {ip}: {e}")
-
-                if not prev.get("credentials"):
-                    unauth_url = await loop.run_in_executor(
-                        _THREAD_POOL, find_rtsp_path, ip, 554, "", "", onvif_meta)
-                # rc2.1: find_rtsp_path → _identify_camera_brand mutated
-                # onvif_meta in place, setting manufacturer if a brand
-                # was identified. Capture it for the record below so the
-                # UI shows the real brand (e.g. "Hipcam/Microseven")
-                # instead of just the generic ONVIF name ("IPCAM").
-                # rc2.1.1: also capture server_header — populated by the
-                # walker mid-probe — for downstream display + diagnosis
-                # in the camera Identity panel.
-                # rc2.2: page_title also captured — set by HTTP probe above.
-                _brand   = onvif_meta.get("manufacturer", "")
-                _mac_v   = onvif_meta.get("mac_vendor", "")
-                _mac_a   = onvif_meta.get("mac_addr", "")
-                _srv_hdr = onvif_meta.get("server_header", "")
-                _pg_ttl  = onvif_meta.get("page_title", "")
-                # 2.4.0-rc1.0: RTSP-layer fingerprint fields (distinct from
-                # HTTP-layer server_header / page_title above).
-                _rtsp_srv  = onvif_meta.get("rtsp_server_header", "")
-                _rtsp_rlm  = onvif_meta.get("rtsp_auth_realm", "")
-                _rtsp_sch  = onvif_meta.get("rtsp_auth_scheme", "")
-                _rtsp_pub  = onvif_meta.get("rtsp_public_methods", "")
-                # 2.4.0-rc2.0: locked_streams from path walker
-                _locked    = onvif_meta.get("locked_streams", [])
-                if unauth_url:
-                    log.info(f"  ONVIF {ip}: unauthenticated RTSP works "
-                             f"({_strip_creds(unauth_url)}) — skipping cred prompt")
-                    _publish_scan_card({
-                        "id": cid, "ip": ip, "hostname": onvif["name"],
-                        "port": 554, "protocol": "RTSP",
-                        "stream_url": unauth_url,
-                        "requires_credentials": False,
-                        "credentials": None,
-                        "name": prev.get("name", onvif["name"]),
-                        "xaddrs": onvif.get("xaddrs", ""),
-                        "status": "ready",
-                        "rtsp_probe_ok": True,
-                        "onvif": True, "user_saved": bool(prev), "display": "proxy",
-                        "verdict": "camera", "verdict_reason": "ONVIF + unauth RTSP",
-                        "manufacturer":  _brand,
-                        "mac_addr":      _mac_a,
-                        "mac_vendor":    _mac_v,
-                        "server_header": _srv_hdr,
-                        # rc2.2: persist page_title + onvif_scopes so
-                        # the cred-auth dict-replacement at line ~6269
-                        # can preserve them, and so they're visible in
-                        # the camera Identity panel.
-                        "page_title":    _pg_ttl,
-                        "onvif_scopes":  onvif_meta.get("onvif_scopes", ""),
-                        # 2.4.0-rc1.0: RTSP fingerprint fields
-                        "rtsp_server_header":  _rtsp_srv,
-                        "rtsp_auth_realm":     _rtsp_rlm,
-                        "rtsp_auth_scheme":    _rtsp_sch,
-                        "rtsp_public_methods": _rtsp_pub,
-                        # 2.4.0-rc2.0: locked-stream candidates from
-                        # the continued path walk after first success.
-                        # UI shows badge + modal when len > 0 AND no
-                        # creds saved. Always written (may be empty).
-                        "locked_streams":      _locked,
-                    })
-                else:
-                    _publish_scan_card({
-                        "id": cid, "ip": ip, "hostname": onvif["name"],
-                        "port": 80, "protocol": "ONVIF",
-                        "stream_url": prev.get("stream_url", ""),
-                        "requires_credentials": True,
-                        "credentials": prev.get("credentials"),
-                        "name": prev.get("name", onvif["name"]),
-                        "xaddrs": onvif.get("xaddrs", ""),
-                        "status": "needs_credentials",
-                        "onvif": True, "user_saved": bool(prev), "display": "proxy",
-                        "verdict": "camera", "verdict_reason": "ONVIF discovered",
-                        "manufacturer":  _brand,
-                        "mac_addr":      _mac_a,
-                        "mac_vendor":    _mac_v,
-                        "server_header": _srv_hdr,
-                        # rc2.2: see comment above
-                        "page_title":    _pg_ttl,
-                        "onvif_scopes":  onvif_meta.get("onvif_scopes", ""),
-                        # 2.4.0-rc1.0: RTSP fingerprint fields
-                        "rtsp_server_header":  _rtsp_srv,
-                        "rtsp_auth_realm":     _rtsp_rlm,
-                        "rtsp_auth_scheme":    _rtsp_sch,
-                        "rtsp_public_methods": _rtsp_pub,
-                        # 2.4.0-rc2.0: locked-stream candidates (may be
-                        # empty if path-walker didn't enable collection
-                        # for this camera).
-                        "locked_streams":      _locked,
-                    })
+                # 3.8.0-rc1.0 (B54): ONVIF with no login, in place of the
+                # web page on port 80, the RTSP check and the walk on 554.
+                ocard = await _scan_onvif_first(ip, onvif, onvif_meta, prev, loop)
+                if not ocard:
+                    log.info(f"  ONVIF {ip}: no answer to GetProfiles — card needs a password")
+                    ocard = _onvif_card(ip, onvif, onvif_meta, prev, "ONVIF discovered")
+                _publish_scan_card(ocard)
 
         # Merge multicast-only SSDP cameras
         for ssdp in ssdp_results:
