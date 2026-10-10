@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 10 October 2026. Current store version: 3.8.0-rc1.0 (B54), published to the store 2026-10-10 on CrystalHeeler's order (a release candidate in the store; last stable was 3.7.5). Next: field-test 3.8.0-rc1.0.
+**Compiled:** Updated 10 October 2026. Current store version: 3.8.0-rc1.1 (B54 + login hotfix), 2026-10-10 (last stable was 3.7.5). 3.8.0-rc1.0 broke login on cameras that drop the connection after the first stream; rc1.1 fixes it. Next: field-test 3.8.0-rc1.0.
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.

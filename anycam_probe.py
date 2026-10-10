@@ -743,7 +743,7 @@ def _probe_rtsp_paths_single_socket(
                 # Record so that if it happens again on this IP within the
                 # ACD window, the per-IP cooldown escalates.
                 _record_rst_observation(host)
-                return (None, looks_like_rtsp)  # socket dead
+                return (found_list[0] if found_list else None, looks_like_rtsp)  # socket dead
             # rc2.1: detect RTSP-server-ness. ANY response starting with
             # "RTSP/" — even 4xx/5xx — confirms the server speaks RTSP.
             # If no path ever produces an RTSP-formatted reply, the
@@ -810,7 +810,7 @@ def _probe_rtsp_paths_single_socket(
                 next_cseq += 1
             except Exception as e:
                 _log(f"DESCRIBE exception → bailing: {e}")
-                return (None, looks_like_rtsp)
+                return (found_list[0] if found_list else None, looks_like_rtsp)
             if "RTSP/1.0 200" in resp:
                 pass  # continue to SDP parse
             elif "401" in resp.split(CRLF)[0]:
@@ -912,7 +912,7 @@ def _probe_rtsp_paths_single_socket(
                         if host_meta is not None:
                             host_meta["rtsp_needs_password"] = True
                             host_meta["rtsp_401_path"] = path
-                        return (None, looks_like_rtsp)
+                        return (found_list[0] if found_list else None, looks_like_rtsp)
                     _log(f"DESCRIBE → 401 (no creds) — skipping {path}")
                     continue
                 # Capture auth_val from this 401 if we haven't already
@@ -1038,7 +1038,7 @@ def _probe_rtsp_paths_single_socket(
                     next_cseq += 1
                 except Exception as e:
                     _log(f"SETUP exception → bailing: {e}")
-                    return (None, looks_like_rtsp)
+                    return (found_list[0] if found_list else None, looks_like_rtsp)
                 if "RTSP/1.0 200" in resp:
                     for line in resp.split(CRLF):
                         if line.lower().startswith("session:"):
@@ -1109,7 +1109,7 @@ def _probe_rtsp_paths_single_socket(
 
     except Exception as e:
         _log(f"single-socket walk exception: {e}")
-        return (None, looks_like_rtsp)
+        return (found_list[0] if found_list else None, looks_like_rtsp)
     finally:
         # rc2.1.1: persist captured Server header to host_meta on EVERY
         # return path (success, no-match, exception, socket-dead). The

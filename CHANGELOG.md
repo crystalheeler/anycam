@@ -1,3 +1,12 @@
+## 3.8.0-rc1.1
+
+A fix for 3.8.0-rc1.0: logging in to a camera failed when the camera dropped the connection after its first stream.
+
+### Bugs fixed
+
+- **Login failed on many cameras (3.8.0-rc1.0).** While looking for a second stream, AnyCam kept the connection open; cameras that close it after the first stream (Hikvision, Lorex and Dahua recorders, the Hipcam family) made AnyCam throw the first stream away and report no stream. AnyCam now keeps the stream it already found.
+- **The sub-stream was missed on those cameras.** When a camera drops the connection after its first stream, AnyCam now finds the sub-stream on a fresh connection, so the card still offers a lower-resolution option.
+
 ## 3.8.0-rc1.0
 
 A smaller, gentler scan: AnyCam asks a camera as little as it must to identify it, then reads its streams once a password is entered. Not field-tested.

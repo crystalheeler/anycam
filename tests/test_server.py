@@ -2899,6 +2899,25 @@ async def test_credentials():
                                  "from_locked_streams_modal": True})
         check("Z4 ... entered from the badge: locked list cleared", cd.CAMERAS[cid]["locked_streams"] == [])
 
+        # Z4d 3.8.0-rc1.1: the camera drops the connection after the main, so the
+        # walk returns no sub (find.second empty). The fresh-connection DB probe
+        # supplies it (the validate stub passes /12, not /11 or /13).
+        cid4d = "10.0.0.44_554"
+        cd.CAMERAS[cid4d] = {"id": cid4d, "ip": "10.0.0.44", "port": 554, "protocol": "RTSP",
+                             "name": "Side", "mac_vendor": "Microseven Inc"}
+        _keep_result, _keep_second = dict(find.result), dict(find.second)
+        find.result = {554: "rtsp://10.0.0.44:554/11"}; find.second = {}
+        details.clear()
+        calls["validate"].clear()
+        st, _ = await set_creds({"camera_id": cid4d, "username": "admin", "password": "pw"})
+        c = cd.CAMERAS[cid4d]
+        check("Z4d a camera that drops the connection after the main: the sub comes from a fresh "
+              "DB probe (not the same-socket walk)",
+              st == 200 and c["stream_url"] == "rtsp://10.0.0.44:554/11"
+              and (c.get("sub_stream_url") or "").endswith("10.0.0.44:554/12")
+              and any(l.startswith("db_probe") for _, _, l in calls["validate"]), str(c.get("sub_stream_url")))
+        find.result, find.second = _keep_result, _keep_second
+
         # Z5 wrong password
         find.result = {}
         cd.CAMERAS[cid].update(status="needs_credentials", locked_streams=[])
@@ -5072,6 +5091,7 @@ class _FakeRTSP:
     def _serve(self, conn):
         conn.settimeout(2.0)
         buf = b""
+        rst_armed = False
         while not self._stop:
             try:
                 chunk = conn.recv(4096)
@@ -5088,6 +5108,17 @@ class _FakeRTSP:
                 if len(parts) < 2:
                     return
                 method, uri = parts[0], parts[1]
+                # "ok_die": after the first SETUP, reset the connection on the
+                # NEXT request the client sends (deterministic — the client has
+                # already received the SETUP 200, so the stream is "found").
+                if rst_armed:
+                    try:
+                        conn.setsockopt(_socket.SOL_SOCKET, _socket.SO_LINGER,
+                                        __import__("struct").pack("ii", 1, 0))
+                    except OSError:
+                        pass
+                    conn.close()
+                    return
                 path = uri.split("://", 1)[-1]
                 path = path[path.find("/"):] if "/" in path else "/"
                 cseq = "1"
@@ -5099,6 +5130,8 @@ class _FakeRTSP:
                                (ln.lower().startswith("authorization:") and self._auth_ok(ln))
                                for ln in text.split("\r\n"))
                 rule, close = self._rule(path)
+                if rule == "ok_die" and method == "SETUP":
+                    rst_armed = True
                 resp = self._reply(method, path, cseq, rule, has_auth, close, uri)
                 try:
                     conn.sendall(resp)
@@ -5233,6 +5266,20 @@ async def test_b54_walk():
     check("AP7 every request carries a User-Agent; Connection: close and the scan 401-stop are coded",
           'User-Agent: " + user_agent' in src and 'connection:\s*close' in src
           and 'stop_at_401' in src)
+
+    # AP8 REGRESSION (3.8.0-rc1.1): the first stream works, then the camera drops
+    # the connection while want_streams=2 is still looking for a second. The walk
+    # must return the stream it already found, not None. This broke every login
+    # on cameras that reset after the first stream (Hikvision, Lorex, Microseven).
+    srv = _FakeRTSP({"/stream": "ok_die", "/stream1": "ok"})
+    try:
+        res = await loop.run_in_executor(
+            None, lambda: walk(srv, user="admin", pw="good", want_streams=2)); url, meta = res
+    finally:
+        srv.stop()
+    check("AP8 a camera that drops the connection after the first stream still logs in "
+          "(the found stream is kept, not discarded)",
+          url == f"rtsp://127.0.0.1:{srv.port}/stream", str(url))
 
 
 

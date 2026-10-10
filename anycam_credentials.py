@@ -1196,6 +1196,24 @@ async def api_set_credentials(request: web.Request) -> web.Response:
             log.info(f"  Sub-stream from the walk: {_strip_creds(sub_url)}")
             break
 
+    # 3.8.0-rc1.1: the same-connection walk finds no sub when the camera drops
+    # the connection after the first stream (Hikvision, the Hipcam family). Fall
+    # back to a FRESH-connection probe of the brand's paths (as before B54), paced
+    # for rate-limited brands. Skipped for DVRs whose channels get a sub each
+    # through channel enumeration.
+    if sub_url is None and db_entry and proto in ("RTSP", "DVR", "ONVIF"):
+        _recipe = (_identify_camera_brand(camera) or {}).get("streaming_recipe") or {}
+        if _recipe.get("type") != "channel_iterate":
+            db_streams = await _probe_db_streams(ip, port, enc_creds, db_entry,
+                                                 {url}, camera, max_new=1)
+            if db_streams:
+                _pick = min(db_streams, key=lambda c:
+                            (c.get("stream_width") or 0) * (c.get("stream_height") or 0))
+                if _pick.get("url") and _pick["url"] != url:
+                    sub_url = _pick["url"]
+                    sub_details = {k: v for k, v in _pick.items() if k != "url"}
+                    log.info(f"  Sub-stream from a fresh probe: {_strip_creds(sub_url)}")
+
     # 2.4.0-rc2.6: post-auth validation of locked-stream candidates
     # (Fix 3 + Fix 4 followup). After creds accepted, walk through
     # cam.locked_streams and validate each against the freshly-
