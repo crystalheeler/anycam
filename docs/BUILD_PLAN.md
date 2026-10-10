@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 10 October 2026. Current release: 3.7.5, published 2026-10-10. Built, not pushed: 3.8.0-rc1.0 (B54). Next: field-test 3.8.0-rc1.0.
+**Compiled:** Updated 10 October 2026. Current store version: 3.8.0-rc1.0 (B54), published to the store 2026-10-10 on CrystalHeeler's order (a release candidate in the store; last stable was 3.7.5). Next: field-test 3.8.0-rc1.0.
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.
@@ -9,7 +9,7 @@
 
 ## Next up: field-test 3.8.0-rc1.0 (B54)
 
-1. **Built, not pushed (2026-10-10):** 3.8.0-rc1.0, B54 only — the scan asks a camera as little as it must to identify it (ONVIF with no login first; brand paths first with the walk stopping at the first 401; an identified camera's other ports left alone; no Layer 2 at scan time), password entry reads up to 2 streams by the 0/1/2 rule and stops at the first rejected login, DVR channels get a sub-stream each, Deep Re-Probe does one full walk, and the Hikvision NVR skip_layer2 and the Axis retry are fixed. Design and research: docs/B54_Flow_Comparison.html, docs/B54-Port-Probe-Research.md, docs/B54-Followup-Research.md.
+1. **Published to the store (2026-10-10):** 3.8.0-rc1.0, B54 only — pushed, a GitHub prerelease, and the store's current version (CrystalHeeler's order). The scan asks a camera as little as it must to identify it (ONVIF with no login first; brand paths first with the walk stopping at the first 401; an identified camera's other ports left alone; no Layer 2 at scan time), password entry reads up to 2 streams by the 0/1/2 rule and stops at the first rejected login, DVR channels get a sub-stream each, Deep Re-Probe does one full walk, and the Hikvision NVR skip_layer2 and the Axis retry are fixed. Design and research: docs/B54_Flow_Comparison.html, docs/B54-Port-Probe-Research.md, docs/B54-Followup-Research.md.
 2. **Field test 3.8.0-rc1.0:** rescan both systems. The log shows, per camera, one of "ONVIF asks for a login", "identified on port N — its other ports are not probed", or "401 ... password needed", and no Layer 2 line at scan time. Enter a password: the card comes up with its main and sub stream. Enter a wrong password once: the card says "Password rejected or camera locked", and the camera is not locked out. Compare scan time and request counts with 3.7.5.
 3. **Waiting on CrystalHeeler:** an unlocked Microseven camera to test the new scan and the ffmpeg copy against; B48 (a decision); B29 (sound test); B33 (investigation); C23; C25.
 
