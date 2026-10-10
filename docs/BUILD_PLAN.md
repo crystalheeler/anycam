@@ -1,17 +1,18 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 6 October 2026. Current release: 3.7.0, published 2026-10-06. Built and pushed, not published: 3.7.1, 3.7.2, 3.7.3, 3.7.4. Built, not pushed: 3.7.5-rc1.0, 3.7.5-rc2.0.
+**Compiled:** Updated 10 October 2026. Current release: 3.7.5, published 2026-10-10 (the 3.7.5-rc2.0 code). Next build: 3.8.0-rc1.0, B54 only.
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.
 
 ---
 
-## Next up: field-test 3.7.5-rc2.0
+## Next up: 3.8.0-rc1.0 (B54)
 
-1. **Built, not pushed (2026-10-08):** 3.7.5-rc2.0 with B53 (no probing of known cameras, removed cameras remembered, ONVIF never to an RTSP port, the cooldown before the start-up check) and the Quality Switch's failure notice. 3.7.5-rc1.0 also built, not pushed. Built and pushed, not published: 3.7.1 to 3.7.4.
-2. **Field test 3.7.5-rc2.0 (update in place):** the start-up log shows "known camera ... not probed" for each saved camera and no RTSP walk on them; no ONVIF line with port 554. When someone can power-cycle the Microseven: it plays live through the ffmpeg copy and stays healthy across an AnyCam restart. Remove a card and rescan: the card comes back at once, asking for its password, and the log says "not probed".
-3. **Waiting on CrystalHeeler:** a power cycle of the Microseven (on site, or a smart plug); the push order; B48 (a decision); B29 (sound test); B33 (investigation); C23; C25.
+1. **Published (2026-10-10):** 3.7.5, the 3.7.5-rc2.0 code with only the version changed, released as it is on CrystalHeeler's order (no field test of 3.7.5-rc2.0). It carries everything since 3.7.0: 3.7.1 to 3.7.4, 3.7.5-rc1.0 and 3.7.5-rc2.0.
+2. **Next build: 3.8.0-rc1.0 = B54 only** (CrystalHeeler, 2026-10-10). The final scope is in the B54 row; the design is drawn in docs/B54_Flow_Comparison.html. B55 to B59 stay Later.
+3. **Field test 3.7.5:** the start-up log shows "known camera ... not probed" for each saved camera; Remove a card and rescan: the card comes back at once, asking for its password. When someone can power-cycle the Microseven: live view through the ffmpeg copy.
+4. **Waiting on CrystalHeeler:** a power cycle of the Microseven (on site, or a smart plug); B48 (a decision); B29 (sound test); B33 (investigation); C23; C25.
 
 ---
 

@@ -156,7 +156,7 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <p class="eyebrow">AnyCam · Home Assistant add-on</p>
 <h1>AnyCam Build Plan</h1>
 <p class="meta">the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.</p>
-<p class="meta"><span class="mono">Updated 6 October 2026. Current release: 3.7.0, published 2026-10-06. Built and pushed, not published: 3.7.1, 3.7.2, 3.7.3, 3.7.4. Built, not pushed: 3.7.5-rc1.0, 3.7.5-rc2.0. · 14 open · 146 done</span></p>
+<p class="meta"><span class="mono">Updated 10 October 2026. Current release: 3.7.5, published 2026-10-10 (the 3.7.5-rc2.0 code). Next build: 3.8.0-rc1.0, B54 only. · 14 open · 146 done</span></p>
 </header>
 <nav class="bars" aria-label="Open items per group">
 <a class="bar g-a" style="--n:0" href="#group-a" title="Field tests: 0 open"><b>A · 0</b><span>Field tests</span></a>
@@ -180,10 +180,11 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);color:v
 <li class="g-b"><span class="id">B33</span><span class="t"><a href="#B33">One Amcrest camera gets two cards</a></span><span class="x">CrystalHeeler, 2026-10-06: not necessarily a bug; CrystalHeeler investigates why it happens before anything changes. No fix in 3.7.1</span></li>
 <li class="g-c"><span class="id">C23</span><span class="t"><a href="#C23">Storage tab revamp</a></span><span class="x">CrystalHeeler sends the revamp list; then a design discussion before any code</span></li>
 </ul></div>
-<div class="panel"><h2>Next up: field-test 3.7.5-rc2.0</h2><ol class="order">
-<li><span><strong>Built, not pushed (2026-10-08):</strong> 3.7.5-rc2.0 with <a href="#B53">B53</a> (no probing of known cameras, removed cameras remembered, ONVIF never to an RTSP port, the cooldown before the start-up check) and the Quality Switch's failure notice. 3.7.5-rc1.0 also built, not pushed. Built and pushed, not published: 3.7.1 to 3.7.4.</span></li>
-<li><span><strong>Field test 3.7.5-rc2.0 (update in place):</strong> the start-up log shows "known camera ... not probed" for each saved camera and no RTSP walk on them; no ONVIF line with port 554. When someone can power-cycle the Microseven: it plays live through the ffmpeg copy and stays healthy across an AnyCam restart. Remove a card and rescan: the card comes back at once, asking for its password, and the log says "not probed".</span></li>
-<li><span><strong>Waiting on CrystalHeeler:</strong> a power cycle of the Microseven (on site, or a smart plug); the push order; <a href="#B48">B48</a> (a decision); <a href="#B29">B29</a> (sound test); <a href="#B33">B33</a> (investigation); <a href="#C23">C23</a>; <a href="#C25">C25</a>.</span></li>
+<div class="panel"><h2>Next up: 3.8.0-rc1.0 (B54)</h2><ol class="order">
+<li><span><strong>Published (2026-10-10):</strong> 3.7.5, the 3.7.5-rc2.0 code with only the version changed, released as it is on CrystalHeeler's order (no field test of 3.7.5-rc2.0). It carries everything since 3.7.0: 3.7.1 to 3.7.4, 3.7.5-rc1.0 and 3.7.5-rc2.0.</span></li>
+<li><span><strong>Next build: 3.8.0-rc1.0 = <a href="#B54">B54</a> only</strong> (CrystalHeeler, 2026-10-10). The final scope is in the <a href="#B54">B54</a> row; the design is drawn in docs/B54_Flow_Comparison.html. <a href="#B55">B55</a> to <a href="#B59">B59</a> stay Later.</span></li>
+<li><span><strong>Field test 3.7.5:</strong> the start-up log shows "known camera ... not probed" for each saved camera; Remove a card and rescan: the card comes back at once, asking for its password. When someone can power-cycle the Microseven: live view through the ffmpeg copy.</span></li>
+<li><span><strong>Waiting on CrystalHeeler:</strong> a power cycle of the Microseven (on site, or a smart plug); <a href="#B48">B48</a> (a decision); <a href="#B29">B29</a> (sound test); <a href="#B33">B33</a> (investigation); <a href="#C23">C23</a>; <a href="#C25">C25</a>.</span></li>
 </ol>
 </div></div>
 <section class="group g-a" id="group-a">
