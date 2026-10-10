@@ -34,8 +34,8 @@ def story():
                  ["Python integration", verdict("PASS"), "666 of 666."],
                  ["JavaScript behaviour", verdict("PASS"), "193 of 193."],
                  ["Not run", verdict("NOTED"), "No field test of 3.7.5-rc2.0 or 3.7.5: CrystalHeeler chose to "
-                  "release as it is. The Microseven ffmpeg copy is untested: the camera needs a power cycle "
-                  "first. 3.7.5-rc1.0 was installed in the field (Quality Switch report, 2026-10-08)."]],
+                  "release as it is. The ffmpeg copy is untested on an unlocked Microseven camera. "
+                  "3.7.5-rc1.0 was installed in the field (Quality Switch report, 2026-10-08)."]],
                 [1.5 * inch, 0.7 * inch, 4.5 * inch])]
 
     s += [h1("Best-practices compliance"),
@@ -50,7 +50,7 @@ def story():
                 W_BP)]
 
     s += [h1("Known issues"),
-          *bullets(["<b>Microseven:</b> stuck until power-cycled; then the ffmpeg copy gets its test.",
+          *bullets(["<b>Microseven:</b> the ffmpeg copy is untested on an unlocked Microseven camera.",
                     "<b>B48:</b> go2rtc's local RTSP server does not ask local programs for a password.",
                     "<b>B33:</b> one Amcrest camera can get two cards."])]
 

@@ -62,8 +62,8 @@ def story():
                   "drives the walker against a fake RTSP server: scan 401-stop, the 0/1/2 rule, "
                   "the login rule, and the Connection: close reopen. Sections U and Z updated."],
                  ["JavaScript behaviour", verdict("PASS"), "193 of 193."],
-                 ["Not run", verdict("NOTED"), "No field test. No camera exercised the new scan "
-                  "on real hardware; the Microseven is still stuck pending a power cycle."]],
+                 ["Not run", verdict("NOTED"), "No field test. The new scan is untested against a "
+                  "real camera; the Microseven path is untested on an unlocked Microseven camera."]],
                 [1.5 * inch, 0.7 * inch, 4.5 * inch])]
 
     s += [h1("Best-practices compliance"),
@@ -82,8 +82,8 @@ def story():
                 W_BP)]
 
     s += [h1("Known issues"),
-          *bullets(["<b>Microseven:</b> stuck until power-cycled; then the new scan and the ffmpeg "
-                    "copy get their test.",
+          *bullets(["<b>Microseven:</b> the new scan and the ffmpeg copy are untested on an "
+                    "unlocked Microseven camera.",
                     "<b>B48:</b> go2rtc's local RTSP server does not ask local programs for a password.",
                     "<b>B33:</b> one Amcrest camera can get two cards.",
                     "<b>Later (B55–B59):</b> the MAC-first check and printer rule, Reolink FLV / "
