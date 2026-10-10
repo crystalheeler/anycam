@@ -1,3 +1,32 @@
+## 3.7.5
+
+Live view that recovers by itself, a Quality Switch for 4K cameras, calmer handling of stuck and fragile cameras, and scans that leave known cameras alone. Same code as 3.7.5-rc2.0. Not field-tested.
+
+### Changes & improvements
+
+- **Live view repairs itself.** A stream the browser cannot read goes through an ffmpeg copy, and AnyCam keeps that choice for the camera.
+- **Live view gives up after 15 s** when no picture arrives, tries WebRTC once more, and names the camera settings to check.
+- **Cards keep their last picture** while a stream restarts, and stay live for 60 s while the page is hidden.
+- **Quality Switch in the classic view** for cameras with a sub-stream; the classic view drops to keyframes instead of greying out when the Pi falls behind.
+- **A stuck camera is left alone.** AnyCam shows its still pictures, and the card says "Power-cycle camera".
+- **Scans leave saved cameras alone,** and a removed card comes back without probing.
+- **H.265 decodes in software,** because the Pi's HEVC hardware decoder gave green pictures. The log explains Protection mode.
+- **go2rtc's API asks every caller for a password.**
+
+### Bugs fixed
+
+- **Some cameras, such as older Hikvision models, reset every live connection.** AnyCam no longer asks for two-way audio.
+- **Cards and Enhanced View could stay black for good,** and the classic view could show one frozen picture.
+- **Cards on still pictures asked 8 times a second;** now once per new picture.
+- **ONVIF requests could go to a camera's RTSP port,** and the start-up check ignored the camera's cooldown.
+- **A slow network check made the scan search a fixed network** instead of AnyCam's own.
+
+### Known issues
+
+- **Live view is untested on an unlocked Microseven camera.**
+- **Other programs on the Pi can read camera video** through go2rtc's local RTSP server.
+- **One Amcrest camera can get two cards** (under investigation).
+
 ## 3.7.5-rc2.0
 
 A release candidate that stops AnyCam's own start-up checks from upsetting fragile cameras. Not field-tested.
