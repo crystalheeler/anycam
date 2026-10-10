@@ -204,9 +204,13 @@ CONTRACTS = {
     # rc2 — find_rtsp_path orchestrator with brand-aware short-circuits
     # rc2.1 — adds Layer 2 fast-bail when looks_like_rtsp is False
     # rc2.1.1 — direct _identify_camera_brand call + post-walk re-id pass
+    # 3.8.0-rc1.0 (B54) — scan stops at the first 401 (no Layer 2); the
+    # 0/1/2 rule (want_streams); Deep Re-Probe (deep); the Axis retry as
+    # its own field (rtsp_query_retry).
     "find_rtsp_path":        ["_probe_rtsp_paths_single_socket",
                               "rate_limit_per_ip_tcp", "no_rtsp_support",
-                              "session_time_cap", "requires_query_param",
+                              "session_time_cap", "rtsp_query_retry",
+                              "scan", "deep", "want_streams",
                               "Layer 2", "looks_like_rtsp",
                               "_identify_camera_brand", "post-walk"],
     # rc2 — brand-id helper that wires mac_vendor into manufacturer detection

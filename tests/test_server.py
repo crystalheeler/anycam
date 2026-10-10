@@ -1853,7 +1853,7 @@ class _Swap:
 
 async def test_scan():
     print("\n[U] 3.0.0-rc1.4 the scan")
-    calls = {"probe": [], "nmap": [], "identity": [], "fp": [], "find": [], "saved": 0}
+    calls = {"probe": [], "nmap": [], "identity": [], "fp": [], "find": [], "saved": 0, "onvif": []}
 
     def nmap(ips):
         calls["nmap"].append(list(ips))
@@ -1893,9 +1893,13 @@ async def test_scan():
         calls["fp"].append((host, port))
         return {"error": "refused", "looks_like_rtsp": False}
 
-    def find(ip, port, username="", password="", host_meta=None):
+    def find(ip, port, username="", password="", host_meta=None, **kw):
         calls["find"].append((ip, port))
         return None
+
+    def onvif_first(url, timeout=6):            # 3.8.0-rc1.0 (B54)
+        calls["onvif"].append(url)
+        return ("login", []) if "10.0.0.70" in url else ("none", [])
 
     def saved():
         calls["saved"] += 1
@@ -1912,7 +1916,7 @@ async def test_scan():
         ssdp_discover=lambda timeout: [], mdns_discover=lambda timeout: [],
         broad_nmap_scan=lambda ips: [], focused_nmap_scan=nmap, _probe_host_port=probe,
         probe_http_identity=identity, _rtsp_options_fingerprint=fingerprint,
-        find_rtsp_path=find, save_cameras=saved)
+        find_rtsp_path=find, onvif_probe_no_login=onvif_first, save_cameras=saved)
     keep = (dict(cd.CAMERAS), set(cd.BLACKLIST), cd.SCAN_OPTIONS.get("broad_sweep"))
     cd.CAMERAS.clear(); cd.BLACKLIST.clear(); cd.BLACKLIST.add("10.0.0.33_8000")
     cd.CAMERAS["manual_1"] = {"id": "manual_1", "ip": "10.0.0.99", "user_saved": True,
@@ -1947,12 +1951,12 @@ async def test_scan():
         o = cams["10.0.0.70_onvif"]
         check("U5 a device found by ONVIF only: a card that asks for a password",
               o["protocol"] == "ONVIF" and o["status"] == "needs_credentials"
-              and o["requires_credentials"] is True and o["verdict_reason"] == "ONVIF discovered")
-        check("U5 ... its brand comes from its web page (probe_http_identity, restored in 3.0.0-rc1.3)",
-              calls["identity"] == [("10.0.0.70", 80)] and o["manufacturer"] == "Hipcam/Microseven"
-              and o["server_header"] == "Hipcam RealServer/V1.0", str(calls["identity"]))
-        check("U5 ... then one RTSP fingerprint and one path search on port 554",
-              calls["fp"] == [("10.0.0.70", 554)] and calls["find"] == [("10.0.0.70", 554)])
+              and o["requires_credentials"] is True and o["verdict_reason"] == "ONVIF asks for a login")
+        check("U5 ... 3.8.0-rc1.0 (B54): one ONVIF request without a login; no web page, "
+              "no RTSP check, no path search",
+              calls["identity"] == [] and calls["fp"] == [] and calls["find"] == []
+              and calls["onvif"] == ["http://10.0.0.33/onvif/media",
+                                     "http://10.0.0.70:8080/onvif/media"], str(calls["onvif"]))
         st = cd.SCAN_STATE
         check("U6 the scan ends: not running, 100%, counts in the message, cameras saved once",
               st["running"] is False and st["progress"] == 100 and st["stage"] == 0
@@ -1996,7 +2000,7 @@ async def test_scan():
             return {}
         meta = {"ip": ip, "hostname": "cam"}
         with _Swap(
-                find_rtsp_path=lambda i, p, username="", password="", host_meta=None:
+                find_rtsp_path=lambda i, p, username="", password="", host_meta=None, **k:
                     (order.append("find") or w.get("rtsp")),
                 probe_rtmp=lambda i, p: (order.append("rtmp") or w.get("rtmp", False)),
                 probe_mjpeg_http=lambda i, p, u, pw: (order.append("mjpeg") or w.get("mjpeg")),
@@ -2740,11 +2744,12 @@ class JsonReq:
 async def test_credentials():
     print("\n[Z] 3.0.0-rc1.5 password entry")
     import re as _re
-    calls = {"validate": [], "find": [], "probe": [], "waits": [], "onvif_snap": []}
+    calls = {"validate": [], "find": [], "find_kw": [], "probe": [], "waits": [], "onvif_snap": []}
 
     def validate(ip, port, urls, user, pw, timeout, meta=None, label=""):
         calls["validate"].append((port, list(urls), label))
-        return {u: (bool(_re.search(r"channel=[23]&subtype=0", u)) if "realmonitor" in u
+        return {u: (bool(_re.search(r"channel=[23]&subtype=0|channel=2&subtype=1", u))
+                    if "realmonitor" in u
                     else not u.endswith(("/13", "/h264major", "/h264minor", "/11")))
                 for u in urls}
 
@@ -2760,10 +2765,17 @@ async def test_credentials():
     async def wait(ip, secs, label=""):
         calls["waits"].append((secs, label))
 
-    def find(ip, port, user, pw, cam=None):
+    def find(ip, port, user, pw, cam=None, **kw):
         calls["find"].append((ip, port))
-        return find.result.get(port)
-    find.result = {}
+        calls["find_kw"].append(kw)
+        if cam is not None and find.rejected:
+            cam["login_rejected"] = True        # the walker's login rule fired
+            return None
+        url = find.result.get(port)
+        if url and cam is not None and find.second.get(port):
+            cam["walk_found"] = [url, find.second[port]]
+        return url
+    find.result, find.second, find.rejected = {}, {}, False
 
     profiles = [{"token": "P1", "name": "main", "onvif_width": 2560, "onvif_height": 1440,
                  "onvif_encoding": "H264"},
@@ -2852,6 +2864,7 @@ async def test_credentials():
                            "name": "Garage", "mac_vendor": "Microseven Inc",
                            "locked_streams": [{"path": "/13", "realm": "r"}, {"path": "/11"}, {"path": "/14"}]}
         find.result = {554: "rtsp://10.0.0.42:554/11"}
+        find.second = {554: "rtsp://10.0.0.42:554/12"}
         details.clear()
         details.update({"/12": {"stream_codec": "h264", "stream_width": 640, "stream_height": 352},
                         "/13": {"stream_codec": "h264", "stream_width": 1280, "stream_height": 720},
@@ -2866,18 +2879,21 @@ async def test_credentials():
               all(s == 5.0 for s, _ in calls["waits"]) and labels[0] == "non-ONVIF ffprobe"
               and {"locked-stream-validate 1", "locked-stream-details 1",
                    "locked-stream-validate 3"} <= set(labels), str(calls["waits"]))
-        check("Z4 3.0.1 (B24): the stream-table check and its ffprobe wait out the cooldown too",
-              labels[1] == "db_probe validation"
-              and any(l.startswith("db_probe ffprobe") and l.endswith("/12") for l in labels), str(labels))
-        check("Z4 ... table paths checked with the password percent-encoded, the main path skipped",
-              all("admin:p%40ss&w+rd%20%2350%25%20x@10.0.0.42:554/" in u for u in calls["validate"][0][1])
-              and not any(u.endswith("/11") for u in calls["validate"][0][1]))
-        check("Z4 ... main kept, the table's sub-stream added, one locked stream confirmed",
+        check("Z4 3.8.0-rc1.0 (B54): the sub-stream comes from the walk, its ffprobe waits out the "
+              "cooldown; no second pass over the brand paths",
+              labels[1] == "sub-stream ffprobe" and not any(l.startswith("db_probe") for l in labels)
+              and calls["validate"] == []
+              and any("admin:p%40ss&w+rd%20%2350%25%20x@10.0.0.42:554/12" in u for u in calls["probe"]),
+              str(labels))
+        check("Z4 ... the walk: brand paths first, asking for 2 streams",
+              calls["find_kw"][-1] == {"want_streams": 2, "path_set": "brand"}, str(calls["find_kw"][-1:]))
+        check("Z4 ... main kept, the walk's sub-stream added, one locked stream confirmed",
               c["stream_url"] == "rtsp://10.0.0.42:554/11" and c["sub_stream_url"].endswith("10.0.0.42:554/12")
               and [a["path"] for a in c["additional_streams"]] == ["/13"]
               and [p.get("stream_width") for p in c["stream_profiles"]] == [2560, 640, 1280])
         check("Z4 ... locked list kept when not entered from its badge",
               len(c["locked_streams"]) == 3)
+        find.second = {}
         cd.CAMERAS[cid]["locked_streams"] = [{"path": "/14"}]
         st, _ = await set_creds({"camera_id": cid, "username": "admin", "password": TRICKY_PASS,
                                  "from_locked_streams_modal": True})
@@ -2888,9 +2904,17 @@ async def test_credentials():
         cd.CAMERAS[cid].update(status="needs_credentials", locked_streams=[])
         cd.CAMERAS[cid].pop("status_text", None)
         st, body = await set_creds({"camera_id": cid, "username": "admin", "password": "wrong"})
-        check("Z5 wrong password: 401, and the card back to its login form",
+        check("Z5 no stream found: 401, and the card back to its login form",
               st == 401 and body["error"] == "Could not connect with those credentials."
               and cd.CAMERAS[cid]["status"] == "needs_credentials" and "status_text" not in cd.CAMERAS[cid])
+        calls["find"].clear(); find.rejected = True
+        st, body = await set_creds({"camera_id": cid, "username": "admin", "password": "wrong"})
+        find.rejected = False
+        check("Z5 3.8.0-rc1.0 (B54): the camera rejects the login: one walk only, and the card says "
+              "'Password rejected or camera locked.'",
+              st == 401 and body["error"] == "Password rejected or camera locked."
+              and calls["find"] == [("10.0.0.42", 554)] and "login_rejected" not in cd.CAMERAS[cid],
+              f"{body} {calls['find']}")
 
         # Z6 MJPEG
         cd.CAMERAS["m"] = {"id": "m", "ip": "10.0.0.43", "port": 8080, "protocol": "MJPEG", "name": "m"}
@@ -2925,10 +2949,14 @@ async def test_credentials():
             check("Z7 ... the status endpoint reports the populated channels",
                   s == {"done": True, "populated_channels": ["1", "2", "3"]}, str(s))
             enum_urls = [u for _, urls, label in calls["validate"] if label.startswith("channel-enum")
-                         for u in urls]
+                         and not label.endswith("sub)") for u in urls]
+            sub_urls = [u for _, urls, label in calls["validate"] if label.endswith("sub)") for u in urls]
             check("Z7 ... channels 2 to 16 walked, one address per socket",
                   len(enum_urls) == 15 and all(len(urls) == 1 for _, urls, l in calls["validate"]
                                                if l.startswith("channel-enum")))
+            check("Z7 3.8.0-rc1.0 (B54): each populated channel, and the parent, gets its sub-stream checked",
+                  sorted(u.split("channel=")[1] for u in sub_urls)
+                  == ["1&subtype=1", "2&subtype=1", "3&subtype=1"], str(sub_urls))
             ch2 = cd.CAMERAS.get("10.0.0.50_554_ch2", {})
             check("Z7 ... a card per channel: its own snapshot, the parent's password, no password in the address",
                   ch2.get("http_snap_url") == "http://10.0.0.50/cgi-bin/snapshot.cgi?channel=2"
@@ -2936,6 +2964,9 @@ async def test_credentials():
                   and ch2.get("stream_url") == "rtsp://10.0.0.50:554/cam/realmonitor?channel=2&subtype=0"
                   and ch2.get("name") == "Lorex / Dahua DVR-NVR Family ch2"
                   and "10.0.0.50_554_ch3" in cd.CAMERAS, str(ch2)[:200])
+            check("Z7 ... the channel-2 card has its sub-stream, without the password; channel 3 has none",
+                  ch2.get("sub_stream_url") == "rtsp://10.0.0.50:554/cam/realmonitor?channel=2&subtype=1"
+                  and not cd.CAMERAS["10.0.0.50_554_ch3"].get("sub_stream_url"), str(ch2.get("sub_stream_url")))
             check("Z7 ... each new card starts its thumbnail loop; the parent is renamed for its channel",
                   sorted(started) == ["10.0.0.50_554_ch2", "10.0.0.50_554_ch3"]
                   and cd.CAMERAS[cid]["name"] == "Lorex / Dahua DVR-NVR Family ch1", str(started))
@@ -2954,7 +2985,7 @@ async def test_credentials():
         with _Swap(snap_loop=fake_snap_loop, _dvr_channel_count=four):
             await cd._enumerate_dvr_channels_after_auth(cid)
         enum_urls = [u for _, urls, label in calls["validate"] if label.startswith("channel-enum")
-                     for u in urls]
+                     and not label.endswith("sub)") for u in urls]
         check("AF1 D1: a DVR that reports 4 channels: channels 2 to 4 walked, not 2 to 16",
               len(enum_urls) == 3 and cd.CAMERAS[cid].get("dvr_channels") == 4, str(len(enum_urls)))
 
@@ -2998,45 +3029,33 @@ async def test_credentials():
         cd.CAMERAS["d"] = {"id": "d", "ip": "10.0.0.70", "port": 554, "deep_reprobe_in_progress": True}
         check("Z10 ... one at a time: 409", (await rp("d")).status == 409)
 
-        def find_locked(ip, port, u, p, meta):
-            meta["locked_streams"] = [{"path": "/a"}]
-            return "rtsp://10.0.0.70:554/live"
-        cd.CAMERAS["d"] = {"id": "d", "ip": "10.0.0.70", "port": 554, "early_bail_reason": "x"}
+        deep_kw = []
+
+        def find_locked(ip, port, u, p, meta, **kw):
+            deep_kw.append(kw)
+            meta["locked_streams"] = [{"path": "/b"}]
+            return find_locked.url
+        find_locked.url = "rtsp://10.0.0.70:554/live"
+        cd.CAMERAS["d"] = {"id": "d", "ip": "10.0.0.70", "port": 554, "early_bail_reason": "x",
+                           "locked_streams": [{"path": "/a"}]}
         with _Swap(find_rtsp_path=find_locked):
             body = json.loads((await rp("d")).body)
         c = cd.CAMERAS["d"]
-        check("Z10 ... no saved walk: a fresh full probe; the card ready, the walk state cleared",
-              body["found_stream"] and body["outcome"] == "ready" and c["status"] == "ready"
-              and c["locked_streams"] == [{"path": "/a"}] and "early_bail_reason" not in c
-              and c["deep_reprobe_in_progress"] is False and c["deep_reprobe_attempts"] == 1, str(body))
-        resumed = []
-
-        def walk(ip, port, paths, u, p, t, *rest):
-            resumed.append(list(paths))
-            rest[2]["locked_streams"] = [{"path": "/b"}]
-            return None, True
-        cd.CAMERAS["d"] = {"id": "d", "ip": "10.0.0.70", "port": 554, "locked_streams": [{"path": "/a"}],
-                           "early_bail_reason": "layer1_consecutive_401s",
-                           "early_bail_paths_remaining": ["/b", "/c"],
-                           "early_bail_at": datetime_now_iso()}
-        with _Swap(_probe_rtsp_paths_single_socket=walk):
-            body = json.loads((await rp("d")).body)
-        check("Z10 ... a recent early stop: the walk resumes on the paths left; locked streams merged",
-              resumed == [["/b", "/c"]] and body["outcome"] == "locked_streams:2"
-              and [l["path"] for l in cd.CAMERAS["d"]["locked_streams"]] == ["/a", "/b"], str(body))
-        cd.CAMERAS["d"] = {"id": "d", "ip": "10.0.0.70", "port": 554,
-                           "early_bail_reason": "layer1_then_layer2_skipped_401s",
-                           "early_bail_paths_remaining": [], "early_bail_at": datetime_now_iso()}
-        with _Swap(probe_rtsp=lambda url, u="", p="", timeout=6.0: True):
-            body = json.loads((await rp("d")).body)
-        check("Z10 ... the skipped second stage runs: first address that answers",
-              body["found_stream"] and body["stream_url"] == "rtsp://10.0.0.70:554" + cd.RTSP_PATHS[0])
+        check("Z10 3.8.0-rc1.0 (B54): one full walk (deep), the card ready, locked streams merged, "
+              "the old walk state cleared",
+              deep_kw == [{"deep": True}] and body["found_stream"] and body["outcome"] == "ready"
+              and c["status"] == "ready" and [l["path"] for l in c["locked_streams"]] == ["/a", "/b"]
+              and "early_bail_reason" not in c and c["deep_reprobe_in_progress"] is False
+              and c["deep_reprobe_attempts"] == 1, f"{deep_kw} {body}")
+        find_locked.url = None
         cd.CAMERAS["d"] = {"id": "d", "ip": "10.0.0.70", "port": 554,
                            "early_bail_reason": "layer1_consecutive_401s",
-                           "early_bail_paths_remaining": ["/b"], "early_bail_at": "2000-01-01T00:00:00"}
-        calls["find"].clear()
-        await rp("d")
-        check("Z10 ... an old early stop: a fresh probe instead", calls["find"] == [("10.0.0.70", 554)])
+                           "early_bail_paths_remaining": ["/b"], "early_bail_at": datetime_now_iso()}
+        deep_kw.clear()
+        with _Swap(find_rtsp_path=find_locked):
+            body = json.loads((await rp("d")).body)
+        check("Z10 ... a card with an old early stop: the same full walk, no resume",
+              deep_kw == [{"deep": True}] and body["outcome"] == "locked_streams:1", f"{deep_kw} {body}")
 
     # Z11 the stream table
     check("Z11 stream table: the OUI vendor finds the recipe",
@@ -5004,6 +5023,219 @@ FAKE_BIN.write_text(textwrap.dedent('''
 '''))
 
 
+# ── AP. 3.8.0-rc1.0 (B54) the RTSP walk ───────────────────────────────────────
+import socket as _socket
+import threading as _threading
+
+
+class _FakeRTSP:
+    """A tiny RTSP server over a real socket, driven by a rule per path.
+
+    rules[path] is one of:
+      "ok"        OPTIONS 200, DESCRIBE 200 with an SDP video track, SETUP 200.
+      "401"       a 401 with a Digest challenge; "200" after a correct login.
+      "401wrong"  a 401, and a 401 again after any login (wrong password).
+      "401nochal" a 401 with no WWW-Authenticate header.
+      "404"       a 404.
+    "close" after a rule name makes the server send Connection: close with it.
+    realm and the accepted password are server-wide.
+    """
+
+    def __init__(self, rules, password="good", realm="AnyCamTest"):
+        self.rules = rules
+        self.password = password
+        self.realm = realm
+        self.srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        self.srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen(8)
+        self.port = self.srv.getsockname()[1]
+        self.describe_paths = []          # paths that reached DESCRIBE
+        self._stop = False
+        self.t = _threading.Thread(target=self._run, daemon=True)
+        self.t.start()
+
+    def _rule(self, path):
+        r = self.rules.get(path, self.rules.get(path.split("?")[0], "404"))
+        close = r.endswith(" close")
+        return (r[:-6] if close else r), close
+
+    def _run(self):
+        while not self._stop:
+            try:
+                self.srv.settimeout(0.5)
+                conn, _ = self.srv.accept()
+            except (OSError, _socket.timeout):
+                continue
+            _threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn):
+        conn.settimeout(2.0)
+        buf = b""
+        while not self._stop:
+            try:
+                chunk = conn.recv(4096)
+            except (OSError, _socket.timeout):
+                break
+            if not chunk:
+                break
+            buf += chunk
+            while b"\r\n\r\n" in buf:
+                head, buf = buf.split(b"\r\n\r\n", 1)
+                text = head.decode("utf-8", errors="replace")
+                line0 = text.split("\r\n")[0]
+                parts = line0.split()
+                if len(parts) < 2:
+                    return
+                method, uri = parts[0], parts[1]
+                path = uri.split("://", 1)[-1]
+                path = path[path.find("/"):] if "/" in path else "/"
+                cseq = "1"
+                for ln in text.split("\r\n"):
+                    if ln.lower().startswith("cseq:"):
+                        cseq = ln.split(":", 1)[1].strip()
+                has_auth = any(ln.lower().startswith("authorization:")
+                               and self.password in ("",) or
+                               (ln.lower().startswith("authorization:") and self._auth_ok(ln))
+                               for ln in text.split("\r\n"))
+                rule, close = self._rule(path)
+                resp = self._reply(method, path, cseq, rule, has_auth, close, uri)
+                try:
+                    conn.sendall(resp)
+                except OSError:
+                    return
+                if close:
+                    conn.close()
+                    return
+
+    def _auth_ok(self, header):
+        # The test's passwords are distinctive, so a substring check suffices.
+        return ('response="' in header) and (self.password != "__never__")
+
+    def _reply(self, method, path, cseq, rule, has_auth, close, uri):
+        hdr = f"CSeq: {cseq}\r\n"
+        if close:
+            hdr += "Connection: close\r\n"
+        if method == "DESCRIBE":
+            self.describe_paths.append(path)
+        if method == "OPTIONS":
+            return (f"RTSP/1.0 200 OK\r\n{hdr}Public: OPTIONS, DESCRIBE, SETUP, "
+                    f"TEARDOWN\r\n\r\n").encode()
+        if rule == "401authnochal":
+            # a challenge on the first 401, none once a login is sent (final)
+            if has_auth:
+                return f"RTSP/1.0 401 Unauthorized\r\n{hdr}\r\n".encode()
+            chal = f'Digest realm="{self.realm}", nonce="{os.urandom(8).hex()}"'
+            return (f"RTSP/1.0 401 Unauthorized\r\n{hdr}"
+                    f"WWW-Authenticate: {chal}\r\n\r\n").encode()
+        if rule in ("401", "401wrong", "401nochal") and not (has_auth and rule == "401"):
+            if rule == "401nochal":
+                return f"RTSP/1.0 401 Unauthorized\r\n{hdr}\r\n".encode()
+            chal = (f'Digest realm="{self.realm}", '
+                    f'nonce="{os.urandom(8).hex()}"')
+            return (f"RTSP/1.0 401 Unauthorized\r\n{hdr}"
+                    f"WWW-Authenticate: {chal}\r\n\r\n").encode()
+        if rule == "404":
+            return f"RTSP/1.0 404 Not Found\r\n{hdr}\r\n".encode()
+        # "ok", or "401" with a correct login
+        if method == "DESCRIBE":
+            sdp = ("v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=t\r\n"
+                   "m=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n"
+                   f"a=control:{uri}\r\n")
+            return (f"RTSP/1.0 200 OK\r\n{hdr}Content-Type: application/sdp\r\n"
+                    f"Content-Length: {len(sdp)}\r\n\r\n{sdp}").encode()
+        if method == "SETUP":
+            return (f"RTSP/1.0 200 OK\r\n{hdr}Session: 12345678\r\n"
+                    f"Transport: RTP/AVP/TCP;interleaved=0-1\r\n\r\n").encode()
+        return f"RTSP/1.0 200 OK\r\n{hdr}\r\n".encode()
+
+    def stop(self):
+        self._stop = True
+        try:
+            self.srv.close()
+        except OSError:
+            pass
+
+
+async def test_b54_walk():
+    print("\n[AP] 3.8.0-rc1.0 (B54) the RTSP walk")
+    loop = asyncio.get_running_loop()
+
+    def walk(srv, **kw):
+        meta = kw.pop("host_meta", {})
+        return cd.find_rtsp_path("127.0.0.1", srv.port, kw.pop("user", ""),
+                                 kw.pop("pw", ""), meta, **kw), meta
+
+    # AP1 scan: the first 401 stops the walk; the password-needed flag is set
+    srv = _FakeRTSP({"/stream": "404", "/stream1": "401"})
+    try:
+        res = await loop.run_in_executor(None, lambda: walk(srv, scan=True)); url, meta = res
+    finally:
+        srv.stop()
+    check("AP1 scan: the first 401 stops the walk; a password is needed",
+          url is None and meta.get("rtsp_needs_password") is True
+          and srv.describe_paths == ["/stream", "/stream1"], str(srv.describe_paths))
+
+    # AP2 scan: a no-login stream is found; the walk does not stop at a later 401
+    srv = _FakeRTSP({"/stream": "ok"})
+    try:
+        res = await loop.run_in_executor(None, lambda: walk(srv, scan=True)); url, meta = res
+    finally:
+        srv.stop()
+    check("AP2 scan: a stream that plays without a login gives a ready URL",
+          url == f"rtsp://127.0.0.1:{srv.port}/stream", str(url))
+
+    # AP3 login: the right password; want_streams=2 keeps walking to the second
+    srv = _FakeRTSP({"/stream1": "401", "/stream2": "401"}, password="good")
+    try:
+        res = await loop.run_in_executor(
+            None, lambda: walk(srv, user="admin", pw="good", want_streams=2)); url, meta = res
+    finally:
+        srv.stop()
+    check("AP3 login: two streams asked for, two found; the first is primary, both recorded",
+          url == f"rtsp://127.0.0.1:{srv.port}/stream1"
+          and meta.get("walk_found") == [f"rtsp://127.0.0.1:{srv.port}/stream1",
+                                           f"rtsp://127.0.0.1:{srv.port}/stream2"], str(meta.get("walk_found")))
+
+    # AP4 login: a rejected login stops the walk at once (login_rejected)
+    srv = _FakeRTSP({"/stream": "401wrong", "/stream1": "401wrong"})
+    try:
+        res = await loop.run_in_executor(
+            None, lambda: walk(srv, user="admin", pw="wrong", want_streams=2)); url, meta = res
+    finally:
+        srv.stop()
+    check("AP4 login: a rejected login stops the walk (never reaches the next path)",
+          url is None and meta.get("login_rejected") is True
+          and "/stream1" not in srv.describe_paths, str(srv.describe_paths))
+
+    # AP5 login: an authed 401 with no challenge is final (the walk stops)
+    srv = _FakeRTSP({"/stream": "401authnochal", "/stream1": "ok"})
+    try:
+        res = await loop.run_in_executor(
+            None, lambda: walk(srv, user="admin", pw="good")); url, meta = res
+    finally:
+        srv.stop()
+    check("AP5 login: a 401 with no challenge after the login is final; the walk stops",
+          url is None and meta.get("login_rejected") is True
+          and "/stream1" not in srv.describe_paths, str(srv.describe_paths))
+
+    # AP6 Connection: close — the walk reopens one connection and goes on
+    srv = _FakeRTSP({"/stream": "404 close", "/stream1": "ok"})
+    try:
+        res = await loop.run_in_executor(None, lambda: walk(srv, scan=True)); url, meta = res
+    finally:
+        srv.stop()
+    check("AP6 the camera closes the connection: the walk reopens and finds the next stream",
+          url == f"rtsp://127.0.0.1:{srv.port}/stream1", str(url))
+
+    # AP7 the walker's request builder: User-Agent, Connection: close, stop_at_401
+    src = (Path(__file__).resolve().parent.parent / "anycam_probe.py").read_text(encoding="utf-8")
+    check("AP7 every request carries a User-Agent; Connection: close and the scan 401-stop are coded",
+          'User-Agent: " + user_agent' in src and 'connection:\s*close' in src
+          and 'stop_at_401' in src)
+
+
+
 async def test_supervisor():
     print("\n[F] supervisor (real subprocess)")
     record = SCRATCH / "fake_go2rtc_record.txt"
@@ -5110,6 +5342,7 @@ async def main():
     await test_374()
     await test_375()
     await test_375_rc2()
+    await test_b54_walk()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

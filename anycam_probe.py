@@ -458,6 +458,8 @@ def _probe_rtsp_paths_single_socket(
     expected_realm: str = "",
     deep_reprobe_mode: bool = False,
     brand_recipe_paths: list[str] | None = None,
+    stop_at_401: bool = False,
+    want_streams: int = 1,
 ) -> tuple[str | None, bool]:
     """rc2 Layer 1: Walk multiple RTSP paths through OPTIONS+DESCRIBE+
     SETUP+TEARDOWN on a SINGLE TCP socket. Returns a tuple
@@ -509,6 +511,22 @@ def _probe_rtsp_paths_single_socket(
     Captured upstream by the OPTIONS fingerprint helper (rc1.0) into
     host_meta["rtsp_auth_realm"]; the orchestrator passes that value
     here as expected_realm.
+
+    3.8.0-rc1.0 (B54):
+    stop_at_401 — at scan time (no login), the first 401 means the camera
+    needs a password: the walk stops there and sets
+    host_meta["rtsp_needs_password"]. Deep Re-Probe and the locked-stream
+    collection after a working stream keep walking.
+    want_streams — with a login, keep walking until this many streams work
+    (the 0/1/2 rule); all of them go to host_meta["walk_found"].
+    The login rule: a 401 to a request that carried a login built from this
+    connection's challenge is a rejection, and the walk stops
+    (host_meta["login_rejected"]). One retry only when the challenge says
+    stale=true, or the connection was reopened. After one success, a later
+    401 skips that path, at most 2 times. A 401 without a challenge is final.
+    Every request carries a User-Agent; replies are read one by one (CSeq
+    checked, leftover bytes kept apart); "Connection: close" reopens one
+    new connection.
     """
     if not paths:
         return (None, False)
@@ -608,64 +626,106 @@ def _probe_rtsp_paths_single_socket(
     # the response digest for each method+uri pair.
     auth_val: str | None = None
 
-    # 2.4.0-rc2.4: early-bail counter for consecutive same-realm 401s.
-    # When auth is required at the server level (RFC 7235 §2.2 — realm
-    # is server-scoped, not URL-scoped), every path on the same socket
-    # will get the same 401 with the same realm. Walking 25-31 paths
-    # to confirm what we already know wastes ~5s per port. After 5
-    # consecutive same-realm 401s we bail and save state for the
-    # Deep Re-Probe button. The counter resets on any non-401 response
-    # OR a 401 with a DIFFERENT realm (rare but possible — some
-    # firmwares scope auth per-resource).
-    consecutive_same_realm_401s: int = 0
-    early_bail_realm: str = ""
-    EARLY_BAIL_THRESHOLD: int = 5
-    bailed_early: bool = False
-    paths_tried_count: int = 0
+    # 3.8.0-rc1.0 (B54): the same-realm early stop (5 answers of 401 with
+    # one realm) is gone: a scan stops at the first 401 (stop_at_401), and
+    # the Microseven, which sends no realm, never triggered it anyway.
+    found_list: list[str] = []          # streams that worked (want_streams)
+    login_ok: bool = False              # one request with the login got 200
+    skipped_401s: int = 0               # later 401s after a success
+    MAX_SKIPPED_401S: int = 2
+    reopens: int = 0
+    MAX_REOPENS: int = 3
+    conn = {"pending": b"", "closing": False, "reopened": False}
+    user_agent = f"AnyCam/{CURRENT_VERSION}"
 
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
         sock.settimeout(timeout)
 
-        def roundtrip(method: str, cseq: int,
-                      extra: dict | None = None,
-                      uri: str = "") -> str:
-            """Send RTSP request on the persistent sock, read full response
-            (headers + body if Content-Length present). Returns response text.
-            Raises socket exceptions if the connection dies — caller must
-            decide whether to bail."""
-            extra = extra or {}
-            target = uri
-            hdr = "".join(k + ": " + v + CRLF for k, v in extra.items())
-            req = method + " " + target + " RTSP/1.0" + CRLF
-            req += "CSeq: " + str(cseq) + CRLF + hdr + CRLF
-            sock.sendall(req.encode())
-            buf = b""
-            while CRLFCRLF.encode() not in buf and len(buf) < 65536:
+        def _reopen() -> None:
+            """3.8.0-rc1.0 (B54): one new connection after Connection: close.
+            A nonce is never reused on a new connection."""
+            nonlocal sock, auth_val, reopens
+            try:
+                sock.close()
+            except Exception:
+                pass
+            reopens += 1
+            sock = socket.create_connection((host, port), timeout=timeout)
+            sock.settimeout(timeout)
+            auth_val = None
+            conn.update(pending=b"", closing=False, reopened=True)
+            _log(f"camera asked to close the connection — reopened ({reopens}/{MAX_REOPENS})")
+
+        def _read_message() -> bytes:
+            """One RTSP reply: headers, then exactly Content-Length body bytes.
+            Bytes beyond it stay in conn["pending"] for the next read, and
+            stray bytes before "RTSP/" (a body sent without Content-Length)
+            are dropped instead of being read as the next reply."""
+            buf = conn["pending"]
+            sep_mark = CRLFCRLF.encode()
+            while True:
+                start = buf.find(b"RTSP/")
+                if start > 0:
+                    buf = buf[start:]
+                    start = 0
+                if start == 0 and sep_mark in buf:
+                    break
+                if len(buf) >= 65536:
+                    break
                 chunk = sock.recv(4096)
                 if not chunk:
                     break
                 buf += chunk
-            text = buf.decode("utf-8", errors="replace")
+            sep = buf.find(sep_mark)
+            if sep < 0:
+                conn["pending"] = b""
+                return buf
+            head = buf[:sep + 4]
             cl = 0
-            for line in text.split(CRLF):
+            for line in head.decode("utf-8", errors="replace").split(CRLF):
                 if line.lower().startswith("content-length:"):
                     try:
                         cl = int(line.split(":", 1)[1].strip())
                     except (ValueError, IndexError):
                         cl = 0
                     break
-            if cl > 0:
-                sep_idx   = text.find(CRLFCRLF)
-                already   = (len(buf) - (sep_idx + 4)) if sep_idx >= 0 else 0
-                remaining = max(0, cl - already)
-                while remaining > 0:
-                    chunk = sock.recv(min(remaining, 4096))
-                    if not chunk:
-                        break
-                    buf       += chunk
-                    remaining -= len(chunk)
-            return buf.decode("utf-8", errors="replace")
+            body = buf[sep + 4:]
+            while len(body) < cl:
+                chunk = sock.recv(min(cl - len(body), 4096))
+                if not chunk:
+                    break
+                body += chunk
+            conn["pending"] = body[cl:]
+            return head + body[:cl]
+
+        def roundtrip(method: str, cseq: int,
+                      extra: dict | None = None,
+                      uri: str = "") -> str:
+            """Send one RTSP request and read its reply (3.8.0-rc1.0: the
+            reply with this CSeq; an older reply left in the buffer is
+            skipped). Raises socket exceptions if the connection dies."""
+            extra = dict(extra or {})
+            if conn["closing"]:
+                if reopens >= MAX_REOPENS:
+                    raise ConnectionError("camera closed the connection too often")
+                _reopen()
+                extra.pop("Authorization", None)     # old nonce: never on a new connection
+            hdr = "".join(k + ": " + v + CRLF for k, v in extra.items())
+            req = method + " " + uri + " RTSP/1.0" + CRLF
+            req += "CSeq: " + str(cseq) + CRLF + "User-Agent: " + user_agent + CRLF + hdr + CRLF
+            sock.sendall(req.encode())
+            text = ""
+            for _ in range(3):
+                text = _read_message().decode("utf-8", errors="replace")
+                m = re.search(r"(?im)^cseq:\s*(\d+)", text)
+                if m and int(m.group(1)) < cseq:
+                    _log(f"skipped an old reply (CSeq {m.group(1)}, sent {cseq})")
+                    continue
+                break
+            if re.search(r"(?im)^connection:\s*close", text):
+                conn["closing"] = True
+            return text
 
         for path_idx, path in enumerate(paths):
             full_path = path + extra_query
@@ -735,14 +795,10 @@ def _probe_rtsp_paths_single_socket(
                     else:
                         _log(f"OPTIONS → 401 with no WWW-Authenticate "
                              f"— skipping path")
-                        consecutive_same_realm_401s = 0
                         continue
                 else:
                     _log(f"OPTIONS → {resp.split(CRLF)[0].strip()!r} "
                          f"— skipping path")
-                    # 2.4.0-rc2.4: reset early-bail counter — non-401
-                    # response means this isn't a same-realm-401 streak.
-                    consecutive_same_realm_401s = 0
                     # Path-level rejection: try next path, socket likely still alive
                     continue
 
@@ -756,15 +812,8 @@ def _probe_rtsp_paths_single_socket(
                 _log(f"DESCRIBE exception → bailing: {e}")
                 return (None, looks_like_rtsp)
             if "RTSP/1.0 200" in resp:
-                # 2.4.0-rc2.4: reset early-bail counter — got a 200,
-                # streak of consecutive same-realm 401s is broken.
-                consecutive_same_realm_401s = 0
                 pass  # continue to SDP parse
-            elif "401" in resp:
-                # 2.4.0-rc2.4: extract realm for the early-bail
-                # counter. Need to do this regardless of whether
-                # collect_locked is enabled, because the counter
-                # decision is independent.
+            elif "401" in resp.split(CRLF)[0]:
                 _401_realm = ""
                 _auth_line_global = next(
                     (l for l in resp.splitlines()
@@ -854,51 +903,17 @@ def _probe_rtsp_paths_single_socket(
                                  f"(got {realm!r}, expected "
                                  f"{expected_realm!r}) — not surfacing")
                 if not username:
+                    # 3.8.0-rc1.0 (B54): at scan time the first 401 means
+                    # "password needed": the camera is identified, and its
+                    # streams are read after the password is entered.
+                    if stop_at_401 and not found_working_url and not deep_reprobe_mode:
+                        log.info(pfx + f" 401 on {path} — password needed; "
+                                 f"the walk stops here (realm={_401_realm!r})")
+                        if host_meta is not None:
+                            host_meta["rtsp_needs_password"] = True
+                            host_meta["rtsp_401_path"] = path
+                        return (None, looks_like_rtsp)
                     _log(f"DESCRIBE → 401 (no creds) — skipping {path}")
-                    # 2.4.0-rc2.4: early-bail counter. Track consecutive
-                    # 401s that share the same realm. After N hits, we
-                    # have high confidence that all remaining paths will
-                    # also 401 with the same realm (auth is enforced at
-                    # the server level per RFC 7235 §2.2). Bail out and
-                    # save state so the Deep Re-Probe button can resume
-                    # the walk on demand.
-                    if early_bail_realm == "" and _401_realm:
-                        early_bail_realm = _401_realm
-                    if _401_realm and _401_realm == early_bail_realm:
-                        consecutive_same_realm_401s += 1
-                    else:
-                        # Different realm OR no realm — reset counter
-                        consecutive_same_realm_401s = 0
-                        if _401_realm:
-                            early_bail_realm = _401_realm
-                            consecutive_same_realm_401s = 1
-                    paths_tried_count = path_idx + 1
-                    if consecutive_same_realm_401s >= EARLY_BAIL_THRESHOLD:
-                        # 2.4.0-rc2.5: in deep_reprobe_mode the user
-                        # explicitly wants to walk every path —
-                        # don't bail out, just keep going so all
-                        # remaining 401s get surfaced as locked
-                        # candidates. The original rc2.4 bail logic
-                        # is the right default for discovery scans
-                        # (saves ~5s/camera) but wrong here.
-                        if deep_reprobe_mode:
-                            _log(f"early-bail threshold reached but "
-                                 f"deep_reprobe_mode=True — continuing "
-                                 f"to enumerate all locked candidates")
-                            continue
-                        # 2.4.0-rc2.5: log at INFO unconditionally
-                        # (was using _log which downgrades to DEBUG
-                        # for unlabeled walks — i.e. all scan-time
-                        # walks, hiding evidence that the optimization
-                        # was firing during normal scans).
-                        log.info(pfx + f" Layer 1 early-bail: "
-                                 f"{EARLY_BAIL_THRESHOLD} consecutive "
-                                 f"401s with realm={early_bail_realm!r} "
-                                 f"— remaining {len(paths) - paths_tried_count} "
-                                 f"path(s) will likely also 401; saving "
-                                 f"state for Deep Re-Probe")
-                        bailed_early = True
-                        break
                     continue
                 # Capture auth_val from this 401 if we haven't already
                 if not auth_val:
@@ -909,52 +924,71 @@ def _probe_rtsp_paths_single_socket(
                 if not auth_val:
                     _log("DESCRIBE → 401 with no WWW-Authenticate — skipping")
                     continue
-                auth_hdr = _build_auth(auth_val, "DESCRIBE", rtsp_url)
-                if not auth_hdr:
-                    _log(f"DESCRIBE → unparseable auth: {auth_val[:60]!r}")
-                    continue
-                try:
-                    resp = roundtrip("DESCRIBE", next_cseq,
-                                     {"Accept": "application/sdp",
-                                      "Authorization": auth_hdr},
-                                     uri=rtsp_url)
-                    next_cseq += 1
-                except Exception as e:
-                    _log(f"DESCRIBE-auth exception → bailing: {e}")
-                    return (None, looks_like_rtsp)
-                if "RTSP/1.0 200" not in resp:
-                    _log(f"DESCRIBE-auth → {resp.split(CRLF)[0].strip()!r}")
-                    # 2.5.0-rc1.0: auth_attempt_lockout policy. For
-                    # brands whose throttle is a per-IP failed-auth
-                    # counter (Lorex/Dahua DVR-NVR family: 10 failed
-                    # attempts then ~30 min lockout or until power-
-                    # cycle), continuing the walk after a Digest-auth-
-                    # rejected response burns additional attempts on
-                    # credentials we already know are wrong. Stop the
-                    # entire walk after the first auth rejection so
-                    # the user surfaces a clean "credentials wrong"
-                    # failure with one used attempt. Only fires when
-                    # host_meta plumbed the throttle type through
-                    # (find_rtsp_path does this when the brand entry
-                    # is matched). Sets a flag on host_meta so caller
-                    # (cred-auth) can surface a counter-aware message.
-                    _walker_throttle = ""
-                    if host_meta:
-                        _walker_throttle = str(host_meta.get(
-                            "walker_throttle_type", "") or "")
-                    if _walker_throttle == "auth_attempt_lockout":
-                        _log(f"auth_attempt_lockout brand — bailing walk "
-                             f"after first auth rejection (preserves "
-                             f"remaining attempts before camera lockout)")
-                        if host_meta is not None:
-                            host_meta["walker_auth_lockout_bailed"] = True
-                        return (None, looks_like_rtsp)
+                # 3.8.0-rc1.0 (B54): the login rule. One retry only when the
+                # camera says the nonce is stale, or the connection was
+                # reopened (its old nonce is not valid there).
+                retried = False
+                rejected = False
+                skip_path = False
+                while True:
+                    auth_hdr = _build_auth(auth_val, "DESCRIBE", rtsp_url)
+                    if not auth_hdr:
+                        _log(f"DESCRIBE → unparseable auth: {auth_val[:60]!r}")
+                        skip_path = True
+                        break
+                    conn["reopened"] = False
+                    try:
+                        resp = roundtrip("DESCRIBE", next_cseq,
+                                         {"Accept": "application/sdp",
+                                          "Authorization": auth_hdr},
+                                         uri=rtsp_url)
+                        next_cseq += 1
+                    except Exception as e:
+                        _log(f"DESCRIBE-auth exception → bailing: {e}")
+                        return (found_list[0] if found_list else None, looks_like_rtsp)
+                    status_line = resp.split(CRLF)[0].strip()
+                    if "RTSP/1.0 200" in resp:
+                        login_ok = True
+                        break
+                    if "401" not in status_line:
+                        _log(f"DESCRIBE-auth → {status_line!r} — skipping {path}")
+                        skip_path = True
+                        break
+                    chal_line = next((l for l in resp.splitlines()
+                                      if l.lower().startswith("www-authenticate:")), "")
+                    chal = chal_line.split(":", 1)[-1].strip() if chal_line else ""
+                    stale = bool(re.search(r'stale\s*=\s*"?true', chal, re.IGNORECASE))
+                    if chal and (stale or conn["reopened"]) and not retried:
+                        _log("DESCRIBE-auth → 401 with a fresh challenge "
+                             f"({'stale nonce' if stale else 'new connection'}) — one retry")
+                        auth_val = chal
+                        retried = True
+                        continue
+                    if not chal:
+                        _log(f"DESCRIBE-auth → 401 without a challenge — final, the walk stops")
+                        rejected = True
+                    elif login_ok:
+                        skipped_401s += 1
+                        _log(f"DESCRIBE-auth → 401 after an earlier success — this path is "
+                             f"not allowed for the login; skipping ({skipped_401s}/{MAX_SKIPPED_401S})")
+                        if skipped_401s > MAX_SKIPPED_401S:
+                            log.info(pfx + " too many refused paths after a success — the walk stops")
+                            return (found_list[0] if found_list else None, looks_like_rtsp)
+                        skip_path = True
+                    else:
+                        rejected = True
+                    break
+                if rejected:
+                    log.info(pfx + f" login rejected on {path} — password rejected or camera "
+                             f"locked; the walk stops (no more login attempts)")
+                    if host_meta is not None:
+                        host_meta["login_rejected"] = True
+                        host_meta["walker_auth_lockout_bailed"] = True
+                    return (found_list[0] if found_list else None, looks_like_rtsp)
+                if skip_path:
                     continue
             else:
                 _log(f"DESCRIBE → {resp.split(CRLF)[0].strip()!r} — skipping")
-                # 2.4.0-rc2.4: reset early-bail counter — non-401
-                # response means this isn't a same-realm-401 streak.
-                consecutive_same_realm_401s = 0
                 continue
 
             # ── Parse SDP for first m=video track URL ───────────────
@@ -1053,13 +1087,22 @@ def _probe_rtsp_paths_single_socket(
                 _log(f"continuing walk to collect locked candidates "
                      f"after first success: {rtsp_url}")
                 continue
-            # Normal mode (or second+ success in collect mode): bail
-            return (rtsp_url, True)
+            if collect_locked:
+                return (found_working_url, True)
+            # 3.8.0-rc1.0 (B54): with a login, the 0/1/2 rule asks for up
+            # to want_streams working streams.
+            found_list.append(rtsp_url)
+            if len(found_list) >= want_streams:
+                return (found_list[0], True)
+            _log(f"stream {len(found_list)}/{want_streams} found: {rtsp_url} — walking on")
+            continue
 
         # Walked every path. In collect mode, return the first working
         # URL we found (could be None if nothing worked).
         if collect_locked and found_working_url:
             return (found_working_url, True)
+        if found_list:
+            return (found_list[0], True)
 
         # Walked every path without finding a streamable track
         return (None, looks_like_rtsp)
@@ -1083,19 +1126,8 @@ def _probe_rtsp_paths_single_socket(
         # has no saved creds.
         if host_meta is not None and collect_locked:
             host_meta["locked_streams"] = locked_streams
-        # 2.4.0-rc2.4: persist early-bail state. When Layer 1 bailed
-        # after EARLY_BAIL_THRESHOLD consecutive same-realm 401s, save
-        # what we tried + what's remaining onto host_meta so the
-        # Deep Re-Probe button can resume the walk on demand without
-        # re-walking what we already know will 401.
-        if host_meta is not None and bailed_early:
-            host_meta["early_bail_reason"] = "layer1_consecutive_401s"
-            host_meta["early_bail_realm"] = early_bail_realm
-            host_meta["early_bail_paths_tried"] = list(
-                paths[:paths_tried_count])
-            host_meta["early_bail_paths_remaining"] = list(
-                paths[paths_tried_count:])
-            host_meta["early_bail_at"] = datetime.datetime.utcnow().isoformat()
+        if host_meta is not None and found_list:
+            host_meta["walk_found"] = list(found_list)
         if sock:
             try:
                 sock.close()
@@ -1500,7 +1532,9 @@ def _validate_rtsp_urls_single_socket(
 
 def find_rtsp_path(ip: str, port: int,
                    username: str = "", password: str = "",
-                   host_meta: dict | None = None) -> str | None:
+                   host_meta: dict | None = None, *,
+                   scan: bool = False, deep: bool = False,
+                   want_streams: int = 1, path_set: str = "all") -> str | None:
     """rc2 Two-layer RTSP path probe with brand-aware short-circuits.
 
     Layer 1 — Single-socket walk through all paths (always tried first
@@ -1514,6 +1548,16 @@ def find_rtsp_path(ip: str, port: int,
     host_meta — optional camera dict (mac_vendor, hostname, page_title,
     etc.) used to identify the brand BEFORE the probe begins. Without it,
     the function falls back to brand-agnostic two-layer behavior.
+
+    3.8.0-rc1.0 (B54):
+    scan — the network scan: the walk stops at the first 401 (password
+      needed), and Layer 2 never runs.
+    deep — Deep Re-Probe: every path, 401 paths kept as locked streams,
+      then Layer 2 (also on skip_layer2 brands; never on rate-limited ones).
+    want_streams — with a login: stop when this many streams work.
+    path_set — "brand" (the brand's paths and DVR recipe only), "universal"
+      (the universal list without the brand's paths) or "all".
+    Password entry stops at the first rejected login (see the walker).
     """
     # ── Brand identification — first pass (uses signals already in
     #    host_meta: mac_vendor, page_title, server_header, nmap_product,
@@ -1557,14 +1601,8 @@ def find_rtsp_path(ip: str, port: int,
         if sdb:
             db_paths = list(sdb.get("rtsp", []))
 
-    # 2.5.0-rc1.0: streaming_recipe consumer. Brands with
-    # `streaming_recipe.type == "channel_iterate"` (Lorex/Dahua DVR-NVR
-    # family, Hikvision NVR, Uniview NVR, Dahua direct, Amcrest, etc.)
-    # need DVR-channel-specific paths, not the universal single-camera
-    # paths. Expand the recipe and prepend it so channel iteration
-    # happens BEFORE generic fallbacks. The fallback paths from the
-    # recipe (legacy firmware URLs) come last in the recipe list itself,
-    # see _expand_channel_iterate_paths.
+    # 2.5.0-rc1.0: streaming_recipe consumer (channel_iterate brands: DVR
+    # channel paths come first). The walker gets the populated-channel test.
     recipe_paths: list[str] = []
     recipe = (brand_entry or {}).get("streaming_recipe") or {}
     if recipe.get("type") == "channel_iterate":
@@ -1573,10 +1611,6 @@ def find_rtsp_path(ip: str, port: int,
             log.info(f"  RTSP path list: brand={brand_name} streaming_recipe "
                      f"channel_iterate expanded to {len(recipe_paths)} paths "
                      f"(channels capped at 16)")
-            # Tell the walker this is a channel-iteration walk so it can
-            # apply the populated-channel SDP heuristic and the
-            # auth_attempt_lockout bail-on-first-failure policy if either
-            # is configured on the brand entry.
             if host_meta is not None:
                 host_meta["walker_streaming_recipe_active"] = True
                 host_meta["walker_populated_channel_test"] = (
@@ -1584,30 +1618,33 @@ def find_rtsp_path(ip: str, port: int,
                 )
                 host_meta["walker_throttle_type"] = throttle_type
 
-    seen: set[str]   = set()
-    ordered: list[str] = []
-    for p in recipe_paths + db_paths + RTSP_PATHS:
-        if p not in seen:
-            seen.add(p)
-            ordered.append(p)
+    brand_list: list[str] = []
+    for pth in recipe_paths + db_paths:
+        if pth not in brand_list:
+            brand_list.append(pth)
+    universal = [pth for pth in RTSP_PATHS if pth not in brand_list]
+    if path_set == "brand":
+        ordered = brand_list
+    elif path_set == "universal":
+        ordered = universal
+    else:
+        ordered = brand_list + universal
+    if not ordered:
+        return None
+    if host_meta is not None:
+        for k in ("rtsp_needs_password", "login_rejected"):
+            host_meta.pop(k, None)
 
     # ── Layer 1: single-socket walk ──────────────────────────────────
     label_for_log = f"{ip}:{port}"
     if brand_name:
         label_for_log += f" ({brand_name})"
+    mode = "scan" if scan else ("Deep Re-Probe" if deep else ("login" if username else "no login"))
     log.info(f"  RTSP probe: Layer 1 (single-socket walk, "
-             f"{len(ordered)} paths) — {label_for_log}")
+             f"{len(ordered)} paths, {mode}) — {label_for_log}")
 
-    # 2.4.0-rc2.0 (Layered Stream Discovery): enable locked-stream
-    # collection when:
-    #  • no credentials are supplied to this call (creds-already-known
-    #    means cred-auth flow handles enumeration directly)
-    #  • brand is NOT marked skip_layer2 — skip_layer2 brands have known
-    #    fragile multi-attempt behavior (per-IP TCP rate-limit, lockout
-    #    counters); we don't grind extra DESCRIBEs against them
-    #  • host_meta has a captured rtsp_auth_realm — without one we
-    #    can't filter by realm; safer to skip collection than surface
-    #    locked streams that need different creds
+    # 2.4.0-rc2.0 (Layered Stream Discovery): locked-stream collection
+    # after a working no-login stream; Deep Re-Probe always collects.
     skip_layer2_brand = bool(
         brand_entry and brand_entry.get("skip_layer2", False)
     )
@@ -1616,32 +1653,28 @@ def find_rtsp_path(ip: str, port: int,
         captured_realm = str(host_meta.get("rtsp_auth_realm", "") or "").strip()
     enable_locked_collect = bool(
         (not username)
-        and (not skip_layer2_brand)
-        and captured_realm
+        and (deep or ((not skip_layer2_brand) and captured_realm))
     )
     if enable_locked_collect:
         log.info(f"  RTSP probe: Layered Stream Discovery enabled "
                  f"(realm={captured_realm!r})")
 
-    found, looks_like_rtsp = _probe_rtsp_paths_single_socket(
-        ip, port, ordered, username, password,
-        timeout=sock_timeout, label="", host_meta=host_meta,
-        collect_locked=enable_locked_collect,
-        expected_realm=captured_realm,
-        # 2.4.0-rc2.6: when we have a brand recipe, pass its paths so
-        # the walker can filter locked candidates to paths the brand
-        # actually serves. db_paths was already computed above from
-        # _match_stream_db. Empty list → no filter (backward-compat).
-        brand_recipe_paths=db_paths,
-    )
-    # rc2.1.1: re-run brand identification after the walk. The walker
-    # captured the RTSP Server: header into host_meta["server_header"],
-    # which is a strong identification signal especially for cameras
-    # whose mac_vendor was unavailable (e.g. Microseven — its TCP
-    # rate-limit prevented inclusion in nmap_results, so OUI lookup
-    # had nothing to feed). The Hipcam RealServer firmware family
-    # always returns `Server: Hipcam RealServer/V1.0` which matches
-    # the http_headers field in the Hipcam/Microseven CAMERA_DB entry.
+    def _walk(extra_query: str = "") -> tuple[str | None, bool]:
+        return _probe_rtsp_paths_single_socket(
+            ip, port, ordered, username, password,
+            timeout=sock_timeout, extra_query=extra_query, label="",
+            host_meta=host_meta,
+            collect_locked=enable_locked_collect,
+            expected_realm="" if deep else captured_realm,
+            deep_reprobe_mode=deep,
+            brand_recipe_paths=db_paths,
+            stop_at_401=scan and not username,
+            want_streams=max(1, want_streams),
+        )
+
+    found, looks_like_rtsp = _walk()
+    # rc2.1.1: re-run brand identification after the walk (the walker
+    # captured the RTSP Server: header, e.g. "Hipcam RealServer/V1.0").
     if host_meta is not None and not brand_name and host_meta.get("server_header"):
         try:
             re_id = _identify_camera_brand(host_meta, force=True)
@@ -1657,22 +1690,30 @@ def find_rtsp_path(ip: str, port: int,
     if found:
         log.info(f"  RTSP OK (Layer 1): {found}")
         return found
+    stopped = bool(host_meta and (host_meta.get("rtsp_needs_password")
+                                  or host_meta.get("login_rejected")))
 
-    # ── Layer 1 fallback: Axis Companion query-param retry ───────────
-    # Only triggers when the brand DB explicitly says this camera needs
-    # the query param. Cheap to attempt; one extra single-socket pass.
-    if throttle_type == "requires_query_param":
-        log.info(f"  RTSP probe: Layer 1 retry with Axis-Orig-Sw=true "
-                 f"({brand_name}, requires_query_param)")
-        found, lr2 = _probe_rtsp_paths_single_socket(
-            ip, port, ordered, username, password,
-            timeout=sock_timeout, extra_query="?Axis-Orig-Sw=true",
-            label="", host_meta=host_meta,
-        )
+    # 3.8.0-rc1.0 (B54): the Axis query retry is its own field on the brand
+    # (rtsp_query_retry), so it runs. One more Layer 1 pass, only after the
+    # first found nothing and nothing stopped it.
+    query_retry = str((brand_entry or {}).get("rtsp_query_retry", "") or "")
+    if query_retry and not stopped:
+        log.info(f"  RTSP probe: Layer 1 retry with {query_retry} ({brand_name})")
+        found, lr2 = _walk(query_retry)
         looks_like_rtsp = looks_like_rtsp or lr2
         if found:
             log.info(f"  RTSP OK (Layer 1+query): {found}")
             return found
+        stopped = bool(host_meta and (host_meta.get("rtsp_needs_password")
+                                      or host_meta.get("login_rejected")))
+
+    if stopped:
+        return None
+
+    # 3.8.0-rc1.0 (B54): no Layer 2 at scan time. No camera is documented
+    # that needs a new connection per path (docs/B54-Followup-Research.md).
+    if scan:
+        return None
 
     # ── Layer 2 short-circuit: per-IP TCP rate-limit ─────────────────
     if throttle_type == "rate_limit_per_ip_tcp":
@@ -1681,26 +1722,13 @@ def find_rtsp_path(ip: str, port: int,
         return None
 
     # ── 2.4.0-rc2.1: Layer 2 short-circuit on skip_layer2 brands ─────
-    # Brands with skip_layer2=True are documented as having fragile
-    # multi-attempt behavior — typically lockout counters or per-stream
-    # session caps that punish repeated DESCRIBE attempts. Lorex/Dahua
-    # DVR-NVR family is the canonical example: Layer 2 grinds 50+ seconds
-    # through 10 sockets × 5s sleep on a multi-channel DVR where the
-    # right answer is "use the streaming_recipe with channel iteration"
-    # (consumed in rc3.x), not "try more single-channel paths."
-    # 2.4.0-rc2.9: also honor host_meta["host_skip_layer2"], propagated
-    # by run_scan when an EARLIER port on this IP triggered the skip.
-    # Lorex/Dahua case: port 554 IDs as "Lorex / Dahua DVR-NVR Family"
-    # (skip_layer2: True), but port 80 IDs as plain "Lorex" (no
-    # skip_layer2). Without inheritance, port 80 would run Layer 2
-    # for ~45s wastefully on an IP we already know can't speak it.
+    # Deep Re-Probe overrides it (CrystalHeeler's design, 2.4.0-rc2.9).
     inherited_skip_layer2 = bool(
         host_meta and host_meta.get("host_skip_layer2"))
-    if skip_layer2_brand or inherited_skip_layer2:
+    if (skip_layer2_brand or inherited_skip_layer2) and not deep:
         if skip_layer2_brand:
             log.info(f"  RTSP Layer 2 skipped: {brand_name} marked "
                      f"skip_layer2 (use streaming_recipe / channel iteration)")
-            # Mark host_meta so run_scan can propagate to alt ports
             if host_meta is not None:
                 host_meta["brand_skip_layer2"] = True
         else:
@@ -1708,36 +1736,7 @@ def find_rtsp_path(ip: str, port: int,
                      f"skip_layer2 from earlier port on this host")
         return None
 
-    # ── 2.4.0-rc2.4: Layer 2 short-circuit on Layer 1 early-bail ────
-    # If Layer 1 hit EARLY_BAIL_THRESHOLD consecutive 401s with the
-    # same realm and bailed out (state was written to host_meta in
-    # _probe_rtsp_paths_single_socket's finally block), Layer 2's
-    # multi-socket walk will get the same 401 with the same realm on
-    # every fresh socket — auth is enforced server-side, not socket-
-    # side, per RFC 7235 §2.2. Skip Layer 2 immediately and let the
-    # camera surface as needs_credentials. Users who want to verify
-    # against firmware-quirk cases (5% chance Layer 2 reveals
-    # something Layer 1 missed) can hit the per-card "Deep Re-Probe"
-    # button which re-runs Layer 2 on demand AND resumes the Layer 1
-    # walk on the unwalked remaining paths.
-    if (host_meta is not None
-            and host_meta.get("early_bail_reason") == "layer1_consecutive_401s"):
-        realm = host_meta.get("early_bail_realm", "")
-        log.info(f"  RTSP Layer 2 skipped: Layer 1 early-bailed after "
-                 f"5 consecutive 401s with realm={realm!r} — fresh sockets "
-                 f"won't change auth result. Use Deep Re-Probe button to "
-                 f"override.")
-        # Mark that we ALSO skipped Layer 2 so the Deep Re-Probe button
-        # knows to run Layer 2 in addition to resuming Layer 1.
-        host_meta["early_bail_reason"] = "layer1_then_layer2_skipped_401s"
-        return None
-
     # ── rc2.1: Layer 2 fast-bail — host doesn't speak RTSP at all ───
-    # If Layer 1 walked every path and got NO RTSP-formatted responses
-    # (server is HTTP, raw TCP, or otherwise non-RTSP), Layer 2 will
-    # waste 50+s grinding through 10 sockets × 5s sleep before its own
-    # bail kicks in. Skip it. Common when a Hikvision NVR is probed on
-    # port 80 (HTTP) instead of 554 (RTSP) by the cred-relogin flow.
     if not looks_like_rtsp:
         log.info(f"  RTSP Layer 2 skipped: {ip}:{port} did not respond "
                  f"with RTSP format on any path — likely wrong port or "
@@ -1757,9 +1756,8 @@ def find_rtsp_path(ip: str, port: int,
             log.info(f"  RTSP OK (Layer 2): {url}")
             return url
 
-        # Axis Companion retry-on-failure with query param
-        if throttle_type == "requires_query_param":
-            url_q = f"rtsp://{ip}:{port}{path}?Axis-Orig-Sw=true"
+        if query_retry:
+            url_q = f"rtsp://{ip}:{port}{path}{query_retry}"
             if probe_rtsp(url_q, username, password, timeout=sock_timeout):
                 log.info(f"  RTSP OK (Layer 2+query): {url_q}")
                 return url_q
@@ -2447,6 +2445,17 @@ def is_camera_positive(ip: str, port: int, service: str, product: str,
     return False
 
 
+def _onvif_envelope(body: str, security: str = "") -> str:
+    """A SOAP 1.2 envelope for an ONVIF media request."""
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"'
+        ' xmlns:trt="http://www.onvif.org/ver10/media/wsdl"'
+        ' xmlns:tt="http://www.onvif.org/ver10/schema">'
+        f"{security}<s:Body>{body}</s:Body></s:Envelope>"
+    )
+
+
 def _onvif_soap(url: str, body: str,
                 username: str = "", password: str = "", timeout: int = 6) -> str | None:
     import urllib.request
@@ -2480,13 +2489,7 @@ def _onvif_soap(url: str, body: str,
             f'</Security>'
             f'</s:Header>'
         )
-    envelope = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"'
-        ' xmlns:trt="http://www.onvif.org/ver10/media/wsdl"'
-        ' xmlns:tt="http://www.onvif.org/ver10/schema">'
-        f"{security}<s:Body>{body}</s:Body></s:Envelope>"
-    )
+    envelope = _onvif_envelope(body, security)
     # Try SOAP 1.2 first (application/soap+xml), then fall back to SOAP 1.1
     # (text/xml) for cameras like Hikvision that return HTTP 400 on SOAP 1.2.
     for content_type in ("application/soap+xml; charset=utf-8",
@@ -2520,6 +2523,11 @@ def onvif_get_profiles(onvif_url: str, username: str, password: str) -> list[dic
     xml = _onvif_soap(onvif_url, "<trt:GetProfiles/>", username, password)
     if not xml:
         return []
+    return _onvif_parse_profiles(xml)
+
+
+def _onvif_parse_profiles(xml: str) -> list[dict]:
+    """The profiles in a GetProfiles answer (token, name, resolution, codecs)."""
     profiles = []
     enc_map  = {"H264": "h264", "H265": "hevc", "JPEG": "mjpeg",
                 "H264E": "h264", "MPEG4": "mpeg4"}
@@ -2569,6 +2577,55 @@ def onvif_get_profiles(onvif_url: str, username: str, password: str) -> list[dic
     except Exception as e:
         log.debug(f"GetProfiles parse: {e}")
     return profiles
+
+
+# 3.8.0-rc1.0 (B54): the answers that mean "log in first". ONVIF Core sends
+# the SOAP fault ter:NotAuthorized; many cameras send HTTP 401 instead.
+_ONVIF_LOGIN_FAULT = re.compile(r"NotAuthorized|not\s+authori[sz]ed|Sender not Authorized",
+                                re.IGNORECASE)
+
+
+def onvif_probe_no_login(onvif_url: str, timeout: int = 6) -> tuple[str, list[dict]]:
+    """3.8.0-rc1.0 (B54): ask ONVIF for its profiles without a login.
+
+    ("login", [])        the camera asks for a login: it is an ONVIF camera
+                         that needs a password, so the scan stops there.
+    ("profiles", [...])  it gave its profiles without a login.
+    ("none", [])         no answer, or one AnyCam cannot read.
+    One request, plus one more for the older SOAP 1.1 form. No login is
+    sent, so a camera's failed-login counter is not touched.
+    """
+    import urllib.error
+    import urllib.request
+    envelope = _onvif_envelope("<trt:GetProfiles/>").encode("utf-8")
+    for content_type in ("application/soap+xml; charset=utf-8",
+                         "text/xml; charset=utf-8"):
+        try:
+            req = urllib.request.Request(onvif_url, envelope, method="POST")
+            req.add_header("Content-Type", content_type)
+            req.add_header("SOAPAction", '""')
+            req.add_header("User-Agent", f"AnyCam/{CURRENT_VERSION}")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                xml = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = ""
+            if e.code in (401, 403) or _ONVIF_LOGIN_FAULT.search(body):
+                return ("login", [])
+            if e.code == 400 and content_type.startswith("application/soap"):
+                continue            # retry with SOAP 1.1 (Hikvision)
+            log.debug(f"ONVIF no-login GetProfiles ({onvif_url}): HTTP {e.code}")
+            return ("none", [])
+        except Exception as e:
+            log.debug(f"ONVIF no-login GetProfiles ({onvif_url}): {e}")
+            return ("none", [])
+        if _ONVIF_LOGIN_FAULT.search(xml):
+            return ("login", [])
+        profiles = _onvif_parse_profiles(xml)
+        return ("profiles", profiles) if profiles else ("none", [])
+    return ("none", [])
 
 
 def onvif_get_stream_uri(onvif_url: str, token: str,
