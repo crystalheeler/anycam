@@ -1,3 +1,12 @@
+## 3.8.0-rc2
+
+Fixes for 3.8.0-rc1.1: DVRs regained their channels, and a slow login no longer looks like it failed.
+
+### Bugs fixed
+
+- **A DVR showed only one channel.** The scan no longer reads the camera's RTSP identity, so a Lorex or Dahua recorder was mistaken for a single camera and its other channels never appeared. The scan now reads the one piece of identity it needs, and the channels come back.
+- **A login that worked could look like it failed.** On a slow login the request could time out in Home Assistant while the add-on finished and succeeded; the page stayed on the form. The page now re-checks after a slow login and shows the camera. The login fields are also locked while a login runs.
+
 ## 3.8.0-rc1.1
 
 A fix for 3.8.0-rc1.0: logging in to a camera failed when the camera dropped the connection after its first stream.

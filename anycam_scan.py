@@ -1492,6 +1492,12 @@ def _onvif_card(ip: str, onvif: dict, meta: dict, prev: dict, reason: str) -> di
         "mac_addr":      meta.get("mac_addr", ""),
         "mac_vendor":    meta.get("mac_vendor", ""),
         "onvif_scopes":  onvif.get("onvif_scopes", ""),
+        # 3.8.0-rc2: the RTSP realm/fingerprint identifies the brand at password
+        # entry (the DVR family is known by its realm), so channel enumeration runs.
+        "rtsp_auth_realm":     meta.get("rtsp_auth_realm", ""),
+        "rtsp_server_header":  meta.get("rtsp_server_header", ""),
+        "rtsp_auth_scheme":    meta.get("rtsp_auth_scheme", ""),
+        "rtsp_public_methods": meta.get("rtsp_public_methods", ""),
         "locked_streams": [],
     }
 
@@ -1513,6 +1519,26 @@ async def _scan_onvif_first(ip: str, onvif: dict, meta: dict, prev: dict,
     media_url = _onvif_media_url(ip, 80, onvif.get("xaddrs", ""))
     answer, profiles = await loop.run_in_executor(_THREAD_POOL, onvif_probe_no_login, media_url)
     if answer == "login":
+        # 3.8.0-rc2 (B54 fix): capture the RTSP auth realm with one OPTIONS, so
+        # brands distinguished by it are recognized. The Lorex/Dahua DVR-NVR
+        # family is identified by its "Login to <hex>" realm; without it the DVR
+        # reads as a plain single camera and its channels never enumerate.
+        try:
+            fp = await loop.run_in_executor(_THREAD_POOL, _rtsp_options_fingerprint, ip, 554)
+            if fp.get("auth_realm"):
+                meta["rtsp_auth_realm"] = fp["auth_realm"]
+            if fp.get("server_header"):
+                meta["rtsp_server_header"] = fp["server_header"]
+            if fp.get("auth_scheme"):
+                meta["rtsp_auth_scheme"] = fp["auth_scheme"]
+            if fp.get("public_methods"):
+                meta["rtsp_public_methods"] = ",".join(fp["public_methods"])
+            if meta.get("rtsp_auth_realm"):
+                _identify_camera_brand(meta, force=True)
+                log.info(f"  ONVIF {ip}: RTSP realm {meta['rtsp_auth_realm']!r} → "
+                         f"{meta.get('manufacturer') or 'unidentified'}")
+        except Exception as e:
+            log.debug(f"  RTSP fingerprint (ONVIF first) {ip}: {e}")
         log.info(f"  ONVIF {ip}: asks for a login — card needs a password; no RTSP walk, "
                  f"its other ports are not probed")
         return _onvif_card(ip, onvif, meta, prev, "ONVIF asks for a login")

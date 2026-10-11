@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 10 October 2026. Current store version: 3.8.0-rc1.1 (B54 + login hotfix), 2026-10-10 (last stable was 3.7.5). 3.8.0-rc1.0 broke login on cameras that drop the connection after the first stream; rc1.1 fixes it. Next: field-test 3.8.0-rc1.0.
+**Compiled:** Updated 10 October 2026. Current store version: 3.8.0-rc2 (B54 + fixes), 2026-10-10 (last stable was 3.7.5). rc1.0 broke login; rc1.1 fixed login; rc2 fixes DVR channel enumeration (realm identity) and the slow-login UI. rc's are single-digit from now (CrystalHeeler, 2026-10-10). Next: field-test 3.8.0-rc1.0.
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.

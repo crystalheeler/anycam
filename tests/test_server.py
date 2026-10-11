@@ -1952,11 +1952,12 @@ async def test_scan():
         check("U5 a device found by ONVIF only: a card that asks for a password",
               o["protocol"] == "ONVIF" and o["status"] == "needs_credentials"
               and o["requires_credentials"] is True and o["verdict_reason"] == "ONVIF asks for a login")
-        check("U5 ... 3.8.0-rc1.0 (B54): one ONVIF request without a login; no web page, "
-              "no RTSP check, no path search",
-              calls["identity"] == [] and calls["fp"] == [] and calls["find"] == []
+        check("U5 ... B54 + 3.8.0-rc2: one ONVIF request without a login, and one RTSP realm "
+              "fingerprint; no web page, no path search",
+              calls["identity"] == [] and calls["fp"] == [("10.0.0.70", 554)] and calls["find"] == []
               and calls["onvif"] == ["http://10.0.0.33/onvif/media",
-                                     "http://10.0.0.70:8080/onvif/media"], str(calls["onvif"]))
+                                     "http://10.0.0.70:8080/onvif/media"],
+              f"fp={calls['fp']} onvif={calls['onvif']}")
         st = cd.SCAN_STATE
         check("U6 the scan ends: not running, 100%, counts in the message, cameras saved once",
               st["running"] is False and st["progress"] == 100 and st["stage"] == 0

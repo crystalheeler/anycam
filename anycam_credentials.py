@@ -356,7 +356,13 @@ async def _enumerate_dvr_channels_after_auth(camera_id: str) -> None:
         return
 
     ip   = cam.get("ip", "")
-    port = cam.get("port", 554)
+    # 3.8.0-rc2: the RTSP port is the one the working stream is on, not the
+    # card's discovery port (an ONVIF card's port is 80). Parse it from the
+    # stream URL so channel enumeration talks to :554, not :80.
+    try:
+        port = urlparse(primary_url).port or cam.get("port", 554)
+    except (ValueError, AttributeError):
+        port = cam.get("port", 554)
 
     # Build candidate URLs for OTHER channels. Main stream only here —
     # we want to know "which channels have cameras," not validate every

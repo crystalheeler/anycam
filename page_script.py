@@ -3586,6 +3586,14 @@ async function submitCreds(cid) {
     ? 'Authenticating (Camera rate-limited, ~30 seconds)…'
     : 'Verifying…';
   e.classList.add('visible');
+  // 3.8.0-rc2: stop a second submit while this one runs, and lock the fields
+  // so a slow login (several seconds) does not look idle or invite a re-type.
+  if (submitCreds._busy && submitCreds._busy[cid]) return;
+  (submitCreds._busy = submitCreds._busy || {})[cid] = true;
+  const _uEl = document.getElementById('u_' + cid);
+  const _pEl = document.getElementById('p_' + cid);
+  if (_uEl) _uEl.disabled = true;
+  if (_pEl) _pEl.disabled = true;
   try {
     const r = await fetch(BASE + '/api/credentials', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -3648,7 +3656,16 @@ async function submitCreds(cid) {
       }
     }
     else e.textContent = d.error || 'Connection failed.';
-  } catch { e.textContent = 'Network error.'; }
+  } catch {
+    // 3.8.0-rc2: the request can time out at the Home Assistant ingress while
+    // the add-on is still finishing a slow login — and then succeed. Re-sync
+    // the camera list so a login that really worked shows as a ready card,
+    // instead of leaving the user on the form thinking nothing happened.
+    e.textContent = 'Still working — checking…';
+    try { await loadCameras(); } catch {}
+  } finally {
+    if (submitCreds._busy) submitCreds._busy[cid] = false;
+  }
 }
 
 async function clearCreds(cid) {
