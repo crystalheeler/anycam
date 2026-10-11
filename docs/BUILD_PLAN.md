@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 10 October 2026. Current store version: 3.8.0-rc3 (B54 + B55 + fixes), 2026-10-10 (last stable was 3.7.5). rc1.0 broke login; rc1.1 fixed login; rc2 fixes DVR channel enumeration (realm identity) and the slow-login UI; rc3 fixes zone drawing from the Cog menu, adds a login prompt to appliance cards, corrects the appliance notes wording, and adds B55 (the scan skips confident non-cameras). rc's are single-digit from now (CrystalHeeler, 2026-10-10). Next: field-test 3.8.0-rc3.
+**Compiled:** Updated 11 October 2026. Current store version: 3.8.0 (stable, B54 + B55 + fixes), 2026-10-11 (previous stable was 3.7.5). The rc1.0 to rc3 line: rc1.0 broke login; rc1.1 fixed login; rc2 fixed DVR channel enumeration (realm identity) and the slow-login UI; rc3 fixed zone drawing from the Cog menu, added a login prompt to appliance cards, corrected the appliance notes wording, and added B55 (the scan skips confident non-cameras). 3.8.0 is rc3's code, field-tested on both systems (Chrome and the mobile HA app, CrystalHeeler 2026-10-11, no bugs). rc's are single-digit from now (CrystalHeeler, 2026-10-10). Next: UI and feature improvements (CrystalHeeler, to come).
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.

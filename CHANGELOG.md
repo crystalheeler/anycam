@@ -1,3 +1,26 @@
+## 3.8.0
+
+The scan is faster and asks each camera less, appliance cards offer a login, and devices that are clearly not cameras are skipped. This is the stable release of the 3.8.0-rc1 to 3.8.0-rc3 line.
+
+### Changes & improvements
+
+- **Faster, quieter scan (B54).** The scan now asks a camera only what it must to identify it: ONVIF once with no login first, then brand paths, and it stops at the first login prompt. An identified camera's other ports are left alone. Initial scans are noticeably faster.
+- **Skip confident non-cameras (B55).** The scan skips a host when a printer port is open, or when the MAC maker is a known non-camera brand. Printers and similar appliances are no longer probed.
+- **Appliance cards offer a login.** A camera built into an appliance (for example a robot vacuum or a litter robot) keeps its "Camera in an appliance" notes and now also shows a login prompt, so you can try a local login if the appliance has one.
+- **Password entry reads up to two streams.** Password entry gets a main and a sub stream by the 0/1/2 rule, stops at the first rejected login, and gives each DVR channel its own sub-stream.
+
+### Bugs fixed
+
+- **Login failed on many cameras.** Cameras that close the connection after their first stream (Hikvision, Lorex and Dahua recorders, the Hipcam family) no longer lose that stream.
+- **A DVR showed only one channel.** The scan reads the one piece of RTSP identity it needs, so a Lorex or Dahua recorder is recognized and its channels come back.
+- **A slow login could look like it failed.** The page now re-checks after a slow login and shows the camera, and the login fields are locked while a login runs.
+- **Could not draw a zone from the Cog menu.** The zone editor waits for the video to size before it lays out, so drawing works from the Cog menu as it does from Enhanced View.
+
+### Known issues
+
+- A camera using Smart Codec (H.264+/H.265+) may show a still picture until you turn Smart Codec off or set its I-frame interval equal to its frame rate.
+- A Hipcam/Microseven camera in a locked state needs a power cycle to recover.
+
 ## 3.8.0-rc3
 
 Zone drawing works again from the Cog menu, appliance cards now offer a login, and the scan skips devices it can confidently tell are not cameras.
