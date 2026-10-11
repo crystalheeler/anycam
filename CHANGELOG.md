@@ -1,3 +1,17 @@
+## 3.8.0-rc3
+
+Zone drawing works again from the Cog menu, appliance cards now offer a login, and the scan skips devices it can confidently tell are not cameras.
+
+### Changes & improvements
+
+- **Appliance cards now offer a login.** A camera built into an appliance (for example a robot vacuum or a litter robot) keeps its "Camera in an appliance" notes and now also shows a login prompt, so you can try a local login if the appliance has one.
+- **Scan skips confident non-cameras (B55).** The scan now skips a host when a printer port is open, or when the MAC maker is a known non-camera brand. This stops the scan from probing printers and other appliances.
+
+### Bugs fixed
+
+- **Could not draw a zone from the Cog menu.** Opening Edit Zones from a card's Cog menu left a canvas that would not draw, even with +New Zone. The editor now waits for the video to size before it lays out, so drawing works from the Cog menu as it does from Enhanced View.
+- **Corrected the appliance notes wording.** The note now reads that the camera's video may or may not be reachable only through the appliance maker's app.
+
 ## 3.8.0-rc2
 
 Fixes for 3.8.0-rc1.1: DVRs regained their channels, and a slow login no longer looks like it failed.

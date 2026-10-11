@@ -2337,6 +2337,19 @@ async function zoneEditOpen() {
   document.getElementById('zone-only').checked = _ze.zonesOnly;
   _zoneLayout();
   _zoneList();
+  // 3.8.0-rc3: from the Cog, zone editing opens Enhanced View fresh, so the
+  // picture has no size yet and the drawing overlay would stay at the 16x9
+  // fallback (nothing to draw on). Re-lay-out as the picture gains real
+  // dimensions. The manual Zones button opens over a loaded picture, so this
+  // exits on the first check.
+  let _zeTries = 0;
+  const _zeRelayout = () => {
+    if (!_ze) return;
+    const m = _zoneMedia();
+    if (m.w > 16 || m.h > 9) { _zoneLayout(); return; }
+    if (_zeTries++ < 50) setTimeout(_zeRelayout, 100);   // up to ~5s
+  };
+  setTimeout(_zeRelayout, 100);
 }
 
 /* 3.7.0-rc2.0 (C22): the zone window moves by its title bar and folds to
@@ -3268,8 +3281,14 @@ function toggleIdentity(camId) {
 }
 
 function credFormHTML(cam) {
-  if (cam.status !== 'needs_credentials' || ['webrtc','wsrtsp'].includes(cam.display)) return '';
+  // 3.8.0-rc3: an appliance-camera card keeps its "Camera in an appliance"
+  // overlay AND offers a login, in case the embedded camera exposes a local
+  // stream with credentials. Its status is "info", not "needs_credentials".
+  const _appliance = cam.display === 'appliance';
+  if ((cam.status !== 'needs_credentials' && !_appliance)
+      || ['webrtc','wsrtsp'].includes(cam.display)) return '';
   return '<div class="cred-form">'
+    + (_appliance ? '<div class="cred-help">If this appliance\'s camera has a local login, try it:</div>' : '')
     + '<label>USERNAME</label>'
     + '<input type="text" id="u_' + cam.id + '" autocomplete="username">'
     + '<label>PASSWORD</label>'

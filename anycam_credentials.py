@@ -641,6 +641,8 @@ async def api_set_credentials(request: web.Request) -> web.Response:
     port  = camera.get("port", 554)
     loop  = asyncio.get_event_loop()
     url   = None
+    wmeta: dict = {}              # the RTSP walk's findings (empty for ONVIF/MJPEG/appliance paths)
+    walk_found: list[str] = []    # extra streams the walk found; used for the sub-stream
 
     log.info(f"Credential attempt: {camera_id} proto={proto} ip={ip}:{port} "
              f"onvif={camera.get('onvif')} xaddrs={camera.get('xaddrs','')[:40]}")
@@ -1067,8 +1069,37 @@ async def api_set_credentials(request: web.Request) -> web.Response:
         else:
             log.warning(f"  ONVIF: no profiles returned (auth failed or device unreachable)")
 
+    # 3.8.0-rc3: a camera built into an appliance usually streams only through
+    # the maker's app, but the user may try a local login. Probe RTSP (554),
+    # then MJPEG/HLS on common web ports, with the credentials. On success the
+    # card becomes a normal camera; on failure it stays an appliance card.
+    if proto == "Appliance" or camera.get("display") == "appliance":
+        log.info(f"  Appliance {camera_id}: trying a local login on {ip}")
+        url = await loop.run_in_executor(
+            _THREAD_POOL,
+            lambda: find_rtsp_path(ip, 554, username, password, dict(camera), want_streams=1))
+        if url:
+            proto = "RTSP"; port = urlparse(url).port or 554
+            camera["protocol"] = "RTSP"; camera["port"] = port; camera["display"] = "proxy"
+        else:
+            for _wp in (80, 8080, 8888, 443):
+                _m = await loop.run_in_executor(_THREAD_POOL, probe_mjpeg_http, ip, _wp, username, password)
+                if _m:
+                    url = _m; proto = "MJPEG"; port = _wp
+                    camera["protocol"] = "MJPEG"; camera["port"] = _wp; camera["display"] = "mjpeg"; break
+                _h = await loop.run_in_executor(_THREAD_POOL, probe_hls, ip, _wp, username, password)
+                if _h:
+                    url = _h; proto = "HLS"; port = _wp
+                    camera["protocol"] = "HLS"; camera["port"] = _wp; camera["display"] = "hls"; break
+        if not url:
+            camera["status"] = "info"; camera.pop("status_text", None)
+            log.warning(f"Appliance login FAILED for {camera_id} — no local camera reachable")
+            return web.json_response(
+                {"error": "No camera reachable in this appliance with those credentials. "
+                          "These cameras usually stream only through the maker's app."}, status=401)
+
     # RTSP direct — for ONVIF cards always try port 554 in addition to stored port
-    if proto in ("RTSP", "DVR", "ONVIF"):
+    if not url and proto in ("RTSP", "DVR", "ONVIF"):
         # 2.3.0: brand throttle awareness for non-ONVIF cred-auth.
         # find_rtsp_path already does single-socket walking (Layer 1) +
         # brand-aware Layer 2 short-circuit, so no socket pressure here,
@@ -1110,10 +1141,10 @@ async def api_set_credentials(request: web.Request) -> web.Response:
         walk_found = [u for u in (wmeta.get("walk_found") or []) if u != url]
         log.info(f"  RTSP result: {_strip_creds(url) if url else 'None'}"
                  + (f" (+{len(walk_found)} more)" if walk_found else ""))
-    elif proto == "MJPEG":
+    elif not url and proto == "MJPEG":
         url = await loop.run_in_executor(
             _THREAD_POOL, probe_mjpeg_http, ip, port, username, password)
-    elif proto == "HLS":
+    elif not url and proto == "HLS":
         url = await loop.run_in_executor(
             _THREAD_POOL, probe_hls, ip, port, username, password)
 

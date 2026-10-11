@@ -23,7 +23,7 @@ import xml.etree.ElementTree as ET
 from anycam_host import H
 from camera_db import CAMERA_DB       # 3.5.0 (D2): the scan's port list
 from anycam_brand import (
-    CAMERA_KEYWORDS, NON_CAMERA_KEYWORDS, appliance_camera, lookup_oui,
+    CAMERA_KEYWORDS, NON_CAMERA_KEYWORDS, appliance_camera, lookup_oui, oui_is_camera,
 )
 from anycam_probe import (
     _onvif_media_url, _rtsp_options_fingerprint, _validate_rtsp_urls_single_socket,
@@ -1721,6 +1721,21 @@ async def run_scan() -> None:
                 log.info(f"  {ip}: removed camera '{restored[0].get('name', ip)}' — card given back "
                          f"from its kept details, not probed")
                 continue
+            # 3.8.0-rc3 (B55): skip a host that is confidently not a camera,
+            # unless it answered a camera discovery (WS-Discovery/SSDP/mDNS).
+            # The MAC-maker check (lost in the 2.0.6 rebuild) is back: a
+            # non-camera maker (Cisco, HP, printers...) is not probed, and a
+            # printer/IPP port (631/9100) is not probed. 3D-printer cameras
+            # (OctoPrint, Bambu) open neither port, so they stay findable.
+            if ip not in multicast_ips:
+                _mac = host.get("mac_addr", "")
+                _ports = {pp["port"] for pp in host.get("open_ports", [])}
+                if 631 in _ports or 9100 in _ports:
+                    log.info(f"  {ip}: printer port open ({_ports & {631, 9100}}) — not a camera, not probed")
+                    continue
+                if _mac and oui_is_camera(_mac) is False:
+                    log.info(f"  {ip}: MAC maker is not a camera ({lookup_oui(_mac) or _mac}) — not probed")
+                    continue
             # 3.8.0-rc1.0 (B54): ONVIF first, with no login. An answer
             # identifies the camera, and its ports get no probes.
             onvif_hit = onvif_by_ip.get(ip)
@@ -2014,7 +2029,8 @@ async def run_scan() -> None:
                 if not appl or aip in BLACKLIST:
                     continue
                 aname, app = appl
-                note = f"Camera built into an appliance; its video is reachable only through {app}."
+                note = (f"Camera built into an appliance; its video may or may not be "
+                        f"reachable only through {app}.")
                 have = [c for c in list(CAMERAS.values()) + list((PENDING_CAMERAS or {}).values())
                         if c.get("ip") == aip]
                 if have:

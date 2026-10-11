@@ -1989,6 +1989,47 @@ async def test_scan():
         cd.SCAN_OPTIONS["broad_sweep"] = keep[2]
         cd.SCAN_STATE.update(running=False, progress=0, message="Idle. Click Scan to begin.")
 
+    # ── U16 3.8.0-rc3 (B55): skip confident non-cameras, keep camera-MAC and
+    #    multicast devices ───────────────────────────────────────────────────
+    b55 = []
+
+    async def b55_probe(ip, port, hostname, initial, prev, verdict, reason, loop, host_meta=None):
+        b55.append(ip)
+        return None
+
+    def b55_nmap(ips):
+        return [
+            {"ip": "10.0.0.31", "hostname": "cam", "mac_addr": "1C:C3:16:00:00:01", "mac_vendor": "",
+             "open_ports": [{"port": 554, "service": "rtsp", "product": ""}]},          # camera OUI (Hikvision)
+            {"ip": "10.0.0.32", "hostname": "pc", "mac_addr": "00:1A:A0:00:00:01", "mac_vendor": "",
+             "open_ports": [{"port": 80, "service": "http", "product": ""}]},            # non-camera OUI (Dell)
+            {"ip": "10.0.0.33", "hostname": "prn", "mac_addr": "", "mac_vendor": "",
+             "open_ports": [{"port": 9100, "service": "jetdirect", "product": ""},       # printer port
+                            {"port": 80, "service": "http", "product": ""}]},
+            {"ip": "10.0.0.34", "hostname": "odd", "mac_addr": "00:1A:A0:00:00:02", "mac_vendor": "",
+             "open_ports": [{"port": 8080, "service": "http", "product": ""}]},          # non-camera OUI but ONVIF
+        ]
+    keep2 = (dict(cd.CAMERAS), set(cd.BLACKLIST), cd.SCAN_OPTIONS.get("broad_sweep"))
+    cd.CAMERAS.clear(); cd.BLACKLIST.clear(); cd.REMOVED_CAMERAS.clear()
+    cd.SCAN_OPTIONS["broad_sweep"] = False
+    with _Swap(get_local_subnet=lambda: "10.0.0.0/26", get_default_gateway=lambda: "10.0.0.1",
+               discover_live_hosts=lambda s: {"10.0.0.31", "10.0.0.32", "10.0.0.33", "10.0.0.34"},
+               onvif_discover=lambda t: [{"ip": "10.0.0.34", "name": "X", "onvif_scopes": "",
+                                          "xaddrs": "http://10.0.0.34/onvif/device_service"}],
+               ssdp_discover=lambda t: [], mdns_discover=lambda t: [], broad_nmap_scan=lambda i: [],
+               focused_nmap_scan=b55_nmap, _probe_host_port=b55_probe,
+               onvif_probe_no_login=lambda *a, **k: ("none", []),
+               find_rtsp_path=lambda *a, **k: None, save_cameras=lambda: None):
+        await cd.run_scan()
+    check("U16 B55: a camera-MAC host is probed; a non-camera-MAC host and a printer-port host are not",
+          "10.0.0.31" in b55 and "10.0.0.32" not in b55 and "10.0.0.33" not in b55, str(b55))
+    check("U16 ... a non-camera MAC that answers ONVIF is still probed (multicast overrides the MAC skip)",
+          "10.0.0.34" in b55, str(b55))
+    cd.CAMERAS.clear(); cd.CAMERAS.update(keep2[0])
+    cd.BLACKLIST.clear(); cd.BLACKLIST.update(keep2[1]); cd.REMOVED_CAMERAS.clear()
+    cd.SCAN_OPTIONS["broad_sweep"] = keep2[2]
+    cd.SCAN_STATE.update(running=False, progress=0, message="Idle. Click Scan to begin.")
+
     # ── the port prober ──────────────────────────────────────────────────────
     fp_ok = {"looks_like_rtsp": True, "status": 401, "server_header": "", "auth_realm": "Login",
              "auth_scheme": "Digest", "public_methods": ["OPTIONS", "DESCRIBE"], "elapsed_ms": 5}
@@ -2918,6 +2959,31 @@ async def test_credentials():
               and (c.get("sub_stream_url") or "").endswith("10.0.0.44:554/12")
               and any(l.startswith("db_probe") for _, _, l in calls["validate"]), str(c.get("sub_stream_url")))
         find.result, find.second = _keep_result, _keep_second
+
+        # Z4e 3.8.0-rc3: an appliance card offers a login. A local RTSP stream
+        # turns it into a ready camera; nothing reachable keeps it an appliance.
+        cid4e = "10.0.0.45_appliance"
+        _base4e = {"id": cid4e, "ip": "10.0.0.45", "port": 0, "protocol": "Appliance",
+                   "display": "appliance", "status": "info", "name": "Litter box",
+                   "info": "Camera built into an appliance; ..."}
+        cd.CAMERAS[cid4e] = dict(_base4e)
+        _kr, _ks = dict(find.result), dict(find.second)
+        find.result = {554: "rtsp://10.0.0.45:554/stream"}; find.second = {}
+        details.clear(); details["10.0.0.45"] = {"stream_codec": "h264", "stream_width": 1280, "stream_height": 720}
+        st, _ = await set_creds({"camera_id": cid4e, "username": "admin", "password": "pw"})
+        c = cd.CAMERAS[cid4e]
+        check("Z4e appliance login: a local RTSP stream turns the appliance card into a ready camera",
+              st == 200 and c.get("status") == "ready" and c.get("protocol") == "RTSP"
+              and c.get("display") == "proxy" and c.get("stream_url") == "rtsp://10.0.0.45:554/stream",
+              f"{st} {c.get('status')} {c.get('protocol')}")
+        cd.CAMERAS[cid4e] = dict(_base4e)
+        find.result = {}
+        with _Swap(probe_mjpeg_http=lambda *a, **k: None, probe_hls=lambda *a, **k: None):
+            st, body = await set_creds({"camera_id": cid4e, "username": "admin", "password": "pw"})
+        check("Z4e ... nothing reachable: 401 and the card stays an appliance",
+              st == 401 and cd.CAMERAS[cid4e]["display"] == "appliance"
+              and "appliance" in body["error"].lower(), f"{st} {body}")
+        find.result, find.second = _kr, _ks
 
         # Z5 wrong password
         find.result = {}
