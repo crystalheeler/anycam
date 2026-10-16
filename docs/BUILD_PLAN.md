@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 15 October 2026. Store and repository version: 3.8.1 (released 2026-10-15: pushed, GitHub Latest, store; C26 pre-warm with the connection gate, B61). Previous: 3.8.0 (2026-10-11). The CHANGELOG lines that named a private subnet were removed from the whole git history of both repositories and force-pushed (CrystalHeeler's order, 2026-10-15). rc numbers are single-digit (CrystalHeeler, 2026-10-10).
+**Compiled:** Updated 16 October 2026. Store and repository version: 3.8.1 (released 2026-10-15: pushed, GitHub Latest, store; C26 pre-warm with the connection gate, B61). Previous: 3.8.0 (2026-10-11). The CHANGELOG lines that named a private subnet were removed from the whole git history of both repositories and force-pushed (CrystalHeeler's order, 2026-10-15). rc numbers are single-digit (CrystalHeeler, 2026-10-10).
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.
@@ -11,7 +11,7 @@
 
 1. **Released (2026-10-15):** 3.8.1 — pre-warm of every camera's main and card stream through go2rtc's preload, the connection gate for the Hipcam-family brands, and B61. Pushed, GitHub Latest, store.
 2. **Field test 3.8.1:** the log shows "go2rtc: pre-warm on for ..." per camera (", through the connection gate" for the Microseven) about 10 s after start. A card and Enhanced View open in about 1-2 s on desktop. Leaving Enhanced View, the card comes back within a few seconds (was about 19 s). No "pre-warm paused" lines for healthy cameras, and no reset or stuck lines for the Microseven over a day. Watch the DVR with 14 held connections; turn the prewarm setting off if it objects.
-3. **Waiting on CrystalHeeler:** B62 (Enhanced View label in Chrome on the phone, outside the HA app); B48 (a decision); B29 (sound test); B33 (check after a rescan); C23 (the revamp list).
+3. **Waiting on CrystalHeeler:** B62 (Enhanced View label in Chrome on the phone, outside the HA app); B48 (a decision); B29 (sound test); B33 (check after a rescan); C23 (the revamp list); C27 (where a saved zone copy lives and how restore works).
 
 ---
 
@@ -52,6 +52,7 @@
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
+| C27 | Discuss | **Save and restore zone configurations** | CrystalHeeler, 2026-10-16: save the zone setup of every camera that has zones, to put it back after a reinstall or when something goes wrong. Today zones live only in /data/motion.json, beside each camera's motion settings, and an uninstall deletes /data. A camera's id can change after a reinstall (a card found by ONVIF, or on port 554), so a saved copy must be keyed by the card's lasting name, ip:port plus #chN for a recorder channel, as the card order is (D3) | Decide with CrystalHeeler: where the copy lives (a file to download, an automatic copy under /media/anycam, which an uninstall keeps, or both); what it holds (zones only, or each camera's motion settings too); how restore works (every camera, or chosen cameras; what happens to a camera that is not found, or whose picture size changed). Then build, with tests |
 | C21 | Later | **Remove the classic engine** | From C20 and C19. 3.0.1-rc1.0 removed the Classic button; 3.1.0-rc1.0 made MJPEG cameras and wide streams play live in cards. The classic engine (the native-resolution snapshot loop, the adaptive ladder, the Adaptive Quality toggle) is still the fallback for a camera or browser that cannot play live | Remove it only when no camera or browser needs the fallback any more. Still needed: on 2026-10-15 the cards on a phone (B62) got no live video within 15 s and fell back to still pictures |
 | C23 | You | **Storage tab revamp** | CrystalHeeler, 2026-10-05: a larger revamp CrystalHeeler has wanted for a while; details to follow. One known fault goes with it: on a phone held upright the file names cannot be seen (screenshot). Cause: the list's columns are `1fr 180px 130px 90px 80px`; the fixed columns need 480 px, wider than the phone, so the Name column gets 0 px. It is not a scrolling fault | CrystalHeeler sends the revamp list; then a design discussion before any code |
 | C25 | Later | **A better on/off design for Remote Storage** | CrystalHeeler, 2026-10-05: the camera choice "Do not upload" needs a better design, perhaps an "Enable remote storage" toggle or checkbox somewhere; it stays as it is for now | Design discussion when CrystalHeeler picks it up |
@@ -60,6 +61,7 @@
 
 | # | Status | Item | Why / source | Next step |
 |---|---|---|---|---|
+| D5 | Ready | **A recorder's new channel cards appear at the end of the grid** | CrystalHeeler, 2026-10-16: after the password on a multi-camera NVR or DVR, the new channel cards should appear right after the recorder's card, pushing the other cards right and down. Today _cards_in_order (camera_discovery.py) puts every card that is not in the saved order at the end, and with no saved order the cards keep the order they were added in | When password entry registers channel cards (anycam_credentials.py, "N new card(s) registered"), insert their card keys into the saved order right after the recorder's card, in channel order, and save it (runtime.json, D3); with no saved order yet, start one from the current order. The same for any device that adds cards from one login (B57's ONVIF NVR, when built). Tests: the order after a login, with and without a saved order |
 
 ## E. Code health
 
