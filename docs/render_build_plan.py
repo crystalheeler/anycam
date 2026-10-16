@@ -14,6 +14,7 @@ wrong number of cells stops the render with the line number, instead of
 silently dropping an item from the page.
 """
 import argparse
+import datetime
 import html
 import pathlib
 import re
@@ -420,6 +421,30 @@ def render(plan: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def header_problems(plan: dict, today: datetime.date) -> list[str]:
+    """2026-10-15: the header line went stale twice while the items were updated.
+
+    The "**Compiled:**" line must carry today's date ("Updated 15 October 2026")
+    and name the version in config.yaml, so every render makes the header be
+    read and rewritten.
+    """
+    compiled = plan.get("compiled", "")
+    problems = []
+    m = re.search(r"Updated (\d{1,2} [A-Z][a-z]+ \d{4})", compiled)
+    try:
+        dated = datetime.datetime.strptime(m.group(1), "%d %B %Y").date() if m else None
+    except ValueError:
+        dated = None
+    if dated != today:
+        problems.append(f'the header date is not today: write "Updated {today.day} '
+                        f'{today:%B %Y}" in the **Compiled:** line')
+    cfg = HERE.parent / "config.yaml"
+    v = re.search(r'^version:\s*"?([^"\s]+)"?', cfg.read_text(encoding="utf-8"), re.M) if cfg.exists() else None
+    if v and v.group(1) not in compiled:
+        problems.append(f"the header does not name the repository version {v.group(1)} (config.yaml)")
+    return problems
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT)
@@ -428,6 +453,15 @@ def main() -> int:
         plan = parse(SRC.read_text(encoding="utf-8"))
     except PlanError as ex:
         print(f"BUILD_PLAN.md: {ex}", file=sys.stderr)
+        return 1
+    problems = header_problems(plan, datetime.date.today())
+    print(f"Header:  {plan.get('compiled', '(none)')}")
+    print(f"Panel:   {plan.get('order_title', '(none)')}")
+    if problems:
+        for p in problems:
+            print(f"BUILD_PLAN.md: {p}", file=sys.stderr)
+        print("Re-read the header and the Next up block, update them, then render again.",
+              file=sys.stderr)
         return 1
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(render(plan), encoding="utf-8", newline="\n")
