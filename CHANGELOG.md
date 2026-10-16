@@ -1,3 +1,22 @@
+## 3.8.1
+
+Live views open faster: AnyCam keeps each camera's streams connected, and cameras that limit connections are never reopened faster than they allow.
+
+### Changes & improvements
+
+- **Pre-warm live streams.** AnyCam keeps each camera's main stream and card stream connected in the background, so a card or Enhanced View opens without first connecting to the camera. A stream that sends no video for about a minute is let go and tried again 10 minutes later. The new setting Pre-warm Live Streams turns this off.
+- **Connection gate for rate-limited cameras.** Hipcam-family cameras (Microseven, Sricam, Vstarcam, Wansview, Tenvis) are never reopened faster than their limit, also when go2rtc reconnects them. These cameras now always play through an ffmpeg copy.
+
+### Bugs fixed
+
+- **A card took about 19 s to come back after Enhanced View.** The card now restarts from the connected stream, without the camera's 5 s wait.
+- **Live view on a rate-limited camera waited 5 s before connecting.** The wait now happens only when the camera is really opened.
+
+### Known issues
+
+- **Live video on a phone can freeze, then catch up.** Where WebRTC does not connect, the phone plays over MSE and can fall behind; under investigation.
+- **Each camera holds one or two connections all the time.** Turn Pre-warm Live Streams off if a camera or recorder objects to them.
+
 ## 3.8.0
 
 The scan is faster and asks each camera less, appliance cards offer a login, and devices that are clearly not cameras are skipped. This is the stable release of the 3.8.0-rc1 to 3.8.0-rc3 line.

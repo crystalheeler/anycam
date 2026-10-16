@@ -40,6 +40,8 @@ from PIL import Image   # 2.6.6: pixel-comparison motion detection
 # 3.0.0-rc1.0 (build plan E1, stage 1): the camera tables and the page's
 # script live in their own files. anycam_modules.py lists every file.
 from camera_db import CAMERA_DB, STREAM_DB
+# 3.8.1 (C26): the connection gate's shared record of when each camera may be opened.
+import anycam_gate
 # 3.0.0-rc1.1 (E1, stage 2): motion, recording, night boost; the Storage tab.
 import anycam_host
 import anycam_motion
@@ -218,7 +220,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.8.0"  # must match config.yaml
+CURRENT_VERSION = "3.8.1"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -240,7 +242,10 @@ CFG_ADAPTIVE_QUALITY     = os.environ.get("ADAPTIVE_QUALITY","false").lower() ==
 # reorder queue removes the RTSP jitter buffer. Off by default until the
 # Pi 4 / HAOS target has a field test.
 CFG_LOW_LATENCY          = os.environ.get("LOW_LATENCY", "false").lower() == "true"
-CFG_RECORDINGS           = os.environ.get("RECORDINGS_PATH", "/media/anycam")
+# 3.8.1 (C26): keep go2rtc connected to every camera's main and sub stream, so
+# a card or Enhanced View opens without first connecting to the camera.
+CFG_PREWARM              = os.environ.get("PREWARM", "true").lower() == "true"
+CFG_RECORDINGS          = os.environ.get("RECORDINGS_PATH", "/media/anycam")
 # 2.6.6: 1 (least sensitive) to 100 (most), shown to the user as a plain
 # scale. It maps to the share of the picture that must change, from 74%
 # down to 1%, on a log curve so the steps are finer at the sensitive end.
@@ -438,6 +443,8 @@ def _record_rst_observation(ip: str) -> None:
     if len(obs) >= ACD_RST_THRESHOLD:
         already = _ACD_ESCALATED.get(ip, 0.0) > now
         _ACD_ESCALATED[ip] = now + ACD_ESCALATION_TTL_S
+        # 3.8.1 (C26): go2rtc's gated sources read the same escalation.
+        anycam_gate.escalate(ip, ACD_ESCALATED_COOLDOWN, ACD_ESCALATION_TTL_S)
         if not already:
             log.warning(
                 f"  ACD: {ip} produced {len(obs)} RST/broken-pipe "
@@ -504,10 +511,11 @@ async def _throttle_wait_if_needed(ip: str, throttle_s: float,
             throttle_s = ACD_ESCALATED_COOLDOWN
     if throttle_s <= 0:
         return
-    last = _THROTTLE_TRACK.get(ip, 0.0)
-    elapsed = now - last
-    if last and elapsed < throttle_s:
-        wait_s = throttle_s - elapsed
+    # 3.8.1 (C26): the turn comes from the connection gate's record, which
+    # go2rtc's gated sources use too, so AnyCam and go2rtc never open the
+    # camera inside one cooldown. The record is a file: read it off the loop.
+    wait_s = await asyncio.to_thread(anycam_gate.reserve, ip, throttle_s) if ip else 0.0
+    if wait_s > 0:
         if log_label:
             log.info(f"  Throttle wait {wait_s:.1f}s for {ip} "
                      f"(brand cooldown ~{throttle_s:.0f}s): {log_label}")

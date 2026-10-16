@@ -22,6 +22,7 @@ export INGRESS_PORT=8099
 export HW_DECODE=$(bashio::config 'hw_decode')
 export ADAPTIVE_QUALITY=$(bashio::config 'adaptive_quality')
 export LOW_LATENCY=$(bashio::config 'low_latency')
+export PREWARM=$(bashio::config 'prewarm')
 export UNRESTRICTED_STORAGE_BROWSER=$(bashio::config 'unrestricted_storage_browser')
 
 # Log-level toggles
@@ -44,7 +45,7 @@ bashio::log.info "Ingress path: ${INGRESS_PATH}"
 # at a glance whether the env-var pipeline is intact. If a toggle's value
 # in the addon Configuration tab differs from what shows up here, the
 # pipeline is broken — investigate run.sh first.
-bashio::log.info "Config: hw_decode=${HW_DECODE} adaptive_quality=${ADAPTIVE_QUALITY} low_latency=${LOW_LATENCY}"
+bashio::log.info "Config: hw_decode=${HW_DECODE} adaptive_quality=${ADAPTIVE_QUALITY} low_latency=${LOW_LATENCY} prewarm=${PREWARM}"
 bashio::log.info "Config: global_recording_settings=${GLOBAL_RECORDING_SETTINGS} recordings_path=${RECORDINGS_PATH} motion_detect_level=${MOTION_DETECT_LEVEL} motion_clip_length=${MOTION_CLIP_LENGTH} motion_cooldown=${MOTION_COOLDOWN_SECS}s motion_padding=${MOTION_CLIP_PADDING_SECS}s"
 bashio::log.info "Config: log_debug=${LOG_DEBUG} log_info=${LOG_INFO} log_warning=${LOG_WARNING} log_error=${LOG_ERROR} unrestricted_storage_browser=${UNRESTRICTED_STORAGE_BROWSER}"
 

@@ -169,7 +169,7 @@ COPY anycam_brand.py anycam_credentials.py anycam_focus.py /
 COPY anycam_go2rtc.py anycam_host.py anycam_motion.py /
 COPY anycam_page.py anycam_probe.py anycam_scan.py /
 COPY anycam_snap.py anycam_storage.py anycam_mjpeg.py anycam_zones.py /
-COPY anycam_upload.py /
+COPY anycam_upload.py anycam_gate.py /
 COPY www/video-rtc.js /www/video-rtc.js
 
 RUN chmod +x /run.sh

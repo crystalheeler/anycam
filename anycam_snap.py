@@ -26,8 +26,8 @@ from anycam_probe import (
 )
 import anycam_focus
 from anycam_go2rtc import (
-    _classic_sub_stream, _go2rtc_relay, _go2rtc_relay_result, _go2rtc_relayed, _rtsp_stuck,
-    _rtsp_stuck_mark,
+    _classic_sub_stream, _go2rtc_relay, _go2rtc_relay_result, _go2rtc_relayed, _go2rtc_will_relay,
+    _rtsp_stuck, _rtsp_stuck_mark,
 )
 
 log = logging.getLogger("anycam")
@@ -460,7 +460,8 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
     _snap_ip = camera.get("ip", "")
     if _snap_throttle_s > 0:
         log.info(f"SNAP [{camera_id}]: rate_limit_per_ip_tcp brand — "
-                 f"flooring ffmpeg backoff at {_snap_throttle_s:.0f}s")
+                 f"flooring ffmpeg backoff at {_snap_throttle_s:.0f}s when it opens the camera "
+                 f"itself; through go2rtc the connection gate paces the camera")
 
     # 2.2.9-rc1: `or ""` handles both missing key AND explicit None. The
     # codec-clear path below used to write None into the camera record; if
@@ -682,7 +683,12 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             # as every other connection to it does. On 2026-10-01 the first
             # start came 1 s after go2rtc's attempt, and five more 5 s apart,
             # while a 30 s cooldown was in force for the Microseven.
-            if _snap_throttle_s > 0 or _acd_active(_snap_ip):
+            # 3.8.1 (B61): not when ffmpeg reads go2rtc's copy of a gated
+            # camera. That open goes to 127.0.0.1, and go2rtc's own open of the
+            # camera waits its turn in the connection gate; waiting here as well
+            # held the card back after Enhanced View (19 s on 2026-10-15).
+            _via_gate = _snap_throttle_s > 0 and _go2rtc_will_relay(camera_id, url)
+            if (_snap_throttle_s > 0 or _acd_active(_snap_ip)) and not _via_gate:
                 await _throttle_wait_if_needed(_snap_ip, _snap_throttle_s,
                                                f"ffmpeg {camera_id}")
                 if native_res and anycam_focus._FOCUSED_CAMERA != camera_id:
@@ -1158,14 +1164,17 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                 streak = state.get("zero_frame_streak", 0) + 1
                 state["zero_frame_streak"] = streak
                 _raw_backoff = min(2 ** min(streak - 1, 4), 32)
-                if _snap_throttle_s > 0:
+                # 3.8.1 (B61): a run that read go2rtc's copy of a gated camera
+                # opened nothing on the camera; the gate paces go2rtc's opens.
+                _gated_run = _snap_throttle_s > 0 and _go2rtc_relayed(state.get("ffmpeg_url_used"))
+                if _snap_throttle_s > 0 and not _gated_run:
                     backoff = max(_snap_throttle_s, _raw_backoff)
                 else:
                     backoff = _raw_backoff
                 # 2.6.7: a camera that is resetting connections gets the
                 # escalated cooldown between restarts, not the 5 s floor.
                 _resetting = _acd_active(_snap_ip)
-                if _resetting:
+                if _resetting and not _gated_run:
                     backoff = max(backoff, ACD_ESCALATED_COOLDOWN)
 
                 # After 3 consecutive 0-frame failures, try flipping the

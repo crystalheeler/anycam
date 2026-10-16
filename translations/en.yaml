@@ -34,6 +34,17 @@ configuration:
       artifacts for latency on a lossy link. Turn this ON to test, and
       turn it OFF again if any camera fails to start or shows new
       artifacts.
+  prewarm:
+    name: Pre-warm Live Streams
+    description: >-
+      Default ON. Keeps each camera's main stream and card stream connected
+      in the background, so a card or Enhanced View opens without first
+      connecting to the camera. Each camera then holds one or two
+      connections all the time. Cameras that limit how often they can be
+      opened (the Hipcam family, such as Microseven) are reconnected no
+      faster than their limit allows. A stream that sends no video for
+      about a minute is let go and tried again 10 minutes later. Turn this
+      OFF if a camera or recorder objects to the extra connections.
   global_recording_settings:
     name: Use Global Recording Settings
     description: >-

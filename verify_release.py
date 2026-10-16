@@ -248,10 +248,15 @@ CONTRACTS = {
                               "GO2RTC_API_HOST"],
     # Inline config: a file path would let go2rtc write camera passwords to disk.
     "_go2rtc_supervisor":    ['"-config", _go2rtc_config()'],
-    # Proxy forwards /api/ws only, only for names AnyCam registered, and
-    # honours the brand cooldown before go2rtc dials the camera.
-    "handle_go2rtc_ws":      ["name in _GO2RTC_STREAMS", "/api/ws?src=",
-                              "_throttle_wait_if_needed"],
+    # Proxy forwards /api/ws only, only for names AnyCam registered.
+    "handle_go2rtc_ws":      ["name in _GO2RTC_STREAMS", "/api/ws?src="],
+    # 3.8.1 (C26): the brand cooldown before go2rtc dials a rate-limited
+    # camera moved from the proxy into the go2rtc source: such a camera's
+    # source is the connection gate, which takes the camera's turn in the
+    # shared record and only then becomes ffmpeg.
+    "_go2rtc_camera_src":    ["_go2rtc_gated(camera)", "_go2rtc_gated_src"],
+    "_go2rtc_gated_src":     ["anycam_gate.__file__", "GATE_FFMPEG_OUT", "starttimeout"],
+    "gate_main":             ["reserve(ip, cooldown)", "time.sleep", "os.execvp"],
     # Treats the no-config-file 400 as success; encodes the password-bearing
     # source so '&' and '+' survive Go's query parser.
     "_go2rtc_register":      ['"config file disabled"', "quote(src, safe='')"],
