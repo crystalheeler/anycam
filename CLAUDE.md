@@ -169,6 +169,34 @@ network means.
 - A log line quoted in a document gets the same treatment before it is
   pasted.
 
+## 10. Every overlay fits every screen
+
+Every modal, dialog, popup, panel, toast, menu and overlay bar must fit
+and work on a phone held upright or sideways, a tablet, and a desktop
+browser, inside Home Assistant's app and in a browser, also when its
+content is long (many zones, long camera names, long messages).
+
+- Fit the visible screen. Width: a cap in `vw` with a margin, such as
+  `width:min(360px, calc(100vw - 32px))`. Height: at most the visible
+  height less a margin, `max-height:calc(100dvh - 32px)`, with a `100vh`
+  line first for older browsers.
+- Scroll inside itself when the content is taller than that
+  (`overflow-y:auto`). Keep its action buttons (Save, Cancel, Close) in
+  view.
+- Never push a control or text off the screen. A bar wraps to a second
+  row or shortens its text on a narrow screen; no fixed height on a bar
+  whose content can grow; long text gets an ellipsis or wraps.
+- Keep clear of a phone's notch and home bar with
+  `env(safe-area-inset-*)` on fixed bars at the screen edge.
+- Before a release, check each new or changed overlay at 375x812,
+  812x375 and 1366x768, with long content.
+
+**Why (CrystalHeeler, 2026-10-19):** the Enhanced View bar lost the camera
+name and pushed its controls off a phone's screen, and the Cog settings
+dialog was cut off at top and bottom on a phone, and on a desktop with
+many zones, with no way to scroll (B67). The release gate checks the
+page's styles for this (added with B67).
+
 ---
 
 ## Coding standards
