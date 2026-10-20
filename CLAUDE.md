@@ -19,6 +19,7 @@ Storage tab), `anycam_mjpeg.py` (live MJPEG cards, since 3.1.0-rc1.0), `anycam_z
 (detection zones, since 3.4.0-rc1.0), `anycam_upload.py` (recording upload,
 since 3.6.0-rc1.0), `anycam_gate.py` (the connection gate for rate-limited
 cameras, since 3.8.1; also run by go2rtc as a source command),
+`anycam_backup.py` (copies of the motion and zone settings, since 3.8.3),
 `anycam_host.py` (the link between them). A new file must be
 added to `anycam_modules.py` and to the Dockerfile's COPY lines; the release
 gate checks both. Package with `python package_release.py`.

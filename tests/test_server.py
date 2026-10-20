@@ -74,6 +74,7 @@ cd.DATA_DIR = SCRATCH
 cd.RUNTIME_FILE = SCRATCH / "runtime.json"
 cd.REMOVED_FILE = SCRATCH / "removed_cameras.json"   # 3.7.5-rc2.0
 cd.GATE_DIR = SCRATCH / "gate"     # 3.8.1 (C26): the connection gate's records, fresh per run
+cd.SETTINGS_COPY_DIR = SCRATCH / "settings"   # 3.8.3 (C27): never /media on this PC
 
 
 def _scene_jpegs():
@@ -2009,7 +2010,7 @@ async def test_scan():
 
     def b55_nmap(ips):
         return [
-            {"ip": "10.0.0.31", "hostname": "cam", "mac_addr": "1C:C3:16:00:00:01", "mac_vendor": "",
+            {"ip": "10.0.0.31", "hostname": "cam", "mac_addr": "28:57:BE:00:00:01", "mac_vendor": "",
              "open_ports": [{"port": 554, "service": "rtsp", "product": ""}]},          # camera OUI (Hikvision)
             {"ip": "10.0.0.32", "hostname": "pc", "mac_addr": "00:1A:A0:00:00:01", "mac_vendor": "",
              "open_ports": [{"port": 80, "service": "http", "product": ""}]},            # non-camera OUI (Dell)
@@ -2185,7 +2186,7 @@ async def test_brand():
         check("V2 lookup_oui: the downloaded table first",
               cd.lookup_oui("aa:00:01:12:34:56") == "Microseven Inc")
         check("V2 ... then the built-in camera and non-camera lists",
-              cd.lookup_oui("1C:C3:16:00:00:01") == "(known camera manufacturer)"
+              cd.lookup_oui("28:57:BE:00:00:01") == "(known camera manufacturer)"
               and cd.lookup_oui("00:00:0C:00:00:01") == "(known non-camera device)")
         check("V2 ... an unknown or bad address gives nothing",
               cd.lookup_oui("02:00:00:00:00:01") == "" and cd.lookup_oui("x") == "")
@@ -2193,7 +2194,7 @@ async def test_brand():
               cd.oui_is_camera("AA:00:01:00:00:00") is True)
         check("V3 ... a vendor with a non-camera word", cd.oui_is_camera("AA:00:02:00:00:00") is False)
         check("V3 ... the built-in lists when the vendor is unknown",
-              cd.oui_is_camera("1C:C3:16:00:00:01") is True and cd.oui_is_camera("00:00:0C:00:00:01") is False)
+              cd.oui_is_camera("28:57:BE:00:00:01") is True and cd.oui_is_camera("00:00:0C:00:00:01") is False)
         check("V3 ... nothing known: None",
               cd.oui_is_camera("AA:00:03:00:00:00") is None and cd.oui_is_camera("") is None)
     finally:
@@ -5970,6 +5971,240 @@ async def test_382():
           and "  motion_calibration_log:" in (REPO / "translations" / "en.yaml").read_text(encoding="utf-8"))
 
 
+# ── AS. 3.8.3 ────────────────────────────────────────────────────────────────
+async def test_383():
+    print("\n[AS] 3.8.3 save and restore motion and zone settings (C27), channel cards (D5), camera MAC list (B64)")
+    import datetime as _dt
+    B = sys.modules["anycam_backup"]
+    Z = sys.modules["anycam_zones"]
+    real = (cd.MOTION_FILE, cd.SETTINGS_COPY_DIR, dict(cd.CAMERAS), cd.MEDIA_DIR)
+    copy_dir = SCRATCH / "as_settings"
+    cd.MOTION_FILE = SCRATCH / "as_motion.json"
+    cd.SETTINGS_COPY_DIR = copy_dir
+    zone = {"zones": [{"name": "Yard", "points": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]],
+                       "level": 40, "closed": True}], "zones_only": True}
+    zclean, zerr = Z.validate(zone)
+    calls = []
+
+    async def _anoop(cid):
+        calls.append(("stop", cid))
+    stubs = _Swap(_motion_ensure_pipelines=lambda cid: calls.append(("pipes", cid)),
+                  _motion_ensure_loop=lambda cid: calls.append(("loop", cid)),
+                  _stop_recording=_anoop, _motion_stop_pipelines=_anoop)
+    try:
+        cd.CAMERAS.clear(); cd._MOTION.clear(); cd._MOTION_CFG.clear(); Z.ZONES.clear()
+        cd.CAMERAS["c1"] = camera(id="c1", ip="10.0.0.51", port=554, name="Yard cam",
+                                  mac_addr="aa-bb-cc-00-00-51", manufacturer="Hikvision",
+                                  stream_width=2560, stream_height=1440)
+        cd.CAMERAS["c2"] = camera(id="c2", ip="10.0.0.52", port=554, name="Plain cam")
+        cd.CAMERAS["d3"] = camera(id="d3", ip="10.0.0.60", port=554, channel="3", name="DVR ch3",
+                                  mac_addr="AA:BB:CC:00:00:60", stream_width=704, stream_height=480)
+
+        # AS1: a copy holds each camera with something to keep, and only those
+        cd._motion_save()
+        check("AS1 C27 no copy while no camera has settings, zones or arming",
+              not copy_dir.exists() or not list(copy_dir.iterdir()))
+        cd._MOTION_CFG["c1"] = {"level": 80, "cooldown": 9}
+        Z.set_zones("c1", zclean)
+        cd._motion_state("c1")["enabled"] = True
+        cd._MOTION_CFG["d3"] = {"tail": 7}
+        cd._motion_save()
+        files = sorted(copy_dir.glob("anycam-motion-*.json"))
+        copy = json.loads(files[0].read_text(encoding="utf-8")) if files else {}
+        c1 = next((c for c in copy.get("cameras", []) if c["id"] == "c1"), {})
+        check("AS1 ... every save writes anycam-motion-<date>-<time>.json with each camera's settings, "
+              "zones, armed state, card key, MAC, channel, name, brand and picture size",
+              len(files) == 1 and {c["id"] for c in copy["cameras"]} == {"c1", "d3"}
+              and c1.get("key") == "10.0.0.51:554" and c1.get("mac") == "aa:bb:cc:00:00:51"
+              and c1.get("settings") == {"level": 80, "cooldown": 9} and c1.get("armed") is True
+              and c1.get("zones", {}).get("zones_only") is True and c1.get("name") == "Yard cam"
+              and c1.get("brand") == "Hikvision" and (c1.get("width"), c1.get("height")) == (2560, 1440),
+              str(copy)[:300])
+        cd._motion_save()
+        check("AS1 ... an unchanged save writes no second copy", len(list(copy_dir.glob("anycam-motion-*.json"))) == 1)
+        base = _dt.datetime(2026, 10, 1, 8, 0, 0)
+        many = SCRATCH / "as_many"
+        for i in range(25):
+            cd._MOTION_CFG["c2"] = {"level": 10 + i}
+            B.write_copy(many, cd._settings_entries(), "t", base + _dt.timedelta(minutes=i))
+        kept = sorted(f.name for f in many.glob("anycam-motion-*.json"))
+        check("AS2 C27 the newest 20 copies are kept",
+              len(kept) == 20 and kept[-1] == "anycam-motion-20261001-082400.json"
+              and kept[0] == "anycam-motion-20261001-080500.json", str(kept[:2]))
+        cd._MOTION_CFG.pop("c2", None)
+
+        # AS3: the download
+        r = await cd.api_motion_copy(make_mocked_request("GET", "/api/motion/copy"))
+        dl = B.parse_copy(r.text, "dl")
+        check("AS3 C27 Save downloads a copy, named like the automatic ones",
+              r.status == 200 and 'filename="anycam-motion-' in r.headers.get("Content-Disposition", "")
+              and dl is not None and {c["id"] for c in dl["cameras"]} == {"c1", "d3"})
+
+        # AS4: matching (answer 5): card key, else MAC and channel; the newest copy wins
+        old = {"name": "old", "saved": _dt.datetime(2026, 9, 1),
+               "cameras": [{"key": "10.0.0.51:554", "settings": {"level": 11}},
+                           {"key": "10.0.0.99:554#ch3", "mac": "aa:bb:cc:00:00:60", "channel": "3",
+                            "settings": {"level": 33}, "width": 1920, "height": 1080}]}
+        new = {"name": "new", "saved": _dt.datetime(2026, 10, 1),
+               "cameras": [{"key": "10.0.0.51:554", "settings": {"level": 22}},
+                           {"key": "10.0.0.98:554#ch4", "mac": "aa:bb:cc:00:00:60", "channel": "4",
+                            "settings": {"level": 44}}]}
+        cams = cd._restore_cameras()
+        m = B.match(cams, [old, new])
+        check("AS4 C27 a camera is found by its card key, in the newest copy that holds it",
+              m["c1"]["entry"]["settings"] == {"level": 22} and m["c1"]["by"] == "key")
+        check("AS4 ... a channel whose address changed is found by MAC address and channel, not another channel",
+              m["d3"]["entry"]["settings"] == {"level": 33} and m["d3"]["by"] == "mac" and "c2" not in m)
+        d3 = next(c for c in cams if c["id"] == "d3")
+        check("AS5 C27 a changed picture shape is flagged (zones are kept in fractions of the picture)",
+              B.aspect_changed(m["d3"]["entry"], d3["width"], d3["height"])
+              and not B.aspect_changed({"width": 1280, "height": 720}, 2560, 1440)
+              and not B.aspect_changed({}, 2560, 1440))
+
+        # AS6: the restore dialog's look-up, from the three sources
+        def req(body):
+            return _req("POST", "/api/motion/restore", body)
+        r_def = json.loads((await cd.api_motion_restore(req({"source": "default"}))).body)
+        rows = {c["id"]: c for c in r_def["cameras"]}
+        check("AS6 C27 Restore lists every camera, with the date found or no saved settings",
+              r_def["copies"] == 1 and rows["c1"]["found"] and rows["c1"]["saved"]
+              and rows["c1"]["zones"] == 1 and rows["c1"]["armed"] and not rows["c2"]["found"],
+              str(r_def)[:300])
+        r_out = await cd.api_motion_restore(req({"source": "pi", "folder": str(SCRATCH)}))
+        real_roots = B.RESTORE_ROOTS
+        B.RESTORE_ROOTS = (str(SCRATCH),)
+        try:
+            r_pi = json.loads((await cd.api_motion_restore(req({"source": "pi", "folder": str(copy_dir)}))).body)
+        finally:
+            B.RESTORE_ROOTS = real_roots
+        check("AS6 ... a folder on the Pi must be under /media or /share",
+              r_out.status == 400 and "/media" in json.loads(r_out.body)["error"] and r_pi["copies"] == 1)
+        sent = [{"name": "anycam-motion-x.json", "text": json.dumps(B.build_copy(
+                    [{"key": "10.0.0.52:554", "settings": {"level": 5}, "armed": False}], "t",
+                    _dt.datetime(2026, 10, 2)))},
+                {"name": "notes.json", "text": "{}"}, {"name": "big.json", "text": "x" * (B.COPY_BYTES_MAX + 1)}]
+        r_dev = json.loads((await cd.api_motion_restore(req({"source": "device", "copies": sent}))).body)
+        check("AS6 ... copies read by the page from a folder on the device; other files are skipped",
+              r_dev["copies"] == 1 and {c["id"]: c["found"] for c in r_dev["cameras"]} == {"c1": False, "c2": True, "d3": False})
+
+        # AS7: apply (answer 7): settings, zones and arming, then save and restart motion
+        cd._MOTION_CFG.clear(); Z.ZONES.clear(); cd._MOTION.clear()
+        cd._motion_state("d3")["enabled"] = True
+        with stubs:
+            r_ap = json.loads((await cd.api_motion_restore(req({"source": "default", "apply": ["c1", "d3", "c2", "nope"]}))).body)
+        saved = json.loads(cd.MOTION_FILE.read_text(encoding="utf-8"))
+        check("AS7 C27 Restore applies the chosen cameras' settings, zones and armed state, and saves them",
+              r_ap["restored"] == ["c1", "d3"] and cd._MOTION_CFG.get("c1") == {"level": 80, "cooldown": 9}
+              and Z.zones_only("c1") and cd._MOTION["c1"]["enabled"] and not cd._MOTION["d3"]["enabled"]
+              and cd._MOTION_CFG.get("d3") == {"tail": 7} and saved["armed"] == ["c1"], str(r_ap))
+        check("AS7 ... and restarts motion: the armed camera starts, the disarmed one stops",
+              ("pipes", "c1") in calls and ("loop", "c1") in calls and ("stop", "d3") in calls)
+        bad = {"name": "bad", "saved": _dt.datetime(2026, 10, 3),
+               "cameras": [{"key": "10.0.0.52:554", "settings": {"level": 70},
+                            "zones": {"zones": [{"name": "", "points": "x"}]}}]}
+        copy_dir.joinpath("anycam-motion-20261003-000000.json").write_text(
+            json.dumps({**B.build_copy(bad["cameras"], "t", bad["saved"])}), encoding="utf-8")
+        with stubs:
+            r_bad = json.loads((await cd.api_motion_restore(req({"source": "default", "apply": ["c2"]}))).body)
+        check("AS7 ... a copy with bad zones restores its settings and reports the zones",
+              r_bad["restored"] == ["c2"] and cd._MOTION_CFG.get("c2") == {"level": 70}
+              and "zones not used" in r_bad["problems"]["c2"][0] and not Z.has_zones("c2"))
+        r_x = await cd.api_motion_restore(req({"source": "default", "apply": "c1"}))
+        check("AS7 ... a bad request is refused", r_x.status == 400)
+
+        # AS8: the Storage tab does not list the copy folder
+        cd.MEDIA_DIR = SCRATCH / "as_media"
+        (cd.MEDIA_DIR / "settings").mkdir(parents=True, exist_ok=True)
+        (cd.MEDIA_DIR / "settings" / "anycam-motion-20261001-080000.json").write_text("{}")
+        (cd.MEDIA_DIR / "Yard").mkdir(exist_ok=True)
+        st = json.loads((await cd.api_storage_list(make_mocked_request("GET", "/api/storage"))).body)
+        check("AS8 C27 the Storage tab skips the settings folder",
+              [f["folder"] for f in st["folders"]] == ["Yard"])
+    finally:
+        cd.MOTION_FILE, cd.SETTINGS_COPY_DIR, cd.MEDIA_DIR = real[0], real[1], real[3]
+        cd.CAMERAS.clear(); cd.CAMERAS.update(real[2])
+        cd._MOTION.clear(); cd._MOTION_CFG.clear(); Z.ZONES.clear()
+
+    # AS9: D5, a recorder's new channel cards go right after its card
+    keep = (dict(cd.CAMERAS), cd._CARD_ORDER, cd.RUNTIME_FILE.read_text() if cd.RUNTIME_FILE.exists() else None)
+    try:
+        cd.CAMERAS.clear()
+        a = camera(id="a", ip="10.0.0.70", port=554)
+        dvr = camera(id="dvr", ip="10.0.0.80", port=554, channel="1")
+        b = camera(id="b", ip="10.0.0.90", port=554)
+        for c in (a, dvr, b):
+            cd.CAMERAS[c["id"]] = c
+        cd._CARD_ORDER = ["10.0.0.90:554", "10.0.0.80:554", "10.0.0.70:554"]
+        for ch in ("3", "2"):
+            cd.CAMERAS[f"dvr{ch}"] = camera(id=f"dvr{ch}", ip="10.0.0.80", port=554, channel=ch)
+        cd._card_order_after_parent(dvr, ["dvr3", "dvr2"])
+        order = [cd._card_key(c) for c in cd._cards_in_order(list(cd.CAMERAS.values()))]
+        check("AS9 D5 new channel cards follow the recorder's card, in channel order (its key gains #ch1)",
+              order == ["10.0.0.90:554", "10.0.0.80:554#ch1", "10.0.0.80:554#ch2", "10.0.0.80:554#ch3",
+                        "10.0.0.70:554"]
+              and cd.load_runtime().get("card_order") == order, str(order))
+        cd.CAMERAS["dvr5"] = camera(id="dvr5", ip="10.0.0.80", port=554, channel="5")
+        cd._card_order_after_parent(dvr, ["dvr5"])
+        check("AS9 ... a later channel goes after the recorder's other channel cards",
+              cd._card_order()[1:5] == ["10.0.0.80:554#ch1", "10.0.0.80:554#ch2", "10.0.0.80:554#ch3",
+                                        "10.0.0.80:554#ch5"], str(cd._card_order()))
+        cd._CARD_ORDER = []
+        for k in ("dvr2", "dvr3", "dvr5"):
+            cd.CAMERAS.pop(k)
+        cd.CAMERAS["z"] = camera(id="z", ip="10.0.0.95", port=554)
+        cd.CAMERAS["dvr2"] = camera(id="dvr2", ip="10.0.0.80", port=554, channel="2")
+        cd._card_order_after_parent(dvr, ["dvr2"])
+        check("AS9 ... with no saved order, one starts from the current order",
+              cd._card_order() == ["10.0.0.70:554", "10.0.0.80:554#ch1", "10.0.0.80:554#ch2",
+                                   "10.0.0.90:554", "10.0.0.95:554"], str(cd._card_order()))
+        csrc = (REPO / "anycam_credentials.py").read_text(encoding="utf-8")
+        check("AS9 ... channel enumeration calls it with the new cards",
+              "_card_order_after_parent(cam, new_cards)" in csrc)
+    finally:
+        cd.CAMERAS.clear(); cd.CAMERAS.update(keep[0])
+        cd._CARD_ORDER = keep[1]
+        if keep[2] is None:
+            cd.RUNTIME_FILE.unlink(missing_ok=True)
+        else:
+            cd.RUNTIME_FILE.write_text(keep[2])
+
+    # AS10-AS12: B64, the camera prefixes checked against the IEEE registry
+    sys.path.insert(0, str(REPO / "tests"))
+    import build_oui_extract as bx
+    extract = {}
+    for line in (REPO / "tests" / "data" / "oui_camera_extract.txt").read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#"):
+            field, owner = line.split("\t")
+            extract[bx.block_prefix(field)] = owner
+    lst = cd._CAMERA_OUI_VENDORS
+    wrong = [f"{k} {lst[k]} {extract.get(k)}" for k in lst if extract.get(k) not in bx.MAKERS.get(lst[k], [])]
+    check("AS10 B64 every camera prefix is registered to that brand's company (registry extract)",
+          not wrong and set(lst) == set(extract) and len(lst) == 165, str(wrong[:5]))
+    old_wrong = ["DC:A6:32", "98:03:D8", "80:18:44", "C4:D9:87", "2C:41:38", "70:62:B8", "3C:E8:24",
+                 "70:A7:41", "34:FC:EF", "84:EB:18", "1C:C3:16", "44:A9:2C"]
+    check("AS10 ... the old wrong prefixes are gone (Raspberry Pi, Apple, Dell, Intel, HP, D-Link, Huawei, "
+          "Ubiquiti, LG, TI, Milesight IoT, the whole RA block)", not set(old_wrong) & set(lst))
+    check("AS11 B64 a /28 block: Luxonis's 44:A9:2C:3x is a camera maker, its neighbours are not",
+          cd.camera_oui_block("44:a9:2c:3f:00:01") == "Luxonis / OAK"
+          and cd.camera_oui_block("44-A9-2C-0F-00-01") == "" and cd.camera_oui_block("44:A9:2C:E0:00:01") == "")
+    check("AS11 ... a /36 block (Arecont's 00:50:C2:3B:6) and a 24-bit block",
+          cd.camera_oui_block("00:50:C2:3B:6A:BC") == "Arecont Vision" and cd.camera_oui_block("00:50:C2:3B:7A:BC") == ""
+          and cd.camera_oui_block("10:83:D2:00:00:01") == "Hipcam/Microseven" and cd.camera_oui_block("x") == "")
+    saved_db = dict(cd._OUI_DB)
+    cd._OUI_DB.clear()
+    cd._OUI_DB.update({"44:A9:2C": "IEEE Registration Authority", "28:57:BE": "Hangzhou Hikvision Digital Technology Co.,Ltd."})
+    try:
+        check("AS12 B64 with the downloaded table, a camera block inside an RA prefix gets the camera label",
+              cd.lookup_oui("44:A9:2C:31:00:00") == "(known camera manufacturer)"
+              and cd.lookup_oui("44:A9:2C:01:00:00") == "IEEE Registration Authority"
+              and cd.oui_is_camera("44:A9:2C:31:00:00") is True and cd.oui_is_camera("44:A9:2C:01:00:00") is None)
+    finally:
+        cd._OUI_DB.clear(); cd._OUI_DB.update(saved_db)
+    bsrc = (REPO / "anycam_brand.py").read_text(encoding="utf-8")
+    check("AS12 ... the brands that cannot be found by MAC are recorded",
+          "Not found by MAC at all" in bsrc and "Shenzhen Bilian" in bsrc)
+
+
 async def main():
     test_pure()
     fake = FakeGo2rtc()
@@ -6025,6 +6260,7 @@ async def main():
     await test_b54_walk()
     await test_381()
     await test_382()
+    await test_383()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

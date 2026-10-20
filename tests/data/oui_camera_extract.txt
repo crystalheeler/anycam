@@ -1,0 +1,167 @@
+# IEEE registry lines (via Wireshark's manuf file) for the camera makers in
+# anycam_brand._CAMERA_OUI_VENDORS. Made by tests/build_oui_extract.py.
+00:02:D1	Vivotek, Inc.
+00:03:C5	Mobotix AG
+00:09:18	Samsung Techwin Co.,Ltd
+00:0F:7C	ACTi Corporation
+00:10:BE	March Networks Corporation
+00:12:81	March Networks S.p.A.
+00:13:E2	GeoVision Inc.
+00:18:AE	Tvt Co.,Ltd
+00:1A:07	Arecont Vision
+00:1B:D8	FLIR Systems Inc
+00:1C:27	Sunell Electronics Co.
+00:1F:54	Lorex Technology Inc.
+00:40:7F	FLIR Systems
+00:40:8C	Axis Communications AB
+00:50:1A	IQinVision
+00:50:C2:3B:60/36	Arecont Vision
+00:65:1E	Amcrest Technologies
+00:BC:99	Hangzhou Hikvision Digital Technology Co.,Ltd.
+04:03:12	Hangzhou Hikvision Digital Technology Co.,Ltd.
+04:EE:CD	Hangzhou Hikvision Digital Technology Co.,Ltd.
+08:3B:C1	Hangzhou Hikvision Digital Technology Co.,Ltd.
+08:54:11	Hangzhou Hikvision Digital Technology Co.,Ltd.
+08:A1:89	Hangzhou Hikvision Digital Technology Co.,Ltd.
+08:CC:81	Hangzhou Hikvision Digital Technology Co.,Ltd.
+08:ED:ED	Zhejiang Dahua Technology Co., Ltd.
+0C:0E:C1:40/28	Swann Communications Pty Ltd
+0C:75:D2	Hangzhou Hikvision Digital Technology Co.,Ltd.
+10:12:FB	Hangzhou Hikvision Digital Technology Co.,Ltd.
+10:83:D2	Microseven Systems, LLC
+10:D1:DC	INSTAR Deutschland GmbH
+14:A7:8B	Zhejiang Dahua Technology Co., Ltd.
+14:BA:88	Zhejiang Uniview Technologies Co.,Ltd.
+18:68:CB	Hangzhou Hikvision Digital Technology Co.,Ltd.
+18:80:25	Hangzhou Hikvision Digital Technology Co.,Ltd.
+24:0F:9B	Hangzhou Hikvision Digital Technology Co.,Ltd.
+24:28:FD	Hangzhou Hikvision Digital Technology Co.,Ltd.
+24:32:AE	Hangzhou Hikvision Digital Technology Co.,Ltd.
+24:48:45	Hangzhou Hikvision Digital Technology Co.,Ltd.
+24:52:6A	Zhejiang Dahua Technology Co., Ltd.
+24:B1:05	Prama Hikvision India Private Limited
+28:57:BE	Hangzhou Hikvision Digital Technology Co.,Ltd.
+2C:A5:9C	Hangzhou Hikvision Digital Technology Co.,Ltd.
+30:DD:AA	Zhejiang Dahua Technologyco.,Ltd
+34:09:62	Hangzhou Hikvision Digital Technology Co.,Ltd.
+34:46:63:20/28	Amcrest Technologies
+38:AF:29	Zhejiang Dahua Technology Co., Ltd.
+3C:1B:F8	Hangzhou Hikvision Digital Technology Co.,Ltd.
+3C:DA:6D	Tiandy Technologies Co.,LTD
+3C:E3:6B	Zhejiang Dahua Technology Co., Ltd.
+3C:EF:8C	Zhejiang Dahua Technology Co., Ltd.
+40:7A:A4	Zhejiang Dahua Technologyco.,Ltd
+40:AC:BF	Hangzhou Hikvision Digital Technology Co.,Ltd.
+40:B5:70	Hangzhou Hikvision Digital Technology Co.,Ltd.
+44:19:B6	Hangzhou Hikvision Digital Technology Co.,Ltd.
+44:47:CC	Hangzhou Hikvision Digital Technology Co.,Ltd.
+44:A6:42	Hangzhou Hikvision Digital Technology Co.,Ltd.
+44:A9:2C:30/28	Luxonis Holding Corporation
+44:B4:23	Hanwha Vision Vietnam Company Limited
+48:62:64	Arlo Technology
+48:78:5B	Hangzhou Hikvision Digital Technology Co.,Ltd.
+48:EA:63	Zhejiang Uniview Technologies Co., Ltd.
+4C:11:BF	Zhejiang Dahua Technology Co., Ltd.
+4C:1F:86	Hangzhou Hikvision Digital Technology Co.,Ltd.
+4C:62:DF	Hangzhou Hikvision Digital Technology Co.,Ltd.
+4C:91:7A:60/28	Openeye
+4C:99:E8	Zhejiang Dahua Technologyco.,Ltd
+4C:BD:8F	Hangzhou Hikvision Digital Technology Co.,Ltd.
+4C:F5:DC	Hangzhou Hikvision Digital Technology Co.,Ltd.
+50:E5:38	Hangzhou Hikvision Digital Technology Co.,Ltd.
+54:2B:57	Night Owl SP
+54:8C:81	Hangzhou Hikvision Digital Technology Co.,Ltd.
+54:C4:15	Hangzhou Hikvision Digital Technology Co.,Ltd.
+58:03:FB	Hangzhou Hikvision Digital Technology Co.,Ltd.
+58:50:ED	Hangzhou Hikvision Digital Technology Co.,Ltd.
+58:5B:69	Tvt Co., Ltd
+5C:34:5B	Hangzhou Hikvision Digital Technology Co.,Ltd.
+5C:F5:1A	Zhejiang Dahua Technology Co., Ltd.
+64:DB:8B	Hangzhou Hikvision Digital Technology Co.,Ltd.
+64:FD:29	Zhejiang Dahua Technology Co., Ltd.
+68:6D:BC	Hangzhou Hikvision Digital Technology Co.,Ltd.
+6C:1C:71	Zhejiang Dahua Technology Co., Ltd.
+6C:F1:7E	Zhejiang Uniview Technologies Co.,Ltd.
+74:3F:C2	Hangzhou Hikvision Digital Technology Co.,Ltd.
+74:C9:29	Zhejiang Dahua Technology Co., Ltd.
+80:48:9F	Hangzhou Hikvision Digital Technology Co.,Ltd.
+80:7C:62	Hangzhou Hikvision Digital Technology Co.,Ltd.
+80:BE:AF	Hangzhou Hikvision Digital Technology Co.,Ltd.
+80:F5:AE	Hangzhou Hikvision Digital Technology Co.,Ltd.
+84:94:59	Hangzhou Hikvision Digital Technology Co.,Ltd.
+84:9A:40	Hangzhou Hikvision Digital Technology Co.,Ltd.
+88:26:3F	Zhejiang Uniview Technologies Co.,Ltd.
+88:DE:39	Hangzhou Hikvision Digital Technology Co.,Ltd.
+8C:22:D2	Hangzhou Hikvision Digital Technology Co.,Ltd.
+8C:E7:48	Hangzhou Hikvision Digital Technology Co.,Ltd.
+8C:E9:B4	Zhejiang Dahua Technology Co., Ltd.
+90:02:A9	Zhejiang Dahua Technology Co., Ltd.
+94:E1:AC	Hangzhou Hikvision Digital Technology Co.,Ltd.
+98:8B:0A	Hangzhou Hikvision Digital Technology Co.,Ltd.
+98:9D:E5	Hangzhou Hikvision Digital Technology Co.,Ltd.
+98:DF:82	Hangzhou Hikvision Digital Technology Co.,Ltd.
+98:F1:12	Hangzhou Hikvision Digital Technology Co.,Ltd.
+98:F9:CC	Zhejiang Dahua Technology Co., Ltd.
+9C:14:63	Zhejiang Dahua Technology Co., Ltd.
+9C:8E:CD	Amcrest Technologies
+A0:60:32	Amcrest Technologies
+A0:BD:1D	Zhejiang Dahua Technology Co., Ltd.
+A0:FF:0C	Hangzhou Hikvision Digital Technology Co.,Ltd.
+A4:11:62	Arlo Technology
+A4:14:37	Hangzhou Hikvision Digital Technology Co.,Ltd.
+A4:29:02	Hangzhou Hikvision Digital Technology Co.,Ltd.
+A4:4B:D9	Hangzhou Hikvision Digital Technology Co.,Ltd.
+A4:A4:59	Hangzhou Hikvision Digital Technology Co.,Ltd.
+A4:D5:C2	Hangzhou Hikvision Digital Technology Co.,Ltd.
+A8:DC:5A	Digital Watchdog
+AC:B9:2F	Hangzhou Hikvision Digital Technology Co.,Ltd.
+AC:CB:51	Hangzhou Hikvision Digital Technology Co.,Ltd.
+AC:CC:8E	Axis Communications AB
+B0:FF:0D	Hangzhou Hikvision Digital Technology Co.,Ltd.
+B4:4C:3B	Zhejiang Dahua Technology Co., Ltd.
+B4:A3:82	Hangzhou Hikvision Digital Technology Co.,Ltd.
+B8:A4:4F	Axis Communications AB
+BC:29:78	Prama Hikvision India Private Limited
+BC:32:5F	Zhejiang Dahua Technology Co., Ltd.
+BC:51:6C	Tiandy Technologies Co.,LTD
+BC:51:FE	Swann communications Pty Ltd
+BC:5E:33	Hangzhou Hikvision Digital Technology Co.,Ltd.
+BC:9B:5E	Hangzhou Hikvision Digital Technology Co.,Ltd.
+BC:AD:28	Hangzhou Hikvision Digital Technology Co.,Ltd.
+BC:BA:C2	Hangzhou Hikvision Digital Technology Co.,Ltd.
+C0:39:5A	Zhejiang Dahua Technology Co., Ltd.
+C0:51:7E	Hangzhou Hikvision Digital Technology Co.,Ltd.
+C0:56:E3	Hangzhou Hikvision Digital Technology Co.,Ltd.
+C0:6D:ED	Hangzhou Hikvision Digital Technology Co.,Ltd.
+C4:2F:90	Hangzhou Hikvision Digital Technology Co.,Ltd.
+C4:79:05	Zhejiang Uniview Technologies Co.,Ltd.
+C4:AA:C4	Zhejiang Dahua Technology Co., Ltd.
+C4:FF:84:A0/28	Openeye
+C8:A7:02	Hangzhou Hikvision Digital Technology Co.,Ltd.
+CC:13:F3	Hangzhou Hikvision Digital Technology Co.,Ltd.
+D4:2D:C5	i-PRO Co., Ltd.
+D4:43:0E	Zhejiang Dahua Technology Co., Ltd.
+D4:E8:53	Hangzhou Hikvision Digital Technology Co.,Ltd.
+DC:07:F8	Hangzhou Hikvision Digital Technology Co.,Ltd.
+DC:D2:6A	Hangzhou Hikvision Digital Technology Co.,Ltd.
+E0:2E:FE	Zhejiang Dahua Technology Co., Ltd.
+E0:50:8B	Zhejiang Dahua Technology Co., Ltd.
+E0:BA:AD	Hangzhou Hikvision Digital Technology Co.,Ltd.
+E0:CA:3C	Hangzhou Hikvision Digital Technology Co.,Ltd.
+E0:DF:13	Hangzhou Hikvision Digital Technology Co.,Ltd.
+E4:24:6C	Zhejiang Dahua Technology Co., Ltd.
+E4:30:22	Hanwha Vision VietNam
+E4:D5:8B	Hangzhou Hikvision Digital Technology Co.,Ltd.
+E4:E6:6C	Tiandy Technologies Co.,LTD
+E8:27:25	Axis Communications AB
+E8:A0:ED	Hangzhou Hikvision Digital Technology Co.,Ltd.
+EC:71:DB	Reolink Innovation Limited
+EC:A9:71	Hangzhou Hikvision Digital Technology Co.,Ltd.
+EC:C8:9C	Hangzhou Hikvision Digital Technology Co.,Ltd.
+F4:B1:C2	Zhejiang Dahua Technology Co., Ltd.
+F8:4D:FC	Hangzhou Hikvision Digital Technology Co.,Ltd.
+F8:CE:07	Zhejiang Dahua Technologyco.,Ltd
+FC:5F:49	Zhejiang Dahua Technology Co., Ltd.
+FC:9C:98	Arlo Technology
+FC:9F:FD	Hangzhou Hikvision Digital Technology Co.,Ltd.
+FC:B6:9D	Zhejiang Dahua Technology Co., Ltd.

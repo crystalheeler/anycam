@@ -36,7 +36,7 @@ log = logging.getLogger("anycam")
 # Taken from camera_discovery.py at start-up (anycam_host.bind).
 NEEDS = (
     'CAMERAS', 'RTSP_PATHS', '_THREAD_POOL', '_brand_throttle_seconds',
-    '_snap_last_access', '_snap_state', '_strip_creds',
+    '_card_order_after_parent', '_snap_last_access', '_snap_state', '_strip_creds',
     '_throttle_wait_if_needed', 'build_authenticated_url', 'decrypt_creds', 'encrypt_creds',
     'probe_stream_details', 'save_cameras',
 )
@@ -564,6 +564,8 @@ async def _enumerate_dvr_channels_after_auth(camera_id: str) -> None:
 
     _DVR_ENUM_DONE.add(camera_id)
     save_cameras()
+    if new_cards:
+        _card_order_after_parent(cam, new_cards)       # 3.8.3 (D5)
     log.info(f"  Channel enumeration complete for {camera_id}: "
              f"{len(new_cards)} new card(s) registered "
              f"(populated channels: {cam['_dvr_populated_channels']})")

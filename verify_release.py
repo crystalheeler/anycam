@@ -261,6 +261,15 @@ CONTRACTS = {
     "_go2rtc_config":        ['"ffmpeg": {"bin": GO2RTC_FFMPEG_BIN}'],
     "gate_main":             ["ffmpeg_input_host", "reserve(host, cooldown, MAX_WAIT_S)",
                               "if wait is None", "time.sleep", "os.execvp"],
+    # 3.8.3 (C27): every save also writes a copy; a copy with no settings, or
+    # equal to the newest, is never written, so lost settings never push the
+    # good copies out.
+    "_motion_save":          ["anycam_backup.write_copy(_settings_copy_dir()"],
+    "write_copy":            ["if not entries", "_same_cameras(copies[0], entries)", "[COPY_KEEP:]"],
+    # A folder on the Pi must be under /media or /share.
+    "pi_folder":             ["relative_to", "RESTORE_ROOTS"],
+    # 3.8.3 (D5): channel enumeration places the new channel cards.
+    "_card_order_after_parent": ["save_runtime(rt)", "startswith(sibling)"],
     # Treats the no-config-file 400 as success; encodes the password-bearing
     # source so '&' and '+' survive Go's query parser.
     "_go2rtc_register":      ['"config file disabled"', "quote(src, safe='')"],

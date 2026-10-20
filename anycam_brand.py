@@ -241,54 +241,116 @@ _OUI_DB_LOADED = False
 # Curated embedded OUI entries for known camera and non-camera vendors.
 # Used as fallback when the IEEE cache is unavailable, and to seed the
 # camera/non-camera classification even before the full DB loads.
-_CAMERA_OUI_VENDORS = {
-    # Hikvision
-    "1C:C3:16", "28:57:BE", "3C:E8:24", "44:19:B6", "48:EA:63",
-    "4C:11:BF", "54:C4:15", "70:A7:41", "80:18:44", "84:EB:18",
-    "A0:AC:1B", "B4:A3:82", "BC:AD:28", "C8:02:8F", "D8:69:73",
-    "E8:EA:6A", "C8:C2:FA", "50:2A:8B", "D4:56:B0",
-    # Dahua
-    "70:62:B8", "90:02:A9", "98:03:D8", "A8:6B:7C",
-    "C8:02:10", "E0:50:8B", "F4:AA:2C",
-    # Axis Communications
-    "00:40:8C", "AC:CC:8E", "B8:A4:4F", "F4:4D:30",
-    # Hanwha / Samsung Techwin
-    "00:09:18", "00:16:6C", "34:FC:EF",
-    # Reolink
-    "EC:71:DB", "DC:A6:32",
-    # Amcrest / Dahua OEM
-    "98:03:D8", "70:62:B8",
-    # Mobotix
-    "00:4A:E0",
-    # ACTi
-    "00:1F:9F",
-    # Vivotek
-    "00:02:D1",
-    # GeoVision
-    "00:13:E2",
-    # Pelco
-    "00:07:CB",
-    # Bosch
-    "00:04:63",
-    # Sony (network cameras)
-    "00:01:4A", "00:90:C6",
-    # Panasonic
-    "00:80:45", "04:B1:67",
-    # Foscam
-    "C4:D9:87", "E0:AE:5E",
-    # TP-Link (Tapo cameras)
-    "50:3E:AA", "98:DA:C4", "C0:06:C3",
-    # Uniview (UNV)
-    "E8:73:2E",
-    # Lorex / FLIR
-    "00:1C:F0", "C0:03:EF",
-    # Milesight
-    "2C:41:38",
-    # Luxonis
-    "44:A9:2C",
-    # iENSO
-    # (OUI not widely published — identified via HTTP)
+#
+# 3.8.3 (B64): rebuilt from the IEEE registry by company, with every MA-L,
+# MA-M (/28) and MA-S (/36) block of each camera-only maker; made by
+# tests/build_oui_extract.py, and test AS checks every prefix's registered
+# owner. A key is a prefix of 6, 7 or 9 hex digits: "44:A9:2C:3" is Luxonis's
+# /28 block inside an IEEE Registration Authority prefix that 15 companies share.
+# Makers that also make routers, phones, computers or other network devices
+# are left out (Ubiquiti, TP-Link, D-Link, Bosch, Sony, Panasonic, Samsung
+# Electronics, Wyze, Ring, EZVIZ, Verkada, Kedacom, Speco, Honeywell), because
+# the list calls every device with the prefix a camera.
+# Not found by MAC at all: Foscam, Annke, Vstarcam, Wansview, Tenvis, Sricam,
+# Zosi, LaView, Hiseeu, Q-See, Pelco, Illustra, Oncam, IndigoVision and VideoIQ
+# have no block in the registry; the Hipcam family (the Microseven too) uses
+# the prefix of its Wi-Fi module's maker, such as Shenzhen Bilian, which is in
+# thousands of other devices. The brand then comes from the camera's answers.
+_CAMERA_OUI_VENDORS: dict[str, str] = {
+    # Hikvision: 86
+    "00:BC:99": "Hikvision", "04:03:12": "Hikvision", "04:EE:CD": "Hikvision", "08:3B:C1": "Hikvision", "08:54:11": "Hikvision",
+    "08:A1:89": "Hikvision", "08:CC:81": "Hikvision", "0C:75:D2": "Hikvision", "10:12:FB": "Hikvision", "18:68:CB": "Hikvision",
+    "18:80:25": "Hikvision", "24:0F:9B": "Hikvision", "24:28:FD": "Hikvision", "24:32:AE": "Hikvision", "24:48:45": "Hikvision",
+    "24:B1:05": "Hikvision", "28:57:BE": "Hikvision", "2C:A5:9C": "Hikvision", "34:09:62": "Hikvision", "3C:1B:F8": "Hikvision",
+    "40:AC:BF": "Hikvision", "40:B5:70": "Hikvision", "44:19:B6": "Hikvision", "44:47:CC": "Hikvision", "44:A6:42": "Hikvision",
+    "48:78:5B": "Hikvision", "4C:1F:86": "Hikvision", "4C:62:DF": "Hikvision", "4C:BD:8F": "Hikvision", "4C:F5:DC": "Hikvision",
+    "50:E5:38": "Hikvision", "54:8C:81": "Hikvision", "54:C4:15": "Hikvision", "58:03:FB": "Hikvision", "58:50:ED": "Hikvision",
+    "5C:34:5B": "Hikvision", "64:DB:8B": "Hikvision", "68:6D:BC": "Hikvision", "74:3F:C2": "Hikvision", "80:48:9F": "Hikvision",
+    "80:7C:62": "Hikvision", "80:BE:AF": "Hikvision", "80:F5:AE": "Hikvision", "84:94:59": "Hikvision", "84:9A:40": "Hikvision",
+    "88:DE:39": "Hikvision", "8C:22:D2": "Hikvision", "8C:E7:48": "Hikvision", "94:E1:AC": "Hikvision", "98:8B:0A": "Hikvision",
+    "98:9D:E5": "Hikvision", "98:DF:82": "Hikvision", "98:F1:12": "Hikvision", "A0:FF:0C": "Hikvision", "A4:14:37": "Hikvision",
+    "A4:29:02": "Hikvision", "A4:4B:D9": "Hikvision", "A4:A4:59": "Hikvision", "A4:D5:C2": "Hikvision", "AC:B9:2F": "Hikvision",
+    "AC:CB:51": "Hikvision", "B0:FF:0D": "Hikvision", "B4:A3:82": "Hikvision", "BC:29:78": "Hikvision", "BC:5E:33": "Hikvision",
+    "BC:9B:5E": "Hikvision", "BC:AD:28": "Hikvision", "BC:BA:C2": "Hikvision", "C0:51:7E": "Hikvision", "C0:56:E3": "Hikvision",
+    "C0:6D:ED": "Hikvision", "C4:2F:90": "Hikvision", "C8:A7:02": "Hikvision", "CC:13:F3": "Hikvision", "D4:E8:53": "Hikvision",
+    "DC:07:F8": "Hikvision", "DC:D2:6A": "Hikvision", "E0:BA:AD": "Hikvision", "E0:CA:3C": "Hikvision", "E0:DF:13": "Hikvision",
+    "E4:D5:8B": "Hikvision", "E8:A0:ED": "Hikvision", "EC:A9:71": "Hikvision", "EC:C8:9C": "Hikvision", "F8:4D:FC": "Hikvision",
+    "FC:9F:FD": "Hikvision",
+    # Dahua: 31
+    "08:ED:ED": "Dahua", "14:A7:8B": "Dahua", "24:52:6A": "Dahua", "30:DD:AA": "Dahua", "38:AF:29": "Dahua",
+    "3C:E3:6B": "Dahua", "3C:EF:8C": "Dahua", "40:7A:A4": "Dahua", "4C:11:BF": "Dahua", "4C:99:E8": "Dahua",
+    "5C:F5:1A": "Dahua", "64:FD:29": "Dahua", "6C:1C:71": "Dahua", "74:C9:29": "Dahua", "8C:E9:B4": "Dahua",
+    "90:02:A9": "Dahua", "98:F9:CC": "Dahua", "9C:14:63": "Dahua", "A0:BD:1D": "Dahua", "B4:4C:3B": "Dahua",
+    "BC:32:5F": "Dahua", "C0:39:5A": "Dahua", "C4:AA:C4": "Dahua", "D4:43:0E": "Dahua", "E0:2E:FE": "Dahua",
+    "E0:50:8B": "Dahua", "E4:24:6C": "Dahua", "F4:B1:C2": "Dahua", "F8:CE:07": "Dahua", "FC:5F:49": "Dahua",
+    "FC:B6:9D": "Dahua",
+    # Axis: 4
+    "00:40:8C": "Axis", "AC:CC:8E": "Axis", "B8:A4:4F": "Axis", "E8:27:25": "Axis",
+    # Hanwha / Samsung Techwin: 3
+    "00:09:18": "Hanwha / Samsung Techwin", "44:B4:23": "Hanwha / Samsung Techwin", "E4:30:22": "Hanwha / Samsung Techwin",
+    # Reolink: 1
+    "EC:71:DB": "Reolink",
+    # Uniview (UNV): 5
+    "14:BA:88": "Uniview (UNV)", "48:EA:63": "Uniview (UNV)", "6C:F1:7E": "Uniview (UNV)", "88:26:3F": "Uniview (UNV)", "C4:79:05": "Uniview (UNV)",
+    # Vivotek: 1
+    "00:02:D1": "Vivotek",
+    # GeoVision: 1
+    "00:13:E2": "GeoVision",
+    # Mobotix: 1
+    "00:03:C5": "Mobotix",
+    # ACTi: 1
+    "00:0F:7C": "ACTi",
+    # Lorex: 1
+    "00:1F:54": "Lorex",
+    # Amcrest: 4
+    "00:65:1E": "Amcrest", "34:46:63:2": "Amcrest", "9C:8E:CD": "Amcrest", "A0:60:32": "Amcrest",
+    # Swann: 2
+    "0C:0E:C1:4": "Swann", "BC:51:FE": "Swann",
+    # Night Owl: 1
+    "54:2B:57": "Night Owl",
+    # i-PRO: 1
+    "D4:2D:C5": "i-PRO",
+    # FLIR: 2
+    "00:1B:D8": "FLIR", "00:40:7F": "FLIR",
+    # Tiandy: 3
+    "3C:DA:6D": "Tiandy", "BC:51:6C": "Tiandy", "E4:E6:6C": "Tiandy",
+    # Arecont Vision: 2
+    "00:1A:07": "Arecont Vision", "00:50:C2:3B:6": "Arecont Vision",
+    # Digital Watchdog: 1
+    "A8:DC:5A": "Digital Watchdog",
+    # March Networks: 2
+    "00:10:BE": "March Networks", "00:12:81": "March Networks",
+    # Sunell: 1
+    "00:1C:27": "Sunell",
+    # TVT: 2
+    "00:18:AE": "TVT", "58:5B:69": "TVT",
+    # Arlo: 3
+    "48:62:64": "Arlo", "A4:11:62": "Arlo", "FC:9C:98": "Arlo",
+    # INSTAR: 1
+    "10:D1:DC": "INSTAR",
+    # IQinVision: 1
+    "00:50:1A": "IQinVision",
+    # OpenEye: 2
+    "4C:91:7A:6": "OpenEye", "C4:FF:84:A": "OpenEye",
+    # Luxonis / OAK: 1
+    "44:A9:2C:3": "Luxonis / OAK",
+    # Hipcam/Microseven: 1
+    "10:83:D2": "Hipcam/Microseven",
 }
+
+
+def camera_oui_block(mac: str) -> str:
+    """The brand when the MAC is in a camera maker's block, else "" (longest block first)."""
+    hexes = "".join(ch for ch in (mac or "").upper() if ch in "0123456789ABCDEF")
+    if len(hexes) < 6:
+        return ""
+    for n in (9, 7, 6):
+        cut = hexes[:n]
+        key = ":".join(cut[i:i + 2] for i in range(0, n, 2))
+        if key in _CAMERA_OUI_VENDORS:
+            return _CAMERA_OUI_VENDORS[key]
+    return ""
+
 
 # OUI prefixes of devices that are almost certainly NOT cameras
 _NON_CAMERA_OUI_VENDORS: set[str] = {
@@ -453,11 +515,14 @@ def lookup_oui(mac: str) -> str:
     key = _oui_key(mac)
     if not key:
         return ""
-    # Full downloaded DB
-    if key in _OUI_DB:
-        return _OUI_DB[key]
+    # Full downloaded DB. 3.8.3 (B64): it holds only the 24-bit blocks; a
+    # camera maker's smaller block inside a Registration Authority prefix
+    # (Luxonis in 44:A9:2C) gets the curated label instead.
+    vendor = _OUI_DB.get(key, "")
+    if vendor and not (vendor.startswith("IEEE Registration Authority") and camera_oui_block(mac)):
+        return vendor
     # Curated embedded fallback label
-    if key in _CAMERA_OUI_VENDORS:
+    if camera_oui_block(mac):
         return "(known camera manufacturer)"
     if key in _NON_CAMERA_OUI_VENDORS:
         return "(known non-camera device)"
@@ -485,7 +550,7 @@ def oui_is_camera(mac: str) -> bool | None:
             if kw in vendor:
                 return False
     # Curated embedded sets
-    if key in _CAMERA_OUI_VENDORS:
+    if camera_oui_block(mac):
         return True
     if key in _NON_CAMERA_OUI_VENDORS:
         return False

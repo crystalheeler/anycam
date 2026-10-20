@@ -1,3 +1,22 @@
+## 3.8.3
+
+Motion and zone settings can be saved and restored, a recorder's channel cards appear next to it, and the list of camera makers' MAC addresses is rebuilt from the IEEE registry.
+
+### Changes & improvements
+
+- **Save and restore motion and zone settings.** AnyCam keeps a copy of every camera's motion settings, zones and armed state after each change, the newest 20, in the settings folder under the recordings folder (/media/anycam/settings). Save Motion & Zone Settings in the Storage tab downloads a copy.
+- **Restore Motion & Zone Settings.** In the Storage tab. Name a folder (the settings folder, a folder under /media or /share, or a folder on this device where the browser can pick one), and AnyCam finds each camera's newest copy, by its address or by its MAC address when the address changed. Choose all cameras, one, or a group; the dialog shows the date found and warns when a camera's picture shape changed.
+- **A recorder's channel cards appear next to it.** New channel cards from a DVR or NVR go right after the recorder's card, in channel order, instead of at the end of the grid.
+
+### Bugs fixed
+
+- **The built-in list of camera makers' MAC addresses was mostly wrong.** 37 of its 57 prefixes belonged to other companies, among them Apple, Dell, Intel and Raspberry Pi. It is rebuilt from the IEEE registry: 165 blocks of 28 camera-only makers, including the smaller blocks inside shared prefixes (Luxonis).
+
+### Known issues
+
+- **Some brands cannot be recognised by their MAC address.** Foscam, the Hipcam family (the Microseven too) and several others use the address of their Wi-Fi module's maker; AnyCam recognises them from the camera's answers instead.
+- **The Home Assistant phone app cannot pick a folder yet.** Use the settings folder, or a folder under /media or /share.
+
 ## 3.8.2
 
 The Microseven plays through go2rtc again, the log link opens inside the Home Assistant app, and dialogs and the Enhanced View bar fit a phone's screen.

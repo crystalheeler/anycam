@@ -962,6 +962,166 @@ async function openUpload(camId) {
   _upFill();
 }
 
+/* ── 3.8.3 (C27): save and restore the motion and zone settings ───────────
+ * The add-on keeps a copy after every change; the Save button downloads one.
+ * Restore names a folder, never a file: the add-on finds each camera's newest
+ * copy. A folder on this device is read here and its copies sent along.
+ */
+const RS_SEND_MAX = 20;            // copies sent from this device, newest first
+const RS_SEND_CHARS = 900000;      // under the add-on's 1 MB request limit
+let _rsFound = null;               // the last list, {cameras: [...]}
+let _rsSource = null;              // the request body that found it
+
+function downloadMotionCopy() {
+  const a = document.createElement('a');
+  a.href = BASE + '/api/motion/copy';
+  a.download = '';
+  a.click();
+}
+
+function _rsCanPickFolder() {
+  return 'webkitdirectory' in document.createElement('input');
+}
+
+function openRestore() {
+  const dev = document.getElementById('rs-device-opt');
+  dev.textContent = _rsCanPickFolder() ? 'A folder on this device' : 'A folder on this device (not in this browser)';
+  document.getElementById('rs-source').value = 'default';
+  document.getElementById('restore-modal').classList.add('open');
+  rsSourceShow();
+  rsFind();
+}
+
+function closeRestore() {
+  document.getElementById('restore-modal').classList.remove('open');
+  _rsFound = _rsSource = null;
+}
+
+function rsSourceShow() {
+  const src = document.getElementById('rs-source').value;
+  const canPick = _rsCanPickFolder();
+  document.getElementById('rs-pi-row').style.display = src === 'pi' ? '' : 'none';
+  document.getElementById('rs-device-row').style.display = src === 'device' && canPick ? '' : 'none';
+  document.getElementById('rs-device-note').style.display = src === 'device' && !canPick ? '' : 'none';
+  document.getElementById('rs-find').style.display = src === 'device' ? 'none' : '';
+  _rsShow(null);
+}
+
+// The copies in the picked folder, newest first, as {name, text}.
+async function _rsDeviceCopies(files) {
+  const picked = [...files].filter(f => /^anycam-motion-.*\.json$/.test(f.name))
+    .sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0)).slice(0, RS_SEND_MAX);
+  const out = [];
+  let chars = 0;
+  for (const f of picked) {
+    const text = await f.text();
+    if (chars + text.length > RS_SEND_CHARS) break;
+    chars += text.length;
+    out.push({name: f.name, text});
+  }
+  return out;
+}
+
+async function rsFind() {
+  const src = document.getElementById('rs-source').value;
+  const err = document.getElementById('rs-error');
+  err.textContent = '';
+  const body = {source: src};
+  if (src === 'pi') {
+    body.folder = document.getElementById('rs-pi').value.trim();
+    if (!body.folder) { _rsShow(null); return; }
+  } else if (src === 'device') {
+    const files = document.getElementById('rs-device').files || [];
+    if (!files.length) { _rsShow(null); return; }
+    body.copies = await _rsDeviceCopies(files);
+  }
+  document.getElementById('rs-where').textContent = 'Looking…';
+  try {
+    const r = await fetch(BASE + '/api/motion/restore', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.status);
+    _rsSource = body;
+    _rsShow(d);
+  } catch (e) {
+    _rsShow(null);
+    err.textContent = 'Could not look there: ' + (e.message || e);
+  }
+}
+
+function _rsWhen(iso) {
+  return iso ? iso.replace('T', ' ') : '';
+}
+
+function _rsShow(d) {
+  _rsFound = d;
+  const list = document.getElementById('rs-list');
+  const where = document.getElementById('rs-where');
+  if (!d) {
+    list.innerHTML = '';
+    where.textContent = '';
+    document.getElementById('rs-apply').disabled = true;
+    return;
+  }
+  const n = d.cameras.filter(c => c.found).length;
+  where.textContent = d.copies + (d.copies === 1 ? ' copy' : ' copies') + ' in ' + d.where
+    + ': saved settings for ' + n + ' of ' + d.cameras.length + ' camera(s).';
+  list.innerHTML = d.cameras.map(c => {
+    if (!c.found) {
+      return '<label class="rs-row rs-none"><input type="checkbox" disabled>'
+        + '<span class="rs-text">' + esc(c.name) + '<span class="rs-when">no saved settings</span></span></label>';
+    }
+    const what = [c.custom ? 'settings' : 'default settings',
+                  c.zones ? c.zones + (c.zones === 1 ? ' zone' : ' zones') : 'no zones',
+                  c.armed ? 'armed' : 'not armed'].join(' · ');
+    return '<label class="rs-row"><input type="checkbox" data-id="' + esc(c.id) + '" checked onchange="rsCount()">'
+      + '<span class="rs-text">' + esc(c.name)
+      + '<span class="rs-when">saved ' + esc(_rsWhen(c.saved)) + ' · ' + what + '</span>'
+      + (c.by === 'mac' ? '<span class="rs-when">found by MAC address: the camera\'s address changed</span>' : '')
+      + (c.aspect_changed ? '<span class="rs-warn">The picture shape changed since then: check the zones after the restore.</span>' : '')
+      + '</span></label>';
+  }).join('');
+  rsCount();
+}
+
+function _rsChosen() {
+  return [...document.querySelectorAll('#rs-list input[data-id]:checked')].map(i => i.dataset.id);
+}
+
+function rsCount() {
+  const k = _rsChosen().length;
+  const b = document.getElementById('rs-apply');
+  b.disabled = !k;
+  b.textContent = k ? 'Restore ' + k + (k === 1 ? ' camera' : ' cameras') : 'Restore';
+}
+
+function rsAll(on) {
+  document.querySelectorAll('#rs-list input[data-id]').forEach(i => { i.checked = on; });
+  rsCount();
+}
+
+async function rsApply() {
+  const ids = _rsChosen();
+  if (!ids.length || !_rsSource) return;
+  const err = document.getElementById('rs-error');
+  err.textContent = '';
+  document.getElementById('rs-apply').disabled = true;
+  try {
+    const r = await fetch(BASE + '/api/motion/restore', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({..._rsSource, apply: ids})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.status);
+    const bad = Object.keys(d.problems || {}).length;
+    showToast('Restored ' + d.restored.length + (d.restored.length === 1 ? ' camera' : ' cameras')
+      + (bad ? ' (' + bad + ' with problems: see the log)' : ''), !!bad);
+    closeRestore();
+    loadCameras();
+  } catch (e) {
+    err.textContent = 'Restore failed: ' + (e.message || e);
+    rsCount();
+  }
+}
+
 function closeUpload() {
   _upCam = null;
   document.getElementById('upload-modal').classList.remove('open');
@@ -2312,6 +2472,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && _focusCamId) closeFocus();
   else if (e.key === 'Escape' && _csCamId) closeCamSettings();
   else if (e.key === 'Escape' && document.getElementById('upload-modal').classList.contains('open')) closeUpload();
+  else if (e.key === 'Escape' && document.getElementById('restore-modal').classList.contains('open')) closeRestore();
 });
 
 // When the browser tab returns to focus after being backgrounded, the browser

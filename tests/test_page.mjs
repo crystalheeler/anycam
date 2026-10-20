@@ -1094,5 +1094,53 @@ console.log('\n[3.8.2] log link inside HA (B66), WebRTC report (B62)');
         && page.includes("this._emit('webrtc-diag'"));
 }
 
+// ── 3.8.3: C27 restore the motion and zone settings ──────────────────────────
+console.log('\n[3.8.3] restore motion and zone settings (C27)');
+{
+  const grab = name => {
+    const i = page.indexOf('function ' + name + '(');
+    let depth = 0, j = page.indexOf('{', i);
+    for (let k = j; k < page.length; k++) {
+      if (page[k] === '{') depth++;
+      else if (page[k] === '}' && --depth === 0) return page.slice(i, k + 1);
+    }
+  };
+  vm.runInThisContext('async ' + grab('_rsDeviceCopies')
+                      + '\nglobalThis.__rsDev = _rsDeviceCopies;');
+  const f = (name, n) => ({name, text: async () => 'x'.repeat(n)});
+  const files = [f('notes.txt', 5), f('anycam-motion-20261001-080000.json', 10), f('anycam-motion-20261003-080000.json', 10),
+                 f('other.json', 10), ...Array.from({length: 25}, (_, i) => f('anycam-motion-20260901-0800' + String(i).padStart(2, '0') + '.json', 10))];
+  const sent = await __rsDev(files);
+  check('C27 a folder on the device: only copies are sent, newest first, at most 20',
+        sent.length === 20 && sent[0].name === 'anycam-motion-20261003-080000.json'
+        && sent[1].name === 'anycam-motion-20261001-080000.json' && sent.every(c => c.name.startsWith('anycam-motion-')));
+  const big = await __rsDev([f('anycam-motion-2.json', 600000), f('anycam-motion-1.json', 600000)]);
+  check('C27 ... and under the add-on\'s 1 MB request limit', big.length === 1 && big[0].name === 'anycam-motion-2.json');
+
+  const els = {};
+  const el = id => (els[id] = els[id] || {id, innerHTML: '', textContent: '', disabled: false, style: {}});
+  const realDoc = globalThis.document;
+  globalThis.document = {getElementById: el, querySelectorAll: () => []};
+  vm.runInThisContext(grab('esc') + '\n' + grab('_rsWhen') + '\n' + grab('_rsChosen') + '\n' + grab('rsCount') + '\n'
+                      + grab('_rsShow') + '\nglobalThis.__rsShow = _rsShow;');
+  __rsShow({where: '/media/anycam/settings', copies: 3, cameras: [
+    {id: 'a', name: 'Yard <cam>', found: true, saved: '2026-10-18T14:03', by: 'key', aspect_changed: false, zones: 2, custom: true, armed: true},
+    {id: 'b', name: 'Gate', found: true, saved: '2026-10-17T09:00', by: 'mac', aspect_changed: true, zones: 0, custom: false, armed: false},
+    {id: 'c', name: 'Shed', found: false}]});
+  const html = els['rs-list'].innerHTML;
+  check('C27 the dialog lists each camera with the date found, or "no saved settings"',
+        html.includes('Yard &lt;cam&gt;') && html.includes('saved 2026-10-18 14:03 · settings · 2 zones · armed')
+        && /disabled>.*Shed.*no saved settings/.test(html)
+        && els['rs-where'].textContent === '3 copies in /media/anycam/settings: saved settings for 2 of 3 camera(s).',
+        html.slice(0, 200));
+  check('C27 ... says when a camera was found by MAC address, and warns when the picture shape changed',
+        html.includes('found by MAC address') && html.includes('The picture shape changed'));
+  globalThis.document = realDoc;
+  check('C27 Restore sends the same source again with the chosen cameras, then reloads the cards',
+        page.includes('JSON.stringify({..._rsSource, apply: ids})') && /closeRestore\(\);\s*loadCameras\(\);/.test(page));
+  check('C27 a folder picker only where the browser has one (webkitdirectory), else a note',
+        page.includes("'webkitdirectory' in document.createElement('input')") && page.includes("'rs-device-note'"));
+}
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

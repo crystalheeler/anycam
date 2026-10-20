@@ -47,8 +47,9 @@ import anycam_host
 import anycam_motion
 from anycam_motion import (
     _MOTION, _motion_keeper, _motion_load, _motion_on_frame,
-    _motion_reset_prev, _motion_uses_snapshots, api_motion_all, api_motion_settings,
-    api_motion_status, api_motion_toggle, api_motion_zones,
+    _motion_reset_prev, _motion_uses_snapshots, api_motion_all, api_motion_copy,
+    api_motion_restore, api_motion_settings, api_motion_status, api_motion_toggle,
+    api_motion_zones,
 )
 # 3.0.0-rc1.2 (E1): go2rtc.
 import anycam_go2rtc
@@ -221,7 +222,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.8.2"  # must match config.yaml
+CURRENT_VERSION = "3.8.3"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1086,6 +1087,38 @@ def _cards_in_order(cams: list[dict]) -> list[dict]:
                                  key=lambda ic: (rank.get(_card_key(ic[1]), last + ic[0]),))]
 
 
+def _card_order_after_parent(parent: dict, new_ids: list[str]) -> None:
+    """3.8.3 (D5): put a recorder's new channel cards right after its card.
+
+    Without a saved order, the order starts from the current one. A channel card
+    that already follows the recorder's card keeps its place; the new ones go after
+    the last of them, in channel order. The recorder's own key gains #chN when its
+    channel is set, so its old key (ip:port) is renamed in the order.
+    """
+    global _CARD_ORDER
+    new_cams = sorted((CAMERAS[i] for i in new_ids if i in CAMERAS),
+                      key=lambda c: int(c["channel"]) if str(c.get("channel")).isdigit() else 999)
+    if not new_cams:
+        return
+    new_keys = [_card_key(c) for c in new_cams]
+    order = [k for k in (_card_order() or [_card_key(c) for c in _cards_in_order(list(CAMERAS.values()))])
+             if k not in new_keys]
+    key, bare = _card_key(parent), _card_key({**parent, "channel": ""})
+    if key not in order and bare in order:
+        order[order.index(bare)] = key
+    if key not in order:
+        order.append(key)
+    at = order.index(key)
+    sibling = bare + "#ch"
+    while at + 1 < len(order) and order[at + 1].startswith(sibling):
+        at += 1
+    _CARD_ORDER = list(dict.fromkeys(order[:at + 1] + new_keys + order[at + 1:]))[:CARD_ORDER_MAX]
+    rt = load_runtime()
+    rt["card_order"] = _CARD_ORDER
+    save_runtime(rt)
+    log.info(f"Card order: {len(new_keys)} channel card(s) placed after {parent.get('name') or key}")
+
+
 async def api_card_order(request: web.Request) -> web.Response:
     """GET or POST /api/card_order — the saved card order, a list of card keys."""
     global _CARD_ORDER
@@ -1552,6 +1585,8 @@ def make_app() -> web.Application:
     app.router.add_post(  "/api/cameras/{camera_id}/motion",      api_motion_toggle)
     app.router.add_get(   "/api/cameras/{camera_id}/motion",      api_motion_status)
     app.router.add_get(   "/api/motion",                          api_motion_all)
+    app.router.add_get(   "/api/motion/copy",                     api_motion_copy)      # 3.8.3 (C27)
+    app.router.add_post(  "/api/motion/restore",                  api_motion_restore)   # 3.8.3 (C27)
     app.router.add_route("*", "/api/cameras/{camera_id}/motion/settings", api_motion_settings)
     app.router.add_route("*", "/api/cameras/{camera_id}/motion/zones", api_motion_zones)
     app.router.add_get(   "/api/storage",                         api_storage_list)

@@ -28,6 +28,7 @@ from anycam_go2rtc import _go2rtc_profiles      # 3.0.0-rc1.2: it moved there
 from anycam_go2rtc import _go2rtc_relay, _go2rtc_relay_result     # 3.3.0 (C4)
 import anycam_zones                                                 # 3.4.0 (C17)
 import anycam_upload                                                # 3.6.0 (C14)
+import anycam_backup                                                # 3.8.3 (C27)
 
 log = logging.getLogger("anycam")
 
@@ -35,11 +36,11 @@ log = logging.getLogger("anycam")
 NEEDS = (
     'CAMERAS', 'CARD_MAX_WIDTH', 'CFG_MOTION_CLIP_S', 'CFG_MOTION_COOL',
     'CFG_MOTION_CALIBRATION', 'CFG_MOTION_GLOBAL', 'CFG_MOTION_LEVEL', 'CFG_MOTION_PAD',
-    'CFG_RECORDINGS',
+    'CFG_RECORDINGS', 'CURRENT_VERSION',
     'DATA_DIR', 'MEDIA_DIR', 'MOTION_FILE', '_brand_throttle_seconds',
     '_dahua_sub_stream', '_drain_stderr', '_snap_last_access',
     '_snap_state', '_stop_proc', '_throttle_wait_if_needed', 'build_authenticated_url',
-    'snap_loop',
+    'snap_loop', '_card_key',
 )
 # Per-camera motion state
 _MOTION: dict = {}   # camera_id → {enabled, recording, last_motion, proc, clip_path}
@@ -1494,6 +1495,175 @@ def _motion_save() -> None:
     MOTION_FILE.write_text(json.dumps({"armed": armed, "cameras": _MOTION_CFG,
                                        "zones": anycam_zones.ZONES}),
                            encoding="utf-8")
+    # 3.8.3 (C27): and a copy under the recordings folder, which a reinstall keeps
+    try:
+        path = anycam_backup.write_copy(_settings_copy_dir(), _settings_entries(), CURRENT_VERSION)
+    except OSError as ex:
+        log.warning(f"Motion: could not write a copy of the motion and zone settings: {ex}")
+    else:
+        if path:
+            log.debug(f"Motion: settings copy written: {path.name}")
+
+
+# ── 3.8.3 (C27): save and restore the motion and zone settings ──────────────
+SETTINGS_COPY_DIR: Path | None = None     # None: MEDIA_DIR/settings (the tests set it)
+
+
+def _settings_copy_dir() -> Path:
+    return SETTINGS_COPY_DIR or (MEDIA_DIR / anycam_backup.COPY_FOLDER)
+
+
+def _settings_entry(camera_id: str, cam: dict) -> dict | None:
+    """One camera in a copy; None when it has nothing to keep (defaults, no zones, not armed)."""
+    custom = dict(_MOTION_CFG.get(camera_id) or {})
+    zones = anycam_zones.ZONES.get(camera_id)
+    armed = bool((_MOTION.get(camera_id) or {}).get("enabled"))
+    if not (custom or zones or armed):
+        return None
+    return {"key": _card_key(cam), "id": camera_id,
+            "mac": anycam_backup.normal_mac(cam.get("mac_addr")),
+            "channel": str(cam.get("channel") or ""), "name": cam.get("name") or "",
+            "brand": cam.get("manufacturer") or "",
+            "width": cam.get("stream_width"), "height": cam.get("stream_height"),
+            "settings": custom, "zones": anycam_zones.zone_cfg(camera_id) if zones else None,
+            "armed": armed}
+
+
+def _settings_entries() -> list[dict]:
+    entries = [_settings_entry(cid, cam) for cid, cam in list(CAMERAS.items())]
+    return sorted((e for e in entries if e), key=lambda e: e["key"])
+
+
+async def api_motion_copy(request: web.Request) -> web.Response:
+    """GET /api/motion/copy — a copy of every camera's motion and zone settings, to download."""
+    now = datetime.datetime.now()
+    body = json.dumps(anycam_backup.build_copy(_settings_entries(), CURRENT_VERSION, now), indent=1)
+    log.info("Motion: settings copy downloaded")
+    return web.Response(text=body, content_type="application/json", headers={
+        "Content-Disposition": f'attachment; filename="{anycam_backup.copy_name(now)}"'})
+
+
+def _restore_copies(data: dict) -> tuple[list[dict], str, str | None]:
+    """The copies the restore reads: (copies, where, error).
+
+    data["source"]: "default" (the copy folder), "pi" with data["folder"], or
+    "device" with data["copies"] = [{"name", "text"}] read by the page.
+    """
+    source = data.get("source") or "default"
+    if source == "default":
+        folder = _settings_copy_dir()
+        return anycam_backup.read_folder(folder), str(folder), None
+    if source == "pi":
+        folder = anycam_backup.pi_folder(data.get("folder"))
+        if folder is None:
+            return [], "", ("The folder must be a folder under "
+                            + " or ".join(anycam_backup.RESTORE_ROOTS))
+        return anycam_backup.read_folder(folder), str(folder), None
+    if source == "device":
+        sent = data.get("copies")
+        if not isinstance(sent, list) or len(sent) > anycam_backup.COPY_READ_MAX:
+            return [], "", "copies must be a list"
+        copies = [c for c in (anycam_backup.parse_copy(f.get("text"), str(f.get("name") or "")[:120])
+                              for f in sent if isinstance(f, dict)) if c]
+        return copies, "the folder on this device", None
+    return [], "", "Unknown source"
+
+
+def _restore_cameras() -> list[dict]:
+    return [{"id": cid, "key": _card_key(cam), "mac": cam.get("mac_addr"),
+             "channel": cam.get("channel"), "name": cam.get("name") or cid,
+             "width": cam.get("stream_width"), "height": cam.get("stream_height")}
+            for cid, cam in list(CAMERAS.items())]
+
+
+async def _restore_apply(camera_id: str, entry: dict) -> list[str]:
+    """Apply one camera's saved settings, zones and armed state; return the problems."""
+    problems = []
+    clean, errors = _motion_validate({**MOTION_DEFAULTS, **(entry.get("settings") or {})})
+    if errors:
+        problems.append("settings not used: " + "; ".join(errors))
+    else:
+        custom = {k: v for k, v in clean.items() if v != MOTION_DEFAULTS[k]}
+        if custom:
+            _MOTION_CFG[camera_id] = custom
+        else:
+            _MOTION_CFG.pop(camera_id, None)
+    zclean, zerrors = (anycam_zones.validate(entry["zones"]) if entry.get("zones")
+                       else ({}, []))
+    if zerrors:
+        problems.append("zones not used: " + "; ".join(zerrors))
+    else:
+        anycam_zones.set_zones(camera_id, zclean or None)
+    ms = _motion_state(camera_id)
+    want = bool(entry.get("armed"))
+    if ms["enabled"] and not want:
+        ms["enabled"] = False
+        await _stop_recording(camera_id)
+        await _motion_stop_pipelines(camera_id)
+    elif want and not ms["enabled"]:
+        ms["enabled"] = True
+    await _motion_restart_detector(camera_id)     # new zones, and starts an armed camera
+    if ms["enabled"]:
+        _motion_ensure_loop(camera_id)
+    return problems
+
+
+async def api_motion_restore(request: web.Request) -> web.Response:
+    """POST /api/motion/restore — find saved settings for each camera, and restore them.
+
+    Without "apply" it only reports what it found. With "apply": [camera ids] it
+    restores those cameras from the same source, saves and restarts motion.
+    """
+    try:
+        data = await request.json()
+    except ValueError:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    if not isinstance(data, dict):
+        return web.json_response({"error": "Invalid request"}, status=400)
+    copies, where, error = await asyncio.to_thread(_restore_copies, data)
+    if error:
+        return web.json_response({"error": error}, status=400)
+    cams = _restore_cameras()
+    found = anycam_backup.match(cams, copies)
+    apply = data.get("apply")
+    if apply is not None:
+        if not isinstance(apply, list) or not all(isinstance(c, str) for c in apply):
+            return web.json_response({"error": "apply must be a list of camera ids"}, status=400)
+        done, problems = [], {}
+        for camera_id in dict.fromkeys(apply):
+            hit = found.get(camera_id)
+            if not hit or camera_id not in CAMERAS:
+                continue
+            issues = await _restore_apply(camera_id, hit["entry"])
+            done.append(camera_id)
+            if issues:
+                problems[camera_id] = issues
+            log.info(f"Motion [{camera_id}]: settings restored from {hit['source'] or where} "
+                     f"(saved {hit['saved']:%Y-%m-%d %H:%M}, matched by "
+                     f"{'card' if hit['by'] == 'key' else 'MAC address'})"
+                     + (f" — {'; '.join(issues)}" if issues else ""))
+        if done:
+            try:
+                await asyncio.to_thread(_motion_save)
+            except OSError as ex:
+                log.warning(f"Motion: could not save {MOTION_FILE}: {ex}")
+        return web.json_response({"restored": done, "problems": problems})
+    rows = []
+    for cam in cams:
+        hit = found.get(cam["id"])
+        entry = hit["entry"] if hit else {}
+        rows.append({
+            "id": cam["id"], "name": cam["name"], "found": bool(hit),
+            "saved": hit["saved"].isoformat(timespec="minutes") if hit else None,
+            "by": hit["by"] if hit else None,
+            "aspect_changed": bool(hit) and anycam_backup.aspect_changed(
+                entry, cam["width"], cam["height"]),
+            "zones": len((entry.get("zones") or {}).get("zones") or []),
+            "custom": bool(entry.get("settings")), "armed": bool(entry.get("armed")),
+        })
+    log.info(f"Motion: restore looked in {where}: {len(copies)} cop{'y' if len(copies) == 1 else 'ies'}, "
+             f"saved settings for {len(found)} of {len(cams)} camera(s)")
+    return web.json_response({"where": where, "copies": len(copies), "cameras": rows})
 
 
 def _rec_zones_file() -> Path:

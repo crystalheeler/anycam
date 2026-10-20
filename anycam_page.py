@@ -311,6 +311,13 @@ header h1{{cursor:pointer}}
 .cs-modal label.cs-check{{flex-direction:row;align-items:center;gap:8px;font-size:.84rem;color:var(--text)}}
 /* 3.7.0-rc2.0 (B28): .modal input sets width 100%, which pushed the box away from its text */
 .modal label.cs-check input[type=checkbox]{{width:auto;flex:0 0 auto;margin:0;padding:0;accent-color:var(--primary)}}
+/* 3.8.3 (C27): the restore list; long names wrap */
+.cs-modal label.rs-row{{display:flex;flex-direction:row;align-items:flex-start;gap:8px;font-size:.84rem;color:var(--text);padding:6px 0;border-top:1px solid var(--border)}}
+.modal .rs-row input[type=checkbox]{{width:auto;flex:0 0 auto;margin:2px 0 0;padding:0;accent-color:var(--primary)}}
+.rs-text{{min-width:0;overflow-wrap:anywhere}}
+.rs-when{{display:block;font-size:.76rem;color:var(--text-dim)}}
+.rs-warn{{display:block;font-size:.76rem;color:var(--yellow)}}
+.rs-none{{opacity:.55}}
 /* 3.4.0 (C17): the drawing window over Enhanced View */
 #focus-zone-ctl{{display:flex;align-items:center;gap:10px;flex-shrink:0;font-size:.78rem;color:#ccc}}
 #focus-zone-ctl label{{display:flex;align-items:center;gap:4px;cursor:pointer}}
@@ -616,6 +623,35 @@ header h1{{cursor:pointer}}
   </div>
 </div>
 
+<!-- 3.8.3 (C27): restore the motion and zone settings -->
+<div class="modal-backdrop" id="restore-modal" onclick="if(event.target.id==='restore-modal')closeRestore()">
+  <div class="modal cs-modal">
+    <h3>Restore Motion &amp; Zone Settings</h3>
+    <div class="cs-help">AnyCam keeps a copy after every change, the newest 20, in the settings
+      folder of the recordings folder. Name a folder: AnyCam finds each camera's newest copy,
+      by its address, or by its MAC address when the address changed.</div>
+    <label>Look in<select id="rs-source" onchange="rsSourceShow()">
+      <option value="default">The settings folder</option>
+      <option value="pi">A folder on the Home Assistant machine</option>
+      <option value="device" id="rs-device-opt">A folder on this device</option>
+    </select></label>
+    <label id="rs-pi-row" style="display:none">Folder (under /media or /share)<input type="text" id="rs-pi" spellcheck="false" placeholder="/share/anycam"></label>
+    <label id="rs-device-row" style="display:none">Folder<input type="file" id="rs-device" webkitdirectory multiple onchange="rsFind()"></label>
+    <div class="cs-help" id="rs-device-note" style="display:none">This browser cannot pick a folder.
+      Copy the files to a folder under /media or /share, and pick "A folder on the Home Assistant machine".</div>
+    <button class="btn btn-ghost btn-sm" id="rs-find" onclick="rsFind()">Find saved settings</button>
+    <div class="cs-help" id="rs-where"></div>
+    <div id="rs-list"></div>
+    <div class="cs-error" id="rs-error"></div>
+    <div class="modal-btns">
+      <button class="btn btn-ghost btn-sm" onclick="rsAll(true)" style="margin-right:auto">All</button>
+      <button class="btn btn-ghost btn-sm" onclick="rsAll(false)">None</button>
+      <button class="btn btn-ghost btn-sm" onclick="closeRestore()">Cancel</button>
+      <button class="btn btn-primary btn-sm" id="rs-apply" onclick="rsApply()" disabled>Restore</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-backdrop" id="nc-modal" onclick="if(event.target.id==='nc-modal')closeNotCamModal()">
   <div class="modal nc-modal-inner">
     <h3>&#x1F6AB; Not a Camera</h3>
@@ -689,6 +725,8 @@ header h1{{cursor:pointer}}
       <div id="disk-bar-track"><div id="disk-bar-fill"></div></div>
     </div>
     <button class="btn btn-secondary btn-sm" onclick="openUpload(null)" title="Copy recordings to a server by SFTP, FTPS or FTP">&#x21E7; Remote Storage</button>
+    <button class="btn btn-secondary btn-sm" onclick="downloadMotionCopy()" title="Download a copy of every camera's motion and zone settings">&#x2913; Save Motion &amp; Zone Settings</button>
+    <button class="btn btn-secondary btn-sm" onclick="openRestore()" title="Restore motion and zone settings from saved copies">&#x2912; Restore Motion &amp; Zone Settings</button>
     <button class="btn btn-secondary btn-sm" onclick="loadStorage()">&#x21BB; Refresh</button>
   </div>
   <!-- Explorer pane: nav bar + column headers + file list all inside white box -->

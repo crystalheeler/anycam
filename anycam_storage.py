@@ -15,6 +15,7 @@ from pathlib import Path
 
 from anycam_host import H
 import anycam_zones          # 3.4.0 (C17): the zone that started a recording
+import anycam_backup         # 3.8.3 (C27): the settings copy folder
 
 log = logging.getLogger("anycam")
 
@@ -43,8 +44,8 @@ async def api_storage_list(request: web.Request) -> web.Response:
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     folders = []
     for cam_dir in sorted(MEDIA_DIR.iterdir()):
-        if not cam_dir.is_dir():
-            continue
+        if not cam_dir.is_dir() or cam_dir.name == anycam_backup.COPY_FOLDER:
+            continue       # 3.8.3 (C27): the settings copies are not recordings
         files = []
         for f in sorted(cam_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
             if f.is_file() and f.suffix in (".mp4", ".mkv", ".jpg", ".jpeg"):
