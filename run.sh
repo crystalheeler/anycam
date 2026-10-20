@@ -38,6 +38,7 @@ export MOTION_DETECT_LEVEL=$(bashio::config 'motion_detect_level')
 export MOTION_CLIP_LENGTH=$(bashio::config 'motion_clip_length')
 export MOTION_COOLDOWN_SECS=$(bashio::config 'motion_cooldown_secs')
 export MOTION_CLIP_PADDING_SECS=$(bashio::config 'motion_clip_padding_secs')
+export MOTION_CALIBRATION_LOG=$(bashio::config 'motion_calibration_log')
 
 bashio::log.info "Camera Discovery starting on port ${INGRESS_PORT}"
 bashio::log.info "Ingress path: ${INGRESS_PATH}"
@@ -46,7 +47,7 @@ bashio::log.info "Ingress path: ${INGRESS_PATH}"
 # in the addon Configuration tab differs from what shows up here, the
 # pipeline is broken — investigate run.sh first.
 bashio::log.info "Config: hw_decode=${HW_DECODE} adaptive_quality=${ADAPTIVE_QUALITY} low_latency=${LOW_LATENCY} prewarm=${PREWARM}"
-bashio::log.info "Config: global_recording_settings=${GLOBAL_RECORDING_SETTINGS} recordings_path=${RECORDINGS_PATH} motion_detect_level=${MOTION_DETECT_LEVEL} motion_clip_length=${MOTION_CLIP_LENGTH} motion_cooldown=${MOTION_COOLDOWN_SECS}s motion_padding=${MOTION_CLIP_PADDING_SECS}s"
+bashio::log.info "Config: global_recording_settings=${GLOBAL_RECORDING_SETTINGS} recordings_path=${RECORDINGS_PATH} motion_detect_level=${MOTION_DETECT_LEVEL} motion_clip_length=${MOTION_CLIP_LENGTH} motion_cooldown=${MOTION_COOLDOWN_SECS}s motion_padding=${MOTION_CLIP_PADDING_SECS}s motion_calibration_log=${MOTION_CALIBRATION_LOG}"
 bashio::log.info "Config: log_debug=${LOG_DEBUG} log_info=${LOG_INFO} log_warning=${LOG_WARNING} log_error=${LOG_ERROR} unrestricted_storage_browser=${UNRESTRICTED_STORAGE_BROWSER}"
 
 # 2.6.3: log the installed ffmpeg version at every start.

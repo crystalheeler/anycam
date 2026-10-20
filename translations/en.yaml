@@ -86,6 +86,16 @@ configuration:
     description: >-
       Used only when Use Global Recording Settings is ON. Extra seconds
       recorded after the cooldown ends. Default 3.
+  motion_calibration_log:
+    name: Motion Calibration Log
+    description: >-
+      Default OFF. For setting each zone's sensitivity. While ON, the add-on
+      log gets one line for each movement in each zone (or in the whole
+      picture when a camera has no zones), written when the movement ends:
+      the date and time it started, how long it lasted, its peak change, the
+      zone's threshold, and what happened (recorded, with the file name, or
+      why not). A movement counts from a quarter of the threshold, so near
+      misses show too. At most 20 lines per camera per minute.
   unrestricted_storage_browser:
     name: Unrestricted Storage Browser
     description: >-

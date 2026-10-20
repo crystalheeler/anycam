@@ -5884,6 +5884,91 @@ async def test_382():
           _re.fullmatch(r"LorexCH7_\d{8}_\d{6}", nb) is not None, nb)
     cd._MOTION.clear(); cd._MOTION_CFG.clear(); zmod.REC_ZONES.clear()
 
+    # AR7: the motion calibration log (CrystalHeeler, 2026-10-20)
+    check("AR7 the calibration log is off unless the setting turns it on",
+          cd.CFG_MOTION_CALIBRATION is False and cd._cal_on() is False)
+    when = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
+    ms = {"recording": False}
+    CAP.lines.clear()
+    cd._cal_track("ch7", ms, [("Patio", 1.5, 4.6), ("Walkway", 0.2, 4.6)], True, False, now_m=100.0)
+    cd._cal_track("ch7", ms, [("Patio", 2.1, 4.6), ("Walkway", 0.1, 4.6)], True, False, now_m=100.25)
+    cd._cal_track("ch7", ms, [("Patio", 0.4, 4.6), ("Walkway", 0.0, 4.6)], True, False, now_m=100.5)
+    open_before = list(ms.get("cal", {}))
+    cd._cal_track("ch7", ms, [("Patio", 0.0, 4.6), ("Walkway", 0.0, 4.6)], True, False, now_m=101.3)
+    line = next((l for l in CAP.lines if "Patio" in l), "")
+    check("AR7 a near miss (a cat below the threshold) gives one line when it ends: date and time, length, "
+          "peak, threshold, outcome",
+          open_before == ["Patio"] and _re.search(
+              when + r' zone "Patio": movement 0\.2 s, peak 2\.1% \(records at 4\.6%\) — not recorded: below the threshold$',
+              line) is not None and not any("Walkway" in l for l in CAP.lines), line)
+    check("AR7 ... a change under a quarter of the threshold is not a movement (Walkway at 0.2% of 4.6%)",
+          "Walkway" not in ms.get("cal", {}))
+    CAP.lines.clear()
+    ms = {"recording": False}
+    cd._cal_track("ch7", ms, [("FrontYard-Left", 6.3, 4.6)], True, False, now_m=200.0)
+    cd._cal_track("ch7", ms, [("FrontYard-Left", 8.0, 4.6), ("Patio", 1.4, 4.6)], True, False, now_m=200.25)
+    cd._cal_recorded(ms, "FrontYard-Left", "FrontYard-Left_LorexCH7_20261020_211405")
+    cd._cal_flush("ch7", ms, 205.0)
+    rec = next((l for l in CAP.lines if "FrontYard-Left\": movement" in l), "")
+    other = next((l for l in CAP.lines if "zone \"Patio\"" in l), "")
+    check("AR7 a movement that started a recording names the file",
+          rec.endswith("peak 8.0% (records at 4.6%) — recorded → FrontYard-Left_LorexCH7_20261020_211405"), rec)
+    check("AR7 ... another zone moving at the same time is marked as during that recording",
+          other.endswith("— during a recording"), other)
+    CAP.lines.clear()
+    ms = {"recording": False}
+    cd._cal_track("ch7", ms, [("Patio", 5.0, 4.6)], True, False, now_m=300.0)
+    cd._cal_reason(ms, "one picture only (often an insect near the lens)")
+    cd._cal_track("ch8", ms, [(None, 30.0, 12.0)], False, True, now_m=300.25)
+    cd._cal_flush("ch7", ms, 302.0)
+    passed = next((l for l in CAP.lines if "Patio" in l), "")
+    light = next((l for l in CAP.lines if "the picture:" in l), "")
+    check("AR7 a check that passed but did not record says why (a bird: one picture only)",
+          passed.endswith("— not recorded: one picture only (often an insect near the lens)"), passed)
+    check("AR7 ... a camera with no zones reports the whole picture, and a light change as the reason",
+          light.endswith("— not recorded: light change") and "peak 30.0% (records at 12.0%)" in light, light)
+    CAP.lines.clear()
+    ms = {"recording": True}
+    cd._cal_track("ch7", ms, [("Patio", 9.0, 4.6)], True, False, now_m=400.0)
+    cd._cal_flush("ch7", ms, 0.0, force=True)
+    check("AR7 a movement while a recording runs is marked as during a recording",
+          any(l.endswith("— during a recording") for l in CAP.lines), str(CAP.lines[-1:]))
+    CAP.lines.clear()
+    minute = int(time.time() // 60)
+    ms = {"recording": False, "cal_minute": minute, "cal_lines": cd.CAL_MAX_PER_MIN, "cal_dropped": 0}
+    cd._cal_track("ch7", ms, [("Patio", 3.0, 4.6)], True, False, now_m=500.0)
+    cd._cal_flush("ch7", ms, 0.0, force=True)
+    dropped_quietly = not any("Patio" in l for l in CAP.lines) and ms["cal_dropped"] == 1
+    ms["cal_minute"] = minute - 1
+    cd._cal_track("ch7", ms, [("Patio", 3.0, 4.6)], True, False, now_m=600.0)
+    cd._cal_flush("ch7", ms, 0.0, force=True)
+    check("AR7 at most 20 lines per camera a minute; the rest are counted in one line",
+          dropped_quietly and any("1 more movement(s) in the last minute not logged (limit 20)" in l
+                                  for l in CAP.lines), str(CAP.lines))
+    cd._MOTION.clear(); cd._MOTION_CFG.clear()
+    jm = cd._motion_state("calcam")
+    jm["enabled"] = True
+    CAP.lines.clear()
+    with _Swap(CFG_MOTION_CALIBRATION=True):
+        verdict, jpct = cd._motion_judge("calcam", cd._motion_thumb(SCENE), cd._motion_thumb(SCENE_PERSON))
+        opened = dict(jm.get("cal", {}))
+        cd._cal_flush("calcam", jm, 0.0, force=True)
+    jline = next((l for l in CAP.lines if "the picture: movement" in l), "")
+    check("AR7 through the real motion check: a person-sized change opens a movement and logs it",
+          None in opened and abs(opened[None]["peak"] - jpct) < 1e-9
+          and f"peak {jpct:.1f}%" in jline, f"{verdict} {jpct:.2f} {jline}")
+    cd._MOTION.clear(); cd._MOTION_CFG.clear()
+    msrc = (REPO / "anycam_motion.py").read_text(encoding="utf-8")
+    check("AR7 the log is fed by every check, the reasons, the recording start, and the keeper",
+          "_cal_track(camera_id, ms," in msrc and msrc.count("_cal_reason(") >= 6
+          and "_cal_recorded(ms, zone, base)" in msrc and "_cal_flush(camera_id, ms, now_m)   # 3.8.2" in msrc)
+    conf = (REPO / "config.yaml").read_text(encoding="utf-8")
+    check("AR7 the setting: off by default, a bool, passed to the add-on, described",
+          "  motion_calibration_log: false" in conf and "  motion_calibration_log: bool" in conf
+          and "export MOTION_CALIBRATION_LOG=$(bashio::config 'motion_calibration_log')"
+          in (REPO / "run.sh").read_text(encoding="utf-8")
+          and "  motion_calibration_log:" in (REPO / "translations" / "en.yaml").read_text(encoding="utf-8"))
+
 
 async def main():
     test_pure()

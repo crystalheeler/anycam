@@ -8,6 +8,7 @@ The Microseven plays through go2rtc again, the log link opens inside the Home As
 - **The log link opens inside the Home Assistant app.** It navigates within Home Assistant as its own menus do, instead of opening the phone's browser.
 - **Live view reports why WebRTC did not connect.** The add-on log gets one line per camera with the outcome and the network routes each side offered, to find why some phones fall back to slower playback.
 - **Quieter pre-warm log.** A stream go2rtc refuses is logged once, not every 30 s.
+- **Motion Calibration Log.** A new setting, off by default. While on, the log gets one line per movement in each zone, with the date and time, how long it lasted, its peak change, the zone's threshold, and whether it recorded (or why not), to help set each zone's sensitivity.
 - **Recordings start with the zone's name.** A recording a zone started is named <zone>_<camera>_<date>_<time>, for example FrontYard-Left_LorexCH7_20261020_101500.mp4. A recording started by whole-picture motion keeps its name.
 
 ### Bugs fixed

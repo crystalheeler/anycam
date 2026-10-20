@@ -34,7 +34,8 @@ log = logging.getLogger("anycam")
 # Taken from camera_discovery.py at start-up (anycam_host.bind).
 NEEDS = (
     'CAMERAS', 'CARD_MAX_WIDTH', 'CFG_MOTION_CLIP_S', 'CFG_MOTION_COOL',
-    'CFG_MOTION_GLOBAL', 'CFG_MOTION_LEVEL', 'CFG_MOTION_PAD', 'CFG_RECORDINGS',
+    'CFG_MOTION_CALIBRATION', 'CFG_MOTION_GLOBAL', 'CFG_MOTION_LEVEL', 'CFG_MOTION_PAD',
+    'CFG_RECORDINGS',
     'DATA_DIR', 'MEDIA_DIR', 'MOTION_FILE', '_brand_throttle_seconds',
     '_dahua_sub_stream', '_drain_stderr', '_snap_last_access',
     '_snap_state', '_stop_proc', '_throttle_wait_if_needed', 'build_authenticated_url',
@@ -165,6 +166,7 @@ def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
             ms["peak_single"] = ms.get("peak_single", 0) + 1
             log.info(f"Motion [{camera_id}]: {hits[0][1]:.1f}% changed in one picture "
                      f"only — not recorded (most often an insect near the lens)")
+            _cal_reason(ms, "one picture only (often an insect near the lens)")
         hits.clear()
     if verdict == "light":
         ms["light_until"] = t + MOTION_LIGHT_HOLD_S
@@ -182,13 +184,16 @@ def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
     if t < ms.get("light_until", float("-inf")):
         log.debug(f"Motion [{camera_id}]: {pct:.1f}% changed within "
                   f"{MOTION_LIGHT_HOLD_S:.0f} s of a light change — not recorded")
+        _cal_reason(ms, f"within {MOTION_LIGHT_HOLD_S:.0f} s of a light change")
         return False
     if not live or ms["recording"]:
         return True
     if repeat:
         ms["peak_repeat"] = ms.get("peak_repeat", 0) + 1
+        _cal_reason(ms, "a repeated picture (the stream stalled)")
         return False
     if ref[0] == ms.get("echo_of"):
+        _cal_reason(ms, "the same change again (one picture only)")
         return False
     # 3.4.0 (answer 9): the second changed picture counts in the same zone
     zone = ms.get("judge_zone")
@@ -213,6 +218,7 @@ def _motion_second_look(camera_id: str, older: tuple | None, thumb: tuple) -> bo
             return True
     log.info(f"Motion [{camera_id}]: changed against the last picture only — not recorded "
              f"(most often an insect near the lens)")
+    _cal_reason(_MOTION.get(camera_id) or {}, "changed against the last picture only")
     return False
 
 
@@ -390,6 +396,12 @@ def _motion_judge(camera_id: str, prev: tuple[bytes, float, float],
     ms = _MOTION.get(camera_id) or {}
     ms["judge_zone"] = None
     _motion_note_peak(camera_id, pct, spread > MOTION_LIGHT_FRACTION)
+    if _cal_on():                                       # 3.8.2: the calibration log
+        zoned = anycam_zones.has_zones(camera_id)
+        _cal_track(camera_id, ms,
+                   _motion_zone_results(camera_id, flags) if zoned
+                   else [(None, pct, _motion_area_now(camera_id))],
+                   zoned, spread > MOTION_LIGHT_FRACTION)
     # 3.4.0 (answer 10): the light rule stays on the whole picture
     if spread > MOTION_LIGHT_FRACTION:
         log.info(f"Motion [{camera_id}]: change across {spread:.0%} of the "
@@ -418,6 +430,96 @@ def _motion_judge(camera_id: str, prev: tuple[bytes, float, float],
         log.debug(f"Motion [{camera_id}]: {pct:.1f}% changed, under the "
                   f"{area:.1f}% threshold")
     return "", pct
+# ── 3.8.2: the motion calibration log ──────────────────────────────────────
+# CrystalHeeler, 2026-10-20: to set each zone so cats and armadillos record at
+# night and birds do not, one line per movement per zone, written when the
+# movement ends: when it started (date and time), how long it lasted, its
+# peak, the zone's threshold, and what happened (recorded with the file name,
+# or why not). A movement counts from a quarter of the zone's threshold, so a
+# near miss shows too. Setting motion_calibration_log, off by default.
+CAL_FLOOR_SHARE   = 0.25     # a movement counts from this share of the threshold ...
+CAL_FLOOR_MIN_PCT = 0.3      # ... and never below this, so sensor noise stays out
+CAL_END_S         = 1.0      # below the floor this long ends the movement
+CAL_MAX_PER_MIN   = 20       # lines per camera per minute; the rest are counted
+
+
+def _cal_on() -> bool:
+    return bool(CFG_MOTION_CALIBRATION)
+
+
+def _cal_label(name: str | None, zoned: bool) -> str:
+    if not zoned:
+        return "the picture"
+    return f'zone "{name}"' if name is not None else "outside the zones"
+
+
+def _cal_track(camera_id: str, ms: dict, results: list, zoned: bool, light: bool,
+               now_m: float | None = None) -> None:
+    """Feed one check: (zone, % changed, % needed) for each zone, or the whole picture."""
+    now_m = time.monotonic() if now_m is None else now_m
+    events = ms.setdefault("cal", {})
+    for name, pct, need in results:
+        floor = max(need * CAL_FLOOR_SHARE, CAL_FLOOR_MIN_PCT)
+        if pct < floor:
+            continue
+        ev = events.get(name)
+        if ev is None:
+            ev = events[name] = {"wall": time.time(), "start": now_m, "peak": 0.0, "need": need,
+                                 "during": bool(ms.get("recording")), "outcome": None,
+                                 "reason": None, "label": _cal_label(name, zoned)}
+        ev["last"] = now_m
+        if pct > ev["peak"]:
+            ev["peak"], ev["need"] = pct, need
+        if light:
+            ev["reason"] = ev["reason"] or "light change"
+    _cal_flush(camera_id, ms, now_m)
+
+
+def _cal_reason(ms: dict, reason: str) -> None:
+    """Why a check that passed did not record; kept for the open movements."""
+    for ev in (ms.get("cal") or {}).values():
+        if ev.get("outcome") is None:
+            ev["reason"] = reason
+
+
+def _cal_recorded(ms: dict, zone: str | None, base: str) -> None:
+    """A recording started: the movement that started it gets the file name."""
+    for name, ev in (ms.get("cal") or {}).items():
+        if ev.get("outcome") is None:
+            ev["outcome"] = f"recorded → {base}" if name == zone else "during a recording"
+
+
+def _cal_outcome(ev: dict) -> str:
+    if ev.get("outcome"):
+        return ev["outcome"]
+    if ev.get("during"):
+        return "during a recording"
+    if ev["peak"] < ev["need"]:
+        return "not recorded: below the threshold"
+    return f"not recorded: {ev.get('reason') or 'passed the threshold, not confirmed'}"
+
+
+def _cal_flush(camera_id: str, ms: dict, now_m: float, force: bool = False) -> None:
+    """Log the movements that ended (below the floor for CAL_END_S, or force)."""
+    events = ms.get("cal") or {}
+    for name in [n for n, ev in events.items() if force or now_m - ev["last"] >= CAL_END_S]:
+        ev = events.pop(name)
+        minute = int(time.time() // 60)
+        if ms.get("cal_minute") != minute:
+            if ms.get("cal_dropped"):
+                log.info(f"Motion [{camera_id}]: calibration: {ms['cal_dropped']} more "
+                         f"movement(s) in the last minute not logged (limit {CAL_MAX_PER_MIN})")
+            ms["cal_minute"], ms["cal_lines"], ms["cal_dropped"] = minute, 0, 0
+        if ms["cal_lines"] >= CAL_MAX_PER_MIN:
+            ms["cal_dropped"] += 1
+            continue
+        ms["cal_lines"] += 1
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ev["wall"]))
+        log.info(f"Motion [{camera_id}]: {when} {ev['label']}: movement "
+                 f"{max(0.0, ev['last'] - ev['start']):.1f} s, peak {ev['peak']:.1f}% "
+                 f"(records at {ev['need']:.1f}%) — {_cal_outcome(ev)}")
+
+
 # ── 2.6.6: tuning line ──────────────────────────────────────────────────────
 # Once a minute, each armed camera logs the largest change it saw, so one
 # walk past the camera shows where to set the sensitivity. CrystalHeeler, 2026-09-30:
@@ -1338,6 +1440,8 @@ async def _motion_keeper() -> None:
                     if not ms.get("detector_live"):
                         _motion_ensure_loop(camera_id)
                     _motion_report_peak(camera_id, ms, now_m)
+                    if ms.get("cal"):
+                        _cal_flush(camera_id, ms, now_m)   # 3.8.2: checks may have stopped
                     await _night_expectation_check(camera_id, ms, time.time())
                 elif ms.get("det_task") or ms.get("buf_task"):
                     await _motion_stop_pipelines(camera_id)
@@ -1507,6 +1611,8 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
     ms["clip_path"] = clip
     ms["clip_base"] = base
     ms["rec_zone"] = zone
+    if _cal_on():
+        _cal_recorded(ms, zone, base)                   # 3.8.2: the calibration log
     if zone is not None:
         log.info(f"Motion [{camera_id}]: recording started by zone \"{zone}\"")
         anycam_zones.REC_ZONES[base] = zone

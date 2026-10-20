@@ -246,6 +246,8 @@ CFG_LOW_LATENCY          = os.environ.get("LOW_LATENCY", "false").lower() == "tr
 # 3.8.1 (C26): keep go2rtc connected to every camera's main and sub stream, so
 # a card or Enhanced View opens without first connecting to the camera.
 CFG_PREWARM              = os.environ.get("PREWARM", "true").lower() == "true"
+# 3.8.2: one log line per movement per zone, for setting sensitivity (anycam_motion.py).
+CFG_MOTION_CALIBRATION   = os.environ.get("MOTION_CALIBRATION_LOG", "false").lower() == "true"
 CFG_RECORDINGS          = os.environ.get("RECORDINGS_PATH", "/media/anycam")
 # 2.6.6: 1 (least sensitive) to 100 (most), shown to the user as a plain
 # scale. It maps to the share of the picture that must change, from 74%

@@ -19,6 +19,7 @@ options:
   motion_clip_length: "30s"
   motion_cooldown_secs: 5
   motion_clip_padding_secs: 3
+  motion_calibration_log: false
   unrestricted_storage_browser: false
   log_debug: true
   log_info: true
@@ -36,6 +37,7 @@ schema:
   motion_clip_length: "list(10s|20s|30s|1min|2min|5min)"
   motion_cooldown_secs: "int(1,300)"
   motion_clip_padding_secs: "int(0,30)"
+  motion_calibration_log: bool
   unrestricted_storage_browser: bool
   log_debug: bool
   log_info: bool

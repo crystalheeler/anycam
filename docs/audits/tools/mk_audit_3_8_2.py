@@ -59,6 +59,15 @@ def story():
                   "safe-area padding, the camera name on its own row and the short Quality Switch line on "
                   "phones. The toast: max-width. The release gate checks these styles (R10) and names "
                   "every fixed overlay; it fails on 3.8.1's styles (dialog scroll, bar, toast)."],
+                 ["Calibration log", "CrystalHeeler, 2026-10-20, to set zones so cats and armadillos "
+                  "record and birds do not: setting motion_calibration_log (off by default). Every check "
+                  "feeds a per-zone movement (from a quarter of the zone's threshold, at least 0.3%); a "
+                  "movement ends 1 s below that and logs one line: date and time, length, peak, threshold, "
+                  "outcome (recorded with the file name, during a recording, below the threshold, or the "
+                  "rejection reason: one picture only, light change, within 2 s of a light change, a "
+                  "repeated picture, changed against the last picture only). At most 20 lines per camera "
+                  "per minute, the rest counted. The keeper closes a movement whose checks stopped. Tests "
+                  "AR7, one through the real motion check."],
                  ["Zone in the file name", "CrystalHeeler, 2026-10-20, changing answer 15 of the zones "
                   "plan: a recording a zone started is named <zone>_<camera>_<date>_<time>; the zone name is "
                   "cut to letters, digits and hyphens, at most 24 characters; whole-picture recordings keep "
@@ -74,7 +83,7 @@ def story():
           table([["Suite", "Result", "Scope"],
                  ["Release gate", verdict("PASS"), "Eight gates, with the new R10 check and the contracts "
                   "moved to the go2rtc source, the go2rtc config and the gate."],
-                 ["Python integration", verdict("PASS"), "734 of 734. New section AR; AQ and AM1 updated for "
+                 ["Python integration", verdict("PASS"), "746 of 746. New section AR; AQ and AM1 updated for "
                   "the 3.8.2 gate."],
                  ["JavaScript behaviour", verdict("PASS"), "201 of 201: B66 navigation and fallback, the B62 "
                   "summary."],
@@ -121,7 +130,8 @@ def story():
                  ["anycam_go2rtc.py", "ffmpeg: source for gated cameras, cooldown record, ffmpeg.bin, quiet "
                   "registration, pre-warm failure logged once, /api/live_diag."],
                  ["anycam_brand.py", "12 prefixes off the non-camera list."],
-                 ["anycam_motion.py, docs/Detection_Zones_Plan.md", "The zone at the front of a recording's name; answer 15 updated."],
+                 ["anycam_motion.py, docs/Detection_Zones_Plan.md", "The zone at the front of a recording's name; answer 15 updated; the calibration log."],
+                 ["config.yaml, run.sh, translations/en.yaml", "The prewarm (3.8.1) and motion_calibration_log settings."],
                  ["page_script.py", "B66 navigation, B62 report."],
                  ["anycam_page.py", "B67 styles."],
                  ["camera_discovery.py, Dockerfile", "Route for /api/live_diag; chmod for the gate; 3.8.2."],
