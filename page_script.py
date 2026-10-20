@@ -248,7 +248,28 @@ async function openHALog() {
     const r = await (await fetch(BASE + '/api/self')).json();
     if (r && r.slug) slug = r.slug;
   } catch (e) {}
-  window.top.location.href = window.top.location.origin + '/config/app/' + encodeURIComponent(slug) + '/logs';
+  const path = '/config/app/' + encodeURIComponent(slug) + '/logs';
+  // 3.8.2 (B66): navigate inside the HA frontend, as its own menus do
+  // (frontend src/common/navigate.ts: pushState on the main window, with the
+  // page it came from for the back button, then a location-changed event),
+  // so the log opens in place. A full page load of the HA window made the
+  // Home Assistant app open the phone's browser, which asked for a login.
+  if (_haNavigate(path)) return;
+  window.top.location.href = window.top.location.origin + path;
+}
+
+function _haNavigate(path) {
+  try {
+    const top = window.top;
+    if (!top || top === window || top.location.origin !== window.location.origin) return false;
+    const from = top.location.pathname + top.location.search;
+    top.history.pushState({from}, '', path);
+    top.dispatchEvent(new CustomEvent('location-changed',
+                                      {detail: {replace: false}, bubbles: true, composed: true}));
+    return true;
+  } catch (e) {
+    return false;           // another origin, or no HA frontend: the caller loads the page
+  }
 }
 
 /* ── Camera page opener (Firefox addon or direct) ────────────────────────────── */
@@ -1120,6 +1141,40 @@ function _liveFailReport(camId, where, reason) {
       .catch(() => {});
   } catch (e) {}
 }
+// 3.8.2 (B62): why WebRTC did or did not connect, for the add-on log: the
+// outcome, the network routes (ICE candidates) each side offered, and how the
+// pairs of them fared. One report per camera, place and outcome per page load.
+const WEBRTC_DIAG_MS = 10000;
+const _liveDiagSent = new Set();
+function _webrtcDiagSummary(stats, outcome, ms) {
+  const cand = {}, local = [], remote = [], pairs = {};
+  let selected = '';
+  const fmt = c => !c ? '?' : (c.candidateType || '?') + '/' + (c.protocol || '?') + ' '
+    + (c.address || c.ip || '?') + (c.port ? ':' + c.port : '') + (c.networkType ? ' ' + c.networkType : '');
+  stats.forEach(r => { if (r.type === 'local-candidate' || r.type === 'remote-candidate') cand[r.id] = r; });
+  stats.forEach(r => {
+    if (r.type === 'local-candidate') local.push(fmt(r));
+    else if (r.type === 'remote-candidate') remote.push(fmt(r));
+    else if (r.type === 'candidate-pair') {
+      pairs[r.state] = (pairs[r.state] || 0) + 1;
+      if (r.nominated && r.state === 'succeeded')
+        selected = fmt(cand[r.localCandidateId]) + ' -> ' + fmt(cand[r.remoteCandidateId]);
+    }
+  });
+  return {outcome: String(outcome), ms: Math.round(ms), local: local.slice(0, 12),
+          remote: remote.slice(0, 12), pairs, selected};
+}
+function _liveDiagReport(camId, where, diag) {
+  if (!diag) return;
+  const key = camId + '|' + where + '|' + diag.outcome;
+  if (_liveDiagSent.has(key)) return;
+  _liveDiagSent.add(key);
+  try {
+    fetch(BASE + '/api/live_diag', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                    body: JSON.stringify({camera_id: camId, where, diag})})
+      .catch(() => {});
+  } catch (e) {}
+}
 const FOCUS_BLANK_POSTER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 let _go2rtc          = null;   // live session state; see _go2rtcMount
 let _go2rtcWatchdog  = null;
@@ -1205,6 +1260,34 @@ function _go2rtcLoadPlayer() {
         onpcvideo(video2) {
           super.onpcvideo(video2);
           if (this.pcState !== WebSocket.CLOSED) this._emit('mode', 'WebRTC');
+        }
+        // 3.8.2 (B62): report why WebRTC did or did not connect. VideoRTC closes
+        // a failed connection itself, after which getStats may refuse, so the
+        // stats are also read every 2 s and on each ICE change, and the last
+        // ones are used then.
+        onwebrtc() {
+          super.onwebrtc();
+          const pc = this.pc;
+          if (!pc || typeof pc.getStats !== 'function') return;
+          const t0 = Date.now();
+          let last = null, done = false;
+          const snap = () => pc.getStats().then(st => { last = st; }).catch(() => {});
+          const tick = setInterval(snap, 2000);
+          const report = outcome => {
+            if (done) return;
+            done = true;
+            clearInterval(tick);
+            const send = st => { if (st) this._emit('webrtc-diag', _webrtcDiagSummary(st, outcome, Date.now() - t0)); };
+            pc.getStats().then(send).catch(() => send(last));
+          };
+          pc.addEventListener('iceconnectionstatechange', snap);
+          pc.addEventListener('icegatheringstatechange', snap);
+          pc.addEventListener('connectionstatechange', () => {
+            if (pc.connectionState === 'connected') report('connected');
+            else if (pc.connectionState === 'failed') report('failed');
+          });
+          setTimeout(() => report('not connected after ' + (WEBRTC_DIAG_MS / 1000) + ' s ('
+                                  + pc.connectionState + ')'), WEBRTC_DIAG_MS);
         }
         _emit(kind, value) {
           if (typeof this.onanycam === 'function') this.onanycam(kind, value);
@@ -1384,6 +1467,8 @@ function _go2rtcEvent(session, kind, value) {
   } else if (kind === 'mode') {
     g.mode = value;
     _go2rtcUpdateInfo();
+  } else if (kind === 'webrtc-diag') {
+    _liveDiagReport(g.camId, 'enhanced view', value);      // 3.8.2 (B62)
   } else if (kind === 'decode') {
     console.warn('[AnyCam] live view: the browser cannot use the stream: ' + value);
     if (g.played || g.repairTried || !DESCRIPTION_ERROR_RE.test(value || '')) return;
@@ -1843,6 +1928,8 @@ function _cardLiveEvent(camId, st, kind, value) {
     if (_videoHasFrame(st.el && st.el.video)) _cardLivePlayed(camId, st);
   } else if (kind === 'open') {
     st.modes = Array.isArray(value) ? value : [];
+  } else if (kind === 'webrtc-diag') {
+    _liveDiagReport(camId, 'card', value);                 // 3.8.2 (B62)
   } else if (kind === 'decode') {
     if (st.played || st.repairTried || !DESCRIPTION_ERROR_RE.test(value || '')) return;
     st.repairTried = true;

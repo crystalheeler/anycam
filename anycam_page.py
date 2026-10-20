@@ -210,9 +210,12 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 #focus-video{{width:100vw;height:calc(100vh - 52px - 44px);height:calc(100dvh - 52px - 44px);margin:44px 0 0 0;background:#000}}
 #focus-video anycam-video{{display:block;width:100%;height:100%}}
 #focus-video video{{object-fit:contain;background:#000}}
-#focus-bar{{position:absolute;bottom:0;left:0;right:0;height:52px;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:space-between;padding:0 16px;gap:12px;z-index:9001;border-top:1px solid #333}}
-#focus-info{{font-size:.78rem;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}}
-#focus-controls{{display:flex;align-items:center;gap:12px;flex-shrink:0}}
+/* 3.8.2 (B67, rule 10): the bar grows to a second row on a narrow screen instead of
+   pushing its controls off it, and keeps clear of a phone's home bar. */
+#focus-bar{{position:absolute;bottom:0;left:0;right:0;min-height:52px;background:rgba(0,0,0,.85);display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;padding:6px 16px;padding-bottom:calc(6px + env(safe-area-inset-bottom));gap:6px 12px;z-index:9001;border-top:1px solid #333}}
+#focus-info{{font-size:.78rem;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 140px;min-width:0}}
+#focus-controls{{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;min-width:0}}
+@media (max-width:600px){{#focus-info{{flex-basis:100%}} .qswitch .qsub{{display:none}}}}
 .qswitch{{display:flex;flex-direction:column;gap:2px;font-size:13px;color:#ddd;cursor:pointer}}
 .qswitch .qrow{{display:flex;align-items:center;gap:6px}}
 .qswitch .qsub{{font-size:11px;color:#999}}
@@ -227,7 +230,7 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 #focus-warning{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a1a;border:1px solid var(--orange);border-radius:10px;padding:24px;max-width:480px;text-align:center;z-index:9003;display:flex;flex-direction:column;gap:14px;align-items:center}}
 #focus-warn-text{{color:#f5b942;font-size:.9rem;line-height:1.5}}
 /* ── Toast ── */
-#toast{{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);padding:10px 22px;border-radius:24px;color:#fff;font-size:.85rem;z-index:9100;pointer-events:none;transition:opacity .3s}}
+#toast{{position:fixed;bottom:28px;bottom:calc(28px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);max-width:calc(100vw - 32px);padding:10px 22px;border-radius:24px;color:#fff;font-size:.85rem;z-index:9100;pointer-events:none;transition:opacity .3s}}
 /* ── Storage view layout ── */
 #storage-view{{padding:16px 18px}}
 #storage-topbar{{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}}
@@ -271,16 +274,18 @@ header h1{{cursor:pointer}}
 .field input:focus,.field select:focus{{border-color:var(--primary)}}
 .field select option{{background:var(--surface2)}}
 #add-error{{font-size:.78rem;color:var(--red);display:none;padding:6px 0}}
-.modal-backdrop{{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:100}}
+.modal-backdrop{{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:100;padding:16px}}
 .modal-backdrop.open{{display:flex}}
 .modal{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
-        padding:20px;width:min(360px,90vw);display:flex;flex-direction:column;gap:12px}}
+        padding:20px;width:min(360px,calc(100vw - 32px));display:flex;flex-direction:column;gap:12px;
+        max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);overflow-y:auto}}
+/* 3.8.2 (B67, rule 10): a tall dialog scrolls inside itself, and its buttons stay in view */
 .modal h3{{font-size:.92rem;font-weight:600}}
 .modal input{{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.86rem;padding:7px 10px;outline:none}}
 .modal input:focus{{border-color:var(--primary)}}
-.modal-btns{{display:flex;gap:8px;justify-content:flex-end}}
+.modal-btns{{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;position:sticky;bottom:-20px;margin:0 -20px -20px;padding:10px 20px 20px;background:var(--surface)}}
 /* 2.6.6 camera settings (cog menu) */
-.cs-modal{{width:min(440px,94vw)}}
+.cs-modal{{width:min(440px,calc(100vw - 32px))}}
 .cs-section{{font-size:.7rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-dim);margin-top:4px}}
 .cs-label{{display:flex;justify-content:space-between;font-size:.84rem}}
 .cs-val{{font-weight:700;color:var(--primary);min-width:2.5em;text-align:right}}

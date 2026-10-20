@@ -254,9 +254,13 @@ CONTRACTS = {
     # camera moved from the proxy into the go2rtc source: such a camera's
     # source is the connection gate, which takes the camera's turn in the
     # shared record and only then becomes ffmpeg.
-    "_go2rtc_camera_src":    ["_go2rtc_gated(camera)", "_go2rtc_gated_src"],
-    "_go2rtc_gated_src":     ["anycam_gate.__file__", "GATE_FFMPEG_OUT", "starttimeout"],
-    "gate_main":             ["reserve(ip, cooldown)", "time.sleep", "os.execvp"],
+    # 3.8.2 (B65): the source is go2rtc's own ffmpeg copy (its API refuses exec:
+    # sources), with the camera's cooldown recorded for the gate; go2rtc's ffmpeg
+    # program is the gate, which takes the turn before it becomes ffmpeg.
+    "_go2rtc_camera_src":    ["_go2rtc_gated(camera)", "_go2rtc_gate_record", "ffmpeg:"],
+    "_go2rtc_config":        ['"ffmpeg": {"bin": GO2RTC_FFMPEG_BIN}'],
+    "gate_main":             ["ffmpeg_input_host", "reserve(host, cooldown, MAX_WAIT_S)",
+                              "if wait is None", "time.sleep", "os.execvp"],
     # Treats the no-config-file 400 as success; encodes the password-bearing
     # source so '&' and '+' survive Go's query parser.
     "_go2rtc_register":      ['"config file disabled"', "quote(src, safe='')"],
@@ -551,6 +555,55 @@ if css_start:
 if "display:flexbox" in src.replace(" ", "") or "display: flexbox" in src:
     fail("C1 CSS typo 'display: flexbox' found — should be 'display: flex'")
     audit_ok = False
+
+# R10 (3.8.2, B67): CLAUDE.md rule 10, every overlay fits every screen. The
+# Enhanced View bar pushed its controls off a phone's screen and the settings
+# dialog could not scroll (CrystalHeeler, 2026-10-19). Every fixed box on the
+# page must be checked here or named as an exemption, so a new one is reviewed.
+R10_SCROLL = {".modal", "#zone-panel"}        # fit the screen's height, scroll inside
+R10_WIDTH = {".modal", ".cs-modal"}           # width capped by the screen
+R10_BARS = {"#focus-bar"}                     # grow, never a fixed height
+R10_TOASTS = {"#toast"}                       # never wider than the screen
+R10_EXEMPT = {"#card-drop-line": "a 2 px drop line",
+              "#focus-overlay": "full screen by design",
+              ".modal-backdrop": "full screen; its .modal is checked",
+              "#zone-svg,#zone-still": "drawing layers that cover the picture"}
+
+
+def _r10_rules(css: str) -> dict:
+    """selector -> its declaration blocks, spaces removed (rules nested in @media included)."""
+    found: dict = {}
+    for m in re.finditer(r"([#.][^{}\n;]*?)\{([^{}]*)\}", css):
+        found.setdefault(m.group(1).strip(), []).append(re.sub(r"\s+", "", m.group(2)))
+    return found
+
+
+_r10 = _r10_rules((ROOT / "anycam_page.py").read_text(encoding="utf-8")
+                  .replace("{{", "{").replace("}}", "}"))
+for _sel in sorted(R10_SCROLL):
+    _body = ";".join(_r10.get(_sel, []))
+    if not (re.search(r"max-height:[^;]*vh", _body) and re.search(r"overflow(-y)?:(auto|scroll)", _body)):
+        fail(f"R10 {_sel} must fit the screen's height (max-height in vh/dvh) and scroll (overflow auto)")
+        audit_ok = False
+for _sel in sorted(R10_WIDTH):
+    if not re.search(r"(^|;)width:min\([^;]*vw", ";".join(_r10.get(_sel, []))):
+        fail(f"R10 {_sel} must cap its width by the screen (width:min(..., calc(100vw - ...)))")
+        audit_ok = False
+for _sel in sorted(R10_BARS):
+    _body = ";".join(_r10.get(_sel, []))
+    if re.search(r"(^|;)height:\d", _body) or "flex-wrap:wrap" not in _body:
+        fail(f"R10 {_sel} must grow with its content (min-height, flex-wrap:wrap; no fixed height)")
+        audit_ok = False
+for _sel in sorted(R10_TOASTS):
+    if not re.search(r"max-width:[^;]*vw", ";".join(_r10.get(_sel, []))):
+        fail(f"R10 {_sel} must not be wider than the screen (max-width in vw)")
+        audit_ok = False
+for _sel, _bodies in sorted(_r10.items()):
+    if any("position:fixed" in b for b in _bodies) and _sel not in (
+            R10_SCROLL | R10_TOASTS | R10_BARS | set(R10_EXEMPT)):
+        fail(f"R10 {_sel} is a new fixed overlay: add it to rule 10's checks or exemptions "
+             f"in verify_release.py")
+        audit_ok = False
 
 if audit_ok:
     ok("No best-practice violations found")

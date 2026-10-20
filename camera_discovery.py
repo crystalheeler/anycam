@@ -54,7 +54,8 @@ from anycam_motion import (
 import anycam_go2rtc
 from anycam_go2rtc import (
     _go2rtc_profile_source, _go2rtc_register, _go2rtc_stream_name, _go2rtc_supervisor,
-    api_go2rtc_card, api_live_fail, api_live_repair, handle_go2rtc_player_js, handle_go2rtc_ws,
+    api_go2rtc_card, api_live_diag, api_live_fail, api_live_repair, handle_go2rtc_player_js,
+    handle_go2rtc_ws,
 )
 # 3.0.0-rc1.3 (E1): anycam_probe.
 import anycam_probe
@@ -220,7 +221,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "3.8.1"  # must match config.yaml
+CURRENT_VERSION = "3.8.2"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -1530,6 +1531,7 @@ def make_app() -> web.Application:
     app.router.add_get(   "/api/go2rtc/focus/{camera_id}",        api_go2rtc_focus)
     app.router.add_get(   "/api/go2rtc/card/{camera_id}",         api_go2rtc_card)
     app.router.add_post(  "/api/live_fail",                       api_live_fail)
+    app.router.add_post(  "/api/live_diag",                       api_live_diag)   # 3.8.2 (B62)
     app.router.add_post(  "/api/live_repair",                     api_live_repair)
     app.router.add_post(  "/api/cameras/{camera_id}/quality_switch", api_quality_switch)
     app.router.add_get(   "/go2rtc/ws",                           handle_go2rtc_ws)

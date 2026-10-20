@@ -40,6 +40,8 @@ NEEDS = (
 _REFRESH_REASONS = ("no stream small enough", "no stream that can play live",
                     "cannot play as live video", "no stream URL")
 GO2RTC_BIN             = Path("/usr/local/bin/go2rtc")
+# 3.8.2 (B65): go2rtc's ffmpeg program; the Dockerfile makes it executable.
+GO2RTC_FFMPEG_BIN      = str(Path(anycam_gate.__file__))
 GO2RTC_API_HOST        = "127.0.0.1"
 # Non-default ports. 1984 and 8555 are go2rtc's defaults, and another add-on
 # on a host-networked HAOS box (Frigate, the go2rtc add-on) may hold them.
@@ -95,7 +97,10 @@ def _go2rtc_config() -> str:
         # every caller (local_auth), and the browser can name only streams
         # AnyCam registered (handle_go2rtc_ws).
         "app":    {"modules": ["api", "ws", "rtsp", "webrtc", "mp4", "ffmpeg", "exec"]},
-        "ffmpeg": {"bin": "ffmpeg"},
+        # 3.8.2 (B65): go2rtc starts every ffmpeg through the connection gate,
+        # which waits a rate-limited camera's turn and then runs the real ffmpeg
+        # (anycam_gate.py). A path in config, never through the API.
+        "ffmpeg": {"bin": GO2RTC_FFMPEG_BIN},
         "api":    {"listen": f"{GO2RTC_API_HOST}:{GO2RTC_API_PORT}",
                    "username": GO2RTC_API_USER, "password": _GO2RTC_API_PASS,
                    "local_auth": True},
@@ -483,26 +488,17 @@ def _classic_sub_stream(camera: dict) -> str | None:
     return None
 
 
-# ── 3.8.1 (C26): the connection gate for rate-limited cameras ──────────────
+# ── 3.8.1 (C26), 3.8.2 (B65): the connection gate for rate-limited cameras ──
 # go2rtc redials a dropped source after 1 s, five times (no setting in
-# 1.9.14), and with pre-warm a source is held all the time. For a camera
-# whose brand limits how often it is opened (throttle_type
-# rate_limit_per_ip_tcp), go2rtc runs anycam_gate.py instead of dialing: the
-# gate waits for the camera's turn in the record AnyCam's own connections use,
-# then becomes the same ffmpeg copy go2rtc's own "ffmpeg:" source runs
-# (internal/ffmpeg defaults: rtsp input, -c:v copy -c:a copy, rtsp output).
-# starttimeout=60: go2rtc's 30 s default would not cover a 30 s escalated wait.
-GATE_STARTTIMEOUT_S = 60
-GATE_FFMPEG_IN  = ("-hide_banner -v error -fflags nobuffer -flags low_delay -timeout 5000000 "
-                   "-user_agent go2rtc/ffmpeg -rtsp_flags prefer_tcp -i")
-GATE_FFMPEG_OUT = "-c:v copy -c:a copy -user_agent ffmpeg/go2rtc -rtsp_transport tcp -f rtsp {output}"
-
-
-def _go2rtc_gated_src(url: str, cooldown_s: float) -> str:
-    """go2rtc's source for a rate-limited camera: the gate, then the ffmpeg copy."""
-    ip = urlsplit(url).hostname or ""
-    return (f"exec:{sys.executable} {anycam_gate.__file__} {ip} {cooldown_s:g} "
-            f"ffmpeg {GATE_FFMPEG_IN} {url} {GATE_FFMPEG_OUT}#starttimeout={GATE_STARTTIMEOUT_S}")
+# 1.9.14), and with pre-warm a source is held all the time. A camera whose
+# brand limits how often it is opened (throttle_type rate_limit_per_ip_tcp)
+# gets go2rtc's own ffmpeg copy source, and go2rtc's ffmpeg program is
+# anycam_gate.py (GO2RTC_FFMPEG_BIN): for an address with a cooldown on
+# record it waits for the camera's turn, the record AnyCam's own connections
+# use, then runs the real ffmpeg. 3.8.1 sent the gate as an exec: source, and
+# go2rtc's API refuses exec: sources and sources with spaces (Validate in
+# internal/streams/handlers.go), so the camera lost go2rtc (B65).
+_GATE_COOLDOWNS: dict[str, float] = {}      # address -> cooldown already recorded this run
 
 
 def _go2rtc_gated(camera: dict | None) -> bool:
@@ -510,12 +506,21 @@ def _go2rtc_gated(camera: dict | None) -> bool:
     return bool(camera) and _brand_throttle_seconds(camera) > 0
 
 
+def _go2rtc_gate_record(url: str, cooldown_s: float) -> None:
+    """Record the camera's cooldown where go2rtc's ffmpeg (the gate) reads it."""
+    host = urlsplit(url).hostname or ""
+    if host and _GATE_COOLDOWNS.get(host) != cooldown_s:
+        anycam_gate.set_cooldown(host, cooldown_s)
+        _GATE_COOLDOWNS[host] = cooldown_s
+
+
 def _go2rtc_camera_src(camera: dict | None, url: str) -> str:
     """The go2rtc source for an authenticated RTSP address of this camera."""
     rtsp = url.lower().startswith(("rtsp://", "rtsps://"))
-    if rtsp and _go2rtc_gated(camera):                  # 3.8.1 (C26)
-        return _go2rtc_gated_src(url, _brand_throttle_seconds(camera))
-    if _go2rtc_ffmpeg_copy(camera) and rtsp:
+    gated = rtsp and _go2rtc_gated(camera)               # 3.8.1 (C26), 3.8.2 (B65)
+    if gated:
+        _go2rtc_gate_record(url, _brand_throttle_seconds(camera))
+    if (gated or _go2rtc_ffmpeg_copy(camera)) and rtsp:
         return f"ffmpeg:{url}#video=copy#audio=copy"
     return _go2rtc_rtsp_src(url)
 
@@ -539,8 +544,12 @@ def _go2rtc_relay_url(camera: dict, raw: str | None,
     return _go2rtc_camera_src(camera, url), codec, "ok"
 
 
-async def _go2rtc_register(name: str, src: str, camera_id: str) -> bool:
-    """Create or update one go2rtc stream. No-op if the source is unchanged."""
+async def _go2rtc_register(name: str, src: str, camera_id: str, quiet: bool = False) -> bool:
+    """Create or update one go2rtc stream. No-op if the source is unchanged.
+
+    3.8.2: quiet logs a refusal at debug level; the pre-warm passes log it once.
+    """
+    warn = log.debug if quiet else log.warning
     if _GO2RTC_STREAMS.get(name) == src:
         return True
     from yarl import URL
@@ -562,18 +571,19 @@ async def _go2rtc_register(name: str, src: str, camera_id: str) -> bool:
                 # See CREDENTIALS above: with no config file, go2rtc has
                 # already created the stream when it returns this 400.
                 if resp.status != 200 and "config file disabled" not in body:
-                    log.warning(f"go2rtc: {method} {name} failed — HTTP "
-                                f"{resp.status}: {_strip_creds(body)[:160]}")
+                    warn(f"go2rtc: {method} {name} failed — HTTP "
+                         f"{resp.status}: {_strip_creds(body)[:160]}")
+                    _GO2RTC_REFUSED[name] = _strip_creds(body)[:160]
                     return False
             # A GET naming only the stream does not dial the camera; go2rtc
             # probes the source only when media parameters are present.
             async with session.get(get_url) as resp:
                 if resp.status != 200:
-                    log.warning(f"go2rtc: {name} missing after {method} "
-                                f"(HTTP {resp.status})")
+                    warn(f"go2rtc: {name} missing after {method} "
+                         f"(HTTP {resp.status})")
                     return False
     except (aiohttp.ClientError, asyncio.TimeoutError) as ex:
-        log.warning(f"go2rtc: {method} {name} failed: {ex}")
+        warn(f"go2rtc: {method} {name} failed: {ex}")
         return False
     _GO2RTC_STREAMS[name] = src
     _GO2RTC_STREAM_CAM[name] = camera_id
@@ -648,6 +658,8 @@ PREWARM_STAGGER_S    = 0.5      # between new preloads, so a start does not open
 _PRELOADS: dict[str, str] = {}                  # stream name -> camera_id, this go2rtc run
 _PRELOAD_SEEN: dict[str, tuple[int, int]] = {}  # stream name -> (bytes received, passes unchanged)
 _PREWARM_PAUSED: dict[str, float] = {}          # camera_id -> monotonic time its pause ends
+_PREWARM_FAILING: set[str] = set()             # 3.8.2: stream names whose start failed, logged once
+_GO2RTC_REFUSED: dict[str, str] = {}           # 3.8.2: stream name -> go2rtc's last refusal
 
 
 def _prewarm_sources(camera_id: str, camera: dict | None) -> dict[str, str]:
@@ -733,11 +745,21 @@ async def _prewarm_pass() -> None:
                 continue
             if added:
                 await asyncio.sleep(PREWARM_STAGGER_S)
-            if await _go2rtc_register(name, src, camera_id) and await _preload_call(session, "PUT", name):
+            if (await _go2rtc_register(name, src, camera_id, quiet=True)
+                    and await _preload_call(session, "PUT", name)):
                 _PRELOADS[name] = camera_id
                 added += 1
+                again = " (it had failed before)" if name in _PREWARM_FAILING else ""
+                _PREWARM_FAILING.discard(name)
                 log.info(f"go2rtc: pre-warm on for {camera_id} ({name}"
-                         f"{', through the connection gate' if src.startswith('exec:') else ''})")
+                         f"{', through the connection gate' if _go2rtc_gated(CAMERAS.get(camera_id)) else ''})"
+                         f"{again}")
+            elif name not in _PREWARM_FAILING:
+                # 3.8.2: once, not every pass (596 lines in one 3.8.1 log).
+                _PREWARM_FAILING.add(name)
+                log.warning(f"go2rtc: pre-warm cannot start {camera_id} ({name}): "
+                            f"{_GO2RTC_REFUSED.get(name, 'go2rtc did not accept it')}; "
+                            f"AnyCam keeps trying quietly every {PREWARM_CHECK_S:.0f} s")
 
 
 async def _prewarm_loop() -> None:
@@ -877,6 +899,47 @@ async def api_live_fail(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+# ── 3.8.2 (B62): why WebRTC did or did not connect, from the browser ──────
+LIVE_DIAG_WHERE = ("card", "enhanced view")
+LIVE_DIAG_MAX_ITEMS = 12
+
+
+def _diag_text(value, limit: int) -> str:
+    return " ".join(str(value).split())[:limit]
+
+
+def _live_diag_line(camera_id: str, where: str, diag: dict) -> str:
+    """The log line for one WebRTC report; every field is cut to size."""
+    def items(key: str) -> str:
+        vals = diag.get(key) if isinstance(diag.get(key), list) else []
+        return ", ".join(_diag_text(v, 100) for v in vals[:LIVE_DIAG_MAX_ITEMS]) or "nothing"
+    pairs = diag.get("pairs") if isinstance(diag.get("pairs"), dict) else {}
+    pair_text = ", ".join(f"{_diag_text(k, 20)} {int(v) if isinstance(v, (int, float)) else 0}"
+                          for k, v in list(pairs.items())[:10]) or "none"
+    try:
+        secs = float(diag.get("ms", 0)) / 1000
+    except (TypeError, ValueError):
+        secs = 0.0
+    return (f"LIVE-DIAG [{camera_id}]: {where}: WebRTC {_diag_text(diag.get('outcome', '?'), 80)} "
+            f"after {secs:.1f} s; this device offered: {items('local')}; go2rtc offered: "
+            f"{items('remote')}; route checks: {pair_text}; route used: "
+            f"{_diag_text(diag.get('selected') or 'none', 200)}")
+
+
+async def api_live_diag(request: web.Request) -> web.Response:
+    """POST /api/live_diag  body: {"camera_id", "where": card or enhanced view, "diag": {...}}."""
+    try:
+        body = await request.json()
+    except (ValueError, aiohttp.ContentTypeError):
+        return web.json_response({"error": "JSON body required"}, status=400)
+    camera_id = str(body.get("camera_id", ""))
+    where, diag = body.get("where"), body.get("diag")
+    if camera_id not in CAMERAS or where not in LIVE_DIAG_WHERE or not isinstance(diag, dict):
+        return web.json_response({"error": "unknown camera, place or report"}, status=400)
+    log.info(_live_diag_line(camera_id, where, diag))
+    return web.json_response({"status": "ok"})
+
+
 async def api_go2rtc_card(request: web.Request) -> web.Response:
     """GET /api/go2rtc/card/{camera_id} — prepare a live card (2.6.6, C1).
 
@@ -939,9 +1002,9 @@ async def handle_go2rtc_ws(request: web.Request) -> web.StreamResponse:
     client_ws = web.WebSocketResponse(heartbeat=30.0)
     await client_ws.prepare(request)
 
-    # 3.8.1 (C26): no cooldown wait here any more. A rate-limited camera's
-    # go2rtc source is the connection gate (_go2rtc_gated_src), which waits for
-    # the camera's turn at the moment go2rtc really opens it; with pre-warm
+    # 3.8.1 (C26): no cooldown wait here any more. go2rtc opens a rate-limited
+    # camera through the connection gate (its ffmpeg program, 3.8.2), which waits
+    # for the camera's turn at the moment go2rtc really opens it; with pre-warm
     # the stream is usually connected already, and waiting here only delayed
     # the picture by up to 5 s.
 

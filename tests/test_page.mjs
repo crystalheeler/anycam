@@ -1032,5 +1032,67 @@ console.log('\n[T] still-picture cards');
   globalThis.fetch = realFetch; globalThis.URL = realURL;
 }
 
+// ── 3.8.2: B66 the log link inside HA, B62 the WebRTC report ────────────────
+console.log('\n[3.8.2] log link inside HA (B66), WebRTC report (B62)');
+{
+  const grab = name => {
+    const i = page.indexOf('function ' + name + '(');
+    let depth = 0, j = page.indexOf('{', i);
+    for (let k = j; k < page.length; k++) {
+      if (page[k] === '{') depth++;
+      else if (page[k] === '}' && --depth === 0) return page.slice(i, k + 1);
+    }
+  };
+  vm.runInThisContext(grab('_haNavigate') + '\nglobalThis.__haNav = _haNavigate;');
+  const realWindow = globalThis.window, realCE = globalThis.CustomEvent;
+  globalThis.CustomEvent = class { constructor(type, init) { this.type = type; Object.assign(this, init || {}); } };
+  const pushed = [], fired = [];
+  const top = {location: {origin: 'https://ha.example', pathname: '/hassio/ingress/abc', search: '?x=1'},
+               history: {pushState: (st, t, path) => pushed.push([st, path])},
+               dispatchEvent: e => fired.push(e)};
+  globalThis.window = {top, location: {origin: 'https://ha.example'}};
+  const ok = __haNav('/config/app/x_camera_discovery/logs');
+  check('B66 the log link navigates the HA window in place: history entry with the page it came from',
+        ok === true && pushed.length === 1 && pushed[0][1] === '/config/app/x_camera_discovery/logs'
+        && pushed[0][0].from === '/hassio/ingress/abc?x=1', JSON.stringify(pushed));
+  check("B66 ... then tells HA's router, as HA's own navigate() does (location-changed, replace false)",
+        fired.length === 1 && fired[0].type === 'location-changed' && fired[0].detail.replace === false
+        && fired[0].bubbles === true && fired[0].composed === true);
+  globalThis.window = {top: {get location() { throw new Error('cross-origin'); }}, location: {origin: 'https://ha.example'}};
+  const cross = __haNav('/x');
+  const alone = {location: {origin: 'https://ha.example'}}; alone.top = alone;
+  globalThis.window = alone;
+  const noParent = __haNav('/x');
+  check('B66 ... another origin, or no HA window around the page: false, so the page loads the log instead',
+        cross === false && noParent === false);
+  globalThis.window = realWindow; globalThis.CustomEvent = realCE;
+  check('B66 ... the fallback full page load is still there',
+        page.includes('if (_haNavigate(path)) return;')
+        && page.includes('window.top.location.href = window.top.location.origin + path'));
+
+  vm.runInThisContext(grab('_webrtcDiagSummary') + '\nglobalThis.__diag = _webrtcDiagSummary;');
+  const stats = new Map([
+    ['L1', {id: 'L1', type: 'local-candidate', candidateType: 'host', protocol: 'udp', address: '192.168.50.20', port: 50000, networkType: 'wifi'}],
+    ['L2', {id: 'L2', type: 'local-candidate', candidateType: 'srflx', protocol: 'udp', address: '203.0.113.9', port: 4000}],
+    ['R1', {id: 'R1', type: 'remote-candidate', candidateType: 'host', protocol: 'udp', address: '10.0.0.24', port: 28555}],
+    ['P1', {id: 'P1', type: 'candidate-pair', state: 'failed', localCandidateId: 'L1', remoteCandidateId: 'R1'}],
+    ['P2', {id: 'P2', type: 'candidate-pair', state: 'succeeded', nominated: true, localCandidateId: 'L2', remoteCandidateId: 'R1'}],
+    ['X',  {id: 'X', type: 'inbound-rtp'}]]);
+  const d = __diag(stats, 'connected', 1234.4);
+  check('B62 the WebRTC report lists the routes each side offered',
+        d.local.join('|') === 'host/udp 192.168.50.20:50000 wifi|srflx/udp 203.0.113.9:4000'
+        && d.remote.join('|') === 'host/udp 10.0.0.24:28555', JSON.stringify(d));
+  check('B62 ... how the route checks fared, the route used, the outcome and the time',
+        d.pairs.failed === 1 && d.pairs.succeeded === 1
+        && d.selected === 'srflx/udp 203.0.113.9:4000 -> host/udp 10.0.0.24:28555'
+        && d.outcome === 'connected' && d.ms === 1234);
+  const many = new Map(Array.from({length: 30}, (_, i) => ['c' + i, {id: 'c' + i, type: 'local-candidate',
+    candidateType: 'host', protocol: 'udp', address: '10.0.0.' + i, port: 1}]));
+  check('B62 ... at most 12 routes per side are sent', __diag(many, 'failed', 5).local.length === 12);
+  check('B62 both live views pass the report on, once per camera, place and outcome',
+        (page.match(/kind === 'webrtc-diag'/g) || []).length === 2 && page.includes('_liveDiagSent.has(key)')
+        && page.includes("this._emit('webrtc-diag'"));
+}
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

@@ -205,6 +205,14 @@ class FakeGo2rtc:
         # percent-decoded by yarl, and decoding it again double-decodes.
         raw = request.rel_url.raw_query_string
         q = {k: v[0] for k, v in parse_qs(raw).items()}
+        # 3.8.2 (B65): go2rtc 1.9.14 internal/streams/handlers.go Validate, on
+        # every source added through the API. 3.8.1's gate source failed it.
+        if request.method in ("PUT", "PATCH") and q.get("src"):
+            src = q["src"]
+            if src.split(":", 1)[0] in ("exec", "echo", "expr"):
+                return web.Response(status=400, text="streams: source from insecure producer")
+            if any(c.isspace() for c in src):
+                return web.Response(status=400, text="streams: source with spaces may be insecure")
         if request.method == "PUT":
             self.puts.append((raw, q.get("name"), q.get("src")))
             self.registered[q["name"]] = q["src"]      # created before persisting
@@ -4661,10 +4669,10 @@ async def test_374():
     # 3.8.1 (C26): the Microseven's brand is rate-limited, so its copy runs
     # behind the connection gate; the copy itself (video and audio) is unchanged.
     check("AM1 B47: the Microseven's go2rtc source is an ffmpeg copy, video and audio",
-          src.startswith("exec:") and " -i " + cd.build_authenticated_url(ms) + " -c:v copy -c:a copy " in src
+          src == "ffmpeg:" + cd.build_authenticated_url(ms) + "#video=copy#audio=copy"
           and reason == "ok", str(src))
     check("AM1 ... the password stays encoded, so its '#' cannot cut the source short",
-          src.count("#") == 1 and "%23" in src)
+          src.count("#") == 2 and "%23" in src)
     src_h, _, _ = cd._go2rtc_relay_url(hik, hik["stream_url"], "hevc")
     check("AM1 ... every other camera keeps its direct source (#backchannel=0)",
           src_h == cd.build_authenticated_url(hik) + "#backchannel=0", str(src_h))
@@ -4691,7 +4699,7 @@ async def test_374():
           and relay.endswith("/" + registered[0][0]), str(registered))
     conf = json.loads(cd._go2rtc_config())
     check("AM1 ... go2rtc loads ffmpeg and exec (B49), and still no echo or expr",
-          {"ffmpeg", "exec"} <= set(conf["app"]["modules"]) and conf["ffmpeg"] == {"bin": "ffmpeg"}
+          {"ffmpeg", "exec"} <= set(conf["app"]["modules"]) and conf["ffmpeg"] == {"bin": cd.GO2RTC_FFMPEG_BIN}
           and not {"echo", "expr"} & set(conf["app"]["modules"]))
 
     # B37 option A: hevc_drm is never picked automatically
@@ -5473,23 +5481,44 @@ async def test_381():
     e1, e2 = gate.reserve("10.0.0.91", 5.0), gate.reserve("10.0.0.91", 5.0)
     check("AQ1 an escalation (ACD) makes every opener wait 30 s, not 5",
           e1 == 0.0 and 29.9 < e2 <= 30.0, f"{e1} {e2}")
-    check("AQ1 a turn is never more than MAX_WAIT_S away (go2rtc gives a gated source 60 s)",
-          all(gate.reserve("10.0.0.91", 30.0) <= gate.MAX_WAIT_S for _ in range(3)))
+    q1, q2 = gate.reserve("10.0.0.91", 30.0, 25.0), gate.reserve("10.0.0.91", 30.0, 25.0)
+    check("AQ1 a turn further away than go2rtc waits (25 s) is not taken, not squeezed in",
+          gate.MAX_WAIT_S <= 25 and q1 is None and q2 is None
+          and 59.8 < gate.reserve("10.0.0.91", 30.0) <= 60.0, f"{q1} {q2}")
+    # 3.8.2 (B65): the gate runs as go2rtc's ffmpeg program
     execs, sleeps = [], []
-    real_exec, real_sleep = gate.os.execvp, gate.time.sleep
+    real_exec, real_sleep, real_cd_of = gate.os.execvp, gate.time.sleep, gate.cooldown_of
     gate.os.execvp = lambda f, a: execs.append((f, list(a)))
     gate.time.sleep = lambda s: sleeps.append(s)
+    args92 = ["-hide_banner", "-v", "error", "-i", "rtsp://u:p%40@10.0.0.92:554/11", "-c:v", "copy",
+              "-c:a", "copy", "-f", "rtsp", "rtsp://127.0.0.1:28554/abc"]
     try:
-        gate.gate_main(["10.0.0.92", "5", "ffmpeg", "-i", "rtsp://x", "{out}"])
-        gate.gate_main(["10.0.0.92", "5", "ffmpeg", "-i", "rtsp://x", "{out}"])
-        bad = gate.gate_main(["10.0.0.92"])
-    finally:
-        gate.os.execvp, gate.time.sleep = real_exec, real_sleep
-    check("AQ1 go2rtc's command: waits for the turn, then becomes ffmpeg with its arguments",
-          execs == [("ffmpeg", ["ffmpeg", "-i", "rtsp://x", "{out}"])] * 2
-          and len(sleeps) == 1 and 4.9 < sleeps[0] <= 5.0 and bad == 2, f"{execs} {sleeps}")
+        gate.set_cooldown("10.0.0.92", 5.0)
+        gate.gate_main(args92)
+        gate.gate_main(args92)
+        gate.gate_main(["-i", "rtsp://10.0.0.93:554/11", "-f", "null", "-"])   # no cooldown on record
+        gate.gate_main(["-version"])                                            # go2rtc's version check
 
-    # AQ2: which cameras go through the gate, and the source go2rtc runs
+        def broken(ip):
+            raise OSError("record unreadable")
+        gate.cooldown_of = broken
+        gate.gate_main(args92)
+    finally:
+        gate.os.execvp, gate.time.sleep, gate.cooldown_of = real_exec, real_sleep, real_cd_of
+    ff = gate.real_ffmpeg()
+    check("AQ1 B65 as go2rtc's ffmpeg: a recorded camera waits its turn, then ffmpeg runs with the same arguments",
+          execs[:2] == [(ff, [ff] + args92)] * 2 and len(sleeps) == 1 and 4.9 < sleeps[0] <= 5.0,
+          f"{execs[:2]} {sleeps}")
+    check("AQ1 ... a camera with no cooldown on record, and ffmpeg -version, pass straight through",
+          execs[2] == (ff, [ff, "-i", "rtsp://10.0.0.93:554/11", "-f", "null", "-"])
+          and execs[3] == (ff, [ff, "-version"]) and len(sleeps) == 1)
+    check("AQ1 ... the gate never stops ffmpeg from running, even when its record cannot be read",
+          len(execs) == 5 and execs[4] == (ff, [ff] + args92))
+    check("AQ1 ... it finds the camera's host after -i, and only for an RTSP address",
+          gate.ffmpeg_input_host(args92) == "10.0.0.92"
+          and gate.ffmpeg_input_host(["-i", "/dev/video0"]) == "" and gate.ffmpeg_input_host(["-i"]) == "")
+
+    # AQ2: which cameras go through the gate, and the source go2rtc gets
     ms = camera(id="ms", ip="10.0.0.22", manufacturer="Hipcam/Microseven",
                 stream_url="rtsp://10.0.0.22:554/11", stream_codec="h264",
                 stream_profiles=[{"url": "rtsp://10.0.0.22:554/11", "stream_codec": "h264", "stream_width": 3840},
@@ -5505,20 +5534,21 @@ async def test_381():
     check("AQ2 the gate covers the brand table's rate-limited brands only",
           cd._go2rtc_gated(ms) and cd._go2rtc_gated(vs) and not cd._go2rtc_gated(hik)
           and cd._brand_throttle_seconds(vs) > 0)
+    cd._GATE_COOLDOWNS.clear()
     auth = cd.build_authenticated_url(ms)
     src = cd._go2rtc_camera_src(ms, auth)
-    raw = src.split("#", 1)[0][len("exec:"):]          # internal/exec: cut at '#', drop "exec:"
-    args = _go_quote_split(raw) or []
-    check("AQ2 go2rtc splits the gated source into: python, the gate, address, cooldown, ffmpeg ...",
-          args[:5] == [sys.executable, gate.__file__, "10.0.0.22", "5", "ffmpeg"], str(args[:5]))
-    check("AQ2 ... the camera address with its encoded password is one argument after -i",
-          "-i" in args and args[args.index("-i") + 1] == auth, str(args))
-    check("AQ2 ... then go2rtc's own copy output, and a 60 s start timeout for the wait",
-          args[-11:] == ["-c:v", "copy", "-c:a", "copy", "-user_agent", "ffmpeg/go2rtc",
-                         "-rtsp_transport", "tcp", "-f", "rtsp", "{output}"]
-          and src.endswith("#starttimeout=60"), src[-80:])
+    check("AQ2 B65 a gated camera gets go2rtc's own ffmpeg copy source (no exec:, no space)",
+          src == "ffmpeg:" + auth + "#video=copy#audio=copy" and " " not in src, src)
+    check("AQ2 ... and its cooldown is recorded where the gate, go2rtc's ffmpeg, reads it",
+          gate.cooldown_of("10.0.0.22") == 5.0)
+    conf = json.loads(cd._go2rtc_config())
+    bin_ = conf["ffmpeg"]["bin"]
+    redirect = f"exec:{bin_} -hide_banner -v error -i {auth} -c:v copy -c:a copy -f rtsp {{output}}"
+    check("AQ2 ... go2rtc's ffmpeg program is the gate, a path go2rtc's command splitter keeps whole",
+          bin_ == str(Path(gate.__file__)) and (_go_quote_split(redirect[len("exec:"):]) or [""])[0] == bin_, bin_)
     check("AQ2 the other rate-limited brands get the gate too (and so the copy)",
-          cd._go2rtc_camera_src(vs, cd.build_authenticated_url(vs)).startswith("exec:"))
+          cd._go2rtc_camera_src(vs, cd.build_authenticated_url(vs)).startswith("ffmpeg:")
+          and gate.cooldown_of("10.0.0.23") > 0)
     check("AQ2 every other camera keeps its direct source; a camera-set copy stays go2rtc's own",
           cd._go2rtc_camera_src(hik, cd.build_authenticated_url(hik)).endswith("#backchannel=0")
           and cd._go2rtc_camera_src(dict(hik, live_ffmpeg_copy=True),
@@ -5534,7 +5564,11 @@ async def test_381():
     took = time.monotonic() - t0
     check("AQ3 AnyCam waits for a turn go2rtc's gate took", 0.25 <= took < 1.5, f"{took:.2f}s")
     await cd._throttle_wait_if_needed("10.0.0.94", 0.3)  # AnyCam opened first
-    check("AQ3 go2rtc's gate waits for a turn AnyCam took", 0.25 <= gate.reserve("10.0.0.94", 0.3) <= 0.3)
+    anycam_turn = gate._update("10.0.0.94", lambda rec: None)["next"]
+    gate.reserve("10.0.0.94", 0.3)                        # then go2rtc's gate
+    gate_turn = gate._update("10.0.0.94", lambda rec: None)["next"]
+    check("AQ3 go2rtc's gate waits for a turn AnyCam took (its turn is one cooldown after AnyCam's)",
+          abs(gate_turn - anycam_turn - 0.3) < 1e-6, f"{gate_turn - anycam_turn:.4f}")
     cd._RST_OBSERVED.pop("10.0.0.95", None)
     cd._record_rst_observation("10.0.0.95"); cd._record_rst_observation("10.0.0.95")
     g1, g2 = gate.reserve("10.0.0.95", 5.0), gate.reserve("10.0.0.95", 5.0)
@@ -5570,7 +5604,7 @@ async def test_381():
     check("AQ4 not a stuck camera, a paused one, or one resetting connections without the gate",
           not stuck and not paused and not acd_hik)
     check("AQ4 a gated camera stays connected while it resets: the gate paces go2rtc",
-          len(acd_ms) == 2 and all(s.startswith("exec:") for s in acd_ms.values()))
+          len(acd_ms) == 2 and all(s.startswith("ffmpeg:") for s in acd_ms.values()))
     with _Swap(CFG_PREWARM=False):
         off = cd._prewarm_sources("h1", hik)
     check("AQ4 the prewarm setting turns it off", off == {})
@@ -5689,6 +5723,121 @@ async def test_381():
           and cd.CFG_PREWARM is True)
 
 
+async def test_382():
+    print("\n[AR] 3.8.2 the gate through go2rtc's ffmpeg (B65), quiet pre-warm log, B64, B62, B66, B67")
+    import inspect
+    gate = sys.modules["anycam_gate"]
+    fake = FakeGo2rtcPreload()
+    await fake.start()
+    real_ready = cd._GO2RTC_READY
+    cd._GO2RTC_READY = True
+    cd._GO2RTC_STREAMS.clear(); cd._GO2RTC_STREAM_CAM.clear()
+    cd._PRELOADS.clear(); cd._PRELOAD_SEEN.clear(); cd._PREWARM_PAUSED.clear()
+    cd._PREWARM_FAILING.clear(); cd._GO2RTC_REFUSED.clear(); cd._GATE_COOLDOWNS.clear()
+    ms = camera(id="ms", ip="10.0.0.22", manufacturer="Hipcam/Microseven",
+                stream_url="rtsp://10.0.0.22:554/11", stream_codec="h264",
+                stream_profiles=[{"url": "rtsp://10.0.0.22:554/11", "stream_codec": "h264", "stream_width": 3840},
+                                 {"url": "rtsp://10.0.0.22:554/12", "stream_codec": "h264", "stream_width": 1280}])
+    warn = LogCapture()
+    warn.setLevel(logging.WARNING)
+    cd.log.addHandler(warn)
+    try:
+        # AR1: go2rtc's API check, now in the fake
+        old_381 = "exec:/usr/bin/python3 /anycam_gate.py 10.0.0.22 5 ffmpeg -i rtsp://x {output}"
+        refused = await cd._go2rtc_register("ar1a", old_381, "ms", quiet=True)
+        spaced = await cd._go2rtc_register("ar1b", "rtsp://10.0.0.22/11 x", "ms", quiet=True)
+        src = cd._go2rtc_camera_src(ms, cd.build_authenticated_url(ms))
+        accepted = await cd._go2rtc_register("ar1c", src, "ms")
+        check("AR1 B65 go2rtc's API refuses 3.8.1's exec: gate source and any source with a space",
+              refused is False and spaced is False
+              and "insecure producer" in cd._GO2RTC_REFUSED.get("ar1a", ""))
+        check("AR1 ... and accepts 3.8.2's gated source, go2rtc's own ffmpeg copy", accepted is True, src)
+
+        # AR2: a stream go2rtc keeps refusing is logged once, not every pass
+        cd._GO2RTC_STREAMS.clear(); cd._GO2RTC_STREAM_CAM.clear()
+        cd.CAMERAS.clear(); cd.CAMERAS["ms"] = ms
+        fake.put_status, fake.put_body = 400, "streams: source from insecure producer"
+        warn.lines.clear(); CAP.lines.clear()
+        with _Swap(PREWARM_STAGGER_S=0.0):
+            for _ in range(3):
+                await cd._prewarm_pass()
+            once = [l for l in warn.lines if "pre-warm cannot start" in l]
+            check("AR2 three refused passes give one warning per stream, not one per pass (596 in a 3.8.1 log)",
+                  len(once) == 2 and len(warn.lines) == 2 and "insecure producer" in once[0], str(warn.lines))
+            fake.put_status, fake.put_body = 400, "config file disabled"
+            await cd._prewarm_pass()
+            check("AR2 ... when go2rtc accepts it, pre-warm starts and says it had failed before",
+                  len(cd._PRELOADS) == 2 and not cd._PREWARM_FAILING
+                  and any("it had failed before" in l and "through the connection gate" in l for l in CAP.lines))
+    finally:
+        cd.log.removeHandler(warn)
+        cd._GO2RTC_READY = real_ready
+        cd._PRELOADS.clear(); cd._PRELOAD_SEEN.clear(); cd._PREWARM_FAILING.clear()
+        cd._GO2RTC_STREAMS.clear(); cd._GO2RTC_STREAM_CAM.clear()
+        fake.put_status, fake.put_body = 400, "config file disabled"
+        await fake.stop()
+    check("AR2 the card's own registration still warns at once (not quiet)",
+          "quiet=True" not in inspect.getsource(cd.api_go2rtc_card))
+
+    # AR3: B64, first step
+    removed = ["00:15:6D", "00:27:22", "04:18:D6", "18:E8:29", "24:A4:3C", "44:D9:E7", "68:72:51",
+               "80:2A:A8", "B4:FB:E4", "DC:9F:DB", "F0:9F:C2", "0C:80:63"]
+    check("AR3 B64 the 12 Ubiquiti and TP-Link prefixes are off the non-camera list",
+          not set(removed) & cd._NON_CAMERA_OUI_VENDORS)
+    check("AR3 ... so the scan no longer skips such a host as 'not a camera'",
+          all(cd.oui_is_camera(p + ":12:34:56") is not False for p in removed))
+    check("AR3 ... and a router maker still counts as no camera (Cisco)", cd.oui_is_camera("00:00:0C:12:34:56") is False)
+
+    # AR4: B62, the WebRTC report from the page
+    class Req:
+        def __init__(self, body):
+            self._b = body
+        async def json(self):
+            if isinstance(self._b, Exception):
+                raise self._b
+            return self._b
+    cd.CAMERAS.clear(); cd.CAMERAS["h1"] = camera(id="h1")
+    diag = {"outcome": "not connected after 10 s (checking)", "ms": 10012,
+            "local": ["host/udp 192.168.50.20:50000 wifi", "srflx/udp 203.0.113.9:4000"],
+            "remote": ["host/udp 10.0.0.24:28555", "host/tcp 10.0.0.24:28555"],
+            "pairs": {"in-progress": 2, "failed": 3}, "selected": ""}
+    CAP.lines.clear()
+    r = await cd.api_live_diag(Req({"camera_id": "h1", "where": "enhanced view", "diag": diag}))
+    line = next((l for l in CAP.lines if l.startswith("LIVE-DIAG [h1]")), "")
+    check("AR4 B62 the page's WebRTC report becomes one log line: outcome, both sides' routes, checks",
+          r.status == 200 and "WebRTC not connected after 10 s (checking) after 10.0 s" in line
+          and "this device offered: host/udp 192.168.50.20:50000 wifi, srflx/udp 203.0.113.9:4000" in line
+          and "go2rtc offered: host/udp 10.0.0.24:28555" in line and "failed 3" in line
+          and "route used: none" in line, line)
+    bad = [await cd.api_live_diag(Req(b)) for b in (
+        {"camera_id": "nope", "where": "card", "diag": diag},
+        {"camera_id": "h1", "where": "kitchen", "diag": diag},
+        {"camera_id": "h1", "where": "card", "diag": "text"},
+        ValueError("not JSON"))]
+    check("AR4 ... an unknown camera, place or report shape is refused", all(b.status == 400 for b in bad))
+    huge = dict(diag, local=["x" * 500] * 50, outcome="y" * 500)
+    CAP.lines.clear()
+    await cd.api_live_diag(Req({"camera_id": "h1", "where": "card", "diag": huge}))
+    line = next((l for l in CAP.lines if l.startswith("LIVE-DIAG")), "")
+    check("AR4 ... every field is cut to size (12 routes of 100 characters, outcome 80)",
+          0 < len(line) < 2600 and line.count("x" * 100) == 12 and "y" * 81 not in line, str(len(line)))
+    cd.CAMERAS.clear()
+
+    # AR5: B66, B62 and B67 in the page
+    check("AR5 B66 the log link navigates inside HA (history plus location-changed), with a page load as fallback",
+          "function _haNavigate(" in cd._JS and "'location-changed'" in cd._JS
+          and "window.top.location.href = window.top.location.origin + path" in cd._JS)
+    check("AR5 B62 both live views pass the WebRTC report to the add-on",
+          cd._JS.count("kind === 'webrtc-diag'") == 2 and "/api/live_diag" in cd._JS
+          and "onwebrtc()" in cd._JS)
+    page = (REPO / "anycam_page.py").read_text(encoding="utf-8")
+    check("AR5 B67 dialogs fit the screen's height and scroll; their buttons stay in view",
+          "max-height:calc(100dvh - 32px);overflow-y:auto" in page and "position:sticky;bottom:-20px" in page)
+    check("AR5 B67 the Enhanced View bar grows to a second row and clears a phone's home bar",
+          "min-height:52px" in page and "flex-wrap:wrap" in page and "env(safe-area-inset-bottom)" in page
+          and "#focus-bar{{position:absolute;bottom:0;left:0;right:0;height:52px" not in page)
+
+
 async def main():
     test_pure()
     fake = FakeGo2rtc()
@@ -5743,6 +5892,7 @@ async def main():
     await test_375_rc2()
     await test_b54_walk()
     await test_381()
+    await test_382()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

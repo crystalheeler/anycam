@@ -305,10 +305,12 @@ _NON_CAMERA_OUI_VENDORS: set[str] = {
     "00:0C:42", "2C:C8:1B", "4C:5E:0C", "6C:3B:6B", "74:4D:28",
     "8C:22:50", "B8:69:F4", "CC:2D:E0", "D4:CA:6D", "DC:2C:6E",
     "E4:8D:8C", "18:FD:74",
-    # Ubiquiti Networks
-    "00:15:6D", "00:27:22", "04:18:D6", "0C:80:63", "18:E8:29",
-    "24:A4:3C", "44:D9:E7", "68:72:51", "80:2A:A8", "B4:FB:E4",
-    "DC:9F:DB", "F0:9F:C2",
+    # 3.8.2 (B64, first step): the "Ubiquiti Networks" group is gone. Since
+    # 3.8.0 (B55) the scan skips a host whose prefix is in this set, unprobed,
+    # and Ubiquiti (UniFi Protect) and TP-Link (Tapo; 0C:80:63 was in this
+    # group) also make cameras. The IEEE registry gives these 12 prefixes to
+    # those two makers: 00:15:6D 00:27:22 04:18:D6 0C:80:63 18:E8:29 24:A4:3C
+    # 44:D9:E7 68:72:51 80:2A:A8 B4:FB:E4 DC:9F:DB F0:9F:C2.
     # HP / Hewlett-Packard
     "00:01:E6", "00:02:A5", "00:0D:9D", "00:11:0A", "00:13:21",
     "00:17:08", "00:18:71", "00:1E:0B", "00:1F:29", "00:21:5A",

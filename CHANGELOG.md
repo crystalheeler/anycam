@@ -1,3 +1,24 @@
+## 3.8.2
+
+The Microseven plays through go2rtc again, the log link opens inside the Home Assistant app, and dialogs and the Enhanced View bar fit a phone's screen.
+
+### Changes & improvements
+
+- **Dialogs and the Enhanced View bar fit every screen.** Dialogs fit the screen's height, scroll inside themselves and keep their buttons in view. On a phone the Enhanced View bar wraps to a second row instead of pushing its controls off the screen.
+- **The log link opens inside the Home Assistant app.** It navigates within Home Assistant as its own menus do, instead of opening the phone's browser.
+- **Live view reports why WebRTC did not connect.** The add-on log gets one line per camera with the outcome and the network routes each side offered, to find why some phones fall back to slower playback.
+- **Quieter pre-warm log.** A stream go2rtc refuses is logged once, not every 30 s.
+
+### Bugs fixed
+
+- **The Microseven got no live video in 3.8.1.** go2rtc refused its connection-gate source. The gate now sits where go2rtc starts ffmpeg, so the camera plays through go2rtc again and is still never reopened faster than its limit.
+- **The scan could skip UniFi Protect and Tapo cameras.** Twelve Ubiquiti and TP-Link prefixes were on the list of makers that make no cameras; they are removed.
+
+### Known issues
+
+- **Live video on a phone can freeze, then catch up.** Some phones play over MSE when WebRTC does not connect; the new report in the log helps find why.
+- **Each camera holds one or two connections all the time.** Turn Pre-warm Live Streams off if a camera or recorder objects.
+
 ## 3.8.1
 
 Live views open faster: AnyCam keeps each camera's streams connected, and cameras that limit connections are never reopened faster than they allow.

@@ -170,6 +170,8 @@ COPY anycam_go2rtc.py anycam_host.py anycam_motion.py /
 COPY anycam_page.py anycam_probe.py anycam_scan.py /
 COPY anycam_snap.py anycam_storage.py anycam_mjpeg.py anycam_zones.py /
 COPY anycam_upload.py anycam_gate.py /
+# 3.8.2 (B65): go2rtc runs the connection gate as its ffmpeg program.
+RUN chmod 755 /anycam_gate.py
 COPY www/video-rtc.js /www/video-rtc.js
 
 RUN chmod +x /run.sh
