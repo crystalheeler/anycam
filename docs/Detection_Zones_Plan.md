@@ -133,6 +133,11 @@ Answers 1 to 20 approved by CrystalHeeler on 2026-10-04 ("All of that sounds gre
    (`LorexCH4_<date>_<time>.mp4`). The zone's name goes into the log line
    and into the recording's entry in the Storage tab. Free-text names would
    make file names long and need cleaning of unsafe characters.
+   **Changed 2026-10-20 (CrystalHeeler, 3.8.2):** a recording a zone started
+   now begins with the zone's name, `<zone>_LorexCH4_<date>_<time>.mp4`. The
+   name is cut to letters, digits and hyphens, at most 24 characters. A
+   recording started by whole-picture motion keeps the old name. The log line
+   and the Storage tab entry stay.
 16. **Zone outlines.** Enhanced View gets a "Show zones" switch that draws the
    outlines over the picture; the zone that started a recording is marked.
 

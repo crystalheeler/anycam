@@ -1599,7 +1599,8 @@ async def test_confirm():
     check("O9 name tag: no name -> Camera",
           cd._cam_file_tag({}) == "Camera")
     src = repo_source()
-    check("O10 recordings start with the tag", 'base     = f"{_cam_file_tag(camera)}_{ts}"' in src)
+    check("O10 recordings start with the tag (3.8.2: after the zone, when a zone started it)",
+          'base     = f"{prefix}{_cam_file_tag(camera)}_{ts}"' in src)
     check("O10 live detector passes the stream clock", "stream_t=frames / MOTION_DETECT_FPS" in src)
     cd._MOTION.clear(); cd._MOTION_CFG.clear(); cd.CAMERAS.clear()
     cd.MOTION_REF_S = real_ref
@@ -5836,6 +5837,52 @@ async def test_382():
     check("AR5 B67 the Enhanced View bar grows to a second row and clears a phone's home bar",
           "min-height:52px" in page and "flex-wrap:wrap" in page and "env(safe-area-inset-bottom)" in page
           and "#focus-bar{{position:absolute;bottom:0;left:0;right:0;height:52px" not in page)
+
+    # AR6: the zone at the front of a recording's name (CrystalHeeler, 2026-10-20)
+    import re as _re
+    check("AR6 a zone name is cut to letters, digits and hyphens, 24 at most",
+          cd._zone_file_tag("FrontYard-Left") == "FrontYard-Left"
+          and cd._zone_file_tag("Back door / gate #2") == "Back-door-gate-2"
+          and cd._zone_file_tag("x" * 40) == "x" * 24 and cd._zone_file_tag("***") == "Zone"
+          and cd._zone_file_tag("") == "Zone")
+    started, names = [], {}
+    rec_dir = SCRATCH / "media_ar6" / "LorexCH7"
+    rec_dir.mkdir(parents=True, exist_ok=True)
+
+    async def fake_exec(*a, **k):
+        started.append(a)
+        raise OSError("no ffmpeg in the test")
+
+    async def fake_relay(cid, url):
+        return url
+
+    async def fake_dir(camera, base=None):
+        return rec_dir
+    cam7 = {"id": "ch7", "name": "Lorex / Dahua DVR-NVR Family ch7", "channel": 7, "ip": "10.0.0.217",
+            "stream_codec": "h264"}
+    cd._MOTION.clear(); cd._MOTION_CFG.clear()
+    zmod = sys.modules["anycam_zones"]
+    real_exec = cd.asyncio.create_subprocess_exec
+    with _Swap(_go2rtc_relay=fake_relay, _ensure_cam_dir=fake_dir):
+        cd.asyncio.create_subprocess_exec = fake_exec
+        try:
+            for zone in ("FrontYard-Left", None):
+                ms = cd._motion_state("ch7")
+                ms.update(recording=False, judge_zone=zone, tsbuf=None)
+                await cd._start_recording("ch7", cam7, "rtsp://10.0.0.217/x")
+                names[zone] = ms["clip_base"]
+        finally:
+            cd.asyncio.create_subprocess_exec = real_exec
+    zb, nb = names.get("FrontYard-Left", ""), names.get(None, "")
+    check("AR6 a recording a zone started begins with the zone: <zone>_<camera>_<date>_<time>",
+          _re.fullmatch(r"FrontYard-Left_LorexCH7_\d{8}_\d{6}", zb) is not None, zb)
+    check("AR6 ... ffmpeg writes the files under that name",
+          any(str(a[-1]).endswith(zb + "_part%02d.mp4") for a in started), str([a[-1] for a in started]))
+    check("AR6 ... and the Storage tab still finds the zone from the file name",
+          zmod.rec_zone_for(zb + "_part02.mp4") == "FrontYard-Left" and zmod.rec_zone_for(zb + ".mp4") == "FrontYard-Left")
+    check("AR6 a recording whole-picture motion started keeps the old name",
+          _re.fullmatch(r"LorexCH7_\d{8}_\d{6}", nb) is not None, nb)
+    cd._MOTION.clear(); cd._MOTION_CFG.clear(); zmod.REC_ZONES.clear()
 
 
 async def main():

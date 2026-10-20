@@ -59,6 +59,11 @@ def story():
                   "safe-area padding, the camera name on its own row and the short Quality Switch line on "
                   "phones. The toast: max-width. The release gate checks these styles (R10) and names "
                   "every fixed overlay; it fails on 3.8.1's styles (dialog scroll, bar, toast)."],
+                 ["Zone in the file name", "CrystalHeeler, 2026-10-20, changing answer 15 of the zones "
+                  "plan: a recording a zone started is named <zone>_<camera>_<date>_<time>; the zone name is "
+                  "cut to letters, digits and hyphens, at most 24 characters; whole-picture recordings keep "
+                  "their name. The joining of parts and the Storage tab's zone lookup use the same base name "
+                  "(test AR6)."],
                  ["B62 report", "The live player reads WebRTC's statistics and reports the outcome, the "
                   "candidates each side offered, the pair checks and the route used, once per camera, "
                   "place and outcome, to POST /api/live_diag, which checks every field and logs one "
@@ -69,7 +74,7 @@ def story():
           table([["Suite", "Result", "Scope"],
                  ["Release gate", verdict("PASS"), "Eight gates, with the new R10 check and the contracts "
                   "moved to the go2rtc source, the go2rtc config and the gate."],
-                 ["Python integration", verdict("PASS"), "729 of 729. New section AR; AQ and AM1 updated for "
+                 ["Python integration", verdict("PASS"), "734 of 734. New section AR; AQ and AM1 updated for "
                   "the 3.8.2 gate."],
                  ["JavaScript behaviour", verdict("PASS"), "201 of 201: B66 navigation and fallback, the B62 "
                   "summary."],
@@ -116,6 +121,7 @@ def story():
                  ["anycam_go2rtc.py", "ffmpeg: source for gated cameras, cooldown record, ffmpeg.bin, quiet "
                   "registration, pre-warm failure logged once, /api/live_diag."],
                  ["anycam_brand.py", "12 prefixes off the non-camera list."],
+                 ["anycam_motion.py, docs/Detection_Zones_Plan.md", "The zone at the front of a recording's name; answer 15 updated."],
                  ["page_script.py", "B66 navigation, B62 report."],
                  ["anycam_page.py", "B67 styles."],
                  ["camera_discovery.py, Dockerfile", "Route for /api/live_diag; chmod for the gate; 3.8.2."],

@@ -1453,6 +1453,19 @@ def _cam_file_tag(camera: dict) -> str:
     return word + (ip.rsplit(".", 1)[-1] if ip.count(".") == 3 else "")
 
 
+def _zone_file_tag(zone: str) -> str:
+    """3.8.2: the zone that started a recording, at the front of its file name.
+
+    CrystalHeeler, 2026-10-20, changing answer 15 of docs/Detection_Zones_Plan.md
+    (which kept zones out of file names because free-text names make long names
+    with unsafe characters): the name is cut to letters, digits and hyphens, at
+    most 24 characters.
+    """
+    import re as _re
+    tag = _re.sub(r"[^A-Za-z0-9-]+", "-", zone or "").strip("-")[:24].strip("-")
+    return tag or "Zone"
+
+
 async def _ensure_cam_dir(camera: dict, base: Path | None = None) -> Path:
     """Create and return the recording directory for a camera.
 
@@ -1471,7 +1484,9 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
     while motion continues (build plan C12). Files are
     <camera>_<date>_<time>_part01.mp4, part02, ...: a new event gets a new
     date and time; a higher part number is a continuation. 2.6.7: <camera>
-    is _cam_file_tag, for example LorexCH4. Each file ends
+    is _cam_file_tag, for example LorexCH4. 3.8.2: a recording a zone
+    started begins with that zone, <zone>_<camera>_<date>_<time>, for example
+    FrontYard-Left_LorexCH7_20261020_101500.mp4. Each file ends
     on the first keyframe after the interval, so lengths are approximate.
     """
     ms = _motion_state(camera_id)
@@ -1483,12 +1498,14 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
     cfg      = _motion_cfg(camera_id)
     cam_dir  = await _ensure_cam_dir(camera, Path(cfg["path"]))
     ts       = time.strftime("%Y%m%d_%H%M%S")
-    base     = f"{_cam_file_tag(camera)}_{ts}"
+    zone     = ms.get("judge_zone")
+    # 3.4.0 (answer 15): the zone goes into the log and the Storage tab. 3.8.2
+    # (CrystalHeeler, 2026-10-20): and at the front of the file name.
+    prefix   = f"{_zone_file_tag(zone)}_" if zone is not None else ""
+    base     = f"{prefix}{_cam_file_tag(camera)}_{ts}"
     clip     = cam_dir / f"{base}_part01.mp4"
     ms["clip_path"] = clip
     ms["clip_base"] = base
-    # 3.4.0 (answer 15): the zone goes into the log and the Storage tab, not the file name
-    zone = ms.get("judge_zone")
     ms["rec_zone"] = zone
     if zone is not None:
         log.info(f"Motion [{camera_id}]: recording started by zone \"{zone}\"")
