@@ -4107,6 +4107,18 @@ async function submitRename() {
 }
 document.getElementById('rename-modal').addEventListener('click',
   e => { if (e.target.id === 'rename-modal') closeRename(); });
+
+// 3.8.4 (B69): a click closes a dialog from its backdrop only when the press
+// began there too. Selecting text in a field and releasing outside the
+// dialog sends the click to the backdrop (the element under both ends), which
+// closed the dialog. Applies to every dialog on a .modal-backdrop.
+let _pressTarget = null;
+document.addEventListener('pointerdown', e => { _pressTarget = e.target; }, true);
+document.addEventListener('click', e => { if (_backdropClickIgnored(e.target, _pressTarget)) e.stopPropagation(); }, true);
+
+function _backdropClickIgnored(target, pressed) {
+  return !!(target && target.classList && target.classList.contains('modal-backdrop') && pressed !== target);
+}
 document.getElementById('rename-input').addEventListener('keydown',
   e => { if (e.key === 'Enter') submitRename(); if (e.key === 'Escape') closeRename(); });
 

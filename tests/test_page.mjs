@@ -1142,5 +1142,29 @@ console.log('\n[3.8.3] restore motion and zone settings (C27)');
         page.includes("'webkitdirectory' in document.createElement('input')") && page.includes("'rs-device-note'"));
 }
 
+// ── 3.8.4: B69 a drag out of a dialog does not close it ─────────────────────
+console.log('\n[3.8.4] dialogs: a drag out does not close them (B69)');
+{
+  const grab = name => {
+    const i = page.indexOf('function ' + name + '(');
+    let depth = 0, j = page.indexOf('{', i);
+    for (let k = j; k < page.length; k++) {
+      if (page[k] === '{') depth++;
+      else if (page[k] === '}' && --depth === 0) return page.slice(i, k + 1);
+    }
+  };
+  vm.runInThisContext(grab('_backdropClickIgnored') + '\nglobalThis.__bdIgnored = _backdropClickIgnored;');
+  const backdrop = {classList: {contains: c => c === 'modal-backdrop'}};
+  const field = {classList: {contains: () => false}};
+  check('B69 a press in a field released on the backdrop does not close the dialog',
+        __bdIgnored(backdrop, field) === true);
+  check('B69 ... a press and release on the backdrop still closes it; clicks inside are untouched',
+        __bdIgnored(backdrop, backdrop) === false && __bdIgnored(field, field) === false
+        && __bdIgnored(field, backdrop) === false && __bdIgnored(null, field) === false);
+  check('B69 ... the press is recorded before any handler, and the click stopped in the capture phase',
+        page.includes("document.addEventListener('pointerdown', e => { _pressTarget = e.target; }, true);")
+        && page.includes("if (_backdropClickIgnored(e.target, _pressTarget)) e.stopPropagation(); }, true);"));
+}
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

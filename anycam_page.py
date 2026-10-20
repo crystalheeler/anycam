@@ -280,6 +280,8 @@ header h1{{cursor:pointer}}
         padding:20px;width:min(360px,calc(100vw - 32px));display:flex;flex-direction:column;gap:12px;
         max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);overflow-y:auto}}
 /* 3.8.2 (B67, rule 10): a tall dialog scrolls inside itself, and its buttons stay in view */
+/* 3.8.4 (B68): its parts keep their height; shrunk to fit the cap, long text ran over the next line */
+.modal>*{{flex-shrink:0}}
 .modal h3{{font-size:.92rem;font-weight:600}}
 .modal input{{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.86rem;padding:7px 10px;outline:none}}
 .modal input:focus{{border-color:var(--primary)}}

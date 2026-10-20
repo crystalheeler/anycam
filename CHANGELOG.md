@@ -1,3 +1,20 @@
+## 3.8.4
+
+Two dialog fixes: text no longer runs over the next line, and a text selection that ends outside a dialog no longer closes it.
+
+### Changes & improvements
+
+- **Dialogs close from the backdrop only on a real click there.** A click closes a dialog only when it starts and ends outside the dialog.
+
+### Bugs fixed
+
+- **Text ran over the next line in tall dialogs.** Since 3.8.2 a dialog that is taller than the screen squeezed its lines together, so the zone peaks text covered "Detection in zones only" in the camera settings. Each line now keeps its height, and the dialog scrolls.
+- **Selecting a camera's name to rename it could close the dialog.** Pressing in the text field and releasing the mouse outside the dialog closed it. It now stays open, in every dialog.
+
+### Known issues
+
+- **Some brands cannot be recognised by their MAC address.** Foscam and the Hipcam family use the address of their Wi-Fi module's maker; AnyCam recognises them from the camera's answers instead.
+
 ## 3.8.3
 
 Motion and zone settings can be saved and restored, a recorder's channel cards appear next to it, and the list of camera makers' MAC addresses is rebuilt from the IEEE registry.

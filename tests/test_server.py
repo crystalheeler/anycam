@@ -6205,6 +6205,14 @@ async def test_383():
           "Not found by MAC at all" in bsrc and "Shenzhen Bilian" in bsrc)
 
 
+# ── AT. 3.8.4 ────────────────────────────────────────────────────────────────
+async def test_384():
+    print("\n[AT] 3.8.4 dialog parts keep their height (B68)")
+    html = cd.build_html()
+    check("AT1 B68 a dialog's parts never shrink, so long text cannot run over the next line; the dialog scrolls",
+          ".modal>*{flex-shrink:0}" in html and "overflow-y:auto" in html)
+
+
 async def main():
     test_pure()
     fake = FakeGo2rtc()
@@ -6261,6 +6269,7 @@ async def main():
     await test_381()
     await test_382()
     await test_383()
+    await test_384()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

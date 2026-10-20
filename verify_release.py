@@ -594,6 +594,11 @@ for _sel in sorted(R10_SCROLL):
     if not (re.search(r"max-height:[^;]*vh", _body) and re.search(r"overflow(-y)?:(auto|scroll)", _body)):
         fail(f"R10 {_sel} must fit the screen's height (max-height in vh/dvh) and scroll (overflow auto)")
         audit_ok = False
+# 3.8.4 (B68): a height-capped flex column shrinks its parts, and their text runs
+# over the next part; the parts must keep their height and the dialog scroll.
+if "flex-shrink:0" not in ";".join(_r10.get(".modal>*", [])):
+    fail("R10 .modal>* must not shrink (flex-shrink:0): text overlaps in a tall dialog")
+    audit_ok = False
 for _sel in sorted(R10_WIDTH):
     if not re.search(r"(^|;)width:min\([^;]*vw", ";".join(_r10.get(_sel, []))):
         fail(f"R10 {_sel} must cap its width by the screen (width:min(..., calc(100vw - ...)))")
