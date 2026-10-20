@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 20 October 2026. Store and repository version: 3.8.3 (built 2026-10-20; push and publish ordered by CrystalHeeler the same day). It adds saving and restoring the motion and zone settings (C27), a recorder's new channel cards next to it (D5) and the camera MAC list rebuilt from the IEEE registry (B64). Previous: 3.8.2 (2026-10-20). rc numbers are single-digit (CrystalHeeler, 2026-10-10).
+**Compiled:** Updated 20 October 2026. Store and repository version: 3.8.3 (released 2026-10-20: pushed, GitHub Latest, store). It adds saving and restoring the motion and zone settings (C27), a recorder's new channel cards next to it (D5) and the camera MAC list rebuilt from the IEEE registry (B64). Previous: 3.8.2 (2026-10-20). rc numbers are single-digit (CrystalHeeler, 2026-10-10).
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.
