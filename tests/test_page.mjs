@@ -1166,5 +1166,55 @@ console.log('\n[3.8.4] dialogs: a drag out does not close them (B69)');
         && page.includes("if (_backdropClickIgnored(e.target, _pressTarget)) e.stopPropagation(); }, true);"));
 }
 
+// ── 3.9.0-rc1.0: B81 cards paused behind Enhanced View, B62 playback numbers, C31 zone list ──
+console.log('\n[3.9.0] cards stay paused behind Enhanced View (B81), playback numbers (B62)');
+{
+  const grab = name => {
+    const i = page.indexOf('function ' + name + '(');
+    let depth = 0, j = page.indexOf('{', i);
+    for (let k = j; k < page.length; k++) {
+      if (page[k] === '{') depth++;
+      else if (page[k] === '}' && --depth === 0) return page.slice(i, k + 1);
+    }
+  };
+  check('B81 a card player does not connect while Enhanced View is open (its own restarts included)',
+        page.includes("if (typeof this.anycamHold === 'function' && this.anycamHold()) return false;")
+        && page.includes("el.anycamHold = () => !!_focusCamId;"));
+  check('B81 ... closing Enhanced View clears the camera before the cards resume',
+        page.indexOf('_focusCamId  = null;', page.indexOf('async function closeFocus')) <
+        page.indexOf('cardLivePauseAll(false);', page.indexOf('async function closeFocus')));
+
+  vm.runInThisContext(grab('_playbackSummary') + '\nglobalThis.__play = _playbackSummary;');
+  const stats = new Map([
+    ['a', {type: 'inbound-rtp', kind: 'audio', packetsLost: 99}],
+    ['v', {type: 'inbound-rtp', kind: 'video', frameWidth: 1280, frameHeight: 720, framesPerSecond: 19.5,
+           framesReceived: 400, framesDecoded: 390, framesDropped: 10, freezeCount: 3, totalFreezesDuration: 4.2,
+           packetsReceived: 5000, packetsLost: 12, jitter: 0.035, bytesReceived: 5000000}]]);
+  const w = __play(stats, null, 20000);
+  check('B62 WebRTC playback: size, rate, decoded and dropped, freezes, lost packets, jitter, bitrate (video only)',
+        w.mode === 'WebRTC' && w.width === 1280 && w.dropped === 10 && w.freezes === 3 && w.lost === 12
+        && w.jitter_ms === 35 && w.kbps === 2000 && w.seconds === 20, JSON.stringify(w));
+  const video = {videoWidth: 3840, videoHeight: 2160, currentTime: 10,
+                 buffered: {length: 1, end: () => 22.5},
+                 getVideoPlaybackQuality: () => ({totalVideoFrames: 600, droppedVideoFrames: 4})};
+  const m = __play(null, video, 20000);
+  check('B62 MSE playback: decoded, dropped and how far behind live',
+        m.mode === 'MSE' && m.decoded === 600 && m.dropped === 4 && m.behind_s === 12.5, JSON.stringify(m));
+
+  const sent = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (url, opt) => { sent.push(JSON.parse(opt.body)); return Promise.resolve({}); };
+  vm.runInThisContext(grab('_livePlayReport') + '\nglobalThis.__send = _livePlayReport;');
+  __send('ms', 'card', w); __send('ms', 'card', w); __send('ms', 'enhanced view', m);
+  globalThis.fetch = realFetch;
+  check('B62 ... one report per camera and place every 5 minutes',
+        sent.length === 2 && sent[0].where === 'card' && sent[1].where === 'enhanced view'
+        && sent[0].diag.kind === 'playback', JSON.stringify(sent.map(x => x.where)));
+  check('B62 ... both live views send it',
+        (page.match(/kind === 'play-diag'/g) || []).length === 2 && page.includes("this._emit('play-diag'"));
+  check('C31 the Storage tab shows the whole zone list as hover text',
+        page.includes('title="Zones, the first started it: \' + esc(f.zone) + \'"'));
+}
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

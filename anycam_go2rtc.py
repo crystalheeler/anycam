@@ -956,11 +956,12 @@ def _diag_mask(text: str) -> str:
     import ipaddress
     out = []
     for tok in text.split(" "):
-        addr, sep, port = tok.rpartition(":")
+        core = tok.rstrip(",;")                 # items are joined with ", "
+        addr, sep, port = core.rpartition(":")
         if sep and port.isdigit() and addr:
             try:
                 if ipaddress.ip_address(addr.strip("[]")).is_global:
-                    tok = f"public:{port}"
+                    tok = f"public:{port}" + tok[len(core):]
             except ValueError:
                 pass
         out.append(tok)

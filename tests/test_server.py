@@ -9,6 +9,7 @@ Run:  python tests/test_server.py        (or tests/run_tests.py for everything)
 Exit code 0 = every check passed.
 """
 import asyncio
+import collections
 import hashlib
 import importlib.util
 import json
@@ -1089,7 +1090,12 @@ async def test_preroll():
     check("M1 the newest keyframe at least 3 s old (t=16 at now 20)",
           ts_tag(first_video) == 80 and abs(buf.preroll_seconds(t) - 4.0) < 1e-6,
           f"tag={ts_tag(first_video)} pre={buf.preroll_seconds(t)}")
-    check("M1 nothing older is kept", len(buf.gops) == 1)
+    # 3.9.0 (C30): the buffer keeps MOTION_BUF_KEEP_S (10 s), so a recording right
+    # after a headlight pause can start before the pause
+    check("M1 nothing older than the 10 s window is kept; a longer pre-roll starts earlier",
+          len(buf.gops) == 3 and ts_tag(next(p for p in (lambda x: [x[i:i + 188] for i in range(0, len(x), 188)])(
+              buf.preroll(10.0)) if ((p[1] & 0x1F) << 8 | p[2]) == V)) == 40
+          and abs(buf.preroll_seconds(t, 10.0) - 12.0) < 1e-6, f"{len(buf.gops)}")
     check("M1 every packet came through whole", len(pre) % 188 == 0 and not buf.rest)
 
     # M2 the pipeline, with stand-in ffmpeg processes
@@ -6214,6 +6220,282 @@ async def test_384():
           ".modal>*{flex-shrink:0}" in html and "overflow-y:auto" in html)
 
 
+# ── AU. 3.9.0-rc1.0 ──────────────────────────────────────────────────────────
+async def test_390():
+    print("\n[AU] 3.9.0-rc1.0 card order, quieter log, masked addresses, slow-check fixes, zone list, "
+          "relay retry, third stream, scan pacing, playback numbers, headlight pause")
+    import random as _r
+    Z = sys.modules["anycam_zones"]
+    G = sys.modules["anycam_go2rtc"]
+
+    # AU1 B79: start-up keeps every runtime.json entry
+    src = (REPO / "camera_discovery.py").read_text(encoding="utf-8")
+    check("AU1 B79 start-up rewrites runtime.json with every entry kept (the card order survives)",
+          "_runtime_data = load_runtime()" in src
+          and 'if k in ("last_scan_duration", "store_defaults_set")' not in src)
+
+    # AU2 B70: per-check lines at DEBUG, at a movement's start, then at most every 5 s
+    said = []
+    with _Swap():
+        real_debug = cd.log.debug
+        cd.log.debug = lambda msg, *a, **k: said.append(msg)
+        try:
+            ms = {}
+            for t in (0.0, 0.25, 0.5, 0.75):
+                cd._motion_check_log(ms, ("zone", "A"), f"A {t}", now_m=t)
+            first = len(said)
+            for t in (2.0, 2.25):                       # quiet for more than 1 s before: a new movement
+                cd._motion_check_log(ms, ("zone", "A"), f"A {t}", now_m=t)
+            second = len(said)
+            for k in range(1, 30):                      # one long movement: 4 a second for 7 s
+                cd._motion_check_log(ms, ("zone", "A"), "long", now_m=2.25 + k * 0.25)
+        finally:
+            cd.log.debug = real_debug
+    check("AU2 B70 one per-check line per movement start, then at most one every 5 s",
+          first == 1 and second == 2 and said.count("long") == 1, f"{first} {second} {said.count('long')}")
+    ms = {"peak_since": 0.0, "zone_peaks": {"A": (0.0, 1.2), "B": (0.1, 4.6)}, "peak_n": 0}
+    CAP.lines.clear()
+    cd._motion_report_peak("au", ms, 100.0)
+    still = not any("zones in the last" in l for l in CAP.lines)
+    ms = {"peak_since": 0.0, "zone_peaks": {"A": (0.9, 1.2)}, "peak_n": 0}
+    cd._motion_report_peak("au", ms, 100.0)
+    check("AU2 ... the once-a-minute zone line only when a zone saw movement",
+          still and any("zones in the last" in l for l in CAP.lines))
+
+    # AU3 B72: two decimals when peak and threshold round alike; empty error text named; signalling close
+    check("AU3 B72 near miss shows two decimals, others one",
+          cd._cal_pcts(1.46, 1.54) == ("1.46", "1.54") and cd._cal_pcts(1.2, 1.5) == ("1.2", "1.5"))
+    gsrc = (REPO / "anycam_go2rtc.py").read_text(encoding="utf-8")
+    check("AU3 ... a timeout names its type; a WebRTC set-up close is not logged as a closed live view",
+          "type(ex).__name__" in gsrc and 'if seen["webrtc"] and not seen["media"]:' in gsrc)
+
+    # AU4 B71: public addresses masked, private kept
+    m = cd._diag_mask("srflx/udp 8.8.4.4:4000 unknown, host/udp 192.168.50.20:5000 wifi, "
+                      "prflx/udp 172.24.1.2:42263, srflx/udp 2001:4860:4860::8888:52137, host/udp ?:1")
+    check("AU4 B71 LIVE-DIAG: public addresses become public:<port>; private, VPN and unknown stay",
+          "8.8.4.4" not in m and "public:4000" in m and "192.168.50.20:5000" in m
+          and "172.24.1.2:42263" in m and "4860" not in m and "public:52137" in m and "?:1" in m, m)
+
+    # AU5-AU7: the slow-movement check
+    W, H = cd.MOTION_GRID
+    rnd = _r.Random(5)
+    base = bytearray(rnd.randrange(60, 200) for _ in range(W * H))
+
+    def pic(blocks=(), bright=None, delta=0, noise=True):
+        b = bytearray(base)
+        for x, y, w, h in blocks:
+            for yy in range(y, y + h):
+                for xx in range(x, x + w):
+                    b[yy * W + xx] = 255
+        for i in (bright or []):
+            b[i] = min(255, b[i] + delta)
+        if noise:
+            b[rnd.randrange(len(b))] ^= 1
+        return cd._motion_thumb_gray(bytes(b))
+    cid = "au"
+    cd.CAMERAS.clear(); cd.CAMERAS[cid] = camera(id=cid)
+    cd._MOTION.clear(); cd._MOTION_CFG.clear()
+    ms = cd._motion_state(cid); ms["enabled"] = True
+    zone = {"zones": [{"name": "All", "points": [[0, 0], [1, 0], [1, 1], [0, 1]], "level": 100,
+                       "closed": True}], "zones_only": True}
+    clean, _err = Z.validate(zone)
+    Z.set_zones(cid, clean)
+    gw, gh = cd._grid_of(Z.ZONE_GRID[0] * Z.ZONE_GRID[1])
+    big = bytearray(rnd.randrange(60, 200) for _ in range(gw * gh))
+
+    def zpic(block=None):
+        b = bytearray(big)
+        if block:
+            x, y, w, h = block
+            for yy in range(y, y + h):
+                for xx in range(x, x + w):
+                    b[yy * gw + xx] = 255
+        b[rnd.randrange(len(b))] ^= 1
+        return cd._motion_thumb_gray(bytes(b))
+    old_insect = zpic((10, 10, 20, 8))
+    ms["slow_refs"] = collections.deque([(0.0, old_insect), (0.25, old_insect)])
+    a = cd._motion_slow_look(cid, ms, zpic(), 5.0)
+    b = cd._motion_slow_look(cid, ms, zpic(), 5.25)
+    ms["slow_refs"] = collections.deque([(0.0, old_insect), (0.25, old_insect)]); ms["slow_runs"] = {}
+    ms["slow_taint"] = collections.deque([0.1])
+    c = cd._motion_slow_look(cid, ms, zpic(), 5.0)
+    d = cd._motion_slow_look(cid, ms, zpic(), 5.25)
+    check("AU5 B78 the slow check records against an old insect picture, and no more once the fast "
+          "checks rejected that picture", (a or b) and not (c or d), f"{a} {b} {c} {d}")
+    ms["slow_refs"] = collections.deque([(0.0, old_insect)]); ms["slow_runs"] = {"All": 1}
+    cd._motion_slow_forget(ms)
+    check("AU6 B73 a light change empties the slow check's older pictures",
+          not ms["slow_refs"] and not ms["slow_runs"])
+    src_m = (REPO / "anycam_motion.py").read_text(encoding="utf-8")
+    check("AU6 ... and the light rule calls it", 'hits.clear()\n        _motion_slow_forget(ms)          # 3.9.0 (B73)' in src_m)
+    ms["cal"] = {}
+    ms["cal_slow"] = ("All", 3.4, 1.0)
+    cd._cal_recorded(ms, "All", "All_Cam_20261024_101010")
+    ev = ms["cal"].get("All") or {}
+    check("AU7 B74 a recording the slow check started gets its calibration line with the file name",
+          ev.get("outcome") == "recorded (slow movement, over 5 s) → All_Cam_20261024_101010"
+          and abs(ev.get("peak", 0) - 3.4) < 1e-9, str(ev))
+
+    # AU8 C31: every zone a recording passed through, in order, in the Storage tab and the log
+    ms2 = {}
+    cd._motion_note_rec_zones(ms2, ["Walkway"])
+    cd._motion_note_rec_zones(ms2, [None, "Patio", "Walkway"])
+    cd._motion_note_rec_zones(ms2, ["FrontYard-Right"])
+    rec_dir = SCRATCH / "au_rec"; rec_dir.mkdir(exist_ok=True)
+    base_name = "Walkway_Cam_20261024_101010"
+    (rec_dir / f"{base_name}_part01.mp4").write_bytes(b"x")
+    ms2.update(clip_base=base_name, clip_path=rec_dir / f"{base_name}_part01.mp4")
+    CAP.lines.clear()
+    real_enq = cd.anycam_upload.enqueue if hasattr(cd, "anycam_upload") else None
+    sys.modules["anycam_upload"].enqueue, real_enqueue = (lambda cid_, parts: None), sys.modules["anycam_upload"].enqueue
+    try:
+        cd._motion_finish_files("au", ms2)
+    finally:
+        sys.modules["anycam_upload"].enqueue = real_enqueue
+    check("AU8 C31 a recording lists every zone it passed through, in order",
+          Z.REC_ZONES.get(base_name) == "Walkway, Patio, FrontYard-Right" and ms2.get("rec_zones_dirty")
+          and any("(zones: Walkway, Patio, FrontYard-Right)" in l for l in CAP.lines), str(CAP.lines[-2:]))
+    Z.REC_ZONES.pop(base_name, None)
+
+    # AU9 B80: back to go2rtc's copy once it delivers again, with a growing wait
+    G._RELAY_FAILS.clear(); G._RELAY_DIRECT.clear(); G._PRELOADS.clear(); G._PRELOAD_SEEN.clear()
+    relayed = f"rtsp://anycam:x@{G.GO2RTC_API_HOST}:{G.GO2RTC_RTSP_PORT}/s"
+    for _ in range(3):
+        cd._go2rtc_relay_result("ms", relayed, False)
+    d1 = dict(G._RELAY_DIRECT.get("ms", {}))
+    due_early = cd._relay_retry_due("ms")
+    G._RELAY_DIRECT["ms"]["next"] = 0.0
+    G._PRELOADS["s"] = "ms"; G._PRELOAD_SEEN["s"] = (5000, 1)     # no new bytes in the last pass
+    due_stale = cd._relay_retry_due("ms")
+    G._PRELOAD_SEEN["s"] = (9000, 0)                              # new bytes
+    due_live = cd._relay_retry_due("ms")
+    real_ready = G._GO2RTC_READY
+    G._GO2RTC_READY = True
+    try:
+        will = cd._go2rtc_will_relay("ms", "rtsp://10.0.0.22:554/11")
+    finally:
+        G._GO2RTC_READY = real_ready
+    G._RELAY_FAILS["ms"] = G.RELAY_FAIL_LIMIT - 1
+    cd._go2rtc_relay_result("ms", relayed, False)                 # the retry failed too
+    d2 = dict(G._RELAY_DIRECT.get("ms", {}))
+    cd._go2rtc_relay_result("ms", relayed, True)                  # later it works
+    check("AU9 B80 after 3 failures: direct, retried only after the wait and when go2rtc has new video",
+          d1.get("round") == 0 and not due_early and not due_stale and due_live and will)
+    check("AU9 ... a failed retry waits longer (1 then 2 min); a success goes back for good",
+          d2.get("round") == 1 and d2["next"] - time.monotonic() > 100 and "ms" not in G._RELAY_DIRECT
+          and "ms" not in G._RELAY_FAILS, str(d2))
+    G._PRELOADS.clear(); G._PRELOAD_SEEN.clear()
+
+    # AU10 B58: the third stream from the brand table
+    hik = ["/Streaming/Channels/101", "/Streaming/Channels/102", "/Streaming/Channels/103"]
+    dah = ["/cam/realmonitor?channel=1&subtype=0", "/cam/realmonitor?channel=1&subtype=1",
+           "/cam/realmonitor?channel=1&subtype=2"]
+    g = cd._third_stream_guess
+    check("AU10 B58 main and sub one number apart give the next, only when the brand table lists it",
+          g("rtsp://10.0.0.33:554/Streaming/Channels/101", "rtsp://10.0.0.33:554/Streaming/Channels/102", hik)
+          == "/Streaming/Channels/103"
+          and g("rtsp://10.0.0.5:554" + dah[0], "rtsp://10.0.0.5:554" + dah[1], dah) == dah[2]
+          and g("rtsp://10.0.0.5:554" + dah[0], "rtsp://10.0.0.5:554" + dah[1], dah[:2]) is None
+          and g("rtsp://x/a1/b1", "rtsp://x/a2/b2", ["/a3/b3"]) is None
+          and g("rtsp://x/h264Preview_01_main", "rtsp://x/h264Preview_01_sub", []) is None)
+    csrc = (REPO / "anycam_credentials.py").read_text(encoding="utf-8")
+    check("AU10 ... checked with one request, paced, using the password that worked",
+          "_third_stream_guess(url, sub_url" in csrc and '"third-stream check"' in csrc)
+
+    # AU11 B63: the RTSP server name names the brand; the scan paces ONVIF then RTSP
+    cam = {"name": "IPCAM", "rtsp_server_header": "Hipcam RealServer/V1.0"}
+    cd._identify_camera_brand(cam)
+    check("AU11 B63 the RTSP server name identifies a camera whose ONVIF name says nothing",
+          cam.get("manufacturer") == "Hipcam/Microseven", str(cam.get("manufacturer")))
+    waits = []
+
+    async def fake_wait(ip, s_, label=""):
+        waits.append((ip, s_, label))
+    with _Swap(_throttle_wait_if_needed=fake_wait, onvif_probe_no_login=lambda url: ("login", []),
+               _rtsp_options_fingerprint=lambda ip, port: {"server_header": "Hipcam RealServer/V1.0"}):
+        await cd._scan_onvif_first("10.0.0.22", {"xaddrs": "http://10.0.0.22:8080/onvif/device_service"},
+                                   {"ip": "10.0.0.22"}, {}, asyncio.get_event_loop())
+    check("AU11 ... the scan's ONVIF request and RTSP check take turns 5 s apart",
+          [w[1] for w in waits] == [5.0, 5.0] and "ONVIF" in waits[0][2] and "RTSP" in waits[1][2], str(waits))
+
+    # AU12 B62: the playback report's log line
+    line = cd._live_play_line("ms", "card", {"kind": "playback", "mode": "WebRTC", "seconds": 20, "width": 1280,
+                                             "height": 720, "fps": 19.5, "dropped": 10, "freezes": 3,
+                                             "freeze_s": 4.25, "lost": 12, "kbps": 2010, "bogus": "x",
+                                             "jitter_ms": "nan"})
+    check("AU12 B62 LIVE-PLAY: numbers only, unknown fields and text dropped",
+          line.startswith("LIVE-PLAY [ms]: card: WebRTC after 20 s, 1280x720, 19.5 pictures/s")
+          and "freezes 3" in line and "lost 12" in line and "bogus" not in line and "jitter" not in line, line)
+    cd.CAMERAS["ms"] = camera(id="ms")
+    CAP.lines.clear()
+    r = await cd.api_live_diag(_req("POST", "/api/live_diag", {"camera_id": "ms", "where": "enhanced view",
+                                    "diag": {"kind": "playback", "mode": "MSE", "decoded": 600, "behind_s": 12.5}}))
+    check("AU12 ... the endpoint logs it", r.status == 200
+          and any("LIVE-PLAY [ms]: enhanced view: MSE" in l and "12.5 s behind" in l for l in CAP.lines))
+
+    # AU13-AU16 C30: the headlight pause, through the real motion feed
+    started = []
+
+    async def fake_start(cid_, cam_, url_):
+        started.append(cid_); cd._MOTION[cid_]["recording"] = True
+    Z.set_zones(cid, None)
+    real_start, real_url = cd._start_recording, cd.build_authenticated_url
+    cd._start_recording = fake_start
+    cd.build_authenticated_url = lambda c_: "rtsp://x"
+
+    def fresh():
+        cd._MOTION.clear(); cd._MOTION_CFG.clear(); started.clear()
+        cd._MOTION_CFG[cid] = {"level": 100}
+        m_ = cd._motion_state(cid); m_["enabled"] = True
+        cd._motion_reset_prev(cid)
+        return m_
+
+    async def play(frames, t0=0):
+        for k, f in enumerate(frames, start=1):
+            cd._motion_feed(cid, f, 1000.0 + (t0 + k) * 0.25, stream_t=(t0 + k) / 4)
+            await asyncio.sleep(0)
+    rows = range(0, H // 2)
+    lawn = [y * W + x for y in rows for x in range(W)]
+    lit = rnd.sample(lawn, int(0.04 * W * H))                    # scattered: 4% of the picture
+    lit2 = lit + rnd.sample(lawn, int(0.02 * W * H))
+    quiet = lambda n: [pic() for _ in range(n)]
+    beam = [pic(bright=lit, delta=45)] * 2 + [pic(bright=lit2, delta=45)] * 2
+    ms = fresh(); CAP.lines.clear()
+    await play(quiet(8) + beam + [pic(bright=lit2, delta=45)] * 6 + quiet(10))
+    check("AU13 C30 a headlight (scattered cells brighten from a quiet picture): paused, not recorded",
+          not started and any("a passing light" in l for l in CAP.lines), str([l for l in CAP.lines if "Motion" in l][-3:]))
+    ms = fresh()
+    walk = [pic([(5 + 4 * k, 20, 4, 10)]) for k in range(12)]
+    await play(quiet(8) + walk)
+    check("AU14 C30 a solid bright shape (a person in light clothes under infrared): no pause, recorded",
+          started == [cid] and not ms.get("lp"))
+    ms = fresh()
+    dark_in = [cd._motion_thumb_gray(bytes(max(0, v - 60) if i in set(lit) else v for i, v in enumerate(base)))]
+    await play(quiet(8) + dark_in * 3)
+    check("AU15 C30 a darker-only change never starts a pause", not ms.get("lp") and not ms.get("lp_last"))
+    ms = fresh()
+    await play(quiet(4) + [pic([(30, 30, 10, 10)])] * 2 + [pic([(30, 30, 10, 10)], bright=lit, delta=45)])
+    check("AU15 ... nor does a brightening right after other movement (quiet before is required)",
+          not ms.get("lp"))
+    ms = fresh()
+    ms["chroma"] = 0.5; ms["night"] = True
+    await play(quiet(8) + beam[:2])
+    paused = bool(ms.get("lp"))
+    ms["chroma"] = 7.0                                            # the camera turned to colour
+    await play([pic(bright=lit, delta=45)], t0=20)
+    check("AU16 C30 the camera turning from infrared to colour ends the pause (a light switched on)",
+          paused and not ms.get("lp"))
+    ms = fresh()
+    await play(quiet(8) + beam + quiet(4))
+    last = ms.get("lp_last")
+    pre_now = cd._motion_light_preroll(ms, last["end_m"] + 0.5) if last else 0
+    pre_later = cd._motion_light_preroll(ms, last["end_m"] + 5.0) if last else 0
+    check("AU16 ... a recording right after a pause starts before it; later ones keep 3 s",
+          last and pre_now > cd.MOTION_PREROLL_S and pre_later == cd.MOTION_PREROLL_S, f"{pre_now} {pre_later}")
+    cd._start_recording, cd.build_authenticated_url = real_start, real_url
+    cd._MOTION.clear(); cd._MOTION_CFG.clear(); cd.CAMERAS.clear()
+
+
 async def main():
     test_pure()
     fake = FakeGo2rtc()
@@ -6271,6 +6553,7 @@ async def main():
     await test_382()
     await test_383()
     await test_384()
+    await test_390()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

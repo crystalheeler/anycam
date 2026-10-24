@@ -180,6 +180,9 @@ def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
         hits.clear()
         _motion_slow_forget(ms)          # 3.9.0 (B73)
         return False
+    if _motion_light_pause(camera_id, ms, t):      # 3.9.0 (C30)
+        hits.clear()
+        return False
     # One big change records one picture later, unless that picture shows a
     # light change: the first, half-switched picture of an infrared switch
     # changed 24% of ch7 with only 69% spread (06:20:35).
@@ -207,6 +210,121 @@ def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
     zone = ms.get("judge_zone")
     hits.append((t, pct, thumb[0], zone))
     return sum(1 for h in hits if h[3] == zone) >= 2
+
+
+# ── 3.9.0 (C30): passing lights (vehicle headlights) ─────────────────────────
+# CrystalHeeler, 2026-10-24: headlights made most night recordings (14 of 25 on
+# 2026-10-22/23). A car's light reaches several zones at once, 1-10% of the
+# picture, far under the 75% light rule. Measured on 326 recordings of
+# 2026-10-20 to 24 (docs/Recording_Review_2026-10-24.md, sections 7-8): when a
+# headlight arrives, 90-100% of the changed cells get brighter, by +32 to +46
+# grey levels, out of a quiet picture; a walking person or a cat is about half
+# brighter, half darker. Such a change pauses detection until the picture
+# settles. A darker-only change never starts a pause (a person in dark clothes
+# walking in looks like that), but continues one while the beam leaves.
+LIGHT_SWEEP_MIN_PCT   = 0.5    # % of the picture that changed
+LIGHT_SWEEP_SHARE     = 0.90   # of the changed cells, this share brighter (or darker)
+LIGHT_SWEEP_DELTA     = 25.0   # by at least this many grey levels on average
+LIGHT_QUIET_BEFORE_S  = 1.5    # the picture before it was quiet for this long:
+LIGHT_QUIET_BEFORE_PCT = 1.5   #   nothing over this % changed, unless ...
+LIGHT_GROWING_SHARE   = 0.75   #   ... it was itself this much brighter (a light growing)
+LIGHT_SWEEP_FILL_MAX  = 0.35   # changed cells / their bounding box: a lit lawn is scattered
+                               # (at most 0.25 at the start of 71 headlight pauses), a
+                               # person or an animal is one solid shape (2026-10-24)
+LIGHT_QUIET_PCT       = 0.3    # two comparisons under this end the pause
+LIGHT_PAUSE_MAX_S     = 4.0    # a pause lasts at most this long
+LIGHT_TAIL_S          = 3.0    # a darker-only change this soon after a pause continues it
+LIGHT_PAUSE_TOTAL_S   = 6.0    # one passing light pauses at most this long in all
+LIGHT_PREROLL_GAP_S   = 1.5    # a recording this soon after a pause starts before it
+
+
+def _motion_light_dir(prev: tuple, curr: tuple, flags: bytes) -> tuple[float, float, float]:
+    """(share of the changed cells that got brighter, their mean grey-level change,
+    their share of the box around them)."""
+    pa, ca = prev[0], curr[0]
+    idx = [i for i, f in enumerate(flags) if f]
+    if not idx:
+        return 0.5, 0.0, 0.0
+    deltas = [ca[i] - pa[i] for i in idx]
+    gw = _grid_of(len(flags))[0]
+    xs, ys = [i % gw for i in idx], [i // gw for i in idx]
+    box = (max(xs) - min(xs) + 1) * (max(ys) - min(ys) + 1)
+    return (sum(1 for d in deltas if d > 0) / len(deltas), sum(deltas) / len(deltas),
+            len(idx) / box)
+
+
+def _motion_light_pause(camera_id: str, ms: dict, t: float) -> bool:
+    """True while a passing light pauses detection (C30); starts and ends pauses."""
+    pct, share, mean, fill = ms.get("cmp", (0.0, 0.5, 0.0, 1.0))
+    hist = ms.setdefault("lp_hist", collections.deque(maxlen=16))
+    lp, chroma = ms.get("lp"), ms.get("chroma")
+    paused = False
+    if lp:
+        if (lp["chroma0"] is not None and lp["chroma0"] <= NIGHT_CHROMA_MAX
+                and chroma is not None and chroma >= DAY_CHROMA_MIN):
+            # The camera turned from infrared to colour: a light was switched on
+            # (the porch light, 2026-10-20 and 21), and a person most often follows.
+            # The camera switches about 2 s after the light comes on, so the pause
+            # had begun; the next recording starts before it (lp_last).
+            ms["lp"] = None
+            ms["lp_last"] = {"end": t, "first": lp["first"], "start_m": lp["start_m"],
+                             "end_m": time.monotonic()}
+            log.info(f"Motion [{camera_id}]: the camera turned to colour — a light was "
+                     f"switched on, not a passing one; detection goes on")
+        else:
+            lp["quiet"] = lp["quiet"] + 1 if pct < LIGHT_QUIET_PCT else 0
+            if (lp["quiet"] >= 2 or t - lp["t0"] >= LIGHT_PAUSE_MAX_S
+                    or t - lp["first"] >= LIGHT_PAUSE_TOTAL_S):
+                ms["lp"] = None
+                ms["lp_last"] = {"end": t, "first": lp["first"], "start_m": lp["start_m"],
+                                 "end_m": time.monotonic()}
+                log.debug(f"Motion [{camera_id}]: passing light over after "
+                          f"{t - lp['first']:.1f} s; detection goes on")
+            else:
+                paused = True
+    else:
+        strong = pct >= LIGHT_SWEEP_MIN_PCT and abs(mean) >= LIGHT_SWEEP_DELTA
+        bright = strong and mean > 0 and share >= LIGHT_SWEEP_SHARE and fill <= LIGHT_SWEEP_FILL_MAX
+        dark = strong and mean < 0 and share <= 1.0 - LIGHT_SWEEP_SHARE
+        before = [x for x in hist if t - LIGHT_QUIET_BEFORE_S - 1e-6 <= x[0] < t]
+        # a light that grows is scattered too; a solid bright shape is something moving
+        quiet_before = all(x[1] < LIGHT_QUIET_BEFORE_PCT
+                           or (x[2] >= LIGHT_GROWING_SHARE and x[3] <= LIGHT_SWEEP_FILL_MAX)
+                           for x in before)
+        last = ms.get("lp_last")
+        colour_now = bool(ms.get("night")) and chroma is not None and chroma >= DAY_CHROMA_MIN
+        start = None
+        if bright and quiet_before and not colour_now:
+            start = {"t0": t, "first": t, "start_m": time.monotonic()}
+            what = (f"a passing light ({pct:.1f}% of the picture, {share:.0%} of it brighter "
+                    f"by {mean:+.0f})")
+        elif (dark and last and t - last["end"] <= LIGHT_TAIL_S
+                and t - last["first"] < LIGHT_PAUSE_TOTAL_S):
+            start = {"t0": t, "first": last["first"], "start_m": last["start_m"]}
+            what = "the passing light leaving"
+        if start:
+            ms["lp"] = {**start, "quiet": 0, "chroma0": chroma}
+            _motion_slow_forget(ms)
+            log.info(f"Motion [{camera_id}]: {what} — detection paused until the picture settles")
+            paused = True
+    hist.append((t, pct, share, fill))
+    if paused:
+        # also keeps the slow-movement check out (it honours light_until)
+        ms["light_until"] = max(ms.get("light_until", float("-inf")), t + 0.6)
+        _cal_reason(ms, "a passing light (headlights)")
+    return paused
+
+
+def _motion_light_preroll(ms: dict, now_m: float) -> float:
+    """3.9.0 (C30): seconds of pre-roll; a recording right after a pause starts before it.
+
+    The front door's glass pauses detection like a light, then a person steps
+    out (2026-10-23 20:26:49): the file then holds the door opening too.
+    """
+    last = ms.get("lp_last")
+    if last and now_m - last["end_m"] <= LIGHT_PREROLL_GAP_S:
+        return min(MOTION_PREROLL_S + (now_m - last["start_m"]), MOTION_BUF_KEEP_S)
+    return MOTION_PREROLL_S
 
 
 def _motion_slow_forget(ms: dict) -> None:
@@ -443,6 +561,7 @@ def _motion_judge(camera_id: str, prev: tuple[bytes, float, float],
     pct = frac * 100.0
     ms = _MOTION.get(camera_id) or {}
     ms["judge_zone"] = None
+    ms["cmp"] = (pct, *_motion_light_dir(prev, curr, flags))      # 3.9.0 (C30)
     _motion_note_peak(camera_id, pct, spread > MOTION_LIGHT_FRACTION)
     if _cal_on():                                       # 3.8.2: the calibration log
         zoned = anycam_zones.has_zones(camera_id)
@@ -972,6 +1091,9 @@ def _motion_ensure_loop(camera_id: str) -> None:
 MOTION_PREROLL_S = 3.0          # every recording starts at least this early
 MOTION_DETECT_FPS = 4
 MOTION_BUF_MAX_S = 20.0         # memory bound if keyframes are far apart
+# 3.9.0 (C30): a recording right after a headlight pause starts before the
+# pause, so the buffer keeps that much more (about 10 MB at 8 Mbit/s).
+MOTION_BUF_KEEP_S = MOTION_PREROLL_S + 6.0 + 1.0
 MOTION_PIPE_RETRY_S = 10.0
 # 3.0.1 (B20): a stream that keeps failing (the DVR's sub-stream answered
 # 404 1,970 times in 86 minutes) is retried at 10 s, 20 s, 40 s ... up to
@@ -995,6 +1117,7 @@ class _TsBuffer:
         self.rest = b""
         self.gops: collections.deque = collections.deque()   # [start time, bytearray]
         self.psi: dict[int, bytes] = {}                       # latest PAT and PMT
+        self.now = 0.0                                        # time of the last feed
 
     def feed(self, data: bytes, now: float) -> bytes:
         """Add stream bytes; return the complete packets among them."""
@@ -1015,24 +1138,32 @@ class _TsBuffer:
                 self.gops.append([now, bytearray()])
             if self.gops:
                 self.gops[-1][1] += pkt
+        self.now = now
         self._trim(now)
         return out
 
     def _trim(self, now: float) -> None:
-        while len(self.gops) > 1 and now - self.gops[1][0] >= MOTION_PREROLL_S:
+        while len(self.gops) > 1 and now - self.gops[1][0] >= MOTION_BUF_KEEP_S:
             self.gops.popleft()
         while len(self.gops) > 1 and now - self.gops[0][0] > MOTION_BUF_MAX_S:
             self.gops.popleft()
 
-    def preroll(self) -> bytes:
-        """PAT, PMT, then everything from the buffered keyframe on."""
+    def _first(self, want_s: float) -> int:
+        """The newest keyframe at least want_s old, else the oldest kept."""
+        for i in range(len(self.gops) - 1, -1, -1):
+            if self.now - self.gops[i][0] >= want_s:
+                return i
+        return 0
+
+    def preroll(self, want_s: float = MOTION_PREROLL_S) -> bytes:
+        """PAT, PMT, then everything from the keyframe at least want_s old on."""
         if not self.gops:
             return b""
         head = b"".join(self.psi[pid] for pid in (0, TS_PMT_PID) if pid in self.psi)
-        return head + b"".join(bytes(g[1]) for g in self.gops)
+        return head + b"".join(bytes(g[1]) for g in list(self.gops)[self._first(want_s):])
 
-    def preroll_seconds(self, now: float) -> float:
-        return now - self.gops[0][0] if self.gops else 0.0
+    def preroll_seconds(self, now: float, want_s: float = MOTION_PREROLL_S) -> float:
+        return now - self.gops[self._first(want_s)][0] if self.gops else 0.0
 
 
 def _motion_detect_source(camera: dict) -> str | None:
@@ -1908,10 +2039,12 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
         # 2.6.6: start from the buffer — the file begins at a keyframe at
         # least MOTION_PREROLL_S before the motion. Packets that arrive
         # while the writer starts are queued, then handed over in order.
-        ms["rec_queue"] = bytearray(buf.preroll())
-        pre_s = buf.preroll_seconds(time.monotonic())
+        want_s = _motion_light_preroll(ms, time.monotonic())       # 3.9.0 (C30)
+        ms["rec_queue"] = bytearray(buf.preroll(want_s))
+        pre_s = buf.preroll_seconds(time.monotonic(), want_s)
+        light = ", which includes a passing light" if want_s > MOTION_PREROLL_S else ""
         log.info(f"Motion [{camera_id}]: recording started → {clip} (from "
-                 f"{pre_s:.1f} s before the motion; a new file every "
+                 f"{pre_s:.1f} s before the motion{light}; a new file every "
                  f"{cfg['clip_s']} s while motion continues)")
         try:
             writer = await asyncio.create_subprocess_exec(
