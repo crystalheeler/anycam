@@ -126,3 +126,45 @@ The research ranked these for AnyCam, cheapest first:
 6. numpy for the cell comparison, which makes 1–4 cheap.
 
 The costs at 128 x 96 are estimates, not measurements.
+
+## 7. A headlight rule, replayed on the sample clips (C30)
+
+The rule is checked on each comparison, about 4 a second. Each comparison sets the picture against the one
+1 s older, on the 128 x 96 grid.
+
+- **Start a pause:** all four must hold.
+  - 0.5% of the picture or more changed.
+  - 90% or more of the changed cells got brighter.
+  - They got brighter by +25 grey levels or more on average.
+  - In the 1.5 s before, no comparison changed 0.3% or more, unless it was itself 75% or more brighter (a
+    light that grows).
+- **During the pause:** no recording starts. The slow-movement check drops its older pictures (B73).
+- **End of the pause:** after two quiet comparisons in a row (under 0.3%), or 4 s after it started.
+- **The beam leaving:** within 3 s after a pause, a change whose cells are 90% or more darker, by −25 or more,
+  pauses again, at most 6 s after the first start. A darker-only change never starts a pause by itself.
+
+The replay used the same comparison as the add-on (scratch tool, OpenCV), on the recorded clips:
+
+| Clip | Pauses | Left over for detection |
+|---|---|---|
+| Headlights at dusk, 18:21:58 | 2.3–6.5 s | nothing |
+| Headlights, 20:55:25 | 1.4–5.7 s, 5.9–7.6 s | nothing |
+| Headlights, 21:08:35 | 2.6–6.8 s | nothing |
+| Headlights, 23:24:00 | 2.0–6.2 s | nothing |
+| Car on the street at the right, 05:50:13 | 1.7–5.9 s, 7.6–7.9 s | the moving car, 6.2–8.2 s (trim the zone) |
+| The boy (2 clips), the man, the cat | none | all of the movement |
+| The insect, the IR switch | none | nothing (other rules already handle them) |
+
+Two versions failed first, and the final rule is shaped by them:
+
+- A darker-only start fired when the man, in a dark jacket, first walked into the picture.
+- A brighter-only change also fired when he went in the door and the bright doorway reappeared behind him.
+
+The quiet-before condition separates these: a headlight comes out of a quiet picture, a person does not.
+
+**Limits.**
+- The clips start about 3 s before their trigger, so the history before that counts as quiet.
+- The replay is not the add-on's own code (OpenCV, not Pillow; 7 recorded pictures a second).
+- A person who walks in during a pause is detected when it ends, at most 4 s later. A person who comes and
+  goes within it is missed.
+

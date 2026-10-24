@@ -78,4 +78,32 @@ li{margin:3px 0}</style></head><body>
 <li>numpy for the cell comparison, which makes 1–4 cheap.</li>
 </ol>
 <p>The costs at 128 x 96 are estimates, not measurements.</p>
+<h2>7. A headlight rule, replayed on the sample clips (C30)</h2>
+<p>The rule is checked on each comparison, about 4 a second. Each comparison sets the picture against the one 1 s older, on the 128 x 96 grid.</p>
+<ul>
+<li><strong>Start a pause:</strong> all four must hold.</li>
+<ul>
+<li>0.5% of the picture or more changed.</li>
+<li>90% or more of the changed cells got brighter.</li>
+<li>They got brighter by +25 grey levels or more on average.</li>
+<li>In the 1.5 s before, no comparison changed 0.3% or more, unless it was itself 75% or more brighter (a light that grows).</li>
+</ul>
+<li><strong>During the pause:</strong> no recording starts. The slow-movement check drops its older pictures (B73).</li>
+<li><strong>End of the pause:</strong> after two quiet comparisons in a row (under 0.3%), or 4 s after it started.</li>
+<li><strong>The beam leaving:</strong> within 3 s after a pause, a change whose cells are 90% or more darker, by −25 or more, pauses again, at most 6 s after the first start. A darker-only change never starts a pause by itself.</li>
+</ul>
+<p>The replay used the same comparison as the add-on (scratch tool, OpenCV), on the recorded clips:</p>
+<table><thead><tr><th>Clip</th><th>Pauses</th><th>Left over for detection</th></tr></thead><tbody><tr><td>Headlights at dusk, 18:21:58</td><td>2.3–6.5 s</td><td>nothing</td></tr><tr><td>Headlights, 20:55:25</td><td>1.4–5.7 s, 5.9–7.6 s</td><td>nothing</td></tr><tr><td>Headlights, 21:08:35</td><td>2.6–6.8 s</td><td>nothing</td></tr><tr><td>Headlights, 23:24:00</td><td>2.0–6.2 s</td><td>nothing</td></tr><tr><td>Car on the street at the right, 05:50:13</td><td>1.7–5.9 s, 7.6–7.9 s</td><td>the moving car, 6.2–8.2 s (trim the zone)</td></tr><tr><td>The boy (2 clips), the man, the cat</td><td>none</td><td>all of the movement</td></tr><tr><td>The insect, the IR switch</td><td>none</td><td>nothing (other rules already handle them)</td></tr></tbody></table>
+<p>Two versions failed first, and the final rule is shaped by them:</p>
+<ul>
+<li>A darker-only start fired when the man, in a dark jacket, first walked into the picture.</li>
+<li>A brighter-only change also fired when he went in the door and the bright doorway reappeared behind him.</li>
+</ul>
+<p>The quiet-before condition separates these: a headlight comes out of a quiet picture, a person does not.</p>
+<p><strong>Limits.</strong></p>
+<ul>
+<li>The clips start about 3 s before their trigger, so the history before that counts as quiet.</li>
+<li>The replay is not the add-on's own code (OpenCV, not Pillow; 7 recorded pictures a second).</li>
+<li>A person who walks in during a pause is detected when it ends, at most 4 s later. A person who comes and goes within it is missed.</li>
+</ul>
 </body></html>
