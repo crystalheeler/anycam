@@ -1,19 +1,34 @@
-## 3.8.4
+## 3.9.0-rc1.0
 
-Two dialog fixes: text no longer runs over the next line, and a text selection that ends outside a dialog no longer closes it.
+Passing headlights no longer start recordings, recordings show every zone they passed through, the card order survives restarts, and the log is shorter and safer to share. A release candidate for field testing.
 
 ### Changes & improvements
 
-- **Dialogs close from the backdrop only on a real click there.** A click closes a dialog only when it starts and ends outside the dialog.
+- **Headlights pause detection.** A change from a quiet picture whose changed areas nearly all brighten, scattered like a lit lawn, pauses detection until the picture settles (at most 4 s). A recording that starts right after a pause includes it.
+- **Recordings list every zone.** The Storage tab shows each zone a recording passed through, in order; the file name keeps the first.
+- **A shorter log.** The lines written for every motion check now appear once per movement, then at most every 5 s, at debug level.
+- **Playback numbers for live view.** 20 s into a live view, the log gets one LIVE-PLAY line: pictures shown and dropped, freezes, lost packets, size and rate.
+- **Public addresses masked.** LIVE-DIAG lines show public internet addresses as "public"; private addresses stay.
+- **Back to go2rtc after a fall-back.** A card that had to open its camera directly reads go2rtc's copy again once go2rtc has new video, instead of only after a restart.
+- **A camera's third stream.** When the brand's table names the next stream, password entry checks it with one request.
+- **Rate-limited cameras paced in the scan.** The scan spaces its first two openings of a new camera 5 s apart, and recognises the Microseven's family from its RTSP server name.
 
 ### Bugs fixed
 
-- **Text ran over the next line in tall dialogs.** Since 3.8.2 a dialog that is taller than the screen squeezed its lines together, so the zone peaks text covered "Detection in zones only" in the camera settings. Each line now keeps its height, and the dialog scrolls.
-- **Selecting a camera's name to rename it could close the dialog.** Pressing in the text field and releasing the mouse outside the dialog closed it. It now stays open, in every dialog.
+- **The card order was lost at every restart.** The saved order is now kept.
+- **An insect could be recorded 5 s after it was rejected.** The slow-movement check no longer compares with the picture that held it.
+- **The day-to-night switch could be recorded.** The slow-movement check no longer compares across a light change.
+- **Cards restarted behind Enhanced View on phones.** They stay paused until Enhanced View closes.
+- **The calibration log missed recordings started by slow movement.** They get their line, marked as slow movement.
+- **Misleading log lines.** Near misses show two decimals, a WebRTC set-up is not logged as a closed live view, and a failed pre-warm pass names its error.
+- **Text ran over the next line in tall dialogs.** Each line keeps its height and the dialog scrolls.
+- **Selecting text and releasing outside a dialog closed it.** It stays open.
 
 ### Known issues
 
-- **Some brands cannot be recognised by their MAC address.** Foscam and the Hipcam family use the address of their Wi-Fi module's maker; AnyCam recognises them from the camera's answers instead.
+- **Live video on the phone can still freeze.** The new LIVE-PLAY lines will show whether the phone drops pictures or the network loses packets.
+- **Cars driving along the street can still record.** Keep zones off the street.
+- **On a phone held upright the Storage tab hides file names.** This is part of the Storage tab revamp.
 
 ## 3.8.3
 

@@ -268,6 +268,13 @@ CONTRACTS = {
     "write_copy":            ["if not entries", "_same_cameras(copies[0], entries)", "[COPY_KEEP:]"],
     # A folder on the Pi must be under /media or /share.
     "pi_folder":             ["relative_to", "RESTORE_ROOTS"],
+    # 3.9.0 (C30): a headlight pause starts only from a quiet picture, on scattered
+    # brightening, and a switch to colour ends it.
+    "_motion_light_pause":   ["LIGHT_SWEEP_FILL_MAX", "quiet_before", "chroma0", "DAY_CHROMA_MIN"],
+    # 3.9.0 (B71): public addresses never reach the log.
+    "_diag_mask":            ["is_global", "public:"],
+    # 3.9.0 (B79): start-up keeps every runtime.json entry.
+    "_card_order":           ["load_runtime()"],
     # 3.8.3 (D5): channel enumeration places the new channel cards.
     "_card_order_after_parent": ["save_runtime(rt)", "startswith(sibling)"],
     # Treats the no-config-file 400 as success; encodes the password-bearing
@@ -321,7 +328,7 @@ CONTRACTS = {
     "_motion_validate":      ["MOTION_PATH_ROOT", "MOTION_CLIP_CHOICES"],
     "_start_recording":      ['"segment"', "_motion_cfg(camera_id)", "_part%02d.mp4",
                               "_cam_file_tag(camera)",
-                              "buf.preroll()", 'ms["rec_queue"]',
+                              "buf.preroll(want_s)", "_motion_light_preroll(ms", 'ms["rec_queue"]',
                               'ms["recording"] = True', "_drain_stderr"],
     "_stop_recording":       ['ms.get("stopping")', 'ms["stopping"] = True'],
     # 2.6.6: live cards stay within the width a phone can decode.
