@@ -2144,11 +2144,11 @@ async def main() -> None:
     else:  # "routine"
         log.info(f"Routine restart (v{CURRENT_VERSION}) — loaded {len(CAMERAS)} saved camera(s)")
 
-    # Record the current version so next startup can compare
-    # Also save last scan duration so we can use it for future ETA estimates
-    # 3.0.1: keep the F10 marker too, or the defaults would be set again.
-    _runtime_data = {k: v for k, v in load_runtime().items()
-                     if k in ("last_scan_duration", "store_defaults_set")}
+    # Record the current version so next startup can compare.
+    # 3.9.0 (B79): keep every other entry. Until 3.8.4 only last_scan_duration
+    # and store_defaults_set were kept, so every start dropped the saved card
+    # order (D3) and the scan's stage times.
+    _runtime_data = load_runtime()
     _runtime_data["version"] = CURRENT_VERSION
     save_runtime(_runtime_data)
     asyncio.create_task(_store_defaults_once())      # 3.0.1 (F10)

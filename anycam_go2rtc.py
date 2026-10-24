@@ -66,9 +66,16 @@ _GO2RTC_RTSP_PASS      = secrets.token_urlsafe(24)
 GO2RTC_API_USER        = "anycam"
 _GO2RTC_API_PASS       = secrets.token_urlsafe(24)
 # A camera whose stream fails this many times in a row through go2rtc is
-# opened directly by ffmpeg again, as before 3.3.0, until the add-on restarts.
+# opened directly by ffmpeg again, as before 3.3.0.
 RELAY_FAIL_LIMIT       = 3
 _RELAY_FAILS: dict[str, int] = {}
+# 3.9.0 (B80): until 3.8.4 that lasted until the add-on restarted, so the card
+# kept its own connection to the camera beside go2rtc's (the Microseven,
+# 2026-10-23). Now AnyCam tries go2rtc's copy again once go2rtc shows new
+# video from the camera (the pre-warm pass checks every 30 s), and waits
+# longer each time it fails again.
+RELAY_RETRY_S          = (60.0, 120.0, 240.0, 600.0)
+_RELAY_DIRECT: dict[str, dict] = {}     # camera_id -> {"round": n, "next": monotonic time}
 GO2RTC_PLAYER_JS       = Path("/www/video-rtc.js")
 GO2RTC_READY_TIMEOUT_S = 10.0
 _GO2RTC_PROC: asyncio.subprocess.Process | None = None
@@ -273,9 +280,14 @@ async def _go2rtc_relay(camera_id: str, url: str | None) -> str | None:
     running, not an RTSP address, the stream not accepted, or the camera
     already failed RELAY_FAIL_LIMIT times through go2rtc.
     """
-    if (not url or not url.lower().startswith(("rtsp://", "rtsps://")) or not _GO2RTC_READY
-            or _RELAY_FAILS.get(camera_id, 0) >= RELAY_FAIL_LIMIT):
+    if not url or not url.lower().startswith(("rtsp://", "rtsps://")) or not _GO2RTC_READY:
         return url
+    if _RELAY_FAILS.get(camera_id, 0) >= RELAY_FAIL_LIMIT:
+        if not _relay_retry_due(camera_id):
+            return url
+        _RELAY_FAILS[camera_id] = RELAY_FAIL_LIMIT - 1      # one try; a failure goes direct again
+        log.info(f"go2rtc: {camera_id}: go2rtc has new video from the camera — "
+                 f"reading go2rtc's copy again")
     src = _go2rtc_camera_src(CAMERAS.get(camera_id), url)   # 3.7.1 (B31), 3.7.4 (B47)
     name = _go2rtc_shared_name(camera_id, src)
     if not await _go2rtc_register(name, src, camera_id):
@@ -291,7 +303,25 @@ def _go2rtc_relayed(url: str | None) -> bool:
 def _go2rtc_will_relay(camera_id: str, url: str | None) -> bool:
     """3.8.1 (B61): whether _go2rtc_relay would hand ffmpeg go2rtc's copy of `url`."""
     return (bool(url) and url.lower().startswith(("rtsp://", "rtsps://")) and _GO2RTC_READY
-            and _RELAY_FAILS.get(camera_id, 0) < RELAY_FAIL_LIMIT)
+            and (_RELAY_FAILS.get(camera_id, 0) < RELAY_FAIL_LIMIT or _relay_retry_due(camera_id)))
+
+
+def _go2rtc_copy_live(camera_id: str) -> bool:
+    """3.9.0 (B80): go2rtc received new video for this camera in the last pre-warm pass.
+
+    Without pre-warm there is nothing to read; then only the wait counts.
+    """
+    names = [n for n, c in _PRELOADS.items() if c == camera_id]
+    if not names:
+        return True
+    return any(_PRELOAD_SEEN.get(n, (0, 1))[0] > 0 and _PRELOAD_SEEN.get(n, (0, 1))[1] == 0
+               for n in names)
+
+
+def _relay_retry_due(camera_id: str) -> bool:
+    """3.9.0 (B80): a camera that went direct may read go2rtc's copy again now."""
+    d = _RELAY_DIRECT.get(camera_id)
+    return bool(d) and time.monotonic() >= d["next"] and _go2rtc_copy_live(camera_id)
 
 
 def _go2rtc_relay_result(camera_id: str, url: str | None, ok: bool) -> None:
@@ -300,12 +330,18 @@ def _go2rtc_relay_result(camera_id: str, url: str | None, ok: bool) -> None:
         return
     if ok:
         _RELAY_FAILS.pop(camera_id, None)
+        if _RELAY_DIRECT.pop(camera_id, None):
+            log.info(f"go2rtc: {camera_id} reads go2rtc's copy again")
         return
     n = _RELAY_FAILS.get(camera_id, 0) + 1
     _RELAY_FAILS[camera_id] = n
     if n == RELAY_FAIL_LIMIT:
+        rnd = _RELAY_DIRECT.get(camera_id, {}).get("round", -1) + 1
+        wait = RELAY_RETRY_S[min(rnd, len(RELAY_RETRY_S) - 1)]
+        _RELAY_DIRECT[camera_id] = {"round": rnd, "next": time.monotonic() + wait}
         log.warning(f"go2rtc: {camera_id} failed {n} times in a row through go2rtc — "
-                    f"AnyCam opens the camera directly from now on")
+                    f"AnyCam opens the camera directly, and tries go2rtc's copy again in "
+                    f"{wait / 60:.0f} min or later, once go2rtc shows new video from the camera")
 
 
 def _go2rtc_profile_source(camera: dict,
@@ -770,7 +806,9 @@ async def _prewarm_loop() -> None:
             try:
                 await _prewarm_pass()
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as ex:
-                log.warning(f"go2rtc: pre-warm pass failed: {ex}")
+                # 3.9.0 (B72): a timeout has no text; name its type
+                log.warning(f"go2rtc: pre-warm pass failed: {type(ex).__name__}"
+                            + (f": {ex}" if str(ex) else ""))
         await asyncio.sleep(PREWARM_CHECK_S)
 
 
@@ -908,6 +946,27 @@ def _diag_text(value, limit: int) -> str:
     return " ".join(str(value).split())[:limit]
 
 
+def _diag_mask(text: str) -> str:
+    """3.9.0 (B71): "srflx/udp 203.0.113.9:4000" becomes "srflx/udp public:4000".
+
+    The routes WebRTC offers name the home's and the viewing network's public
+    addresses; a log a user posts would share them. Private, local and VPN
+    addresses stay: they tell which way the video went.
+    """
+    import ipaddress
+    out = []
+    for tok in text.split(" "):
+        addr, sep, port = tok.rpartition(":")
+        if sep and port.isdigit() and addr:
+            try:
+                if ipaddress.ip_address(addr.strip("[]")).is_global:
+                    tok = f"public:{port}"
+            except ValueError:
+                pass
+        out.append(tok)
+    return " ".join(out)
+
+
 def _live_diag_line(camera_id: str, where: str, diag: dict) -> str:
     """The log line for one WebRTC report; every field is cut to size."""
     def items(key: str) -> str:
@@ -921,9 +980,9 @@ def _live_diag_line(camera_id: str, where: str, diag: dict) -> str:
     except (TypeError, ValueError):
         secs = 0.0
     return (f"LIVE-DIAG [{camera_id}]: {where}: WebRTC {_diag_text(diag.get('outcome', '?'), 80)} "
-            f"after {secs:.1f} s; this device offered: {items('local')}; go2rtc offered: "
-            f"{items('remote')}; route checks: {pair_text}; route used: "
-            f"{_diag_text(diag.get('selected') or 'none', 200)}")
+            f"after {secs:.1f} s; this device offered: {_diag_mask(items('local'))}; go2rtc offered: "
+            f"{_diag_mask(items('remote'))}; route checks: {pair_text}; route used: "
+            f"{_diag_mask(_diag_text(diag.get('selected') or 'none', 200))}")
 
 
 async def api_live_diag(request: web.Request) -> web.Response:
@@ -1027,12 +1086,17 @@ async def handle_go2rtc_ws(request: web.Request) -> web.StreamResponse:
             await client_ws.close()
             return client_ws
 
+        seen = {"webrtc": False, "media": False}     # 3.9.0 (B72)
+
         async def _relay(reader: "web.WebSocketResponse | aiohttp.ClientWebSocketResponse",
                          writer: "web.WebSocketResponse | aiohttp.ClientWebSocketResponse") -> None:
             async for msg in reader:
                 if msg.type == aiohttp.WSMsgType.TEXT:
+                    if '"webrtc/' in msg.data:
+                        seen["webrtc"] = True
                     await writer.send_str(msg.data)
                 elif msg.type == aiohttp.WSMsgType.BINARY:
+                    seen["media"] = True
                     await writer.send_bytes(msg.data)
                 else:   # CLOSE, CLOSING, CLOSED, ERROR
                     break
@@ -1047,7 +1111,12 @@ async def handle_go2rtc_ws(request: web.Request) -> web.StreamResponse:
                 task.cancel()
             await asyncio.gather(up, down, return_exceptions=True)
             await upstream_ws.close()
-        log.info(f"go2rtc: live view closed for {camera_id}")
+        # 3.9.0 (B72): go2rtc's player closes this connection once WebRTC video
+        # plays (video-rtc.js onpcvideo); the video goes on, so it is no "closed".
+        if seen["webrtc"] and not seen["media"]:
+            log.debug(f"go2rtc: live view set up for {camera_id}; WebRTC plays on")
+        else:
+            log.info(f"go2rtc: live view closed for {camera_id}")
     finally:
         await session.close()
         if not client_ws.closed:

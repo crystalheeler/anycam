@@ -356,7 +356,7 @@ header h1{{cursor:pointer}}
 .zl-lev input{{flex:1;accent-color:var(--primary)}}
 .zl-note{{grid-column:1 / span 2;color:#f5b942;font-size:.74rem}}
 .zl-empty{{color:#888}}
-.stor-zone{{margin-left:8px;font-size:.72rem;color:var(--orange);border:1px solid var(--orange);border-radius:6px;padding:0 5px}}
+.stor-zone{{margin-left:8px;font-size:.72rem;color:var(--orange);border:1px solid var(--orange);border-radius:6px;padding:0 5px;max-width:45%;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}  /* 3.9.0 (C31): a list of zones */
 @media (max-width:700px){{#zone-panel{{left:8px;right:8px;top:auto;bottom:60px;width:auto;max-height:45dvh}}
   #focus-zone-ctl label{{display:none}}}}
 .nc-modal-inner{{width:min(460px,94vw)}}

@@ -27,6 +27,7 @@ from anycam_probe import (
 import anycam_focus
 from anycam_go2rtc import (
     _classic_sub_stream, _go2rtc_relay, _go2rtc_relay_result, _go2rtc_relayed, _go2rtc_will_relay,
+    _relay_retry_due,
     _rtsp_stuck, _rtsp_stuck_mark,
 )
 
@@ -790,6 +791,7 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
             hw_args_run    = hw_args
             same_n, last_len, frozen = 0, -1, False
             rate_t0, rate_n, lagging = time.monotonic(), 0, False   # 3.7.5-rc1.0 (B51)
+            relay_back = False                                       # 3.9.0 (B80)
             _HW_FALLBACK.pop(camera_id, None)     # 3.7.0 (B11): this launch only
             stderr_t = asyncio.create_task(_drain_stderr(proc, f"SNAP:{camera_id}"))
             buf      = b""
@@ -994,6 +996,12 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                         if native_res and anycam_focus._FOCUSED_CAMERA != camera_id:
                             break
 
+                        # 3.9.0 (B80): back to go2rtc's copy once it delivers again
+                        if (frames % 50 == 0 and not _go2rtc_relayed(state.get("ffmpeg_url_used"))
+                                and _relay_retry_due(camera_id)):
+                            relay_back = True
+                            break
+
                         if frames == 1 or frames % 50 == 0:
                             poll_ago = time.monotonic() -                                        _snap_last_access.get(camera_id, time.monotonic())
                             log.info(f"SNAP [{camera_id}]: frame {frames} "
@@ -1017,6 +1025,21 @@ async def snap_loop(camera_id: str, url: str, camera: dict, native_res: bool = F
                                 rate_t0, rate_n = time.monotonic(), 0
                                 if lagging:
                                     break
+
+                    # 3.9.0 (B80): restart this ffmpeg on go2rtc's copy
+                    if relay_back:
+                        relay_back = False
+                        log.info(f"SNAP [{camera_id}]: switching to go2rtc's copy of the stream")
+                        await _stop_proc(proc, timeout=3)
+                        proc     = await _launch_snap(native_res=native_res)
+                        state["proc"] = proc
+                        stderr_t.cancel()
+                        stderr_t = asyncio.create_task(_drain_stderr(proc, f"SNAP:{camera_id}"))
+                        buf      = b""
+                        hw_tried = False
+                        frames   = 0
+                        state["current_run_frames"] = 0
+                        _motion_reset_prev(camera_id)
 
                     # 3.7.5-rc1.0 (B51): keyframes only from now on in this view
                     if lagging:

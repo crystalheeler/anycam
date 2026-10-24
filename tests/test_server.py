@@ -3828,7 +3828,8 @@ async def test_340():
     check("AE3 C17: without the zone the door is too small; with it, it is motion in the zone",
           v0 == "" and v1 == "motion" and cd._MOTION[cid]["judge_zone"] == "Garage" and p1 > 10,
           f"{v0} {v1} {p1:.1f}")
-    check("AE3 ... the log names the zone", any('zone "Garage" changed' in l for l in CAP.lines))
+    # 3.9.0 (B70): the per-check line is DEBUG now (section AU checks it)
+    check("AE3 ... the log names the zone", ("zone", "Garage") in cd._MOTION[cid].get("check_log", {}))
     v2, _ = cd._motion_judge(cid, A, yard)
     Z.set_zones(cid, dict(clean, zones_only=True))
     v3, _ = cd._motion_judge(cid, A, yard)

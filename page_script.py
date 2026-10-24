@@ -666,7 +666,7 @@ function _renderStorageView() {
       row.draggable = true;
       row.innerHTML = '<div class="stor-row-name"><span>🎬</span>'
         + '<span class="stor-row-name-text editable">' + esc(f.name) + '</span>'
-        + (f.zone ? '<span class="stor-zone" title="The zone that started this recording">'
+        + (f.zone ? '<span class="stor-zone" title="Zones, the first started it: ' + esc(f.zone) + '">'
                     + esc(f.zone) + '</span>' : '')   // 3.4.0 (answer 15)
         + '</div>'
         + '<div class="stor-row-date">' + dt + '</div>'
