@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Recording Review</title><style>:root{--bg:#fff;--fg:#1d1d1f;--dim:#555;--line:#ddd;--link:#0b5cad;--code:#f3f3f3}
+@media (prefers-color-scheme: dark){:root{--bg:#16181d;--fg:#e6e6e6;--dim:#aaa;--line:#333;--link:#7ab7ff;--code:#23262d}}
+body{background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,Segoe UI,sans-serif;max-width:860px;margin:0 auto;padding:24px 16px}
+h1{font-size:1.6rem}h2{font-size:1.2rem;margin-top:1.8em;border-bottom:1px solid var(--line);padding-bottom:4px}
+a{color:var(--link)}code{background:var(--code);padding:1px 4px;border-radius:4px;font-size:.9em}
+table{border-collapse:collapse;margin:12px 0;display:block;overflow-x:auto}th,td{border:1px solid var(--line);padding:6px 10px;text-align:left}
+li{margin:3px 0}</style></head><body>
+<h1>Recording review, 2026-10-24</h1>
+<p>CrystalHeeler sent 11 recordings from the Lorex DVR's front channel (test system B, 3.8.3), all inside the add-on log of 2026-10-22 17:37 to 2026-10-23 12:37, for four problems: insects, light changes, vehicle headlights, and objects that move between zones. Each clip was decoded frame by frame in order and matched to its log lines. The camera's on-screen clock runs 2–4 s behind the add-on log.</p>
+<p>Zone settings in force (sensitivity slider; the night boost adds 15):</p>
+<table><thead><tr><th>Zone</th><th>Slider</th><th>Needs by day</th><th>Needs at night</th></tr></thead><tbody><tr><td>FrontYard-Right, Patio</td><td>95</td><td>1.24%</td><td>0.65%</td></tr><tr><td>FrontYard-Left</td><td>90</td><td>1.54%</td><td>0.80%</td></tr><tr><td>Walkway, NeighborSideYard</td><td>50</td><td>8.79%</td><td>4.58%</td></tr></tbody></table>
+<p>A zone's threshold is a share of the zone's own cells (128 x 96 grid), from <code>74 * (1/74) ** ((level - 1) / 99)</code> percent.</p>
+<h2>1. Vehicle headlights (C30) — the largest group</h2>
+<ul>
+<li><strong>Clips:</strong> 4 from the left (18:21:58 at dusk in colour, 20:55:25, 21:08:35, 23:24:00) and 1 from the right (05:50:13).</li>
+<li><strong>How they record.</strong> A car turning on the street lights the lawns and rakes the porch posts' shadows across them. The beam reaches FrontYard-Left first, so its zone starts the recording, and in the same second FrontYard-Right, NeighborSideYard, Walkway and Patio change too. The change covers 1–10% of the picture and at most 38% of its 16 areas, far below the 75% light rule.</li>
+<li><strong>Measured signature.</strong> The same comparison as the add-on was used: 128 x 96 grey, normalised, each picture against the one 1 s older.</li>
+<ul>
+<li>At the moment each left clip triggered, 90–100% of the changed cells got brighter, by +37 to +46 grey levels.</li>
+<li>As the beam swept on, the changed cells were mixed (moving shadows). As it left, they were mostly darker.</li>
+<li>A walking person or a cat is mixed throughout: 36–58% brighter, mean change about ±10.</li>
+</ul>
+<li><strong>Share.</strong> 14 of the 25 night recordings in the log started in FrontYard-Left with FrontYard-Right passing within 2.5 s, the pattern of every left headlight clip. A person cannot be on both lawns, either side of the walkway, in the same second.</li>
+<li><strong>The right-side clip (05:50:13)</strong> is the car itself passing on the street at the top right: about 1% of the picture, mixed brighter and darker. A brightness test does not catch it. The NeighborSideYard zone reaching the street is the likely cause.</li>
+<li><strong>No project found by the research has a brighten-only test</strong> (section 6). It needs a field test.</li>
+</ul>
+<h2>2. Light changes (B73, B77)</h2>
+<ul>
+<li><strong>Clip 18:22:50</strong> (FrontYard-Left, 10 s): black-and-white from the first frame, brightness settling, no moving object. CrystalHeeler's guess was right: it recorded just after the day-to-night switch.</li>
+<li><strong>Log.</strong> At 18:22:45 three comparisons were treated as a light change (81–88% of the areas), and the normal checks ignored the next 2 s. At 18:22:50 the slow-movement check (each picture against the one 5 s older) compared with a picture from before the switch and started the recording. This is B73.</li>
+<li><strong>Morning.</strong> The night-to-day light change (06:39:42) recorded nothing, which matches what CrystalHeeler saw in the videos.</li>
+<li><strong>The other dusk recording (18:21:58)</strong> was headlights, not the switch.</li>
+</ul>
+<h2>3. Insects (B76, B78)</h2>
+<ul>
+<li><strong>Clip 19:48:59</strong> (FrontYard-Right, 10 s): a faint, blurred, infrared-lit streak near the bird feeder at the top right, 10–11 cells (0.08% of the picture), in a different place in each picture.</li>
+<li><strong>Log.</strong> At 19:48:54 the fast checks rejected it ("changed in one picture only"). Five seconds later the slow-movement check compared two new pictures with that 5 s old picture, which held the insect. Both "differed", so it recorded. The insect in the old reference picture made the recording, not anything new. This is B78.</li>
+</ul>
+<h2>4. Objects moving between zones (B75, C31)</h2>
+<ul>
+<li><strong>The man (07:51:42) and the boy (17:40:36).</strong> Every zone they walked through passed its threshold: the man in FrontYard-Left 7.0%, Walkway 37.4%, FrontYard-Right 13.8% and Patio 43.5%. Once a recording runs, a pass in any zone keeps it going, so it stays one file, named after the first zone only. Detection worked; the name hides it.</li>
+<li><strong>The boy far away (17:42:11–17:43:28).</strong> At the tree, FrontYard-Right saw 0.3–0.9% against 1.2% needed, five times. A small, distant figure is too small a share of a large zone, and the slider cannot fix it: at 100, FrontYard-Right still needs 1.0% by day. A smaller zone around the far lawn would (the same figure is a larger share of a smaller zone).</li>
+<li><strong>The cat (05:31:39).</strong> It walked down the Walkway. At 05:31:36 the Walkway saw 4.4% against 4.6% needed, and at 05:31:33 1.7%. FrontYard-Left then recorded it at 1.9% against 0.8%. No other zone saw it before.</li>
+<ul>
+<li>Walkway at 51 or more would have caught the 4.4%.</li>
+<li>At 60 it needs 2.97% at night and 5.69% by day; the boy on the walkway by day peaked at 11–22%.</li>
+<li>Catching the farther 1.7% sighting needs 73.</li>
+</ul>
+<li><strong>Two zones in the same second (B75).</strong> A recording needs a second changed picture in the same zone within 0.5 s. An object that passes one zone, then the next, confirms neither. The log shows this 4 times (19:50:16, 21:52:16, 22:13:05, 00:07:02).</li>
+</ul>
+<h2>5. Log coverage (B70)</h2>
+<p>The export holds 10,000 lines. 6,212 of them (62%) are one-per-check motion lines, so it covers 19 hours of a run of several days.</p>
+<h2>6. What other motion engines do (research, 2026-10-24)</h2>
+<p>None of these projects fixes these problems with a better pixel threshold. They add blob size, persistence or travel over time, and a cut-off for a large sudden change. Some then run a person/vehicle classifier.</p>
+<ul>
+<li><strong><a href="https://docs.frigate.video/configuration/motion_detection/">Frigate</a></strong> (MIT).</li>
+<ul>
+<li>Motion: a running-average background, contour area, and a recalibration above 80% change (<a href="https://github.com/blakeblackshear/frigate/blob/dev/frigate/motion/improved_motion.py">source</a>).</li>
+<li>Motion only starts object detection. An object is <a href="https://docs.frigate.video/configuration/zones/">in a zone</a> when the bottom centre of its box is inside, for 3 pictures.</li>
+</ul>
+<li><strong><a href="https://motion-project.github.io/motion_config.html">Motion</a></strong> (GPL-2): a despeckle filter, a light-switch mute for 5 pictures, and a minimum count of pictures with motion.</li>
+<li><strong><a href="https://zoneminder.readthedocs.io/en/latest/userguide/definezone.html">ZoneMinder</a></strong> (GPL-2): blob filters with minimum and maximum size and count, and a mute after an overload.</li>
+<li><strong><a href="https://ipcamtalk.com/goto/post?id=296543">Blue Iris</a></strong> (proprietary): object size and travel, a reset for large changes, and masks. Its users report no full fix for headlights.</li>
+<li><strong><a href="https://www.ispyconnect.com/docs/agent/motion-detection">Agent DVR</a></strong>: object tracking with a minimum travel and time.</li>
+<li><strong>Insects.</strong> <a href="https://bensoftware.com/forum/discussion/3719/feature-request-ai-mothra-night-sprites-suppression">SecuritySpy</a> leaves them to its classifier. Its best advice is an infrared light away from the lens.</li>
+<li><strong>Classifiers on a Pi 4 CPU</strong> (<a href="https://github.com/aallan/benchmarking-ml-on-the-edge">benchmark</a>, <a href="https://github.com/Qengineering/YoloV8-ncnn-Raspberry-Pi-4">YOLO on NCNN</a>):</li>
+</ul>
+<table><thead><tr><th>Model</th><th>Pi 4 CPU</th><th>Coral (USB 3)</th></tr></thead><tbody><tr><td>MobileNet SSD</td><td>83–113 ms per picture</td><td>15–18 ms</td></tr><tr><td>YOLOX-nano</td><td>7 pictures a second</td><td></td></tr></tbody></table>
+<p>A classifier needs a crop of the full picture, plus numpy and a runtime (tflite-runtime 2.3 MB or onnxruntime 21 MB).</p>
+<p>The research ranked these for AnyCam, cheapest first:</p>
+<ol>
+<li>Blobs (connected changed cells) with an absolute minimum size, and zone membership by the blob's bottom centre.</li>
+<li>A tracker that confirms an object over 3+ pictures and a minimum travel, across zones.</li>
+<li>A light hold that ends when the picture is stable, not after a fixed 2 s.</li>
+<li>A brightness-direction test (headlights, insects).</li>
+<li>A classifier on a full-resolution crop, only while motion is seen.</li>
+<li>numpy for the cell comparison, which makes 1–4 cheap.</li>
+</ol>
+<p>The costs at 128 x 96 are estimates, not measurements.</p>
+</body></html>
