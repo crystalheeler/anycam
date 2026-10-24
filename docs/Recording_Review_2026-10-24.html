@@ -106,4 +106,55 @@ li{margin:3px 0}</style></head><body>
 <li>The replay is not the add-on's own code (OpenCV, not Pillow; 7 recorded pictures a second).</li>
 <li>A person who walks in during a pause is detected when it ends, at most 4 s later. A person who comes and goes within it is missed.</li>
 </ul>
+<h2>8. The headlight rule on every recording (20–24 Oct)</h2>
+<p>CrystalHeeler opened the whole front-camera recordings folder for this test: 486 files, 326 recordings (213 by day, 113 at night). The rule of section 7 ran on each recording's first file. It counts as "paused at the trigger" when a pause covers 2.8–4.6 s into the file, where the recording started after its 3–4 s pre-roll. Clips with movement left after the pause were checked frame by frame, and so was a sample of the rest.</p>
+<p><strong>Version 3 (section 7):</strong></p>
+<ul>
+<li>At night it paused at the trigger in 70 of 113 recordings: headlight sweeps, cars on the street, and three day-to-night switches (20 Oct 18:24:22, 21 Oct 18:23:39, 23 Oct 18:20:40).</li>
+<li>By day it paused in 3, all after dark-hours light.</li>
+</ul>
+<p>Three findings changed the rule.</p>
+<ol>
+<li><strong>Two headlight sweeps were missed (23 Oct 19:48:11, 22 Oct 20:37:12).</strong></li>
+<ul>
+<li>Just before the beam, something small changed: a shadow swept the lawn as the light came on (1.0%, darker), and the car itself showed on the street at the top (0.65%).</li>
+<li>Either broke the "quiet before" check, which allowed nothing at or above 0.3%.</li>
+<li><strong>Change:</strong> quiet before now means nothing at or above 1.5% (unless it was itself mostly brighter).</li>
+<li><strong>Replay:</strong> both are caught, plus a car on the street (22 Oct 20:10:28) and a daytime sun-through-cloud false alarm (24 Oct 09:50:38). Nothing with a person changed.</li>
+<li>The man going in the door still does not start a pause: changes of 4–15% came just before.</li>
+</ul>
+<li><strong>The porch light (20 Oct 18:57:58, 21 Oct 19:19:51).</strong></li>
+<ul>
+<li>A large change (19–23% of the picture), nearly all brighter, as the porch light came on. The camera switched from infrared to colour, and a person came out at once.</li>
+<li>The rule paused the person's first seconds.</li>
+<li><strong>Change:</strong> no pause when the picture turns from infrared to colour during the change; that is a light someone switched on. The add-on already measures colour for its night state.</li>
+<li>The day-to-night switch goes the other way (colour to infrared) and still pauses.</li>
+</ul>
+<li><strong>The front door opening (23 Oct 20:26:49, 24 Oct 06:36:14).</strong></li>
+<ul>
+<li>The storm door's glass makes a narrow bright strip at the right edge (+55 to +76), then a person steps out.</li>
+<li>The rule pauses; the person keeps moving and is recorded when the pause ends, but the file would start about 4 s late and miss the door opening.</li>
+<li><strong>Change:</strong> a recording that starts right after a pause starts its file at the beginning of the pause, so the pause is inside the pre-roll.</li>
+<li>This makes any wrong pause cost nothing, as long as the movement goes on past it.</li>
+<li>It needs about 10 s of video held in memory per armed camera instead of 3 s (about 10 MB at 8 Mbit/s).</li>
+</ul>
+</ol>
+<p><strong>After the changes:</strong></p>
+<ul>
+<li>At night, 73 of 113 recordings are paused at the trigger.</li>
+<li>By day, 1 of 208: the sun coming out from behind a cloud, also a false alarm.</li>
+</ul>
+<p><strong>The 40 night recordings left:</strong></p>
+<ul>
+<li>Mostly small changes (0.1–1% of the picture) at the top: the street and the far lawn. Cars and their lights on the street, many of them a light leaving (darker only, which never starts a pause).</li>
+<li>A moth near the lens (23 Oct 18:39:12).</li>
+<li>The cat (23 Oct 05:31:39).</li>
+<li>A person coming out of the door (21 Oct 19:18:38).</li>
+</ul>
+<p>The street ones need the zone edit: keep NeighborSideYard and the top of FrontYard-Right off the street.</p>
+<p><strong>Not checked:</strong></p>
+<ul>
+<li>Every paused recording was not viewed; those with movement left after the pause were, and a sample of the others (all lights).</li>
+<li>In this replay "turned to colour" was taken from the clip's overall colour, which wrongly lost the dusk headlight clip (22 Oct 18:21:58, colour before and after). The add-on would compare colour before and after the change.</li>
+</ul>
 </body></html>

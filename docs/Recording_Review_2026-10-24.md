@@ -168,3 +168,61 @@ The quiet-before condition separates these: a headlight comes out of a quiet pic
 - A person who walks in during a pause is detected when it ends, at most 4 s later. A person who comes and
   goes within it is missed.
 
+## 8. The headlight rule on every recording (20–24 Oct)
+
+CrystalHeeler opened the whole front-camera recordings folder for this test: 486 files, 326 recordings (213 by
+day, 113 at night). The rule of section 7 ran on each recording's first file. It counts as "paused at the
+trigger" when a pause covers 2.8–4.6 s into the file, where the recording started after its 3–4 s pre-roll.
+Clips with movement left after the pause were checked frame by frame, and so was a sample of the rest.
+
+**Version 3 (section 7):**
+- At night it paused at the trigger in 70 of 113 recordings: headlight sweeps, cars on the street, and three
+  day-to-night switches (20 Oct 18:24:22, 21 Oct 18:23:39, 23 Oct 18:20:40).
+- By day it paused in 3, all after dark-hours light.
+
+Three findings changed the rule.
+
+1. **Two headlight sweeps were missed (23 Oct 19:48:11, 22 Oct 20:37:12).**
+   - Just before the beam, something small changed: a shadow swept the lawn as the light came on (1.0%, darker),
+     and the car itself showed on the street at the top (0.65%).
+   - Either broke the "quiet before" check, which allowed nothing at or above 0.3%.
+   - **Change:** quiet before now means nothing at or above 1.5% (unless it was itself mostly brighter).
+   - **Replay:** both are caught, plus a car on the street (22 Oct 20:10:28) and a daytime sun-through-cloud
+     false alarm (24 Oct 09:50:38). Nothing with a person changed.
+   - The man going in the door still does not start a pause: changes of 4–15% came just before.
+2. **The porch light (20 Oct 18:57:58, 21 Oct 19:19:51).**
+   - A large change (19–23% of the picture), nearly all brighter, as the porch light came on. The camera
+     switched from infrared to colour, and a person came out at once.
+   - The rule paused the person's first seconds.
+   - **Change:** no pause when the picture turns from infrared to colour during the change; that is a light
+     someone switched on. The add-on already measures colour for its night state.
+   - The day-to-night switch goes the other way (colour to infrared) and still pauses.
+3. **The front door opening (23 Oct 20:26:49, 24 Oct 06:36:14).**
+   - The storm door's glass makes a narrow bright strip at the right edge (+55 to +76), then a person steps out.
+   - The rule pauses; the person keeps moving and is recorded when the pause ends, but the file would start
+     about 4 s late and miss the door opening.
+   - **Change:** a recording that starts right after a pause starts its file at the beginning of the pause, so
+     the pause is inside the pre-roll.
+   - This makes any wrong pause cost nothing, as long as the movement goes on past it.
+   - It needs about 10 s of video held in memory per armed camera instead of 3 s (about 10 MB at 8 Mbit/s).
+
+**After the changes:**
+- At night, 73 of 113 recordings are paused at the trigger.
+- By day, 1 of 208: the sun coming out from behind a cloud, also a false alarm.
+
+**The 40 night recordings left:**
+- Mostly small changes (0.1–1% of the picture) at the top: the street and the far lawn. Cars and their lights
+  on the street, many of them a light leaving (darker only, which never starts a pause).
+- A moth near the lens (23 Oct 18:39:12).
+- The cat (23 Oct 05:31:39).
+- A person coming out of the door (21 Oct 19:18:38).
+
+The street ones need the zone edit: keep NeighborSideYard and the top of FrontYard-Right off the street.
+
+**Not checked:**
+- Every paused recording was not viewed; those with movement left after the pause were, and a sample of the
+  others (all lights).
+- In this replay "turned to colour" was taken from the clip's overall colour, which wrongly lost the dusk
+  headlight clip (22 Oct 18:21:58, colour before and after). The add-on would compare colour before and after
+  the change.
+
