@@ -571,6 +571,34 @@ async def _enumerate_dvr_channels_after_auth(camera_id: str) -> None:
              f"(populated channels: {cam['_dvr_populated_channels']})")
 
 
+def _third_stream_guess(main_url: str, sub_url: str, table: list) -> str | None:
+    """3.9.0 (B58): the path after main and sub, when they differ in one number.
+
+    /Streaming/Channels/101 and 102 give 103; subtype=0 and subtype=1 give
+    subtype=2. Only a path the brand's table lists counts, so no guessing.
+    """
+    import re
+    from urllib.parse import urlparse
+
+    def path_of(u: str) -> str:
+        p = urlparse(u)
+        return p.path + (f"?{p.query}" if p.query else "")
+    a, b = re.split(r"(\d+)", path_of(main_url)), re.split(r"(\d+)", path_of(sub_url))
+    if len(a) != len(b):
+        return None
+    diff = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+    if len(diff) != 1 or diff[0] % 2 == 0:          # odd places are the digit runs
+        return None
+    i = diff[0]
+    step = int(b[i]) - int(a[i])
+    if step <= 0:
+        return None
+    nxt = list(b)
+    nxt[i] = str(int(b[i]) + step).zfill(len(b[i]))
+    guess = "".join(nxt)
+    return guess if guess in table else None
+
+
 async def api_dvr_enum_status(request: web.Request) -> web.Response:
     """2.5.0-rc1.8: lightweight polling endpoint that lets the post-cred-
     auth UI flow detect channel-enumeration completion deterministically
@@ -1331,6 +1359,44 @@ async def api_set_credentials(request: web.Request) -> web.Response:
         log.info(f"  Locked-stream validation: "
                  f"{len(additional_streams)}/{len(locked_in)} "
                  f"validated as working")
+
+    # 3.9.0 (B58): the third stream from the brand's table, with one request and
+    # the password that just worked (a correct password adds no failed login).
+    # Main and sub often differ in one number (Hikvision 101/102, Dahua
+    # subtype=0/1, Uniview video1/video2); the next number is checked only when
+    # the brand's table lists it.
+    if sub_url and db_entry and proto in ("RTSP", "ONVIF"):
+        third = _third_stream_guess(url, sub_url, db_entry.get("rtsp") or [])
+        known = {url, sub_url} | {a.get("url") for a in additional_streams}
+        if third and f"rtsp://{ip}:{port}{third}" not in known:
+            t_clear = f"rtsp://{ip}:{port}{third}"
+            t_authed = build_authenticated_url({"stream_url": t_clear, "credentials": enc_creds,
+                                                "ip": ip, "port": port, "protocol": "RTSP"}) or t_clear
+            if _t_s > 0:
+                await _throttle_wait_if_needed(ip, _t_s, "third-stream check")
+            try:
+                ok = await loop.run_in_executor(_THREAD_POOL, probe_rtsp, t_authed, "", "", 6.0)
+            except Exception as e:
+                log.debug(f"  third-stream check ({third}): {e}")
+                ok = False
+            if ok:
+                t_details: dict = {}
+                if _t_s > 0:
+                    await _throttle_wait_if_needed(ip, _t_s, "third-stream details")
+                try:
+                    t_details = await probe_stream_details(t_authed, "RTSP")
+                except Exception as e:
+                    log.debug(f"  probe_stream_details on the third stream: {e}")
+                additional_streams.append({
+                    "path": third, "url": t_clear, "realm": "", "scheme": "",
+                    "stream_width":  t_details.get("stream_width"),
+                    "stream_height": t_details.get("stream_height"),
+                    "stream_codec":  t_details.get("stream_codec"),
+                    "stream_fps":    t_details.get("stream_fps"),
+                })
+                log.info(f"  Third stream from the brand table: {t_clear}")
+            else:
+                log.info(f"  The brand table's third stream does not answer: {third}")
 
     # 2.4.0-rc2.8: build stream_profiles explicitly. The non-ONVIF
     # cred-accept path used to leave stream_profiles empty, relying on

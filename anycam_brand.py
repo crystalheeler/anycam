@@ -189,6 +189,11 @@ def _identify_camera_brand(cam: dict, force: bool = False) -> dict | None:
         str(cam.get("mac_vendor", "") or ""),       # OUI lookup result
         str(cam.get("page_title", "") or ""),
         str(cam.get("server_header", "") or ""),
+        # 3.9.0 (B63): the RTSP server's name, "Hipcam RealServer/V1.0" on the
+        # Microseven; its ONVIF name ("IPCAM") matches no brand, and nmap often
+        # misses its MAC maker, so without this its brand stayed unknown and
+        # password entry did not pace it.
+        str(cam.get("rtsp_server_header", "") or ""),
         str(cam.get("nmap_product", "") or ""),
         # rc2.1.1: ONVIF scopes from WS-Discovery often contain
         # `onvif://www.onvif.org/manufacturer/<Brand>` or

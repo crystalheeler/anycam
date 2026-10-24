@@ -985,6 +985,29 @@ def _live_diag_line(camera_id: str, where: str, diag: dict) -> str:
             f"{_diag_mask(_diag_text(diag.get('selected') or 'none', 200))}")
 
 
+LIVE_PLAY_FIELDS = (("mode", "mode"), ("seconds", "after {} s"), ("width", "{}"), ("height", "x{}"),
+                    ("fps", "{} pictures/s"), ("received", "received {}"), ("decoded", "decoded {}"),
+                    ("dropped", "dropped {}"), ("freezes", "freezes {}"), ("freeze_s", "frozen {} s"),
+                    ("packets", "packets {}"), ("lost", "lost {}"), ("jitter_ms", "jitter {} ms"),
+                    ("kbps", "{} kbit/s"), ("behind_s", "{} s behind"))
+
+
+def _live_play_line(camera_id: str, where: str, diag: dict) -> str:
+    """3.9.0 (B62): the log line for one playback report; numbers only, cut to size."""
+    parts = []
+    for key, fmt in LIVE_PLAY_FIELDS:
+        v = diag.get(key)
+        if key == "mode":
+            mode = v if v in ("WebRTC", "MSE") else "?"
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not (-1e9 < v < 1e12):
+            continue
+        num = f"{v:.1f}".rstrip("0").rstrip(".") if isinstance(v, float) else str(v)
+        parts.append(fmt.format(num))
+    text = ", ".join(parts).replace(", x", "x")
+    return f"LIVE-PLAY [{camera_id}]: {where}: {mode} {text or 'no numbers'}"
+
+
 async def api_live_diag(request: web.Request) -> web.Response:
     """POST /api/live_diag  body: {"camera_id", "where": card or enhanced view, "diag": {...}}."""
     try:
@@ -995,6 +1018,9 @@ async def api_live_diag(request: web.Request) -> web.Response:
     where, diag = body.get("where"), body.get("diag")
     if camera_id not in CAMERAS or where not in LIVE_DIAG_WHERE or not isinstance(diag, dict):
         return web.json_response({"error": "unknown camera, place or report"}, status=400)
+    if diag.get("kind") == "playback":                      # 3.9.0 (B62)
+        log.info(_live_play_line(camera_id, where, diag))
+        return web.json_response({"status": "ok"})
     log.info(_live_diag_line(camera_id, where, diag))
     return web.json_response({"status": "ok"})
 

@@ -1502,6 +1502,9 @@ def _onvif_card(ip: str, onvif: dict, meta: dict, prev: dict, reason: str) -> di
     }
 
 
+SCAN_NEW_CAMERA_GAP_S = 5.0     # 3.9.0 (B63): between two openings of an unknown camera
+
+
 async def _scan_onvif_first(ip: str, onvif: dict, meta: dict, prev: dict,
                             loop: asyncio.AbstractEventLoop) -> dict | None:
     """3.8.0-rc1.0 (B54): ask a device that answered WS-Discovery for its
@@ -1517,8 +1520,14 @@ async def _scan_onvif_first(ip: str, onvif: dict, meta: dict, prev: dict,
     except Exception as e:
         log.debug(f"  brand-id (ONVIF first) {ip}: {e}")
     media_url = _onvif_media_url(ip, 80, onvif.get("xaddrs", ""))
+    # 3.9.0 (B63): the ONVIF request and the RTSP check below are two openings of
+    # a camera AnyCam does not know yet; a rate-limited one (the Hipcam family)
+    # resets the second if it comes within 5 s. Both take a turn in the shared
+    # record, so the second waits.
+    await _throttle_wait_if_needed(ip, SCAN_NEW_CAMERA_GAP_S, "scan: ONVIF")
     answer, profiles = await loop.run_in_executor(_THREAD_POOL, onvif_probe_no_login, media_url)
     if answer == "login":
+        await _throttle_wait_if_needed(ip, SCAN_NEW_CAMERA_GAP_S, "scan: RTSP realm")
         # 3.8.0-rc2 (B54 fix): capture the RTSP auth realm with one OPTIONS, so
         # brands distinguished by it are recognized. The Lorex/Dahua DVR-NVR
         # family is identified by its "Login to <hex>" realm; without it the DVR

@@ -1324,6 +1324,46 @@ function _webrtcDiagSummary(stats, outcome, ms) {
   return {outcome: String(outcome), ms: Math.round(ms), local: local.slice(0, 12),
           remote: remote.slice(0, 12), pairs, selected};
 }
+// 3.9.0 (B62): how the video plays, PLAY_DIAG_MS after it starts: pictures
+// decoded and dropped, freezes, lost packets, size and rate. The phone froze
+// with WebRTC connected in 0.3 s (2026-10-24), and the log had no playback
+// numbers. At most one report per camera and place every PLAY_DIAG_EVERY_MS.
+const PLAY_DIAG_MS = 20000;
+const PLAY_DIAG_EVERY_MS = 5 * 60 * 1000;
+const _playDiagSent = new Map();
+function _playbackSummary(stats, video, ms) {
+  const sec = Math.max(ms / 1000, 0.001);
+  let rtp = null;
+  if (stats) stats.forEach(r => { if (r.type === 'inbound-rtp' && (r.kind || r.mediaType) === 'video') rtp = r; });
+  const n = x => (typeof x === 'number' && isFinite(x)) ? x : null;
+  if (rtp) {
+    return {kind: 'playback', mode: 'WebRTC', seconds: Math.round(sec),
+            width: n(rtp.frameWidth), height: n(rtp.frameHeight), fps: n(rtp.framesPerSecond),
+            received: n(rtp.framesReceived), decoded: n(rtp.framesDecoded), dropped: n(rtp.framesDropped),
+            freezes: n(rtp.freezeCount), freeze_s: n(rtp.totalFreezesDuration),
+            packets: n(rtp.packetsReceived), lost: n(rtp.packetsLost),
+            jitter_ms: rtp.jitter != null ? Math.round(rtp.jitter * 1000) : null,
+            kbps: rtp.bytesReceived != null ? Math.round(rtp.bytesReceived * 8 / sec / 1000) : null};
+  }
+  const q = video && typeof video.getVideoPlaybackQuality === 'function' ? video.getVideoPlaybackQuality() : null;
+  let behind = null;
+  try { if (video && video.buffered.length) behind = video.buffered.end(video.buffered.length - 1) - video.currentTime; } catch (e) {}
+  return {kind: 'playback', mode: 'MSE', seconds: Math.round(sec),
+          width: video ? n(video.videoWidth) : null, height: video ? n(video.videoHeight) : null,
+          decoded: q ? n(q.totalVideoFrames) : null, dropped: q ? n(q.droppedVideoFrames) : null,
+          behind_s: behind != null ? Math.round(behind * 10) / 10 : null};
+}
+function _livePlayReport(camId, where, diag) {
+  if (!diag) return;
+  const key = camId + '|' + where, now = Date.now();
+  if (now - (_playDiagSent.get(key) || 0) < PLAY_DIAG_EVERY_MS) return;
+  _playDiagSent.set(key, now);
+  try {
+    fetch(BASE + '/api/live_diag', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                    body: JSON.stringify({camera_id: camId, where, diag})})
+      .catch(() => {});
+  } catch (e) {}
+}
 function _liveDiagReport(camId, where, diag) {
   if (!diag) return;
   const key = camId + '|' + where + '|' + diag.outcome;
@@ -1367,7 +1407,7 @@ function _go2rtcLoadPlayer() {
           // 2.6.5: an empty poster. Without one, Android WebView (the HA
           // app) draws a large gray play icon until the first frame.
           this.video.poster   = FOCUS_BLANK_POSTER;
-          this.video.addEventListener('playing', () => this._emit('playing'));
+          this.video.addEventListener('playing', () => { this._emit('playing'); this._playDiagLater(); });
           // 3.7.5-rc1.0 (B47): the browser's own reason when it cannot use the stream
           this.video.addEventListener('error', () => {
             const e = this.video.error;
@@ -1448,6 +1488,29 @@ function _go2rtcLoadPlayer() {
           });
           setTimeout(() => report('not connected after ' + (WEBRTC_DIAG_MS / 1000) + ' s ('
                                   + pc.connectionState + ')'), WEBRTC_DIAG_MS);
+        }
+        // 3.9.0 (B81): a card stays paused while Enhanced View is open. Enhanced
+        // View pauses the cards, but VideoRTC starts a paused player again by
+        // itself when the page becomes visible, the player comes back into view,
+        // or its reconnect timer fires; on a phone the cards then played beside
+        // Enhanced View (2026-10-24, 10:10:26 and 10:46:31).
+        onconnect() {
+          if (typeof this.anycamHold === 'function' && this.anycamHold()) return false;
+          return super.onconnect();
+        }
+        // 3.9.0 (B62): the playback numbers, once the video has played a while
+        _playDiagLater() {
+          clearTimeout(this._playTid);
+          const t0 = Date.now();
+          this._playTid = setTimeout(() => {
+            if (!this.isConnected) return;
+            const send = st => this._emit('play-diag', _playbackSummary(st, this.video, Date.now() - t0));
+            if (this.pc && this.pcState === WebSocket.OPEN && typeof this.pc.getStats === 'function') {
+              this.pc.getStats().then(send).catch(() => send(null));
+            } else {
+              send(null);
+            }
+          }, PLAY_DIAG_MS);
         }
         _emit(kind, value) {
           if (typeof this.onanycam === 'function') this.onanycam(kind, value);
@@ -1629,6 +1692,8 @@ function _go2rtcEvent(session, kind, value) {
     _go2rtcUpdateInfo();
   } else if (kind === 'webrtc-diag') {
     _liveDiagReport(g.camId, 'enhanced view', value);      // 3.8.2 (B62)
+  } else if (kind === 'play-diag') {
+    _livePlayReport(g.camId, 'enhanced view', value);      // 3.9.0 (B62)
   } else if (kind === 'decode') {
     console.warn('[AnyCam] live view: the browser cannot use the stream: ' + value);
     if (g.played || g.repairTried || !DESCRIPTION_ERROR_RE.test(value || '')) return;
@@ -1939,6 +2004,7 @@ async function _cardLiveStart(camId) {
   el.visibilityThreshold = 0.01;   // read once, when the player is first attached
   el.style.opacity = '0';          // not display:none: that reads as off screen
   el.onanycam = (kind, value) => _cardLiveEvent(camId, st, kind, value);
+  el.anycamHold = () => !!_focusCamId;      // 3.9.0 (B81): paused behind Enhanced View
   el.onclick  = () => openFocus(camId);
   st.el = el;
   _cardLivePlace(camId);
@@ -2090,6 +2156,8 @@ function _cardLiveEvent(camId, st, kind, value) {
     st.modes = Array.isArray(value) ? value : [];
   } else if (kind === 'webrtc-diag') {
     _liveDiagReport(camId, 'card', value);                 // 3.8.2 (B62)
+  } else if (kind === 'play-diag') {
+    _livePlayReport(camId, 'card', value);                 // 3.9.0 (B62)
   } else if (kind === 'decode') {
     if (st.played || st.repairTried || !DESCRIPTION_ERROR_RE.test(value || '')) return;
     st.repairTried = true;
