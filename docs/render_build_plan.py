@@ -56,6 +56,17 @@ def inline(md: str) -> str:
                                                    quote=False) + "</code>", s)
 
 
+def block(md: str) -> str:
+    """A ticket cell: text, then a bullet list, one bullet per " • " (2026-10-24)."""
+    parts = [x.strip() for x in md.split(" • ")]
+    if md.startswith("• "):
+        parts = [""] + [x.strip() for x in md[2:].split(" • ")]
+    if len(parts) == 1:
+        return inline(md)
+    lead = f"<p>{inline(parts[0])}</p>" if parts[0] else ""
+    return lead + "<ul>" + "".join(f"<li>{inline(x)}</li>" for x in parts[1:] if x) + "</ul>"
+
+
 def links(rendered: str) -> str:
     """Make item IDs (B2, C10) in rendered text link to their cards."""
     return re.sub(r"(?<![\w#/\"-])([A-F]\d{1,2})\b(?![^<]*</a>)", r'<a href="#\1">\1</a>', rendered)
@@ -123,16 +134,18 @@ def parse(text: str) -> dict:
             c = cells(line)
             if c[0] == "#":
                 continue
-            if len(c) != 5:
-                raise PlanError(f"line {n}: expected 5 cells, found {len(c)}")
-            ident, status, item, why, nxt = c
+            # 2026-10-24 (CrystalHeeler): every ticket reads Discovered, Problem, Solution(s).
+            if len(c) != 6:
+                raise PlanError(f"line {n}: expected 6 cells (#, Status, Item, Discovered, "
+                                f"Problem, Solution(s)), found {len(c)}")
+            ident, status, item, found, why, nxt = c
             if status not in STATUSES:
                 raise PlanError(f"line {n}: unknown status '{status}' "
                                 f"(allowed: {', '.join(STATUSES)})")
             priority = item.startswith("**") and item.endswith("**")
             group["items"].append({"id": ident, "status": status,
                                    "item": item.strip("*") if priority else item,
-                                   "priority": priority, "why": why, "next": nxt})
+                                   "priority": priority, "found": found, "why": why, "next": nxt})
         elif section == "done" and line.startswith("|"):
             c = cells(line)
             if c[0] == "Item":
@@ -283,6 +296,8 @@ section.group{margin:0 0 40px}
 .card dl{margin:0;display:grid;gap:6px}
 .card dt{font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
 .card dd{margin:0;color:var(--ink-2);font-size:.9rem;min-width:0}
+.card dd p{margin:0 0 4px}.card dd ul{margin:0;padding-left:1.1em}.card dd li{margin:2px 0}
+.card .found{margin:0;font-size:.8rem;color:var(--ink-3)}
 
 /* done */
 .done-wrap{overflow-x:auto;background:var(--surface);border:1px solid var(--rule);border-radius:6px}
@@ -358,7 +373,7 @@ def render(plan: dict) -> str:
     for i in you:
         out.append(f'<li class="g-{i["group"].lower()}"><span class="id">{html.escape(i["id"])}</span>'
                    f'<span class="t"><a href="#{html.escape(i["id"])}">{e(i["item"])}</a></span>'
-                   f'<span class="x">{e(i["next"])}</span></li>')
+                   f'<span class="x">{e(i["next"].replace(" • ", "; ").lstrip("• "))}</span></li>')
     out.append('</ul></div>')
     out.append(f'<div class="panel"><h2>{html.escape(plan["order_title"])}</h2><ol class="order">')
     for o in plan["order"]:
@@ -398,8 +413,9 @@ def render(plan: dict) -> str:
                 f'<div class="ctop"><span class="id">{html.escape(i["id"])}</span>'
                 f'<span class="pill st-{i["status"]}">{STATUSES[i["status"]]}</span>{prio}</div>'
                 f'<h3>{e(i["item"])}</h3>'
-                f'<dl><dt>Why</dt><dd>{e(i["why"])}</dd>'
-                f'<dt>Next step</dt><dd>{e(i["next"])}</dd></dl></article>')
+                f'<p class="found">{e(i["found"])}</p>'
+                f'<dl><dt>Problem</dt><dd>{links(block(i["why"]))}</dd>'
+                f'<dt>Solution(s)</dt><dd>{links(block(i["next"]))}</dd></dl></article>')
         out.append('</div></section>')
 
     out.append(f'<section data-all-only id="done"><div class="ghead" style="--g:var(--st-ready-fg)">'
