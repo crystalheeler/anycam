@@ -475,7 +475,7 @@ header h1{{cursor:pointer}}
   </div>
   <!-- Manual IP input -->
   <div class="pscan-top">
-    <input type="text" id="pscan-ip" placeholder="Or enter an IP address manually (e.g. 192.168.1.100)"
+    <input type="text" id="pscan-ip" placeholder="Or enter an IP address manually (e.g. 192.168.50.100)"
            oninput="psUpdateButtons()" onkeydown="if(event.key==='Enter'&&!document.getElementById('ps-deeper').disabled)startPortScan('deeper')"/>
   </div>
   <div id="pscan-msg" style="padding:6px 2px;font-size:.8rem;color:var(--text-dim)">Select hosts above and/or enter an IP, then choose a scan below.<br><small style="opacity:.7">Note: navigating away will not cancel an in-progress scan.</small></div>
@@ -517,7 +517,7 @@ header h1{{cursor:pointer}}
   <h2>Connect Known Camera</h2>
   <div class="fgrid">
     <div class="field full"><label>CAMERA NAME</label><input type="text" id="add-name" placeholder="e.g. Front Door"/></div>
-    <div class="field"><label>IP ADDRESS</label><input type="text" id="add-ip" placeholder="192.168.1.100"/></div>
+    <div class="field"><label>IP ADDRESS</label><input type="text" id="add-ip" placeholder="192.168.50.100"/></div>
     <div class="field"><label>PORT</label><input type="number" id="add-port" value="554" min="1" max="65535"/></div>
     <div class="field"><label>PROTOCOL</label>
       <select id="add-proto" onchange="onProtoChange()">
