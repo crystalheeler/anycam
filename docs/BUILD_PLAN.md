@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 25 October 2026. Store version: 3.9.0-rc2.0 (released 2026-10-25: pushed, GitHub prerelease, store; CrystalHeeler's order); GitHub Latest stays 3.8.3. 3.9.0-rc2.0 holds B84 and B85: the first field night of 3.9.0-rc1.0 (24-25 Oct, Test System B) still recorded 29 headlight files, from the pause's end and its first second; replayed through the add-on's code on 409 recordings, none of them record now. 3.9.0-rc1.0 (2026-10-24) held B68, B69 and 14 tickets. Next: the field test of 3.9.0-rc2.0, then C32. rc numbers are single-digit (CrystalHeeler, 2026-10-10).
+**Compiled:** Updated 25 October 2026. Store version: 3.9.0-rc2.0 (released 2026-10-25: pushed, GitHub prerelease, store; CrystalHeeler's order); GitHub Latest stays 3.8.3. 3.9.0-rc2.0 holds B84 and B85: the first field night of 3.9.0-rc1.0 (24-25 Oct, Test System B) still recorded 29 headlight files, from the pause's end and its first second; replayed through the add-on's code on 409 recordings, none of them record now. 3.9.0-rc1.0 (2026-10-24) held B68, B69 and 14 tickets. Home Assistant's update dialog cannot install rc2.0 over rc1.0 (F11); the Supervisor command can. Next: the field test of 3.9.0-rc2.0, then C32. rc numbers are single-digit (CrystalHeeler, 2026-10-10).
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.
@@ -75,6 +75,7 @@ Every ticket reads: Discovered (date, version, test system); Problem; Solution(s
 
 | # | Status | Item | Discovered | Problem | Solution(s) |
 |---|---|---|---|---|---|
+| F11 | Discuss | **Home Assistant cannot update one rc to the next** | Discovered 25 Oct 2026 in 3.9.0-rc2.0 running on Test System A | The update dialog shows "Up-to-date" and a grey Update button for 3.9.0-rc1.0 → 3.9.0-rc2.0, while the add-on page shows "Update available" (also 3.7.0-rc1.0 → rc2.0, 5 Oct). Home Assistant compares versions with AwesomeVersion, which cannot read "rc2.0" (the ".0" after the rc number), so rc2.0 is not newer than rc1.0. The Supervisor only checks that the versions differ, so its command updates | • Now: update with the Supervisor command (Terminal & SSH add-on). • Release the next build as the final 3.9.0, or with a higher base (3.9.1-rc1.0); both read as newer. • Or change the rc format to "rcN" (3.9.1-rc1, rc2 …); CrystalHeeler's decision. • A release-gate check that the new version is newer by Home Assistant's rule |
 ---
 
 ## Done: take these off the older lists
