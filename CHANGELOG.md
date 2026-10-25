@@ -1,3 +1,31 @@
+## 3.9.0
+
+Passing headlights, the dawn switch to colour and motion-sensitive lights no longer start recordings, recordings list every zone they passed through, and the card order survives restarts. This is the stable release of the 3.9.0-rc1.0 to 3.9.0-rc2.0 line.
+
+### Changes & improvements
+
+- **Headlights pause detection.** A passing light pauses detection for the whole pass, up to 12 s, and a recording right after a pause includes it.
+- **A short look before recording.** A recording waits 1.25 s and does not start when that second shows a passing light, a light change, the camera switching between infrared and colour, or a lamp switching on or off. The file still begins before the movement.
+- **Recordings list every zone.** The Storage tab shows each zone a recording passed through.
+- **A shorter log.** Per-check motion lines appear once per movement, then at most every 5 s.
+- **Playback numbers for live view.** 20 s into a live view, the log gets one LIVE-PLAY line with pictures, freezes and lost packets.
+- **Back to go2rtc after a fall-back,** a camera's third stream checked at password entry, and rate-limited cameras paced in the scan.
+
+### Bugs fixed
+
+- **Headlights recorded when the pause ended** and the dawn switch to colour was recorded.
+- **The card order was lost at every restart.**
+- **Insects and light changes recorded by the slow-movement check.**
+- **Cards restarted behind Enhanced View on phones.**
+- **Dialog text overlapped, and a text selection released outside a dialog closed it.**
+
+### Known issues
+
+- **Insects in the infrared still record.** Lower the camera's night sensitivity, or turn on "Recording in zones only".
+- **Live video on the phone can freeze over a VPN** that loses packets; check that the VPN connects directly.
+- **Each armed camera keeps about 17 s of video** in memory for the pre-roll.
+- **On a phone held upright the Storage tab hides file names.**
+
 ## 3.9.0-rc2.0
 
 Passing headlights, the dawn switch to colour and motion-sensitive lights no longer start recordings. A release candidate for field testing.

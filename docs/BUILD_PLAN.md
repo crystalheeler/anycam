@@ -1,18 +1,19 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 25 October 2026. Store version: 3.9.0-rc2.0 (released 2026-10-25: pushed, GitHub prerelease, store; CrystalHeeler's order); GitHub Latest stays 3.8.3. 3.9.0-rc2.0 holds B84 and B85: the first field night of 3.9.0-rc1.0 (24-25 Oct, Test System B) still recorded 29 headlight files, from the pause's end and its first second; replayed through the add-on's code on 409 recordings, none of them record now. 3.9.0-rc1.0 (2026-10-24) held B68, B69 and 14 tickets. Home Assistant's update dialog cannot install rc2.0 over rc1.0 (F11); the Supervisor command can. New from CrystalHeeler's mock-up: one Scans menu (D6) and Back to Cameras in the status bar (D7). Next: the field test of 3.9.0-rc2.0, then C32. rc numbers are single-digit (CrystalHeeler, 2026-10-10).
+**Compiled:** Updated 25 October 2026. Store version: 3.9.0 (released 2026-10-25: pushed, GitHub Latest, store; CrystalHeeler's order), the code of 3.9.0-rc2.0 (B84, B85), which Home Assistant's update dialog could not install over 3.9.0-rc1.0 (F11). CrystalHeeler's order of 2026-10-25, run unattended: 3.9.0, then 4.0.0 = C32 (the object engine, off by default on each camera), then 4.1.0 = D6 and D7 (the Scans menu, Back to Cameras in the status bar), pushed and published. rc numbers are single-digit (CrystalHeeler, 2026-10-10).
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.
 
 ---
 
-## Next up: field-test 3.9.0-rc2.0, then C32
+## Next up: 4.0.0 (C32), then 4.1.0 (D6, D7)
 
-0. **Released (2026-10-25):** 3.9.0-rc2.0 — B84 and B85, from the first field night of 3.9.0-rc1.0. Pushed, GitHub prerelease and store (CrystalHeeler's order, 2026-10-25).
-1. **Field test 3.9.0-rc2.0:** a night of recordings (headlights, the motion-sensitive light, insects, dawn and dusk; "not recorded —" lines); the Pi's memory with the 17 s buffer; and from 3.9.0-rc1.0 the card order after a restart, the Storage tab's zone lists, the phone's LIVE-PLAY lines (B62).
-2. **Then C32,** the object-based motion engine (decisions of 2026-10-24); a design document first. Version to decide (3.9.1 or 4.0.0).
-3. **Waiting on CrystalHeeler:** B62 (the phone's VPN route: direct or relay), B86 (the back yard's night sensitivity), B33 (check after a rescan), C23 (the revamp list).
+0. **Released (2026-10-25):** 3.9.0 — the code of 3.9.0-rc2.0 (B84, B85), stable release of the 3.9.0-rc1.0 to 3.9.0-rc2.0 line. Pushed, GitHub Latest and store (CrystalHeeler's order, 2026-10-25).
+1. **4.0.0 = C32,** the object engine (decisions of 2026-10-24), built unattended on CrystalHeeler's order; a per-camera choice, off by default.
+2. **4.1.0 = D6 and D7,** then pushed and published (CrystalHeeler's order, 2026-10-25).
+3. **Field test 4.1.0:** a night of recordings with the classic engine and one camera on the object engine; the Scans menu; the Pi's memory with the 17 s buffer.
+4. **Waiting on CrystalHeeler:** B62 (the phone's VPN route), B86 (the back yard's night sensitivity), F11 (the rc format), B33, C23.
 
 ---
 
