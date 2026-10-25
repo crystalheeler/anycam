@@ -222,7 +222,7 @@ OUI_MAX_AGE_DAYS = 30  # re-download once a month
 # fingerprints will be submitted automatically.
 COMMUNITY_ENDPOINT = os.environ.get("ANYCAM_COMMUNITY_URL", "")
 
-CURRENT_VERSION = "4.0.0"  # must match config.yaml
+CURRENT_VERSION = "4.1.0"  # must match config.yaml
 
 INGRESS_PATH = os.environ.get("INGRESS_PATH", "").rstrip("/")
 PORT         = int(os.environ.get("INGRESS_PORT", 8099))
@@ -680,6 +680,8 @@ def _publish_scan_card(cam: dict) -> None:
     """
     if anycam_scan.PENDING_CAMERAS is not None:
         anycam_scan.PENDING_CAMERAS[cam["id"]] = cam
+        # 4.1.0 (D6): the page goes to the cameras at the first new one
+        SCAN_STATE["new_cameras"] = sum(1 for cid in anycam_scan.PENDING_CAMERAS if cid not in CAMERAS)
     else:
         CAMERAS[cam["id"]] = cam
 
@@ -1152,6 +1154,7 @@ async def api_scan(request: web.Request) -> web.Response:
         SCAN_OPTIONS["broad_sweep"] = bool(data.get("broad_sweep", False))
     except Exception:
         pass
+    SCAN_STATE["new_cameras"] = 0          # 4.1.0 (D6)
     asyncio.create_task(run_scan())
     return web.json_response({"status": "started"})
 
@@ -1272,19 +1275,24 @@ async def api_pscan_start(request: web.Request) -> web.Response:
         data = await request.json()
         ip   = data.get("ip","").strip()
         ips  = data.get("ips", [])  # batch: list of IPs
+        mode = str(data.get("mode", "all"))      # 4.1.0 (D6): "all" or "deeper"
     except Exception:
         return web.json_response({"error": "Invalid JSON"}, status=400)
+    if mode not in anycam_scan.PSCAN_PORTS:
+        return web.json_response({"error": "mode must be all or deeper"}, status=400)
 
     if PSCAN["running"]:
         return web.json_response({"error": "Scan already running"}, status=409)
+    PSCAN["cancelled"] = False
+    PSCAN["mode"] = mode
 
-    if ips:
-        # Batch mode: queue all IPs, scan sequentially
+    if ips or (ip and mode == "deeper"):
+        # Batch mode: queue all IPs, scan sequentially (a Deeper Scan always, for its cards)
         PSCAN_QUEUE.clear()
-        PSCAN_QUEUE.extend([i.strip() for i in ips if i.strip()])
+        PSCAN_QUEUE.extend([i.strip() for i in (ips or [ip]) if isinstance(i, str) and i.strip()])
         if not PSCAN_QUEUE:
             return web.json_response({"error": "No valid IPs"}, status=400)
-        asyncio.create_task(run_batch_port_scan())
+        asyncio.create_task(run_batch_port_scan(mode))
         return web.json_response({"status": "started", "count": len(PSCAN_QUEUE)})
 
     if not ip:
@@ -1293,24 +1301,43 @@ async def api_pscan_start(request: web.Request) -> web.Response:
     return web.json_response({"status": "started"})
 
 
-async def run_batch_port_scan() -> None:
+async def run_batch_port_scan(mode: str = "all") -> None:
 
-    """Run port scans sequentially for all IPs in PSCAN_QUEUE."""
+    """Run port scans sequentially for all IPs in PSCAN_QUEUE.
+
+    4.1.0 (D6): mode "deeper" scans ports 1-10,000 and then gives the hosts'
+    open ports to the camera probes, so a camera found gets its card.
+    Cancel stops the rest of the queue too.
+    """
     total = len(PSCAN_QUEUE)
     all_results = []
+    by_ip: dict[str, list] = {}
     for idx, ip in enumerate(list(PSCAN_QUEUE)):
+        if PSCAN.get("cancelled"):
+            break
         PSCAN.update(
             running=True, ip=ip, progress=int(100 * idx / total),
             message=f"Scanning {ip} ({idx+1}/{total})…",
         )
-        await run_port_scan(ip)
+        await run_port_scan(ip, mode)
         # Prefix each result with the IP it came from
         for r in PSCAN["results"]:
             r["scanned_ip"] = ip
         all_results.extend(PSCAN["results"])
+        by_ip[ip] = list(PSCAN["results"])
+    cards = ""
+    if mode == "deeper" and not PSCAN.get("cancelled"):
+        PSCAN.update(running=True, message="Looking for cameras on the open ports…")
+        try:
+            new = await anycam_scan.deeper_scan_cards(by_ip)
+        except Exception as ex:          # a probe failure must not lose the port table
+            log.warning(f"Deeper Scan: camera probing failed: {ex}")
+            new = []
+        cards = (f" {len(new)} new camera card(s)." if new else " No new camera found.")
     PSCAN.update(
         running=False, progress=100, results=all_results,
-        message=f"Batch scan complete — {total} host(s), {len(all_results)} open port(s) total.",
+        message=("Cancelled." if PSCAN.get("cancelled") else
+                 f"Scan complete — {total} host(s), {len(all_results)} open port(s) total.{cards}"),
         ip="",
     )
     PSCAN_QUEUE.clear()
@@ -1333,7 +1360,8 @@ async def api_pscan_cancel(request: web.Request) -> web.Response:
             os.kill(pid, signal.SIGTERM)
         except Exception:
             pass
-    PSCAN.update(running=False, paused=False, message="Cancelled.", proc_pid=None)
+    PSCAN.update(running=False, paused=False, message="Cancelled.", proc_pid=None,
+                 cancelled=True)                 # 4.1.0 (D6): the rest of the queue stops too
     return web.json_response({"status": "ok"})
 
 async def api_pscan_pause(request: web.Request) -> web.Response:

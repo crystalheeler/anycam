@@ -65,7 +65,12 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .sweep-toggle{{display:flex;align-items:center;gap:5px;font-size:.78rem;color:var(--text-dim);cursor:pointer;white-space:nowrap}}
 .sweep-toggle input{{accent-color:var(--primary);cursor:pointer}}
 #status-bar{{padding:6px 18px;font-size:.78rem;color:var(--text-dim);
-             display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border);min-height:30px}}
+             display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border);min-height:30px;
+             flex-wrap:wrap}}
+/* 4.1.0 (D7): Back to Cameras, in the status bar of every menu; an accent outline */
+.status-back{{background:color-mix(in srgb,var(--primary) 14%,transparent);color:var(--primary);
+             border:1px solid var(--primary);font-weight:700}}
+.status-back:hover{{background:var(--primary);color:#fff}}
 .stage-badge{{background:var(--primary);color:#fff;border-radius:4px;padding:1px 7px;
               font-size:.7rem;font-weight:700;white-space:nowrap}}
 .progress-track{{flex:1;height:3px;background:var(--surface2);border-radius:2px;overflow:hidden;max-width:180px}}
@@ -125,7 +130,7 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .dot-error{{background:var(--red);box-shadow:0 0 5px var(--red)}}
 .dot-upgrade{{background:var(--orange);box-shadow:0 0 8px var(--orange);animation:pulse 2s infinite}}
 .scan-timer-badge{{font-size:.74rem;color:var(--primary);font-weight:700;white-space:nowrap}}
-.arp-host-section{{padding:14px 18px 0;display:flex;flex-direction:column;gap:6px}}
+.arp-host-section{{padding:0;display:flex;flex-direction:column;gap:6px}}
 .arp-section-label{{font-size:.75rem;font-weight:600;color:var(--text-dim);letter-spacing:.04em}}
 .arp-host-list{{background:var(--surface);border:1px solid var(--border);border-radius:8px;
                padding:10px;display:flex;flex-direction:column;gap:3px;max-height:220px;overflow-y:auto}}
@@ -156,9 +161,11 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .card-actions{{padding:0 12px 10px;display:flex;gap:4px;flex-wrap:wrap;align-items:center}}
 .card-actions .btn-sm{{padding:3px 7px;font-size:.72rem}}
 #pscan-view{{padding:16px 18px;gap:12px}}
-.pscan-header{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px}}
-.pscan-header .pscan-ctl{{margin-left:auto}}
-.pscan-ctl{{display:flex;gap:6px;flex-wrap:wrap}}
+/* 4.1.0 (D6): the scans for the chosen hosts at the left, the network rescan at the right */
+.pscan-actions{{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:space-between}}
+.pscan-ctl{{display:flex;gap:6px;flex-wrap:wrap;align-items:center}}
+.pscan-ctl .btn small{{display:block;font-weight:400;opacity:.75;font-size:.66rem}}
+.pscan-rescan{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-left:auto}}
 .pscan-top{{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end}}
 .pscan-top input{{background:var(--surface);border:1px solid var(--border);color:var(--text);
                   border-radius:8px;padding:7px 12px;font-size:.88rem;outline:none;
@@ -423,20 +430,16 @@ header h1{{cursor:pointer}}
     <span style="margin-left:10px">AnyCam &mdash; Home</span>
   </h1>
   <span id="cam-count" style="color:var(--text-dim);font-size:.78rem"></span>
-  <label class="sweep-toggle" title="Scan ports 0-10000 on live hosts that don't respond to camera ports">
-    <input type="checkbox" id="broad-sweep">
-    <span>Deeper Scan<br><small style="font-weight:400;opacity:.6;font-size:.68rem">Ports 1&#x2013;10,000</small></span>
-  </label>
-  <button class="btn btn-primary"   id="scan-btn"  onclick="startScan()">&#x1F50D; Scan Network</button>
-  <button class="btn btn-secondary" id="pscan-btn"    onclick="switchView('pscan')">&#x1F50E; Port Scan</button>
+  <button class="btn btn-secondary" id="pscan-btn"    onclick="switchView('pscan')">&#x1F50E; Scans</button>
   <button class="btn btn-secondary" id="add-btn"      onclick="switchView('add')">&#x2795; Connect Camera</button>
   <button class="btn btn-secondary" id="storage-btn"  onclick="switchView('storage')">&#x1F4BE; Storage</button>
 
 </header>
 
 <div id="status-bar">
+  <button class="btn btn-sm status-back" id="status-back" onclick="switchView('cameras')" style="display:none">&#x2190; Back to Cameras</button>
   <span id="stage-badge" class="stage-badge" style="display:none"></span>
-  <span id="status-msg">Idle &#x2014; click Scan Network to start.</span>
+  <span id="status-msg">Idle &#x2014; open Scans to look for cameras.</span>
   <div class="progress-track" id="progress-track" style="display:none">
     <div class="progress-fill" id="progress-fill"></div>
   </div>
@@ -455,22 +458,14 @@ header h1{{cursor:pointer}}
         <path d="M15 10l4.553-2.069A1 1 0 0121 8.87v6.26a1 1 0 01-1.447.9L15 14"/>
         <rect x="1" y="7" width="14" height="10" rx="2" ry="2"/>
       </svg>
-      <p id="empty-idle">No cameras found.<br>Click <strong>Scan Network</strong> to discover cameras on your subnet.</p>
+      <p id="empty-idle">No cameras found.<br>Open <strong>Scans</strong> and click <strong>Rescan Entire System</strong> to discover cameras on your network.</p>
       <p id="empty-scanning" style="display:none">No Cameras Found Yet</p>
     </div>
   </div>
 </div>
 
 <div class="view" id="pscan-view">
-  <!-- Back button upper left + controls -->
-  <div class="pscan-header">
-    <button class="btn btn-ghost btn-sm" onclick="switchView('cameras')">&#x2190; Back to Cameras</button>
-    <div class="pscan-ctl">
-      <button class="btn btn-primary"   id="ps-start"  onclick="startPortScan()">&#x25B6; Scan All Ports</button>
-      <button class="btn btn-secondary" id="ps-pause"  onclick="togglePause()" style="display:none">&#x23F8; Pause</button>
-      <button class="btn btn-danger"    id="ps-cancel" onclick="cancelPortScan()" style="display:none">&#x2715; Cancel</button>
-    </div>
-  </div>
+  <!-- 4.1.0 (D6): one Scans menu. Back to Cameras is in the status bar (D7). -->
   <!-- ARP-discovered hosts with checkboxes -->
   <div class="arp-host-section">
     <div class="arp-section-label">&#x1F4E1; Discovered hosts <span style="color:var(--text-dim);font-weight:400">(check any to include in port scan)</span></div>
@@ -481,9 +476,27 @@ header h1{{cursor:pointer}}
   <!-- Manual IP input -->
   <div class="pscan-top">
     <input type="text" id="pscan-ip" placeholder="Or enter an IP address manually (e.g. 192.168.1.100)"
-           onkeydown="if(event.key==='Enter')startPortScan()"/>
+           oninput="psUpdateButtons()" onkeydown="if(event.key==='Enter'&&!document.getElementById('ps-deeper').disabled)startPortScan('deeper')"/>
   </div>
-  <div id="pscan-msg" style="padding:6px 2px;font-size:.8rem;color:var(--text-dim)">Select hosts above and/or enter an IP, then click Scan All Ports.<br><small style="opacity:.7">Note: navigating away will not cancel an in-progress scan.</small></div>
+  <div id="pscan-msg" style="padding:6px 2px;font-size:.8rem;color:var(--text-dim)">Select hosts above and/or enter an IP, then choose a scan below.<br><small style="opacity:.7">Note: navigating away will not cancel an in-progress scan.</small></div>
+  <div class="pscan-actions">
+    <div class="pscan-ctl">
+      <button class="btn btn-primary" id="ps-deeper" onclick="startPortScan('deeper')" disabled
+              title="Ports 1-10,000 on the chosen hosts; a camera found gets its card">&#x25B6; Deeper Scan<small>ports 1&#x2013;10,000</small></button>
+      <button class="btn btn-primary" id="ps-start" onclick="startPortScan('all')" disabled
+              title="All 65,535 ports on the chosen hosts, with service details">&#x25B6; Scan All Ports<small>all 65,535</small></button>
+      <button class="btn btn-secondary" id="ps-pause"  onclick="togglePause()" style="display:none">&#x23F8; Pause</button>
+      <button class="btn btn-danger"    id="ps-cancel" onclick="cancelPortScan()" style="display:none">&#x2715; Cancel</button>
+    </div>
+    <div class="pscan-rescan">
+      <label class="sweep-toggle" title="Also scan ports 1-10,000 on live hosts that do not answer camera ports">
+        <input type="checkbox" id="broad-sweep">
+        <span>Deeper Scan<br><small style="font-weight:400;opacity:.6;font-size:.68rem">Ports 1&#x2013;10,000</small></span>
+      </label>
+      <button class="btn btn-primary" id="scan-btn" onclick="startScan(true)"
+              title="Look for new cameras on the whole network, as at first start">&#x25B6; Rescan Entire System</button>
+    </div>
+  </div>
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
     <div class="progress-track" id="ps-prog-track" style="display:none;flex:1;max-width:none">
       <div class="progress-fill" id="ps-prog-fill"></div>
@@ -501,9 +514,6 @@ header h1{{cursor:pointer}}
 </div>
 
 <div class="view" id="add-view">
-  <div style="margin-bottom:14px">
-    <button class="btn btn-ghost btn-sm" onclick="switchView('cameras')">&#x2190; Back to Cameras</button>
-  </div>
   <h2>Connect Known Camera</h2>
   <div class="fgrid">
     <div class="field full"><label>CAMERA NAME</label><input type="text" id="add-name" placeholder="e.g. Front Door"/></div>
@@ -730,7 +740,6 @@ header h1{{cursor:pointer}}
 <!-- ── Storage view ───────────────────────────────────────────────────────── -->
 <div class="view" id="storage-view">
   <div id="storage-topbar">
-    <button class="btn btn-ghost btn-sm" onclick="switchView('cameras')">&#x2190; Back to Cameras</button>
     <div id="disk-bar-wrap">
       <span id="disk-label">Loading...</span>
       <div id="disk-bar-track"><div id="disk-bar-fill"></div></div>

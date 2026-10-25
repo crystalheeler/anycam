@@ -1844,7 +1844,7 @@ async def test_empty_text():
     print("\n[T] 3.0.0-rc1.4 empty-page text")
     html = cd.build_html()
     check("T1 the page has both texts; the scanning one starts hidden",
-          '<p id="empty-idle">No cameras found.<br>Click <strong>Scan Network</strong>' in html
+          '<p id="empty-idle">No cameras found.<br>Open <strong>Scans</strong> and click <strong>Rescan Entire System</strong>' in html
           and '<p id="empty-scanning" style="display:none">No Cameras Found Yet</p>' in html)
     check("T1 the scan status poll sets the text", "_setEmptyText(running);" in html)
 
@@ -6811,6 +6811,116 @@ async def test_400():
     cd.MOTION_REF_S = real_ref
 
 
+# ── AX. 4.1.0: one Scans menu (D6), Back to Cameras in the status bar (D7) ───
+async def test_410():
+    print("\n[AX] 4.1.0 the Scans menu, Deeper Scan on chosen hosts, Back to Cameras")
+    S = sys.modules["anycam_scan"]
+    from aiohttp import web as _web
+    from aiohttp.test_utils import TestClient, TestServer
+    check("AX1 Deeper Scan scans ports 1-10,000, Scan All Ports every port",
+          S.PSCAN_PORTS["deeper"][0] == "-p1-10000" and S.PSCAN_PORTS["all"][0] == "-p-")
+
+    # AX2 the API: a mode, a queue for a Deeper Scan, Cancel stops the queue
+    ran, cards = [], []
+
+    async def fake_port_scan(ip, mode="all"):
+        ran.append((ip, mode))
+        cd.PSCAN["results"] = [{"port": 8000, "proto": "tcp", "service": "http", "product": "cam"}]
+        if ip == "10.0.0.51":
+            cd.PSCAN["cancelled"] = True      # Cancel pressed during the first host
+
+    async def fake_cards(by_ip):
+        cards.append(dict(by_ip))
+        return ["10.0.0.50_8000"]
+    real_cards = S.deeper_scan_cards
+    S.deeper_scan_cards = fake_cards
+    app = _web.Application()
+    app.router.add_post("/api/pscan/start", cd.api_pscan_start)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        with _Swap(run_port_scan=fake_port_scan):
+            cd.PSCAN["running"] = False
+            r = await client.post("/api/pscan/start", json={"ip": "10.0.0.50", "mode": "magic"})
+            check("AX2 an unknown scan mode is refused", r.status == 400)
+            r = await client.post("/api/pscan/start", json={"ip": "10.0.0.50", "mode": "deeper"})
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                if not cd.PSCAN["running"] and ran:
+                    break
+            check("AX2 a Deeper Scan of one host runs as a queue, ports 1-10,000, then looks for cameras",
+                  r.status == 200 and ran == [("10.0.0.50", "deeper")] and cards
+                  and list(cards[0]) == ["10.0.0.50"] and "1 new camera card" in cd.PSCAN["message"],
+                  f"{ran} {cards} {cd.PSCAN['message']}")
+            ran.clear(); cards.clear()
+            cd.PSCAN["running"] = False
+            r = await client.post("/api/pscan/start", json={"ips": ["10.0.0.51", "10.0.0.52"], "mode": "deeper"})
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                if not cd.PSCAN["running"] and ran:
+                    break
+            check("AX2 ... Cancel stops the rest of the queue, and no cameras are looked for",
+                  ran == [("10.0.0.51", "deeper")] and not cards and cd.PSCAN["message"] == "Cancelled.",
+                  f"{ran} {cards}")
+    finally:
+        await client.close()
+        S.deeper_scan_cards = real_cards
+        cd.PSCAN["running"] = False
+        cd.PSCAN["cancelled"] = False
+
+    # AX3 the open ports become cards through the scan's own probes
+    probed, saved = [], []
+
+    async def fake_probe(ip, port, hostname, initial, prev, verdict, reason, loop, host_meta=None):
+        probed.append((ip, port))
+        return {"id": f"{ip}_{port}", "ip": ip, "port": port, "protocol": "RTSP", "status": "ready",
+                "name": "cam", "stream_url": "rtsp://x"}
+    with _Swap(_probe_host_port=fake_probe, save_cameras=lambda: saved.append(1)):
+        cd.CAMERAS.clear()
+        real_pending = S.PENDING_CAMERAS
+        S.PENDING_CAMERAS = None
+        try:
+            new = await S.deeper_scan_cards({"10.0.0.60": [{"port": 8554, "service": "rtsp", "product": ""}],
+                                             "10.0.0.61": []})
+        finally:
+            S.PENDING_CAMERAS = real_pending
+    check("AX3 Deeper Scan on chosen hosts: a camera on an open port gets its card, saved at once",
+          new == ["10.0.0.60_8554"] and probed == [("10.0.0.60", 8554)] and "10.0.0.60_8554" in cd.CAMERAS
+          and saved, f"{new} {probed}")
+    cd.CAMERAS.clear()
+
+    # AX4 a scan counts its new cameras, so the Scans menu can show the cameras at the first one
+    real_pending = S.PENDING_CAMERAS
+    S.PENDING_CAMERAS = {}
+    cd.CAMERAS["old_554"] = {"id": "old_554"}
+    try:
+        cd._publish_scan_card({"id": "old_554"})
+        first = cd.SCAN_STATE.get("new_cameras")
+        cd._publish_scan_card({"id": "new_554"})
+        check("AX4 the scan status counts the new cameras it found (a known one is not new)",
+              first == 0 and cd.SCAN_STATE.get("new_cameras") == 1)
+    finally:
+        S.PENDING_CAMERAS = real_pending
+        cd.CAMERAS.clear()
+
+    # AX5 the page
+    html = cd.build_html()
+    head = html[html.index("<header"):html.index("</header>")]
+    check("AX5 D6 the header has Scans, and no Deeper Scan box or Scan Network button",
+          "&#x1F50E; Scans</button>" in head and "broad-sweep" not in head and 'id="scan-btn"' not in head)
+    pv = html[html.index('id="pscan-view"'):html.index('id="add-view"')]
+    check("AX5 ... the Scans menu: Deeper Scan and Scan All Ports start grey; Rescan Entire System with its box",
+          'id="ps-deeper" onclick="startPortScan(\'deeper\')" disabled' in pv
+          and 'id="ps-start" onclick="startPortScan(\'all\')" disabled' in pv
+          and 'id="broad-sweep"' in pv and 'onclick="startScan(true)"' in pv and "Rescan Entire System" in pv)
+    check("AX5 D7 Back to Cameras is in the status bar, once, and in no menu",
+          html.count("Back to Cameras</button>") == 1 and 'id="status-back"' in html
+          and html.index('id="status-back"') > html.index('id="status-bar"')
+          and html.index('id="status-back"') < html.index('id="status-msg"'))
+    check("AX5 ... the status bar wraps on a narrow screen (rule 10)",
+          "min-height:30px;\n             flex-wrap:wrap" in html)
+
+
 async def main():
     test_pure()
     fake = FakeGo2rtc()
@@ -6871,6 +6981,7 @@ async def main():
     await test_390()
     await test_390_rc2()
     await test_400()
+    await test_410()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

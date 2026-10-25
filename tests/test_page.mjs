@@ -1221,6 +1221,18 @@ console.log('\n[3.9.0] cards stay paused behind Enhanced View (B81), playback nu
         && page.includes("if (!camId || !_csGlobal) return;"));
   check('C32 answer 14: a camera judged from still pictures shows a warning on its card and in the cog',
         page.includes("(red ? ' \u26a0' : '')") || page.includes("(red ? ' ⚠' : '')"));
+  check('D6 the scans for chosen hosts are grey until a host is checked or an address typed',
+        page.includes("const none = !getSelectedIPs().length;") && page.includes("if (b) b.disabled = none || _psRunning;")
+        && (page.match(/psUpdateButtons\(\);/g) || []).length >= 4);
+  check('D6 ... Deeper Scan sends its mode; its cards load when it ends',
+        page.includes("const body = ips.length === 1 ? {ip: ips[0], mode} : {ips, mode};")
+        && page.includes("if (s.mode === 'deeper') loadCameras();"));
+  check('D6 ... Rescan Entire System keeps the menu open until the first new camera, then shows the cameras',
+        page.includes("if (_rescanWatch && s.running && (s.new_cameras || 0) > 0) {")
+        && page.includes("if (document.getElementById('pscan-view').classList.contains('active')) {")
+        && page.includes("if (!fromMenu && !document.getElementById('cameras-view').classList.contains('active'))"));
+  check('D7 Back to Cameras shows in the status bar on every menu but the cameras',
+        page.includes("if (back) back.style.display = (viewMap[v] && v !== 'cameras') ? '' : 'none';"));
   check('C32 ... the cog warning follows the server', page.includes("dg.style.display = d.detector === 'snapshots' ? '' : 'none';"));
 }
 

@@ -39,6 +39,9 @@ function switchView(v) {
   const viewMap = {cameras: 'cameras-view', pscan: 'pscan-view', add: 'add-view', storage: 'storage-view'};
   document.getElementById(viewMap[v] || 'cameras-view').classList.add('active');
   document.getElementById('pscan-btn').classList.toggle('active', v === 'pscan');
+  // 4.1.0 (D7): Back to Cameras in the status bar on every menu
+  const back = document.getElementById('status-back');
+  if (back) back.style.display = (viewMap[v] && v !== 'cameras') ? '' : 'none';
   document.getElementById('add-btn').classList.toggle('active', v === 'add');
   document.getElementById('storage-btn').classList.toggle('active', v === 'storage');
   if (v === 'storage') loadStorage();
@@ -46,9 +49,7 @@ function switchView(v) {
     loadArpHosts();
     fetch(BASE + '/api/pscan/status').then(r => r.json()).then(s => {
       if (s.running) {
-        document.getElementById('ps-start').disabled = true;
-        document.getElementById('ps-pause').style.display = '';
-        document.getElementById('ps-cancel').style.display = '';
+        psSetRunning(true);
         document.getElementById('ps-prog-track').style.display = '';
         _paused = s.paused || false;
         document.getElementById('ps-pause').textContent = _paused ? '▶ Resume' : '⏸ Pause';
@@ -64,9 +65,14 @@ function switchView(v) {
 }
 
 /* ── Camera scan ───────────────────────────────────────────────────────────── */
-async function startScan() {
-  if (!document.getElementById('cameras-view').classList.contains('active'))
+// 4.1.0 (D6): Rescan Entire System, in the Scans menu. The menu stays open
+// until the scan finds its first new camera, then shows the cameras.
+let _rescanWatch = false;
+
+async function startScan(fromMenu) {
+  if (!fromMenu && !document.getElementById('cameras-view').classList.contains('active'))
     switchView('cameras');
+  _rescanWatch = !!fromMenu;
   const broad = document.getElementById('broad-sweep').checked;
   const r = await fetch(BASE + '/api/scan', {
     method: 'POST',
@@ -113,9 +119,17 @@ async function pollScan() {
       timerEl.style.display = 'none';
     }
     _updateCancelBtn(s.running);
+    if (_rescanWatch && s.running && (s.new_cameras || 0) > 0) {
+      _rescanWatch = false;
+      if (document.getElementById('pscan-view').classList.contains('active')) {
+        switchView('cameras');
+        showToast('New camera found: its card appears when the scan finishes');
+      }
+    }
     if (s.running) {
       pollT = setTimeout(pollScan, 1500);
     } else {
+      _rescanWatch = false;
       document.getElementById('scan-btn').disabled = false;
       document.getElementById('status-bar').classList.remove('scanning');
       document.getElementById('progress-track').style.display = 'none';
@@ -4271,11 +4285,34 @@ function renderArpList() {
               ? '<span class="arp-host"> — ' + esc(h.hostname) + '</span>' : '')
           + '</label>';
       }).join('');
+  psUpdateButtons();
 }
 
 function onCbChange(cb) {
   if (cb.checked) _selectedIPs.add(cb.value);
   else            _selectedIPs.delete(cb.value);
+  psUpdateButtons();
+}
+
+// 4.1.0 (D6): the scans for chosen hosts are grey until a host is chosen
+let _psRunning = false;
+
+function psUpdateButtons() {
+  const none = !getSelectedIPs().length;
+  ['ps-deeper', 'ps-start'].forEach(id => {
+    const b = document.getElementById(id);
+    if (b) b.disabled = none || _psRunning;
+  });
+}
+
+function psSetRunning(on) {
+  _psRunning = !!on;
+  const show = on ? '' : 'none';
+  ['ps-pause', 'ps-cancel'].forEach(id => {
+    const b = document.getElementById(id);
+    if (b) b.style.display = show;
+  });
+  psUpdateButtons();
 }
 
 function arpSelectAll(val) {
@@ -4284,6 +4321,7 @@ function arpSelectAll(val) {
     if (val) _selectedIPs.add(cb.value);
     else     _selectedIPs.delete(cb.value);
   });
+  psUpdateButtons();
 }
 
 function getSelectedIPs() {
@@ -4292,19 +4330,19 @@ function getSelectedIPs() {
   return combined;
 }
 
-async function startPortScan() {
+// 4.1.0 (D6): mode 'deeper' (ports 1-10,000; cameras found get cards) or 'all'
+async function startPortScan(mode) {
+  mode = mode === 'deeper' ? 'deeper' : 'all';
   const ips = getSelectedIPs();
   if (!ips.length) { alert('Select at least one host or enter an IP address.'); return; }
 
-  const body = ips.length === 1 ? {ip: ips[0]} : {ips};
+  const body = ips.length === 1 ? {ip: ips[0], mode} : {ips, mode};
   const r = await fetch(BASE + '/api/pscan/start', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body)
   });
   if (!r.ok) { const d = await r.json(); alert(d.error || 'Scan failed'); return; }
-  document.getElementById('ps-start').disabled = true;
-  document.getElementById('ps-pause').style.display  = '';
-  document.getElementById('ps-cancel').style.display = '';
+  psSetRunning(true);
   document.getElementById('ps-prog-track').style.display = '';
   document.getElementById('port-table').style.display = 'none';
   document.getElementById('port-tbody').innerHTML = '';
@@ -4371,9 +4409,8 @@ async function pollPscan() {
     if (s.running) {
       pscanT = setTimeout(pollPscan, 2000);
     } else {
-      document.getElementById('ps-start').disabled  = false;
-      document.getElementById('ps-pause').style.display  = 'none';
-      document.getElementById('ps-cancel').style.display = 'none';
+      psSetRunning(false);
+      if (s.mode === 'deeper') loadCameras();        // 4.1.0 (D6): the cards it found
     }
   } catch { pscanT = setTimeout(pollPscan, 3000); }
 }
@@ -4462,9 +4499,7 @@ async function cancelPortScan() {
   await fetch(BASE + '/api/pscan/cancel', {method: 'POST'});
   _paused = false;
   document.getElementById('ps-pause').textContent = '⏸ Pause';
-  document.getElementById('ps-start').disabled = false;
-  document.getElementById('ps-pause').style.display  = 'none';
-  document.getElementById('ps-cancel').style.display = 'none';
+  psSetRunning(false);
 }
 
 /* ── Add camera ────────────────────────────────────────────────────────────── */

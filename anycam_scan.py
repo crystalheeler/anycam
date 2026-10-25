@@ -634,7 +634,10 @@ def _initial_protocol(port: int, service: str, product: str) -> str:
     return service.upper() or "UNKNOWN"
 
 
-async def run_port_scan(ip: str) -> None:
+PSCAN_PORTS = {"all": ("-p-", "all 65535 ports"), "deeper": ("-p1-10000", "ports 1-10,000")}   # 4.1.0 (D6)
+
+
+async def run_port_scan(ip: str, mode: str = "all") -> None:
 
     """
     Full 65535-port scan with live discovery feed.
@@ -652,7 +655,7 @@ async def run_port_scan(ip: str) -> None:
 
     PSCAN.update(
         running=True, paused=False, ip=ip, progress=2,
-        message=f"Scanning all 65535 ports on {ip}…",
+        message=f"Scanning {PSCAN_PORTS[mode][1]} on {ip}…",
         results=[], live_ports=[], proc_pid=None,
         scan_start=time.time(), eta=_init_eta, percent=0.0,
     )
@@ -661,7 +664,7 @@ async def run_port_scan(ip: str) -> None:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "nmap", "-sV", "-sC", "-A", "--open", "-p-",
+            "nmap", "-sV", "-sC", "-A", "--open", PSCAN_PORTS[mode][0],
             "-v", "--stats-every", "10s",
             "--host-timeout", "600s", "-T3",
             "-oX", xml_path, ip,
@@ -755,6 +758,86 @@ async def run_port_scan(ip: str) -> None:
     finally:
         PSCAN["proc_pid"] = None
 
+
+
+async def _probe_broad_hosts(broad_results: list[dict], saved: dict, loop,
+                             cancelled=lambda: SCAN_CANCELLED) -> None:
+    """Probe the open ports a deeper (1-10,000) sweep found; publish the cards.
+
+    4.1.0 (D6): the scan's stage 4, and Deeper Scan on hosts chosen in the
+    Scans menu (deeper_scan_cards), which has its own Cancel.
+    """
+    for host in broad_results:
+        if cancelled():
+            break
+        ip, hostname = host["ip"], host.get("hostname", host["ip"])
+        verdict, reason = classify_device(host)
+        if _scan_known_camera(ip, saved) or _scan_restore_removed(ip, saved):
+            continue            # 3.7.5-rc2.0 (B53)
+        for port_info in host.get("open_ports", []):
+            port = port_info["port"]
+            cid  = f"{ip}_{port}"
+            if cid in BLACKLIST:
+                continue
+            # 2.4.0-rc2.4: FEEDBACK fingerprint check (broad-sweep)
+            fb_skip, fb_reason = _matches_feedback_fingerprint(host, port)
+            if fb_skip:
+                log.info(f"  FEEDBACK fingerprint match: skipping "
+                         f"{ip}:{port} — {fb_reason}")
+                continue
+            initial = _initial_protocol(port, port_info.get("service", ""),
+                                         port_info.get("product", ""))
+            prev = saved.get(cid, {})
+            # rc2: pass host_meta for brand-aware probe short-circuits
+            host_meta = {
+                "ip":            ip,
+                "hostname":      hostname,
+                "mac_addr":      host.get("mac_addr", ""),
+                "mac_vendor":    host.get("mac_vendor", ""),
+                "vendor":        host.get("mac_vendor", ""),
+                "nmap_product":  port_info.get("product", ""),
+                "verdict_reason": reason,
+            }
+            cam  = await _probe_host_port(ip, port, hostname, initial,
+                                          prev, verdict, reason, loop,
+                                          host_meta=host_meta)
+            if cam:
+                _publish_scan_card(cam)
+            # 3.8.0-rc1.0 (B54): identified; its other ports get no probes
+            if host_meta.get("rtsp_needs_password") or (
+                    cam and cam.get("protocol") == "RTSP" and cam.get("status") == "ready"):
+                log.info(f"  {ip}: identified on port {port} — its other ports are not probed")
+                break
+
+
+async def deeper_scan_cards(ports_by_ip: dict[str, list[dict]]) -> list[str]:
+    """4.1.0 (D6): the open ports of a Deeper Scan on chosen hosts -> camera cards.
+
+    ports_by_ip: each host's open ports from the port scan (port, service,
+    product). The cards go through _publish_scan_card, so during a network
+    scan they join its pending cards; otherwise they are saved at once.
+    Returns the ids of the new cards.
+    """
+    before = set(CAMERAS) | set(PENDING_CAMERAS or {})
+    hosts = []
+    for ip, ports in ports_by_ip.items():
+        if not ports or ip in BLACKLIST:
+            continue
+        mac = LIVE_HOST_MACS.get(ip, "")
+        hosts.append({"ip": ip, "hostname": ip, "mac_addr": mac,
+                      "mac_vendor": lookup_oui(mac) if mac else "",
+                      "open_ports": [{"port": int(p["port"]), "service": p.get("service", ""),
+                                      "product": p.get("product", "")} for p in ports]})
+    if not hosts:
+        return []
+    saved = {cid: c for cid, c in CAMERAS.items() if c.get("user_saved")}
+    await _probe_broad_hosts(hosts, saved, asyncio.get_event_loop(),
+                             cancelled=lambda: bool(PSCAN.get("cancelled")))
+    new = sorted((set(CAMERAS) | set(PENDING_CAMERAS or {})) - before)
+    if new and PENDING_CAMERAS is None:
+        save_cameras()
+    log.info(f"Deeper Scan on {len(hosts)} chosen host(s): {len(new)} new card(s)")
+    return new
 
 async def _rerun_onvif_auth(camera_id: str, camera: dict,
                              username: str, password: str) -> bool:
@@ -1985,47 +2068,7 @@ async def run_scan() -> None:
                               stage_label="Stage 4/4 — Deeper Scan",
                               message=f"Stage 4/4 — Deeper scan on {len(silent)} unresponsive host(s)…")
             broad_results = await loop.run_in_executor(_THREAD_POOL, broad_nmap_scan, silent)
-            for host in broad_results:
-                if SCAN_CANCELLED:
-                    break
-                ip, hostname = host["ip"], host.get("hostname", host["ip"])
-                verdict, reason = classify_device(host)
-                if _scan_known_camera(ip, saved) or _scan_restore_removed(ip, saved):
-                    continue            # 3.7.5-rc2.0 (B53)
-                for port_info in host.get("open_ports", []):
-                    port = port_info["port"]
-                    cid  = f"{ip}_{port}"
-                    if cid in BLACKLIST:
-                        continue
-                    # 2.4.0-rc2.4: FEEDBACK fingerprint check (broad-sweep)
-                    fb_skip, fb_reason = _matches_feedback_fingerprint(host, port)
-                    if fb_skip:
-                        log.info(f"  FEEDBACK fingerprint match: skipping "
-                                 f"{ip}:{port} — {fb_reason}")
-                        continue
-                    initial = _initial_protocol(port, port_info.get("service", ""),
-                                                 port_info.get("product", ""))
-                    prev = saved.get(cid, {})
-                    # rc2: pass host_meta for brand-aware probe short-circuits
-                    host_meta = {
-                        "ip":            ip,
-                        "hostname":      hostname,
-                        "mac_addr":      host.get("mac_addr", ""),
-                        "mac_vendor":    host.get("mac_vendor", ""),
-                        "vendor":        host.get("mac_vendor", ""),
-                        "nmap_product":  port_info.get("product", ""),
-                        "verdict_reason": reason,
-                    }
-                    cam  = await _probe_host_port(ip, port, hostname, initial,
-                                                  prev, verdict, reason, loop,
-                                                  host_meta=host_meta)
-                    if cam:
-                        _publish_scan_card(cam)
-                    # 3.8.0-rc1.0 (B54): identified; its other ports get no probes
-                    if host_meta.get("rtsp_needs_password") or (
-                            cam and cam.get("protocol") == "RTSP" and cam.get("status") == "ready"):
-                        log.info(f"  {ip}: identified on port {port} — its other ports are not probed")
-                        break
+            await _probe_broad_hosts(broad_results, saved, loop)
 
         # 3.0.1 (B2): an appliance camera (by its MAC) gets an information
         # card. If the probing above already gave it a card (a login form,

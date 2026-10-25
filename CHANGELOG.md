@@ -1,3 +1,27 @@
+## 4.1.0
+
+All scans are in one Scans menu, and Back to Cameras sits in the status bar of every menu. This release also carries 4.0.0: the object engine, a second motion engine you can choose per camera.
+
+### Changes & improvements
+
+- **One Scans menu.** Port Scan is now Scans. Its scans for the chosen hosts: Deeper Scan (ports 1-10,000) and Scan All Ports (every port); both stay grey until a host is checked or an address typed.
+- **Deeper Scan finds cameras too.** It lists the open ports and gives any camera it finds its card.
+- **Rescan Entire System** looks for new cameras on the whole network, as at first start, with its own Deeper Scan box. The cameras show as soon as it finds its first new one.
+- **Back to Cameras in the status bar.** On every menu, in colour; the empty row above each menu is gone.
+- **The object engine (4.0.0).** Choose it per camera in the Cog panel: moving objects by size, in the zone at their feet, followed across zones. The classic engine stays the default.
+- **Reduced detection is shown (4.0.0).** A camera judged from still pictures shows a warning on its record button and in the Cog panel.
+
+### Bugs fixed
+
+- **Cancel did not stop a port scan of several hosts.** It stops the rest of the queue now.
+- **A moving object lost its recording in the next zone** on the object engine (4.0.0).
+
+### Known issues
+
+- **The object engine is new.** Replayed on 409 recordings it records 2 of 29 headlight files and 8 of 10 insect files; try it on one camera first.
+- **Insects in the infrared still record** on both engines; lower the camera's night sensitivity.
+- **New cameras from Rescan Entire System appear when the scan finishes**; the menu shows the cameras at the first one found.
+
 ## 4.0.0
 
 A second motion engine judges moving objects by their size and follows them across zones. Choose it per camera in the Cog panel; the classic engine stays the default.

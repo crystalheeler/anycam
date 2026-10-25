@@ -1,19 +1,17 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 25 October 2026. Store version: 3.9.0 (released 2026-10-25: pushed, GitHub Latest, store). 4.0.0 (C32, the object engine, classic by default) is built; CrystalHeeler's unattended order of 2026-10-25 continues with 4.1.0 = D6 and D7 (the Scans menu, Back to Cameras in the status bar), pushed and published. rc numbers are single-digit (CrystalHeeler, 2026-10-10).
+**Compiled:** Updated 25 October 2026. Store version: 4.1.0 (released 2026-10-25: pushed, GitHub Latest, store; CrystalHeeler's order, run unattended): D6 and D7 (the Scans menu, Back to Cameras in the status bar), with 4.0.0 (C32, the object engine, a per-camera choice, classic by default). 3.9.0 (B84, B85) was released the same day. Next: the field test. rc numbers are single-digit (CrystalHeeler, 2026-10-10).
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.
 
 ---
 
-## Next up: 4.1.0 (D6, D7), then the field test
+## Next up: field-test 4.1.0
 
-0. **Released (2026-10-25):** 3.9.0 — the code of 3.9.0-rc2.0 (B84, B85). Pushed, GitHub Latest and store (CrystalHeeler's order, 2026-10-25).
-1. **Built (2026-10-25):** 4.0.0 — C32, the object engine (B75 with it); a per-camera choice, classic by default. Not published on its own; it goes out with 4.1.0.
-2. **4.1.0 = D6 and D7,** then pushed and published (CrystalHeeler's order, 2026-10-25).
-3. **Field test 4.1.0:** a night of recordings with one camera on the object engine; the Scans menu; the Pi's memory with the 17 s buffer.
-4. **Waiting on CrystalHeeler:** B62 (the phone's VPN route), B86 (the back yard's night sensitivity), F11 (the rc format), B33, C23.
+0. **Released (2026-10-25):** 4.1.0 — D6 and D7, with 4.0.0 (C32, the object engine, classic by default; B75). Pushed, GitHub Latest and store (CrystalHeeler's order, 2026-10-25). 3.9.0 (B84, B85) the same day.
+1. **Field test 4.1.0:** a night of recordings with one camera on the object engine (its "an object" lines); the Scans menu (Deeper Scan on a chosen host, Rescan Entire System); the Pi's memory with the 17 s buffer and its time per picture on the object engine.
+2. **Waiting on CrystalHeeler:** B62 (the phone's VPN route), B86 (the back yard's night sensitivity), F11 (the rc format), B33, C23.
 
 ---
 
@@ -64,8 +62,6 @@ Every ticket reads: Discovered (date, version, test system); Problem; Solution(s
 
 | # | Status | Item | Discovered | Problem | Solution(s) |
 |---|---|---|---|---|---|
-| D6 | Ready | **One Scans menu for every scan** | Discovered 25 Oct 2026 in 3.9.0-rc2.0 running on Test System B (CrystalHeeler's mock-up) | The scans are in two places. • The header holds the Deeper Scan check box and Scan Network (a full network scan; Deeper Scan adds ports 1-10,000 on hosts that do not answer camera ports). • Port Scan opens a menu whose only scan, Scan All Ports, runs all 65,535 ports with service detection on the checked hosts and the typed address (not the whole system) | • The header button Port Scan becomes Scans; the Deeper Scan box and Scan Network leave the header. • Two buttons under the host list, for the checked hosts and the typed address only, grey while none is chosen: Deeper Scan (ports 1-10,000) and Scan All Ports (all ports). • Rescan Entire System at the right: the full network scan for new devices, as at first start, with a Deeper Scan check box beside it that adds the 1-10,000 stage, as the header box does now (CrystalHeeler, 25 Oct). • During Rescan Entire System, the first new camera found takes the user to the Home screen; the scan goes on, its progress in the status bar (CrystalHeeler, 25 Oct). Only from the Scans menu: a user who moved to another menu stays there (both confirmed by CrystalHeeler, 25 Oct). • Texts that name Scan Network change with it. • Deeper Scan on chosen hosts does both: it lists the open ports in the table, as Scan All Ports does, and adds the cameras it finds as cards, as the network scan does (CrystalHeeler, 25 Oct) |
-| D7 | Ready | **Back to Cameras in the status bar, in colour, on every menu** | Discovered 25 Oct 2026 in 3.9.0-rc2.0 running on Test System B (CrystalHeeler's mock-up) | Each menu (Scans, Connect Camera, Storage and the others) has Back to Cameras on a row of its own under the status bar, which leaves a blank band above the content, and the button is grey and easy to miss | • Back to Cameras sits at the left of the status bar on every menu except the cameras view, and the extra row goes. • A clear but quiet colour (an accent outline and text), the same on every menu. • The status bar wraps on a phone (rule 10) |
 
 ## E. Code health
 
@@ -83,6 +79,8 @@ Every ticket reads: Discovered (date, version, test system); Problem; Solution(s
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
+| One Scans menu for every scan (D6) | This plan, D6 | 4.1.0 (built 2026-10-25): Port Scan is Scans; Deeper Scan (ports 1-10,000, ports table and cards) and Scan All Ports for the chosen hosts, grey until one is chosen; Rescan Entire System with its Deeper Scan box; the cameras show at the first new camera (only from the Scans menu); Cancel stops a queue. Tests AX1-AX5, page checks; seen at 1366x768, 375x812 and 812x375. Not field-tested |
+| Back to Cameras in the status bar, in colour, on every menu (D7) | This plan, D7 | 4.1.0 (built 2026-10-25): one button at the left of the status bar on every menu but the cameras, an accent outline; the rows on the Scans, Connect Camera and Storage menus are gone; the bar wraps on a phone. Tests AX5, page check |
 | A motion engine that judges objects, not cells (C32) | This plan, C32 | 4.0.0 (built 2026-10-25): anycam_objects.py and the object path in anycam_motion.py, chosen per camera (classic by default); objects by size, the zone at their feet, tracking over 3 pictures with travel, insects and lit surfaces left out, the 3 s light hold, followed across zones while recording, the reduced-detection warning. Design and replay of 409 recordings: docs/C32_Object_Engine.md. Tests AW1-AW8. Not field-tested |
 | An object that crosses into the next zone is not confirmed (B75) | This plan, B75 | 4.0.0 (built 2026-10-25): on the object engine a confirmed object is followed into any zone, below its size, for up to 3 s unseen (C32). Test AW4. The classic engine is unchanged |
 | Headlights record when the light pause ends (B84) | This plan, B84 | 3.9.0-rc2.0 (built 2026-10-25): a pause lasts up to 8 s (12 s in all); the light still moving continues it; the slow-movement check keeps no picture during a pause; a detector restart clears the pause. Replayed on 409 recordings (docs/Recording_Review_2026-10-24.md, section 10): 0 of the night's 29 headlight files record. Tests AV6-AV8. Not field-tested |
