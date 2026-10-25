@@ -296,6 +296,7 @@ header h1{{cursor:pointer}}
 .cs-mode{{font-size:12px;color:var(--text-dim);margin-top:4px}}
 .cs-mode.cs-night{{color:var(--blue)}}
 .cs-night-note{{font-size:12px;color:var(--orange);margin-top:4px}}
+.cs-degraded{{font-size:12px;color:var(--orange);border:1px solid var(--orange);border-radius:6px;padding:6px 8px;margin:4px 0 8px}}
 .cs-peak-mark{{position:absolute;top:-2px;width:3px;height:22px;margin-left:-1px;background:var(--orange);border-radius:2px;pointer-events:none}}
 .cs-ends{{display:flex;justify-content:space-between;font-size:.7rem;color:var(--text-dim);margin-top:-6px}}
 .cs-peak{{font-size:.78rem;color:var(--orange);min-height:1.2em}}
@@ -549,6 +550,14 @@ header h1{{cursor:pointer}}
     <div class="cs-global" id="cs-global" style="display:none">Global recording settings are on in the
       Configuration tab, so they apply to every camera. Turn them off there to set each camera here.</div>
     <div class="cs-section">Motion</div>
+    <div class="cs-degraded" id="cs-degraded" style="display:none">Detection is reduced on this camera:
+      its live stream is not reaching the motion detector, so it is judged from still pictures, about one
+      a second. Small or quick movements can be missed.</div>
+    <label class="cs-full">Motion engine<select id="cs-engine" onchange="csEngineShow(); csEngineGlobalSave()">
+      <option value="classic">Classic: how much of each zone changed</option>
+      <option value="objects">Objects: moving objects, by size</option>
+    </select></label>
+    <div class="cs-help" id="cs-engine-help"></div>
     <div class="cs-label"><span>Sensitivity</span><span class="cs-val" id="cs-level-val">63</span></div>
     <div class="cs-slider">
       <input type="range" id="cs-level" min="1" max="100" step="1" oninput="csLevelShow()">

@@ -944,9 +944,10 @@ async def test_cam_settings():
     url = "/api/cameras/ch7/motion/settings"
     try:
         d = await (await client.get(url)).json()
-        check("L1 defaults: 63, cooldown 5, tail 3, 30s, /media/anycam",
+        check("L1 defaults: 63, cooldown 5, tail 3, 30s, /media/anycam, the classic engine (4.0.0)",
               d["settings"] == {"level": 63, "cooldown": 5, "tail": 3, "clip": "30s",
-                                "path": "/media/anycam"} and not d["custom"], str(d["settings"]))
+                                "path": "/media/anycam", "engine": "classic"} and not d["custom"],
+              str(d["settings"]))
         r = await client.post(url, json={"level": 90, "cooldown": 8, "tail": 2, "clip": "1min",
                                          "path": "/media/driveway"})
         d = await r.json()
@@ -6641,6 +6642,175 @@ async def test_390_rc2():
     cd.MOTION_REF_S = real_ref
 
 
+# ── AW. 4.0.0 (C32): the object engine ───────────────────────────────────────
+async def test_400():
+    print("\n[AW] 4.0.0 the object engine: objects, tracking, zones, insects, settings")
+    import random as _r
+    O = sys.modules["anycam_objects"]
+    Z = sys.modules["anycam_zones"]
+    real_ref = cd.MOTION_REF_S
+    cd.MOTION_REF_S = 1.0
+    W, H = cd.MOTION_GRID
+    rnd = _r.Random(9)
+    base = bytearray(rnd.randrange(60, 200) for _ in range(W * H))
+
+    def pic(blocks=(), value=255, noise=True):
+        b = bytearray(base)
+        for x, y, w, h in blocks:
+            for yy in range(y, y + h):
+                for xx in range(x, x + w):
+                    b[yy * W + xx] = value
+        if noise:
+            b[rnd.randrange(len(b))] ^= 1
+        return cd._motion_thumb_gray(bytes(b))
+
+    # AW1 grouping: a gap of one cell joins, a wide gap separates
+    flags = bytearray(W * H)
+    for x in (2, 3, 5, 6, 30, 31):          # 2-3 and 5-6 one cell apart; 30-31 far
+        flags[10 * W + x] = 1
+    objs = O.find_objects(bytes(flags), bytes(W * H), bytes([9]) * (W * H), (W, H))
+    check("AW1 changed cells near each other are one object, far ones another",
+          sorted(o["n"] for o in objs) == [2, 4], str([o["n"] for o in objs]))
+    check("AW1 ... an object's feet are the bottom middle of its box",
+          max(objs, key=lambda o: o["n"])["foot"] == (4, 10))
+
+    # AW2 tracking: moving is confirmed after 3 pictures; standing still never
+    def blob(x, y, n=6, bright=1.0, fill=0.8):
+        return {"n": n, "box": (x, y, x + 2, y + 2), "cx": x + 1.0, "cy": y + 1.0, "foot": (x + 1, y + 2),
+                "bright": bright, "delta": 40.0, "fill": fill, "cells": []}
+    st = {}
+    seen = []
+    for k in range(3):
+        seen = O.track(st, [blob(10 + 3 * k, 20)], k * 0.25, (W, H))
+    check("AW2 an object moving over 3 pictures is confirmed", seen and seen[0]["confirmed"])
+    st = {}
+    for k in range(6):
+        seen = O.track(st, [blob(10, 20)], k * 0.25, (W, H))
+    check("AW2 ... one that does not move (a lamp switching on) is not", seen and not seen[0]["confirmed"])
+    st = {}
+    O.track(st, [blob(10, 20)], 0.0, (W, H), counts=lambda o: False)
+    check("AW2 ... an object that does not count where it is starts no track", not st["tracks"])
+    check("AW2 ... a confirmed object is kept 3 s unseen, an unconfirmed one 1 s",
+          O.OBJ_FOLLOW_S == 3.0 and O.OBJ_DROP_S == 1.0)
+    check("AW2 the sensitivity sets the smallest object: 10% at 1, 0.05% at 100, smaller when higher",
+          abs(O.obj_min_pct(1) - 10.0) < 1e-9 and abs(O.obj_min_pct(100) - 0.05) < 1e-6
+          and O.obj_min_pct(63) > O.obj_min_pct(90) > O.obj_min_pct(115) >= 0.02)
+
+    # AW3 through the real motion feed
+    cid = "aw"
+    cd.CAMERAS.clear(); cd.CAMERAS[cid] = camera(id=cid)
+    Z.set_zones(cid, None)
+    started = []
+
+    async def fake_start(cid_, cam_, url_):
+        started.append(cd._MOTION[cid_].get("judge_zone"))
+        cd._MOTION[cid_]["recording"] = True
+    real_start, real_url = cd._start_recording, cd.build_authenticated_url
+    cd._start_recording = fake_start
+    cd.build_authenticated_url = lambda c_: "rtsp://x"
+    clock = {"k": 0}
+
+    def fresh(level=63, night=False):
+        cd._MOTION.clear(); cd._MOTION_CFG.clear(); started.clear()
+        cd._MOTION_CFG[cid] = {"level": level, "engine": "objects"}
+        m_ = cd._motion_state(cid); m_["enabled"] = True
+        cd._motion_reset_prev(cid)
+        m_["night"] = night
+        clock["k"] = 0
+        return m_
+
+    async def play(frames):
+        for f in frames:
+            clock["k"] += 1
+            cd._motion_feed(cid, f, 1000.0 + clock["k"] * 0.25, stream_t=clock["k"] / 4)
+            await asyncio.sleep(0)
+    quiet = lambda n: [pic() for _ in range(n)]
+    walk = [pic([(4 + 2 * k, 18, 5, 12)], value=20) for k in range(16)]     # dark, 60 cells, 2%
+    ms = fresh()
+    await play(quiet(8) + walk)
+    check("AW3 a person walking records on the object engine", len(started) == 1 and ms["engine"] == "objects",
+          str(started))
+    ms = fresh()
+    await play(quiet(8) + [pic([(40, 4, 8, 12)])] * 16)
+    check("AW3 ... a lamp switching on does not", not started)
+    ms = fresh(level=63)
+    small = [pic([(4 + 2 * k, 18, 1, 1)], value=20) for k in range(16)]       # 1 cell: 0.03%
+    await play(quiet(8) + small)
+    check("AW3 ... an object under the size the sensitivity sets does not", not started)
+    insect = [pic([(5 + 5 * k, 10, 3, 3)]) for k in range(10)]                 # bright, solid, quick, 0.3%
+    ms = fresh(level=100, night=True)
+    await play(quiet(8) + insect + quiet(8))
+    at_night = list(started)
+    ms = fresh(level=100, night=False)
+    await play(quiet(8) + insect + quiet(8))
+    check("AW3 ... at night a small, solid, brighter-only object is an insect: not recorded (by day it is)",
+          not at_night and len(started) == 1, f"{at_night} {started}")
+
+    # AW4 B75: while recording, a confirmed object is followed below any size
+    ms = fresh()
+    await play(quiet(8) + walk[:12])
+    rec_before = ms["recording"]
+    last = ms["last_motion"]
+    shrink = [pic([(28 + 2 * k, 26, 2, 2)], value=20) for k in range(4)]      # 4 cells, under the size
+    await play(shrink)
+    check("AW4 B75 a confirmed object is followed while it records, below the size",
+          rec_before and ms["last_motion"] > last)
+
+    # AW5 the zone at the object's feet starts the recording
+    zone = {"zones": [{"name": "Lawn", "points": [[0, 0.5], [1, 0.5], [1, 1], [0, 1]], "level": 63,
+                       "closed": True},
+                      {"name": "Sky", "points": [[0, 0], [1, 0], [1, 0.5], [0, 0.5]], "level": 63,
+                       "closed": True}], "zones_only": True}
+    Z.set_zones(cid, zone)
+    W2, H2 = cd._motion_grid(cid)
+    base2 = bytearray(rnd.randrange(60, 200) for _ in range(W2 * H2))
+
+    def pic2(x, y, w, h):
+        b = bytearray(base2)
+        for yy in range(y, y + h):
+            for xx in range(x, x + w):
+                b[yy * W2 + xx] = 20
+        b[rnd.randrange(len(b))] ^= 1
+        return cd._motion_thumb_gray(bytes(b))
+    ms = fresh()
+    await play([pic2(0, 0, 1, 1) for _ in range(8)] + [pic2(10 + 3 * k, 30, 8, 24) for k in range(14)])
+    check("AW5 an object belongs to the zone at its feet (a person standing on the lawn, head in the sky zone)",
+          started == ["Lawn"], str(started))
+    Z.set_zones(cid, None)
+
+    # AW6 settings
+    clean, errors = cd._motion_validate({**cd.MOTION_DEFAULTS, "engine": "objects"})
+    bad, errors_bad = cd._motion_validate({**cd.MOTION_DEFAULTS, "engine": "magic"})
+    check("AW6 the engine is a setting: objects accepted, anything else refused",
+          not errors and clean["engine"] == "objects" and errors_bad)
+    cd._MOTION_CFG.clear(); cd._MOTION_CFG[cid] = {"engine": "objects"}
+    real_global = cd.CFG_MOTION_GLOBAL
+    with _Swap():
+        cd.CFG_MOTION_GLOBAL = True
+        g_engine = cd._motion_cfg(cid)["engine"]
+        cd.CFG_MOTION_GLOBAL = real_global
+    check("AW6 ... and stays each camera's own choice with the global settings on", g_engine == "objects")
+    check("AW6 ... the classic engine is the default", cd.MOTION_DEFAULTS["engine"] == "classic"
+          and cd._motion_engine("other") == "classic")
+
+    # AW7 answer 14: still pictures only
+    ms = fresh()
+    ms["detector_live"] = False; ms["snap_cmp_t"] = 5.0
+    kind_snap = cd._motion_detector_kind(cid)
+    ms["detector_live"] = True
+    check("AW7 a camera judged from still pictures is reported as reduced; the live stream as live",
+          kind_snap == "snapshots" and cd._motion_detector_kind(cid) == "live")
+    check("AW7 ... the light hold is 1 s longer on the object engine (the picture settling)",
+          cd._motion_light_hold_s({"engine": "objects"}) == cd.MOTION_LIGHT_HOLD_S + 1.0
+          and cd._motion_light_hold_s({"engine": "classic"}) == cd.MOTION_LIGHT_HOLD_S)
+    src = (REPO / "Dockerfile").read_text(encoding="utf-8")
+    check("AW8 the new file is in the image and the module list",
+          "anycam_objects.py" in src and "anycam_objects.py" in sys.modules["anycam_modules"].MODULES)
+    cd._start_recording, cd.build_authenticated_url = real_start, real_url
+    cd._MOTION.clear(); cd._MOTION_CFG.clear(); cd.CAMERAS.clear()
+    cd.MOTION_REF_S = real_ref
+
+
 async def main():
     test_pure()
     fake = FakeGo2rtc()
@@ -6700,6 +6870,7 @@ async def main():
     await test_384()
     await test_390()
     await test_390_rc2()
+    await test_400()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

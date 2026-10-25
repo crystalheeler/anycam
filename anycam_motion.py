@@ -29,6 +29,7 @@ from anycam_go2rtc import _go2rtc_relay, _go2rtc_relay_result     # 3.3.0 (C4)
 import anycam_zones                                                 # 3.4.0 (C17)
 import anycam_upload                                                # 3.6.0 (C14)
 import anycam_backup                                                # 3.8.3 (C27)
+import anycam_objects                                               # 4.0.0 (C32)
 
 log = logging.getLogger("anycam")
 
@@ -263,9 +264,10 @@ def _motion_colour(camera_id: str, chroma: float, now_m: float, frames: int) -> 
                          f"(colour {sum(before) / len(before):.1f} → {chroma:.1f}) — treated as a "
                          f"light change, not recorded")
             ms["colour_switch_t"] = ms["light_t"] = t
-            ms["light_until"] = max(ms.get("light_until", float("-inf")), t + MOTION_LIGHT_HOLD_S)
+            ms["light_until"] = max(ms.get("light_until", float("-inf")), t + _motion_light_hold_s(ms))
             ms["hits"] = []
             _motion_slow_forget(ms)
+            _motion_objs_forget(ms)                                 # 4.0.0 (C32)
     if frames % MOTION_DETECT_FPS == 1:
         _motion_night_observe(camera_id, chroma, now_m)
 
@@ -273,7 +275,7 @@ def _motion_colour(camera_id: str, chroma: float, now_m: float, frames: int) -> 
 def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
                    t: float, live: bool) -> bool:
     """Judge one comparison; apply the light hold and, live, the confirmation."""
-    verdict, pct = _motion_judge(camera_id, ref, thumb)
+    verdict, pct = _motion_judge(camera_id, ref, thumb, t)
     # ffmpeg repeats a picture when the stream stalls; a repeat is not news.
     repeat = live and (thumb[0] == ms.get("last_cur") or ref[0] == ms.get("last_ref"))
     ms["last_cur"], ms["last_ref"] = thumb[0], ref[0]
@@ -290,14 +292,27 @@ def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
             ms.setdefault("slow_taint", collections.deque(maxlen=8)).append(hits[0][0])
         hits.clear()
     if verdict == "light":
-        ms["light_until"] = t + MOTION_LIGHT_HOLD_S
+        ms["light_until"] = t + _motion_light_hold_s(ms)
         ms["light_t"] = t                # 3.9.0-rc2.0 (B85): a waiting start is cancelled
         hits.clear()
         _motion_slow_forget(ms)          # 3.9.0 (B73)
+        _motion_objs_forget(ms)          # 4.0.0 (C32)
         return False
     if _motion_light_pause(camera_id, ms, t):      # 3.9.0 (C30)
         hits.clear()
+        _motion_objs_forget(ms)
         return False
+    if ms.get("engine") == "objects":
+        # 4.0.0 (C32): the tracker confirmed the object over 3 pictures, so no
+        # second-picture rule; the light hold and a stalled stream still apply
+        if t < ms.get("light_until", float("-inf")):
+            # an object seen during the hold is confirmed again after it (the front
+            # yard, 25 Oct 00:43:52: the same car's light, 2.5 s after a light change)
+            _motion_objs_forget(ms)
+            if verdict == "motion":
+                _cal_reason(ms, f"within {MOTION_LIGHT_HOLD_S:.0f} s of a light change")
+            return False
+        return verdict == "motion" and not repeat
     # One big change records one picture later, unless that picture shows a
     # light change: the first, half-switched picture of an infrared switch
     # changed 24% of ch7 with only 69% spread (06:20:35).
@@ -330,6 +345,144 @@ def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
     zone = ms.get("judge_zone")
     hits.append((t, pct, thumb[0], zone, ms.get("cmp")))
     return sum(1 for h in hits if h[3] == zone) >= 2
+
+
+# ── 4.0.0 (C32): the object engine ─────────────────────────────────────────
+# CrystalHeeler's decisions of 2026-10-24. The changed cells of a comparison
+# become objects (anycam_objects.find_objects); an object counts where
+# detection is set (a zone at its feet, or outside the zones unless the camera
+# detects in zones only) when it is at least the size the sensitivity sets
+# (anycam_objects.obj_min_pct, the night boost added); it records once the
+# tracker has seen it in 3 pictures and it has moved. While recording, a
+# confirmed object is followed anywhere, below any zone's size, for up to 3 s
+# unseen (B75). The light rule, the light pause, the light hold, the 1.25 s
+# look and the slow-movement check work as with the classic engine.
+MOTION_ENGINES = ("classic", "objects")
+
+
+def _motion_engine(camera_id: str) -> str:
+    """The camera's motion engine: always its own choice, also in global mode."""
+    return (_MOTION_CFG.get(camera_id) or {}).get("engine", MOTION_DEFAULTS["engine"])
+
+
+OBJ_SETTLE_S = 1.0   # the object engine holds this much longer after a light change: the
+                     # picture settling looks like a shrinking object (25 Oct 00:43:52, 03:34:48)
+
+
+def _motion_light_hold_s(ms: dict) -> float:
+    """Seconds after a light change in which nothing counts."""
+    return MOTION_LIGHT_HOLD_S + (OBJ_SETTLE_S if ms.get("engine") == "objects" else 0.0)
+
+
+def _motion_objs_forget(ms: dict) -> None:
+    """Drop the tracks: after a light change the next pictures must confirm again."""
+    st = ms.get("objs")
+    if st:
+        st.get("tracks", []).clear()
+
+
+def _motion_obj_place(camera_id: str, obj: dict, grid: tuple) -> dict | None:
+    """The zone at the object's feet, else the zone holding most of it, else None."""
+    if not anycam_zones.has_zones(camera_id):
+        return None
+    zmap = anycam_zones.zone_map(camera_id, grid)
+    fx, fy = obj["foot"]
+    z = zmap.get(fy * grid[0] + fx)
+    if z is not None:
+        return z
+    tally: dict[int, list] = {}
+    for c in obj["cells"]:
+        zc = zmap.get(c)
+        if zc is not None:
+            tally.setdefault(id(zc), [zc, 0])[1] += 1
+    best = max(tally.values(), key=lambda v: v[1], default=None)
+    return best[0] if best and best[1] * 2 > obj["n"] else None
+
+
+def _motion_obj_need(camera_id: str, obj: dict, grid: tuple) -> tuple[float | None, dict | None]:
+    """(cells the object needs where it is, its zone); None cells where detection is off."""
+    z = _motion_obj_place(camera_id, obj, grid)
+    if z is None:
+        if anycam_zones.zones_only(camera_id):
+            return None, None
+        level = _motion_cfg(camera_id)["level"]
+    elif z["level"] <= 0:
+        return None, z
+    else:
+        level = z["level"]
+    pct = anycam_objects.obj_min_pct(level + _motion_boost(camera_id))
+    return pct * grid[0] * grid[1] / 100.0, z
+
+
+OBJ_INSECT_BRIGHT = 0.90     # 4.0.0 (C32): at night, an object this one-sided brighter ...
+OBJ_INSECT_FILL = 0.55       # ... this compact (cells / its box) ...
+OBJ_INSECT_MAX_PCT = 1.0     # ... and under this % of the picture is an insect in the infrared
+                             # (8 of 10 insect files on 23-25 Oct; people and the cat are
+                             # brighter and darker in parts, 36-66% brighter)
+
+
+def _motion_obj_insect(ms: dict, obj: dict, total: int) -> bool:
+    """4.0.0 (C32): a small, solid, one-sided object at night: an insect lit by the infrared.
+
+    Brighter where the insect is now; darker where it was 1 s before (its twin
+    in the same comparison, which moves with it).
+    """
+    one_sided = obj["bright"] >= OBJ_INSECT_BRIGHT or obj["bright"] <= 1.0 - OBJ_INSECT_BRIGHT
+    return (bool(ms.get("night")) and one_sided and obj["fill"] >= OBJ_INSECT_FILL
+            and 100.0 * obj["n"] / total < OBJ_INSECT_MAX_PCT)
+
+
+def _motion_obj_light(obj: dict) -> bool:
+    """A lit or darkened surface, not a body: one-sided and scattered (C30's test, per object)."""
+    one_sided = obj["bright"] >= LIGHT_SWEEP_SHARE or obj["bright"] <= 1.0 - LIGHT_SWEEP_SHARE
+    return one_sided and abs(obj["delta"]) >= LIGHT_SWEEP_DELTA and obj["fill"] <= LIGHT_SWEEP_FILL_MAX
+
+
+def _motion_objects(camera_id: str, ms: dict, prev: tuple, curr: tuple, flags: bytes,
+                    t: float) -> tuple[str, float]:
+    """("motion" | "", % of the picture): the object engine's verdict on one comparison."""
+    grid = _grid_of(len(flags))
+    total = grid[0] * grid[1]
+    objs = anycam_objects.find_objects(flags, prev[0], curr[0], grid)
+
+    def counts(obj: dict) -> bool:
+        need, _z = _motion_obj_need(camera_id, obj, grid)
+        return (need is not None and obj["n"] >= need and not _motion_obj_light(obj)
+                and not _motion_obj_insect(ms, obj, total))
+    seen = anycam_objects.track(ms.setdefault("objs", {}), objs, t, grid, counts)
+    conf = [tr for tr in seen if tr["confirmed"]]
+    biggest = 100.0 * objs[0]["n"] / total if objs else 0.0
+    if not conf:
+        return "", biggest
+    tr = max(conf, key=lambda r: r["last"]["n"])
+    _need, z = _motion_obj_need(camera_id, tr["last"], grid)
+    name = z["name"] if z else None
+    pct = 100.0 * tr["last"]["n"] / total
+    if ms.get("recording"):
+        # B75: followed below any size; the zone list gains a zone only when the
+        # object's feet stayed in it for two pictures (a clear move)
+        for r in conf:
+            _n, zr = _motion_obj_need(camera_id, r["last"], grid)
+            hist = r.setdefault("zones", [])
+            hist.append(zr["name"] if zr else None)
+            del hist[:-2]
+            if len(hist) == 2 and hist[0] == hist[1] and hist[0] is not None:
+                _motion_note_rec_zones(ms, [hist[0]])
+        ms["judge_zone"] = name
+        return "motion", pct
+    if not counts(tr["last"]):
+        return "", pct
+    ms["judge_zone"] = name
+    if tr.get("said") is None:
+        tr["said"] = t
+        steps = [(round(x, 1), round(y, 1), n) for _t, x, y, n, _b, _f in tr["path"]]
+        where = ("outside the zones" if name is None and anycam_zones.has_zones(camera_id)
+                 else "in " + _cal_label(name, anycam_zones.has_zones(camera_id)))
+        log.info(f"Motion [{camera_id}]: an object {where} — {pct:.2f}% of the "
+                 f"picture, moved {tr['travel']:.0%} of its width in {len(tr['path'])} pictures")
+        log.debug(f"Motion [{camera_id}]: object {tr['id']}: path {steps}, brighter "
+                  f"{tr['last']['bright']:.0%}, fill {tr['last']['fill']:.2f}")
+    return "motion", pct
 
 
 # ── 3.9.0 (C30): passing lights (vehicle headlights) ─────────────────────────
@@ -568,6 +721,7 @@ def _motion_reset_prev(camera_id: str) -> None:
         ms["lp"] = ms["lp_last"] = ms["hold"] = None
         ms.setdefault("lp_hist", collections.deque(maxlen=16)).clear()
         ms.pop("light_t", None)
+        ms.pop("objs", None)                                        # 4.0.0 (C32)
 # ── 2.6.6: pixel comparison (build plan B16, C13) ──────────────────────────
 # 2.6.5 compared JPEG file sizes. A person barely changes the size of a
 # 9-10 KB Lorex snapshot, so nothing was recorded all day on 2026-09-30,
@@ -701,8 +855,12 @@ def _motion_zone_results(camera_id: str, flags: bytes) -> list[tuple[str | None,
 
 
 def _motion_judge(camera_id: str, prev: tuple[bytes, float, float],
-                  curr: tuple[bytes, float, float]) -> tuple[str, float]:
-    """("motion" | "light" | "", % changed); logs for tuning."""
+                  curr: tuple[bytes, float, float], t: float | None = None) -> tuple[str, float]:
+    """("motion" | "light" | "", % changed); logs for tuning.
+
+    t: the picture's time (the stream clock); the object engine follows
+    objects by it.
+    """
     flags, frac, spread = _motion_cells(prev, curr)
     pct = frac * 100.0
     ms = _MOTION.get(camera_id) or {}
@@ -721,6 +879,13 @@ def _motion_judge(camera_id: str, prev: tuple[bytes, float, float],
                  f"picture ({pct:.0f}% of it changed) — treated as a light "
                  f"change, not recorded")
         return "light", pct
+    if _motion_engine(camera_id) == "objects":                   # 4.0.0 (C32)
+        ms["engine"] = "objects"
+        if anycam_zones.has_zones(camera_id):
+            _motion_note_zone_peaks(ms, _motion_zone_results(camera_id, flags))
+        return _motion_objects(camera_id, ms, prev, curr, flags,
+                               time.monotonic() if t is None else t)
+    ms["engine"] = "classic"
     area = _motion_area_now(camera_id)
     if anycam_zones.has_zones(camera_id):
         # 3.4.0 (C17): each zone on its own cells, outside the zones on the rest
@@ -997,7 +1162,7 @@ def _motion_quiet(camera_id: str, ms: dict, now_m: float) -> bool:
 # Configuration tab's global_recording_settings is on, its values replace
 # every camera's. Stored in MOTION_FILE beside the armed list.
 MOTION_DEFAULTS = {"level": 63, "cooldown": 5, "tail": 3, "clip": "30s",
-                   "path": "/media/anycam"}
+                   "path": "/media/anycam", "engine": "classic"}       # 4.0.0 (C32): engine
 MOTION_CLIP_CHOICES = {"10s": 10, "20s": 20, "30s": 30, "1min": 60,
                        "2min": 120, "5min": 300}
 MOTION_PATH_ROOT = "/media"     # the add-on maps only /media (config.yaml)
@@ -1042,7 +1207,8 @@ def _motion_cfg(camera_id: str) -> dict:
         cfg = {"level": CFG_MOTION_LEVEL, "cooldown": CFG_MOTION_COOL,
                "tail": CFG_MOTION_PAD, "path": CFG_RECORDINGS,
                "clip": next((k for k, v in MOTION_CLIP_CHOICES.items()
-                             if v == CFG_MOTION_CLIP_S), "30s")}
+                             if v == CFG_MOTION_CLIP_S), "30s"),
+               "engine": _motion_engine(camera_id)}      # 4.0.0: always the camera's own
     else:
         cfg = {**MOTION_DEFAULTS, **_MOTION_CFG.get(camera_id, {})}
     cfg["area_pct"] = _motion_area_pct(cfg["level"])
@@ -1076,6 +1242,10 @@ def _motion_validate(data: dict) -> tuple[dict, list[str]]:
                                         or path.startswith(MOTION_PATH_ROOT + "/")):
         errors.append(f"Recording folder must be under {MOTION_PATH_ROOT}")
     clean["path"] = path
+    engine = str(data.get("engine", MOTION_DEFAULTS["engine"]))     # 4.0.0 (C32)
+    if engine not in MOTION_ENGINES:
+        errors.append("Motion engine must be one of " + ", ".join(MOTION_ENGINES))
+    clean["engine"] = engine
     return clean, errors
 
 
@@ -1096,6 +1266,9 @@ def _motion_settings_payload(camera_id: str) -> dict:
         "night":      bool(ms.get("night")),
         "night_boost": MOTION_NIGHT_BOOST,
         "night_note": HA_LOC_NOTE if _HA_LOC_STATE["mismatch"] else ms.get("night_note"),
+        "engines":    list(MOTION_ENGINES),                                # 4.0.0 (C32)
+        # 4.0.0 (C32, answer 14): judged from still pictures, about one a second
+        "detector":   _motion_detector_kind(camera_id),
         **_motion_zones_payload(camera_id),
     }
 
@@ -1173,9 +1346,29 @@ async def api_motion_settings(request: web.Request) -> web.Response:
         return web.json_response({"error": "Camera not found"}, status=404)
     if request.method != "GET":
         if CFG_MOTION_GLOBAL:
-            return web.json_response(
-                {"error": "Global recording settings are on in the Configuration tab"},
-                status=409)
+            # 4.0.0 (C32): the engine stays each camera's own choice
+            try:
+                data = await request.json() if request.method == "POST" else None
+            except ValueError:
+                data = None
+            engine = data.get("engine") if isinstance(data, dict) and set(data) == {"engine"} else None
+            if engine not in MOTION_ENGINES:
+                return web.json_response(
+                    {"error": "Global recording settings are on in the Configuration tab"},
+                    status=409)
+            own = {k: v for k, v in (_MOTION_CFG.get(camera_id) or {}).items() if k != "engine"}
+            if engine != MOTION_DEFAULTS["engine"]:
+                own["engine"] = engine
+            if own:
+                _MOTION_CFG[camera_id] = own
+            else:
+                _MOTION_CFG.pop(camera_id, None)
+            log.info(f"Motion [{camera_id}]: motion engine set to {engine}")
+            try:
+                await asyncio.to_thread(_motion_save)
+            except OSError as ex:
+                log.warning(f"Motion: could not save {MOTION_FILE}: {ex}")
+            return web.json_response(_motion_settings_payload(camera_id))
         if request.method == "DELETE":
             _MOTION_CFG.pop(camera_id, None)
         else:
@@ -1785,6 +1978,17 @@ async def _ha_notify(title: str, message: str, notification_id: str) -> None:
         log.warning(f"Home Assistant notification failed: {ex}")
 
 
+def _motion_detector_kind(camera_id: str) -> str | None:
+    """4.0.0 (C32, answer 14): "live", "snapshots" (reduced: about one picture a
+    second), or None when the camera is not armed or nothing was judged yet."""
+    ms = _MOTION.get(camera_id)
+    if not (ms and ms["enabled"]):
+        return None
+    if ms.get("detector_live"):
+        return "live"
+    return "snapshots" if ms.get("snap_cmp_t") else None
+
+
 def _motion_uses_snapshots(camera_id: str) -> bool:
     """Armed, and the snapshot path is its detector right now."""
     ms = _MOTION.get(camera_id)
@@ -2319,7 +2523,9 @@ async def api_motion_all(request: web.Request) -> web.Response:
     return web.json_response({
         cid: {"enabled": ms["enabled"], "recording": ms["recording"],
               # 3.4.0 (answer 16): the zone that started the recording
-              **({"zone": ms["rec_zone"]} if ms["recording"] and ms.get("rec_zone") else {})}
+              **({"zone": ms["rec_zone"]} if ms["recording"] and ms.get("rec_zone") else {}),
+              # 4.0.0 (C32, answer 14): judged from still pictures
+              **({"reduced": True} if _motion_detector_kind(cid) == "snapshots" else {})}
         for cid, ms in _MOTION.items() if ms["enabled"] or ms["recording"]
     })
 

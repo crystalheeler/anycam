@@ -741,6 +741,8 @@ async function toggleMotion(camId) {
  * 3 s. 2.6.5: one request for all cameras. Before, the page asked only about
  * cameras it already believed armed, so after a page load it never learned
  * that a camera was armed, and another device's change never showed. */
+const _reducedDet = {};   // 4.0.0 (C32): camera id -> judged from still pictures
+
 async function syncMotion(redraw) {
   try {
     const all = await (await fetch(BASE + '/api/motion')).json();
@@ -748,9 +750,11 @@ async function syncMotion(redraw) {
       const m  = all[cam.id] || {};
       const on = !!m.enabled, rec = !!m.recording;
       _recZone[cam.id] = m.zone || null;    // 3.4.0 (answer 16)
-      if (on !== !!_motionEnabled[cam.id] || rec !== !!_recording[cam.id]) {
+      const red = !!m.reduced;               // 4.0.0 (C32, answer 14)
+      if (on !== !!_motionEnabled[cam.id] || rec !== !!_recording[cam.id] || red !== !!_reducedDet[cam.id]) {
         _motionEnabled[cam.id] = on;
         _recording[cam.id]     = rec;
+        _reducedDet[cam.id]    = red;
         if (redraw) updateCard(cam);
       }
     });
@@ -810,12 +814,44 @@ function _csFill(d) {
   document.getElementById('cs-tail').value     = st.tail;
   sel.value                                    = st.clip;
   document.getElementById('cs-path').value     = st.path;
+  const engSel = document.getElementById('cs-engine');                      // 4.0.0 (C32)
+  if (engSel) { engSel.value = st.engine || 'classic'; csEngineShow(); }
   csLevelShow();
   const off = !!d.global;
+  _csGlobal = off;
   ['cs-level', 'cs-cooldown', 'cs-tail', 'cs-clip', 'cs-path', 'cs-save', 'cs-reset']
     .forEach(id => { document.getElementById(id).disabled = off; });
   document.getElementById('cs-global').style.display = off ? '' : 'none';
   _csZonesFill(d, off);
+}
+
+/* 4.0.0 (C32): the engine. Each camera keeps its own choice, also in global mode,
+ * where Save is off: there the choice is saved at once. */
+let _csGlobal = false;
+
+async function csEngineGlobalSave() {
+  const camId = _csCamId;
+  if (!camId || !_csGlobal) return;
+  const err = document.getElementById('cs-error');
+  try {
+    const r = await fetch(BASE + '/api/cameras/' + encodeURIComponent(camId) + '/motion/settings',
+                          {method: 'POST', headers: {'Content-Type': 'application/json'},
+                           body: JSON.stringify({engine: document.getElementById('cs-engine').value})});
+    const d = await r.json();
+    if (!r.ok) { err.textContent = d.error || 'Could not save'; return; }
+    showToast('Motion engine saved');
+  } catch (e) { err.textContent = 'Could not save: ' + e; }
+}
+
+function csEngineShow() {
+  const sel = document.getElementById('cs-engine'), help = document.getElementById('cs-engine-help');
+  if (!sel || !help) return;
+  const objects = sel.value === 'objects';
+  help.textContent = objects
+    ? 'Sensitivity sets the smallest object that records: more sensitive records smaller objects. '
+      + 'An object records once it has moved over 3 pictures; while it records it is followed into '
+      + 'other zones. At night a small, solid object that is only brighter or only darker counts as an insect.'
+    : 'Sensitivity sets how much of a zone, or of the picture, must change.';
 }
 
 function csLevelShow() {
@@ -835,6 +871,9 @@ function _csPeak(d) {
   const note = document.getElementById('cs-night-note');
   note.textContent = d.night_note || '';
   note.style.display = d.night_note ? '' : 'none';
+  // 4.0.0 (C32, answer 14): judged from still pictures
+  const dg = document.getElementById('cs-degraded');
+  if (dg) dg.style.display = d.detector === 'snapshots' ? '' : 'none';
   mark.style.display = 'none';
   // 3.4.0 (answer 14): each zone's largest change, and outside the zones
   const zp = document.getElementById('cs-zone-peaks');
@@ -858,12 +897,15 @@ function _csPeak(d) {
 async function saveCamSettings() {
   const camId = _csCamId;
   if (!camId) return;
+  const engSel = document.getElementById('cs-engine');
+  const engine = engSel ? engSel.value : 'classic';
   const body = {
     level:    parseInt(document.getElementById('cs-level').value, 10),
     cooldown: parseInt(document.getElementById('cs-cooldown').value, 10),
     tail:     parseInt(document.getElementById('cs-tail').value, 10),
     clip:     document.getElementById('cs-clip').value,
     path:     document.getElementById('cs-path').value.trim(),
+    engine,
   };
   const err = document.getElementById('cs-error');
   try {
@@ -3624,10 +3666,14 @@ function cardActions(cam, clearBtn, notCamBtn) {
   }
   const motOn = !!_motionEnabled[cam.id];
   const recOn = !!_recording[cam.id];
+  // 4.0.0 (C32, answer 14): detection reduced to still pictures
+  const red = motOn && !!_reducedDet[cam.id];
   const recBtn = (cam.status === 'ready' && ['proxy'].includes(cam.display || 'proxy'))
     ? '<button class="btn btn-sm ' + (recOn ? 'btn-rec-active' : (motOn ? 'btn-rec-on' : 'btn-rec-off'))
-      + '" onclick="toggleMotion(' + jsArg(cam.id) + ')" title="' + (motOn ? 'Motion recording on' : 'Enable motion recording') + '">'
-      + (recOn ? '⏺ REC' : (motOn ? '⏺ Armed' : '⏺ Record')) + '</button>'
+      + '" onclick="toggleMotion(' + jsArg(cam.id) + ')" title="'
+      + (red ? 'Detection reduced: judged from still pictures, about one a second (see the cog)'
+             : (motOn ? 'Motion recording on' : 'Enable motion recording')) + '">'
+      + (recOn ? '⏺ REC' : (motOn ? '⏺ Armed' : '⏺ Record')) + (red ? ' ⚠' : '') + '</button>'
     : '';
   // Globe button: opens camera web page (via Firefox addon or new tab)
   const webBtn = (cam.status === 'ready' && cam.ip)

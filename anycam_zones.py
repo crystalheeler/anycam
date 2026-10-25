@@ -157,6 +157,18 @@ def masks(camera_id: str, grid: tuple) -> list[tuple[dict, list[int]]]:
     return _MASKS[key]
 
 
+def zone_map(camera_id: str, grid: tuple) -> dict[int, dict]:
+    """4.0.0 (C32): each cell inside a closed zone -> that zone (the first one drawn wins)."""
+    key = (camera_id, tuple(grid), "map")
+    if key not in _MASKS:
+        cell_zone: dict[int, dict] = {}
+        for z, cells in masks(camera_id, grid):
+            for i in cells:
+                cell_zone.setdefault(i, z)
+        _MASKS[key] = cell_zone
+    return _MASKS[key]
+
+
 def outside_cells(camera_id: str, grid: tuple) -> list[int]:
     """The cells in no closed zone (answer 4: an Off zone masks its cells too)."""
     key = (camera_id, tuple(grid), "outside")

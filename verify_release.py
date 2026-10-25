@@ -309,6 +309,11 @@ CONTRACTS = {
     "_motion_colour":        ["_motion_night_observe", "_motion_colour_switch", "_motion_slow_forget",
                               '"light_until"'],
     "_motion_colour_switch": ["COLOUR_SWITCH_STEP", "NIGHT_CHROMA_MAX"],
+    # 4.0.0 (C32): the object engine
+    "_motion_objects":       ["anycam_objects.find_objects", "anycam_objects.track", "_motion_obj_insect",
+                              "_motion_obj_light", "_motion_note_rec_zones", "_motion_obj_need"],
+    "_motion_engine":        ["_MOTION_CFG.get(camera_id)", 'MOTION_DEFAULTS["engine"]'],
+    "_motion_obj_place":     ["anycam_zones.zone_map", '"foot"'],
     # 3.9.0-rc2.0 (B84): no lit picture becomes the slow check's reference
     "_motion_slow_look":     ['ms.get("lp")', "_motion_slow_forget", "slow_taint"],
     "_motion_tick":          ["_stop_recording", "_motion_quiet"],

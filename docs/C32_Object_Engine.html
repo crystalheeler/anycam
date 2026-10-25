@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Object Engine</title><style>:root{--bg:#fff;--fg:#1d1d1f;--dim:#555;--line:#ddd;--link:#0b5cad;--code:#f3f3f3}
+@media (prefers-color-scheme: dark){:root{--bg:#16181d;--fg:#e6e6e6;--dim:#aaa;--line:#333;--link:#7ab7ff;--code:#23262d}}
+body{background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,Segoe UI,sans-serif;max-width:860px;margin:0 auto;padding:24px 16px}
+h1{font-size:1.6rem}h2{font-size:1.2rem;margin-top:1.8em;border-bottom:1px solid var(--line);padding-bottom:4px}
+a{color:var(--link)}code{background:var(--code);padding:1px 4px;border-radius:4px;font-size:.9em}
+table{border-collapse:collapse;margin:12px 0;display:block;overflow-x:auto}th,td{border:1px solid var(--line);padding:6px 10px;text-align:left}
+li{margin:3px 0}</style></head><body>
+<h1>The object engine (C32), 4.0.0</h1>
+<p>A second motion engine, chosen per camera in the Cog panel (Motion engine: Classic or Objects). The classic engine stays the default. CrystalHeeler decided the design on 2026-10-24 and ordered the build on 2026-10-25 (an unattended run: 3.9.0, 4.0.0, 4.1.0).</p>
+<h2>The decisions (2026-10-24)</h2>
+<ol>
+<li>Everything from the research except the person/vehicle/animal classifier, which comes later, with per-camera toggles per object type and the type in file names.</li>
+<li>Any moving object records, subject to a minimum size, only where detection is set (the whole picture, or zones).</li>
+<li>The sensitivity slider becomes each zone's minimum object size.</li>
+<li>An object belongs to the zone holding most of it, at its feet. Only a clear move into another zone switches the recording to that zone.</li>
+<li>A confirmed object is followed into the next zone below that zone's size, for up to 3 s unseen (B75).</li>
+<li>The light pause and the brightness test (C30) and the slow-movement check stay.</li>
+<li>A per-camera choice between the two engines.</li>
+<li>When a camera can only be judged from still pictures, the page warns that its detection is reduced.</li>
+</ol>
+<h2>How it works</h2>
+<p>Each live picture (4 a second) is compared with the one 1 s older, as in the classic engine: the same changed cells, the same light rule (75% of the picture's areas), the same headlight pause, light hold, 1.25 s look before a recording and colour switch (3.9.0).</p>
+<ol>
+<li><strong>Objects.</strong> The changed cells are grouped: cells up to 2 cells apart belong to one object (<code>anycam_objects.find_objects</code>). Each object has its size, its box, its feet (the bottom middle of the box), how much of it got brighter, and its fill (cells / box).</li>
+<li><strong>Where.</strong> The zone at its feet; when its feet are in no zone, the zone holding most of its cells; else outside the zones. An object in an Off zone, or outside the zones on a camera that detects in zones only, does not count.</li>
+<li><strong>Size.</strong> The smallest object that counts is set by the zone's sensitivity (outside the zones: the camera's), plus the night boost: 10% of the picture at 1, 0.36% at 63, 0.085% at 90, 0.05% at 100, down to 0.02% with the boost (<code>anycam_objects.obj_min_pct</code>).</li>
+<li><strong>Not a body.</strong> An object that is one-sided (90% brighter or darker), lit by more than 25 grey levels and scattered (fill 0.35 or less) is a lit surface. At night, an object that is one-sided, solid (fill 0.55 or more) and under 1% of the picture is an insect in the infrared: brighter where it is, darker where it was 1 s before.</li>
+<li><strong>Tracking.</strong> An object that counts starts or feeds a track: the nearest track within a quarter of the picture's width, or whose box (grown by 4 cells) overlaps. A track is confirmed once it has 3 pictures and its centre has moved 3% of the picture's width. A lamp switching on stays still and is never confirmed.</li>
+<li><strong>Recording.</strong> A confirmed object starts a recording (after the 1.25 s look); the zone at its feet names the file. While recording, any confirmed object keeps it going, below any size and in any zone, up to 3 s unseen (B75). The zone list (C31) gains a zone when an object's feet stay in it for two pictures.</li>
+<li><strong>Lights.</strong> A light change, a colour switch or a light pause drops every track, and the object engine holds 3 s after a light change (the classic engine 2 s): the picture settling looks like a shrinking object.</li>
+<li><strong>Reduced detection.</strong> A camera whose live stream does not reach the detector is judged from still pictures, about one a second. The Cog panel says so, and its card's record button shows a warning sign.</li>
+</ol>
+<p>All of it is pure Python; numpy was allowed but is not needed at 128 x 96 cells.</p>
+<h2>The replay (25 Oct)</h2>
+<p>The add-on's own motion path (<code>_motion_feed</code>) replayed 409 recordings, with each camera's zones and sensitivity from the settings copy of 24 Oct 22:42: every first file of 20–24 Oct on the patio camera (ch7) and every file of the night of 24–25 Oct. The classic column is 3.9.0.</p>
+<table><thead><tr><th>Recordings</th><th>Classic</th><th>Objects</th></tr></thead><tbody><tr><td>Headlights (29)</td><td>0</td><td>2</td></tr><tr><td>Insects (10)</td><td>10</td><td>8</td></tr><tr><td>Motion-sensitive light (8)</td><td>0</td><td>0</td></tr><tr><td>Dawn switch (2)</td><td>0</td><td>0</td></tr><tr><td>A person (6)</td><td>6</td><td>6</td></tr><tr><td>The cat (1)</td><td>1</td><td>1</td></tr><tr><td>By day, unlabelled (228)</td><td>211</td><td>217</td></tr><tr><td>At night, unlabelled (122)</td><td>20</td><td>21</td></tr></tbody></table>
+<p>The 15 unlabelled files where the engines disagree were viewed:</p>
+<ul>
+<li><strong>Classic only (4):</strong> an insect near the lens (2), nothing visible (2).</li>
+<li><strong>Objects only (11):</strong> people at the far side of the picture that the classic engine missed (3), headlights (2), nothing visible (6, by day: moving shadows or leaves).</li>
+</ul>
+<p><strong>What the tuning found.</strong></p>
+<ul>
+<li>The first version recorded the insects in all 10 files. Their twin (darker where the insect was 1 s before) formed its own track; the insect test now covers both sides.</li>
+<li>2 insect files still record. When the insect and its twin are within 2 cells, they form one half-bright, half-dark object that looks like a small person.</li>
+<li>Two headlight files recorded when the picture settled after a light change: the 3 s hold.</li>
+</ul>
+<p><strong>Not tested.</strong></p>
+<ul>
+<li>The live detector on the Pi (the replay decoded files with OpenCV), and its time per picture with several cameras on the object engine.</li>
+<li>People at night far from the camera: none in the labelled set.</li>
+<li>A white cat dashing past at night may look like an insect (small, solid, brighter only).</li>
+</ul>
+</body></html>

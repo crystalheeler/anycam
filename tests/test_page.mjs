@@ -1214,6 +1214,14 @@ console.log('\n[3.9.0] cards stay paused behind Enhanced View (B81), playback nu
         (page.match(/kind === 'play-diag'/g) || []).length === 2 && page.includes("this._emit('play-diag'"));
   check('C31 the Storage tab shows the whole zone list as hover text',
         page.includes('title="Zones, the first started it: \' + esc(f.zone) + \'"'));
+  check('C32 the Cog panel offers the engine and says what the slider means for each',
+        page.includes("function csEngineShow()") && page.includes("Sensitivity sets the smallest object that records"));
+  check('C32 ... with the global settings on, the engine saves at once, alone',
+        page.includes("body: JSON.stringify({engine: document.getElementById('cs-engine').value})")
+        && page.includes("if (!camId || !_csGlobal) return;"));
+  check('C32 answer 14: a camera judged from still pictures shows a warning on its card and in the cog',
+        page.includes("(red ? ' \u26a0' : '')") || page.includes("(red ? ' ⚠' : '')"));
+  check('C32 ... the cog warning follows the server', page.includes("dg.style.display = d.detector === 'snapshots' ? '' : 'none';"));
 }
 
 console.log(`\n${pass}/${pass + fail} passed`);
