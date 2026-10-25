@@ -1090,10 +1090,11 @@ async def test_preroll():
     check("M1 the newest keyframe at least 3 s old (t=16 at now 20)",
           ts_tag(first_video) == 80 and abs(buf.preroll_seconds(t) - 4.0) < 1e-6,
           f"tag={ts_tag(first_video)} pre={buf.preroll_seconds(t)}")
-    # 3.9.0 (C30): the buffer keeps MOTION_BUF_KEEP_S (10 s), so a recording right
-    # after a headlight pause can start before the pause
-    check("M1 nothing older than the 10 s window is kept; a longer pre-roll starts earlier",
-          len(buf.gops) == 3 and ts_tag(next(p for p in (lambda x: [x[i:i + 188] for i in range(0, len(x), 188)])(
+    # 3.9.0 (C30): the buffer keeps MOTION_BUF_KEEP_S, so a recording right after a
+    # headlight pause can start before the pause. 3.9.0-rc2.0: 17.25 s (the 12 s
+    # pause and the 1.25 s look), so all 5 keyframe groups of the 20 s stay
+    check("M1 nothing older than the 17.25 s window is kept; a longer pre-roll starts earlier",
+          abs(cd.MOTION_BUF_KEEP_S - 17.25) < 1e-6 and len(buf.gops) == 5 and ts_tag(next(p for p in (lambda x: [x[i:i + 188] for i in range(0, len(x), 188)])(
               buf.preroll(10.0)) if ((p[1] & 0x1F) << 8 | p[2]) == V)) == 40
           and abs(buf.preroll_seconds(t, 10.0) - 12.0) < 1e-6, f"{len(buf.gops)}")
     check("M1 every packet came through whole", len(pre) % 188 == 0 and not buf.rest)
@@ -6496,6 +6497,150 @@ async def test_390():
     cd._MOTION.clear(); cd._MOTION_CFG.clear(); cd.CAMERAS.clear()
 
 
+# ── AV. 3.9.0-rc2.0: the light pause's end (B84), a short look before recording (B85) ──
+async def test_390_rc2():
+    print("\n[AV] 3.9.0-rc2.0 headlights after the pause, the 1 s look before a recording")
+    import random as _r
+    real_ref = cd.MOTION_REF_S
+    cd.MOTION_REF_S = 1.0          # earlier sections shorten it and leave it so
+    W, H = cd.MOTION_GRID
+    rnd = _r.Random(7)
+    base = bytearray(rnd.randrange(60, 200) for _ in range(W * H))
+
+    def pic(blocks=(), bright=None, delta=0, noise=True):
+        b = bytearray(base)
+        for x, y, w, h in blocks:
+            for yy in range(y, y + h):
+                for xx in range(x, x + w):
+                    b[yy * W + xx] = 255
+        for i in (bright or []):
+            b[i] = max(0, min(255, b[i] + delta))
+        if noise:
+            b[rnd.randrange(len(b))] ^= 1
+        return cd._motion_thumb_gray(bytes(b))
+    cid = "av"
+    cd.CAMERAS.clear(); cd.CAMERAS[cid] = camera(id=cid)
+    Z = sys.modules["anycam_zones"]
+    Z.set_zones(cid, None)
+    started = []
+
+    async def fake_start(cid_, cam_, url_):
+        started.append((cid_, cd._MOTION[cid_].get("judge_zone"), cd._MOTION[cid_].get("held_s")))
+        cd._MOTION[cid_]["recording"] = True
+    real_start, real_url = cd._start_recording, cd.build_authenticated_url
+    cd._start_recording = fake_start
+    cd.build_authenticated_url = lambda c_: "rtsp://x"
+    clock = {"k": 0}
+
+    def fresh():
+        cd._MOTION.clear(); cd._MOTION_CFG.clear(); started.clear()
+        cd._MOTION_CFG[cid] = {"level": 100}
+        m_ = cd._motion_state(cid); m_["enabled"] = True
+        cd._motion_reset_prev(cid)
+        clock["k"] = 0
+        return m_
+
+    async def play(frames, colour=None):
+        for f in frames:
+            clock["k"] += 1
+            k = clock["k"]
+            if colour is not None:
+                cd._motion_colour(cid, colour(k), 1000.0 + k * 0.25, k)
+            cd._motion_feed(cid, f, 1000.0 + k * 0.25, stream_t=k / 4)
+            await asyncio.sleep(0)
+    quiet = lambda n: [pic() for _ in range(n)]
+    walk = [pic([(5 + 3 * k, 20, 4, 10)]) for k in range(14)]
+
+    # AV1 B85: a moving person records, MOTION_HOLD_S after the confirming picture
+    ms = fresh()
+    await play(quiet(8) + walk[:3])
+    early = list(started)
+    await play(walk[3:])
+    check("AV1 B85 a person walking still records, after the short look",
+          not early and len(started) == 1 and started[0][2] is not None
+          and started[0][2] >= cd.MOTION_HOLD_S - 0.01, str(started))
+    pre = cd._motion_light_preroll({"held_s": 1.25}, 5000.0)
+    check("AV1 ... the pre-roll grows by the wait, so the file still starts 3 s before the movement",
+          abs(pre - (cd.MOTION_PREROLL_S + 1.25)) < 1e-6, str(pre))
+
+    # AV2 B85: a lamp switching on (one-sided, then still) is not recorded
+    ms = fresh(); CAP.lines.clear()
+    lamp = [(40, 4, 8, 12)]
+    await play(quiet(8) + [pic(lamp)] * 16)
+    check("AV2 B85 a light switching on (brighter only, then still): not recorded",
+          not started and any("a light switched on or off" in l for l in CAP.lines),
+          str([l for l in CAP.lines if "Motion" in l][-3:]))
+    ms = fresh()
+    await play(quiet(8) + [pic(lamp)] * 3 + [pic(lamp + [(5 + 3 * k, 30, 4, 8)]) for k in range(12)])
+    check("AV2 ... the animal that switched it on, still moving, is recorded", len(started) == 1)
+
+    # AV3 B85: the camera switching from infrared to colour during the look
+    ms = fresh(); CAP.lines.clear()
+    await play(quiet(8) + walk[:3], colour=lambda k: 0.5)
+    await play(walk[3:8], colour=lambda k: 3.0)
+    check("AV3 B85 the camera switching between infrared and colour cancels the start",
+          not started and any("switched between infrared and colour" in l for l in CAP.lines))
+
+    # AV4 B85: a light pause that begins during the look cancels the start
+    ms = fresh(); CAP.lines.clear()
+    await play(quiet(8) + walk[:3])
+    ms["lp"] = {"t0": clock["k"] / 4, "first": clock["k"] / 4, "start_m": 0.0, "quiet": 0, "chroma0": None}
+    await play([pic()])
+    check("AV4 B85 a passing light that begins during the look: not recorded",
+          not started and ms.get("hold") is None
+          and any("a passing light followed" in l for l in CAP.lines))
+
+    # AV5 B85: the one-picture rule ignores a lit lawn; the hit counts twice
+    rows = range(0, H // 2)
+    lawn = [y * W + x for y in rows for x in range(W)]
+    lit = rnd.sample(lawn, int(0.05 * W * H))
+    ms = fresh(); CAP.lines.clear()
+    await play(quiet(8) + [pic(bright=lit, delta=45)] + [pic(bright=lit[:40], delta=45)] + quiet(10))
+    check("AV5 B85 one picture of a lit lawn (headlights) does not record at once",
+          not started, str([l for l in CAP.lines if "Motion" in l][-3:]))
+    ms = fresh(); CAP.lines.clear()
+    await play(quiet(8) + [pic([(5, 5, 12, 10)])] + quiet(12))
+    check("AV5 ... a solid shape in one picture (a cat dashing past) still records",
+          len(started) == 1)
+    check("AV5 ... and the log no longer calls that picture \"one picture only\"",
+          not any("in one picture only" in l for l in CAP.lines), str(CAP.lines[-3:]))
+
+    # AV6 B84: the slow check keeps no lit picture as its reference
+    ms = fresh()
+    ms["slow_refs"].append((0.0, pic()))
+    ms["light_until"] = 10.0
+    moved = cd._motion_slow_look(cid, ms, pic(), 5.0)
+    check("AV6 B84 during a pause the slow check keeps no picture", not moved and not ms["slow_refs"])
+
+    # AV7 B84: the light still moving after a pause continues it, with no quiet picture before
+    def after_pause(last):
+        m_ = {"lp_last": last, "cmp": (4.0, 1.0, 45.0, 0.1),        # scattered, brighter
+              "lp_hist": collections.deque([(10.5, 3.0, 0.5, 0.9), (10.75, 3.0, 0.5, 0.9)])}
+        return cd._motion_light_pause(cid, m_, 11.0), m_
+    CAP.lines.clear()
+    went_on, m_on = after_pause({"end": 10.0, "first": 8.0, "start_m": 0.0, "end_m": 0.0})
+    fresh_start, _m = after_pause(None)
+    check("AV7 B84 the light still moving right after a pause continues it (no quiet picture needed)",
+          went_on and m_on.get("lp") is not None and any("still moving" in l for l in CAP.lines)
+          and not fresh_start, str(CAP.lines[-2:]))
+
+    # AV8 B84: a new detector run clears the pause state (its clock starts at 0)
+    ms["lp_last"] = {"end": 300.0, "first": 290.0, "start_m": 0.0, "end_m": 0.0}
+    ms["hold"] = {"t": 1.0}
+    cd._motion_reset_prev(cid)
+    check("AV8 B84 a detector restart clears the pause and a waiting start",
+          ms.get("lp") is None and ms.get("lp_last") is None and ms.get("hold") is None)
+
+    src = (REPO / "anycam_motion.py").read_text(encoding="utf-8")
+    check("AV9 the detector hands every picture's colour to _motion_colour",
+          "_motion_colour(camera_id, _motion_chroma(px[luma:]), now_m, frames)" in src)
+    check("AV9 the buffer keeps the wait too",
+          "MOTION_BUF_KEEP_S = MOTION_PREROLL_S + LIGHT_PAUSE_TOTAL_S + 1.0 + MOTION_HOLD_S" in src)
+    cd._start_recording, cd.build_authenticated_url = real_start, real_url
+    cd._MOTION.clear(); cd._MOTION_CFG.clear(); cd.CAMERAS.clear()
+    cd.MOTION_REF_S = real_ref
+
+
 async def main():
     test_pure()
     fake = FakeGo2rtc()
@@ -6554,6 +6699,7 @@ async def main():
     await test_383()
     await test_384()
     await test_390()
+    await test_390_rc2()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

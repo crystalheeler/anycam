@@ -1,3 +1,26 @@
+## 3.9.0-rc2.0
+
+Passing headlights, the dawn switch to colour and motion-sensitive lights no longer start recordings. A release candidate for field testing.
+
+### Changes & improvements
+
+- **A short look before recording.** A recording waits 1.25 s before it starts, and does not start when that second shows a passing light, a light change or the camera switching between infrared and colour. The file still begins before the movement.
+- **Lamps are not recorded.** A change that is brighter or darker only and stops at once (a motion-sensitive light switching on or off) is not recorded. An animal that keeps moving still is.
+- **Headlight pauses last the whole pass.** A pause lasts up to 8 s (12 s in all), and the light still moving after it continues the pause.
+
+### Bugs fixed
+
+- **Headlights recorded when the pause ended.** The slow-movement check no longer compares the scene with a lit picture from during the pause.
+- **The dawn switch to colour was recorded.** The camera switching between infrared and colour now counts as a light change.
+- **One lit picture recorded at once.** The one-picture rule ignores a lit lawn, and the log no longer calls a recorded picture "one picture only".
+- **A pause from before a detector restart went on after it.** The log showed "passing light over after -284.0 s".
+
+### Known issues
+
+- **Insects in the infrared still record.** The back yard records at 0.8% of the picture at night; lower its night sensitivity, or wait for the object engine (C32).
+- **Recordings need more memory.** Each armed camera keeps about 17 s of video for the pre-roll instead of 10 s.
+- **Live video on the phone can freeze over a VPN.** On 24 Oct the phone's VPN route lost about a quarter of its packets; check that the VPN connects directly, not through a relay.
+
 ## 3.9.0-rc1.0
 
 Passing headlights no longer start recordings, recordings show every zone they passed through, the card order survives restarts, and the log is shorter and safer to share. A release candidate for field testing.

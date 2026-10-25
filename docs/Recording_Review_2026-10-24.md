@@ -271,3 +271,45 @@ not stop them.
 
 **Dusk was not tested.** The dusk recordings of 24 Oct (17:59–20:14) are from the build before
 3.9.0-rc1.0.
+
+## 10. The 3.9.0-rc2.0 changes, replayed (25 Oct)
+
+The add-on's whole live motion path (`_motion_feed`, with each camera's zones and sensitivity from the
+settings copy of 24 Oct 22:42) replayed 409 recordings: every first file of 20–24 Oct on the patio camera
+(ch7), and every first file of the night of 24–25 Oct. Pictures were decoded once, 4 a second, at the
+detector's size, with the colour of each picture.
+
+**What changed (B84, B85):**
+- A light pause lasts up to 8 s (12 s in all), not 4 s (6 s). The light still moving right after a pause
+  continues it.
+- The slow-movement check keeps no picture during a pause, so it never compares the scene with a lit one.
+- A live start waits 1.25 s. It does not start when that time shows a light pause, a light change, the camera
+  switching between infrared and colour (a colour jump of 1.0 or more with one side at 2.5 or less), or a
+  one-sided change that stopped at once (a lamp).
+- The one-picture rule ignores a lit lawn.
+
+**The night of 24–25 Oct (54 files, section 9):**
+
+| Shows | 3.9.0-rc1.0 replay | 3.9.0-rc2.0 replay |
+|---|---|---|
+| Headlights (29) | 22 recorded | 0 |
+| Motion-sensitive light (8) | 4 | 0 |
+| Dawn switch (2) | 1 | 0 |
+| A person (3) | 3 | 3 |
+| Insects (9) | 9 | 9 |
+
+The replay of 3.9.0-rc1.0 records 22 of the 29 headlight files, not 29: each file starts 3–8 s before its
+trigger, so the replay misses what came before it.
+
+**All 409 files:** by day 214 of 215 still record; the one lost is a dusk headlight (22 Oct 18:21:58). At night
+3.9.0-rc2.0 records 36 of the 127 files 3.9.0-rc1.0 records. Every one of the 91 lost was viewed: headlights,
+the porch light switching the camera to colour, the dusk and dawn switches, and one insect. The cat, the person
+at the door (21 Oct), both door openings (23 Oct 20:26, 24 Oct 06:36) and the moth still record.
+
+**Pause length:** 4/6 s left 2 of the 29 headlight files, 6/10 s left 1, 8/12 s left none, with no other file
+lost. The recording buffer keeps 17.25 s (about 17 MB at 8 Mbit/s per armed camera) so a recording after a
+long pause still starts before it.
+
+**Not tested:** the live detector (ffmpeg decoding the sub-stream) on the Pi; the Pi's memory with the longer
+buffer; dusk, which no recording of the night holds on 3.9.0-rc1.0; the rabbit that switched the light on
+(not found in the 9 lamp files).

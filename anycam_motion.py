@@ -148,12 +148,126 @@ def _motion_feed(camera_id: str, thumb: tuple[bytes, float, float], now_m: float
     if moved:
         ms["last_motion"] = now_m
         if not ms["recording"]:
-            camera = CAMERAS.get(camera_id)
-            cam_url = build_authenticated_url(camera) if camera else None
-            if cam_url:
-                asyncio.create_task(_start_recording(camera_id, camera, cam_url))
+            if live:
+                if ms.get("hold") is None:
+                    _motion_hold_open(ms, t, now_m)      # 3.9.0-rc2.0 (B85)
+            else:
+                _motion_begin(camera_id)
+    if live and ms.get("hold") is not None:
+        _motion_hold_check(camera_id, ms, t, now_m, moved)
+    if not moved:
+        _motion_tick(camera_id, ms, now_m)
+
+
+def _motion_begin(camera_id: str) -> None:
+    """Start a recording (the ffmpeg writer runs as its own task)."""
+    camera = CAMERAS.get(camera_id)
+    cam_url = build_authenticated_url(camera) if camera else None
+    if cam_url:
+        asyncio.create_task(_start_recording(camera_id, camera, cam_url))
+
+
+# ── 3.9.0-rc2.0 (B85): look a little longer before a recording starts ────────
+# CrystalHeeler's first field night of 3.9.0-rc1.0 (24-25 Oct): 4 headlight
+# files started on the faint first edge of the light, a moment before the light
+# pause saw it; 2 started on the first, half-switched picture of the dawn
+# switch from infrared to colour, which stayed under the 75% light rule; 9 were
+# the back yard's motion-sensitive light switching on or off. Each showed what
+# it was within the next second. A live start now waits MOTION_HOLD_S; the
+# pre-roll grows by the wait, so the file still begins before the movement.
+MOTION_HOLD_S = 1.25            # a live start waits this long, then records ...
+COLOUR_SWITCH_STEP = 1.0        # ... unless the colour moved this much (infrared <-> colour:
+                                #     1.9-2.2 in a second; other recordings at most 0.6),
+LIGHT_STEP_SHARE = 0.90         # ... or a change this one-sided (brighter or darker) ...
+LIGHT_STEP_QUIET = 2            # ... stopped at once: this many still comparisons (a lamp)
+
+
+def _motion_hold_open(ms: dict, t: float, now_m: float) -> None:
+    """A recording is due; note what started it and wait MOTION_HOLD_S."""
+    colours = list(ms.get("colour_hist") or ())
+    before = colours[-8:-2] or colours[-1:]
+    pct, share, mean, fill = ms.get("cmp", (0.0, 0.5, 0.0, 1.0))
+    one_sided = (abs(mean) >= LIGHT_SWEEP_DELTA
+                 and (share >= LIGHT_STEP_SHARE or share <= 1.0 - LIGHT_STEP_SHARE))
+    ms["hold"] = {"t": t, "m": now_m, "zone": ms.get("judge_zone"), "slow": ms.get("cal_slow"),
+                  "colour": (sum(before) / len(before)) if before else None,
+                  "one_sided": one_sided, "still": 0}
+
+
+def _motion_hold_cancel(camera_id: str, ms: dict, why: str) -> None:
+    ms["hold"] = None
+    ms.pop("cal_slow", None)
+    log.info(f"Motion [{camera_id}]: not recorded — {why}")
+    _cal_reason(ms, why)
+
+
+def _motion_hold_check(camera_id: str, ms: dict, t: float, now_m: float, moved: bool) -> None:
+    """Each live picture during the wait: cancel the start, or make it."""
+    hold = ms["hold"]
+    if ms["recording"]:
+        ms["hold"] = None
         return
-    _motion_tick(camera_id, ms, now_m)
+    if t <= hold["t"]:
+        return
+    if ms.get("lp"):
+        _motion_hold_cancel(camera_id, ms, "a passing light followed (headlights)")
+        return
+    if ms.get("light_t", float("-inf")) >= hold["t"]:
+        _motion_hold_cancel(camera_id, ms, "a light change followed")
+        return
+    colours = ms.get("colour_hist") or ()
+    if hold["colour"] is not None and colours and _motion_colour_switch(hold["colour"], colours[-1]):
+        _motion_hold_cancel(camera_id, ms, "the camera switched between infrared and colour")
+        return
+    hold["still"] = 0 if moved else hold["still"] + 1
+    if t - hold["t"] < MOTION_HOLD_S - 1e-6:
+        return
+    if hold["one_sided"] and hold["still"] >= LIGHT_STEP_QUIET:
+        _motion_hold_cancel(camera_id, ms, "a light switched on or off (a one-sided change "
+                            "that stopped at once)")
+        return
+    ms["hold"] = None
+    ms["judge_zone"] = hold["zone"]
+    if hold["slow"] is not None:
+        ms["cal_slow"] = hold["slow"]
+    ms["held_s"] = now_m - hold["m"]
+    _motion_begin(camera_id)
+
+
+def _motion_colour_switch(before: float, after: float) -> bool:
+    """A jump of COLOUR_SWITCH_STEP with one side black-and-white: infrared <-> colour.
+
+    By day both sides are colour, so a person in a bright coat close to the
+    camera does not count.
+    """
+    return abs(after - before) >= COLOUR_SWITCH_STEP and min(before, after) <= NIGHT_CHROMA_MAX
+
+
+def _motion_colour(camera_id: str, chroma: float, now_m: float, frames: int) -> None:
+    """3.9.0-rc2.0 (B85): each live picture's colour; night mode reads it once a second.
+
+    A jump of COLOUR_SWITCH_STEP is the camera switching between infrared and
+    colour: a light change, even when it stays under the 75% rule (the back
+    yard and the front yard at dawn on 25 Oct). The slow check then drops its
+    older pictures, which are from before the switch.
+    """
+    ms = _MOTION.get(camera_id)
+    if ms is not None:
+        hist = ms.setdefault("colour_hist", collections.deque(maxlen=12))
+        before = list(hist)[-6:-1]
+        hist.append(chroma)
+        if before and _motion_colour_switch(sum(before) / len(before), chroma):
+            t = frames / MOTION_DETECT_FPS
+            if t - ms.get("colour_switch_t", float("-inf")) > MOTION_LIGHT_HOLD_S:
+                log.info(f"Motion [{camera_id}]: the camera switched between infrared and colour "
+                         f"(colour {sum(before) / len(before):.1f} → {chroma:.1f}) — treated as a "
+                         f"light change, not recorded")
+            ms["colour_switch_t"] = ms["light_t"] = t
+            ms["light_until"] = max(ms.get("light_until", float("-inf")), t + MOTION_LIGHT_HOLD_S)
+            ms["hits"] = []
+            _motion_slow_forget(ms)
+    if frames % MOTION_DETECT_FPS == 1:
+        _motion_night_observe(camera_id, chroma, now_m)
 
 
 def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
@@ -177,6 +291,7 @@ def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
         hits.clear()
     if verdict == "light":
         ms["light_until"] = t + MOTION_LIGHT_HOLD_S
+        ms["light_t"] = t                # 3.9.0-rc2.0 (B85): a waiting start is cancelled
         hits.clear()
         _motion_slow_forget(ms)          # 3.9.0 (B73)
         return False
@@ -187,8 +302,13 @@ def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
     # light change: the first, half-switched picture of an infrared switch
     # changed 24% of ch7 with only 69% spread (06:20:35).
     # 3.4.0 (answer 9): not inside a zone, where 3% is one or two cells
+    # 3.9.0-rc2.0 (B85): not when that picture was a lit lawn (headlights on the
+    # driveway, 3 files on 25 Oct); and its hit counts twice, so the check
+    # above no longer calls a recorded picture "one picture only".
     if (live and not ms["recording"] and hits and hits[0][1] >= MOTION_INSTANT_PCT
-            and hits[0][3] is None):
+            and hits[0][3] is None and not _motion_sweep(hits[0][4])):
+        if len(hits) == 1:
+            hits.append(hits[0])
         return True
     if verdict != "motion":
         return False
@@ -208,7 +328,7 @@ def _motion_decide(camera_id: str, ms: dict, ref: tuple, thumb: tuple,
         return False
     # 3.4.0 (answer 9): the second changed picture counts in the same zone
     zone = ms.get("judge_zone")
-    hits.append((t, pct, thumb[0], zone))
+    hits.append((t, pct, thumb[0], zone, ms.get("cmp")))
     return sum(1 for h in hits if h[3] == zone) >= 2
 
 
@@ -232,9 +352,13 @@ LIGHT_SWEEP_FILL_MAX  = 0.35   # changed cells / their bounding box: a lit lawn 
                                # (at most 0.25 at the start of 71 headlight pauses), a
                                # person or an animal is one solid shape (2026-10-24)
 LIGHT_QUIET_PCT       = 0.3    # two comparisons under this end the pause
-LIGHT_PAUSE_MAX_S     = 4.0    # a pause lasts at most this long
-LIGHT_TAIL_S          = 3.0    # a darker-only change this soon after a pause continues it
-LIGHT_PAUSE_TOTAL_S   = 6.0    # one passing light pauses at most this long in all
+# 3.9.0-rc2.0 (B84): 4 s and 6 s ended the pause while the light still crossed
+# the yard (about 10 s); 20 of 29 headlight files on 25 Oct started then.
+# Replayed on 409 recordings: 8 s and 12 s leave none of them, and no person,
+# cat or door opening is lost (docs/Recording_Review_2026-10-24.md, section 10).
+LIGHT_PAUSE_MAX_S     = 8.0    # a pause lasts at most this long
+LIGHT_TAIL_S          = 3.0    # a one-sided change this soon after a pause continues it
+LIGHT_PAUSE_TOTAL_S   = 12.0   # one passing light pauses at most this long in all
 LIGHT_PREROLL_GAP_S   = 1.5    # a recording this soon after a pause starts before it
 
 
@@ -251,6 +375,15 @@ def _motion_light_dir(prev: tuple, curr: tuple, flags: bytes) -> tuple[float, fl
     box = (max(xs) - min(xs) + 1) * (max(ys) - min(ys) + 1)
     return (sum(1 for d in deltas if d > 0) / len(deltas), sum(deltas) / len(deltas),
             len(idx) / box)
+
+
+def _motion_sweep(cmp: tuple | None) -> bool:
+    """3.9.0-rc2.0 (B85): a comparison that looks like a light on a lawn (C30's test)."""
+    if not cmp:
+        return False
+    pct, share, mean, fill = cmp
+    return (pct >= LIGHT_SWEEP_MIN_PCT and mean >= LIGHT_SWEEP_DELTA
+            and share >= LIGHT_SWEEP_SHARE and fill <= LIGHT_SWEEP_FILL_MAX)
 
 
 def _motion_light_pause(camera_id: str, ms: dict, t: float) -> bool:
@@ -298,10 +431,12 @@ def _motion_light_pause(camera_id: str, ms: dict, t: float) -> bool:
             start = {"t0": t, "first": t, "start_m": time.monotonic()}
             what = (f"a passing light ({pct:.1f}% of the picture, {share:.0%} of it brighter "
                     f"by {mean:+.0f})")
-        elif (dark and last and t - last["end"] <= LIGHT_TAIL_S
+        elif ((dark or bright) and last and 0 <= t - last["end"] <= LIGHT_TAIL_S
                 and t - last["first"] < LIGHT_PAUSE_TOTAL_S):
+            # 3.9.0-rc2.0 (B84): the light still moving (brighter) continues it too,
+            # with no quiet picture before it: the light itself was before it
             start = {"t0": t, "first": last["first"], "start_m": last["start_m"]}
-            what = "the passing light leaving"
+            what = "the passing light leaving" if dark else "the passing light still moving"
         if start:
             ms["lp"] = {**start, "quiet": 0, "chroma0": chroma}
             _motion_slow_forget(ms)
@@ -321,10 +456,11 @@ def _motion_light_preroll(ms: dict, now_m: float) -> float:
     The front door's glass pauses detection like a light, then a person steps
     out (2026-10-23 20:26:49): the file then holds the door opening too.
     """
+    held = ms.get("held_s", 0.0)            # 3.9.0-rc2.0 (B85): the start waited this long
     last = ms.get("lp_last")
-    if last and now_m - last["end_m"] <= LIGHT_PREROLL_GAP_S:
+    if last and now_m - held - last["end_m"] <= LIGHT_PREROLL_GAP_S:
         return min(MOTION_PREROLL_S + (now_m - last["start_m"]), MOTION_BUF_KEEP_S)
-    return MOTION_PREROLL_S
+    return min(MOTION_PREROLL_S + held, MOTION_BUF_KEEP_S)
 
 
 def _motion_slow_forget(ms: dict) -> None:
@@ -368,6 +504,12 @@ def _motion_slow_look(camera_id: str, ms: dict, thumb: tuple, t: float) -> bool:
     one second to the next. The comparison counts only when the same zone
     passes its level on two pictures in a row, so a passing insect does not.
     """
+    # 3.9.0-rc2.0 (B84): during a light pause or hold, and 0.6 s after, no picture
+    # is kept; 5 s after a car passed it compared the scene with a lit picture
+    # (14 headlight files on 25 Oct)
+    if t < ms.get("light_until", float("-inf")) or ms.get("lp"):
+        _motion_slow_forget(ms)
+        return False
     slow = ms.setdefault("slow_refs", collections.deque())
     age = anycam_zones.ZONE_SLOW_S - 1e-6
     while len(slow) > 1 and t - slow[1][0] >= age:
@@ -378,8 +520,7 @@ def _motion_slow_look(camera_id: str, ms: dict, thumb: tuple, t: float) -> bool:
     # 3.9.0 (B78): a picture the fast checks rejected as an insect is no reference
     old_t = slow[0][0] if slow else None
     tainted = old_t is not None and any(abs(old_t - x) <= SLOW_TAINT_S for x in ms.get("slow_taint", ()))
-    if (old is None or len(old[0]) != len(thumb[0]) or tainted
-            or t < ms.get("light_until", float("-inf"))):
+    if old is None or len(old[0]) != len(thumb[0]) or tainted:
         runs.clear()
         return False
     flags, _frac, spread = _motion_cells(old, thumb)
@@ -422,6 +563,11 @@ def _motion_reset_prev(camera_id: str) -> None:
         ms.setdefault("snap_hist", collections.deque(maxlen=2)).clear()
         ms.setdefault("slow_refs", collections.deque()).clear()     # 3.4.0
         ms["slow_runs"] = {}
+        # 3.9.0-rc2.0 (B84): "passing light over after -284.0 s" (25 Oct 22:45:56):
+        # a pause from the last run's clock went on in the new one
+        ms["lp"] = ms["lp_last"] = ms["hold"] = None
+        ms.setdefault("lp_hist", collections.deque(maxlen=16)).clear()
+        ms.pop("light_t", None)
 # ── 2.6.6: pixel comparison (build plan B16, C13) ──────────────────────────
 # 2.6.5 compared JPEG file sizes. A person barely changes the size of a
 # 9-10 KB Lorex snapshot, so nothing was recorded all day on 2026-09-30,
@@ -1092,8 +1238,9 @@ MOTION_PREROLL_S = 3.0          # every recording starts at least this early
 MOTION_DETECT_FPS = 4
 MOTION_BUF_MAX_S = 20.0         # memory bound if keyframes are far apart
 # 3.9.0 (C30): a recording right after a headlight pause starts before the
-# pause, so the buffer keeps that much more (about 10 MB at 8 Mbit/s).
-MOTION_BUF_KEEP_S = MOTION_PREROLL_S + 6.0 + 1.0
+# pause, so the buffer keeps that much more: 3.9.0-rc2.0, with the 12 s pause
+# and the 1.25 s look, 17.25 s (about 17 MB at 8 Mbit/s per armed camera).
+MOTION_BUF_KEEP_S = MOTION_PREROLL_S + LIGHT_PAUSE_TOTAL_S + 1.0 + MOTION_HOLD_S   # 3.9.0-rc2.0
 MOTION_PIPE_RETRY_S = 10.0
 # 3.0.1 (B20): a stream that keeps failing (the DVR's sub-stream answered
 # 404 1,970 times in 86 minutes) is retried at 10 s, 20 s, 40 s ... up to
@@ -1247,8 +1394,8 @@ async def _motion_detector(camera_id: str, url: str) -> None:
                         log.info(f"Motion [{camera_id}]: watching the live stream, "
                                  f"{MOTION_DETECT_FPS} frames a second")
                     now_m = time.monotonic()
-                    if frames % MOTION_DETECT_FPS == 1:      # colour once a second
-                        _motion_night_observe(camera_id, _motion_chroma(px[luma:]), now_m)
+                    # 3.9.0-rc2.0 (B85): colour of every picture; night mode once a second
+                    _motion_colour(camera_id, _motion_chroma(px[luma:]), now_m, frames)
                     _motion_feed(camera_id, _motion_thumb_gray(px[:luma]), now_m,
                                  stream_t=frames / MOTION_DETECT_FPS)
             finally:
@@ -2040,9 +2187,11 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
         # least MOTION_PREROLL_S before the motion. Packets that arrive
         # while the writer starts are queued, then handed over in order.
         want_s = _motion_light_preroll(ms, time.monotonic())       # 3.9.0 (C30)
+        held = ms.pop("held_s", 0.0)
         ms["rec_queue"] = bytearray(buf.preroll(want_s))
         pre_s = buf.preroll_seconds(time.monotonic(), want_s)
-        light = ", which includes a passing light" if want_s > MOTION_PREROLL_S else ""
+        light = (", which includes a passing light"
+                 if want_s > MOTION_PREROLL_S + held + 1e-6 else "")
         log.info(f"Motion [{camera_id}]: recording started → {clip} (from "
                  f"{pre_s:.1f} s before the motion{light}; a new file every "
                  f"{cfg['clip_s']} s while motion continues)")

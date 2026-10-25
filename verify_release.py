@@ -299,13 +299,23 @@ CONTRACTS = {
     # 3.0.0-rc1.0 (E4): credentials never reach a log line.
     "_redact":               ["_CRED_USERINFO", "_CRED_QUERY"],
     "_strip_creds":          ["[^/"],
-    "_motion_feed":          ["MOTION_REF_S", "_motion_decide", "_start_recording", "stream_t",
-                              "_motion_tick"],
+    "_motion_feed":          ["MOTION_REF_S", "_motion_decide", "_motion_begin", "stream_t",
+                              "_motion_tick", "_motion_hold_open", "_motion_hold_check"],
+    # 3.9.0-rc2.0 (B85): a live start waits MOTION_HOLD_S and is cancelled by a light
+    "_motion_begin":         ["_start_recording", "build_authenticated_url"],
+    "_motion_hold_check":    ['ms.get("lp")', '"light_t"', "_motion_colour_switch", "MOTION_HOLD_S",
+                              "LIGHT_STEP_QUIET", "_motion_begin", '"held_s"'],
+    # 3.9.0-rc2.0 (B85): every picture's colour; a switch is a light change
+    "_motion_colour":        ["_motion_night_observe", "_motion_colour_switch", "_motion_slow_forget",
+                              '"light_until"'],
+    "_motion_colour_switch": ["COLOUR_SWITCH_STEP", "NIGHT_CHROMA_MAX"],
+    # 3.9.0-rc2.0 (B84): no lit picture becomes the slow check's reference
+    "_motion_slow_look":     ['ms.get("lp")', "_motion_slow_forget", "slow_taint"],
     "_motion_tick":          ["_stop_recording", "_motion_quiet"],
     # 2.6.6: live-stream detection, and the pre-roll buffer recordings start from.
     "_motion_detector":      ["MOTION_DETECT_FPS", "rawvideo", "_motion_feed",
                               '"detector_live"', "_stop_proc",
-                              "format=yuv420p", "_motion_night_observe"],
+                              "format=yuv420p", "_motion_colour"],
     "_motion_buffer":        ['"-c:v", "copy"', "_TsBuffer()", "rec_queue",
                               "_motion_write", "_stop_proc"],
     # 3.4.0 (C17): the comparison moved to _motion_cells, which also flags each cell
