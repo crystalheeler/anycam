@@ -226,3 +226,48 @@ The street ones need the zone edit: keep NeighborSideYard and the top of FrontYa
   headlight clip (22 Oct 18:21:58, colour before and after). The add-on would compare colour before and after
   the change.
 
+
+## 9. First field night on 3.9.0-rc1.0 (24–25 Oct, Test System B)
+
+3.9.0-rc1.0 started at 22:05 on 24 Oct. Every recording from then to 07:00 was viewed (54 files, first part of
+each) and matched with the log (exported 25 Oct).
+
+| What the recording shows | Files | Cameras |
+|---|---|---|
+| Vehicle headlights | 29 | front yard (ch2) 9, patio (ch7) 8, driveway (ch8) 9, driveway (ch6) 3 |
+| Insects in the infrared | 10 | back yard (ch4) 9, patio 1; one ran 15.5 min (31 files) |
+| A light by the hot tub switching on and off | 9 | back yard, outside the zones |
+| The infrared-to-colour switch at dawn | 2 | back yard 06:37, front yard 06:40 |
+| Nothing visible | 1 | driveway (ch8) 06:24 |
+| A person (after 07:00) | 3 | back yard |
+
+**Headlights.** The front cameras paused for a passing light 22 times in the night. 10 passes made no
+recording. 12 passes made the 29 files. The pause starts at the right moment; the recordings come from
+what happens around it:
+
+1. **The pause ends while the light is still moving (20 files).** A pause lasts at most 4 s (6 s in all).
+   A car's light crosses the front yard in about 10 s. The recording starts 1–3 s after the pause ends:
+   - 14 of the 20 through the slow-movement check. It kept storing pictures during the pause, so 5 s later it
+     compared the scene with a lit picture.
+   - 6 through the normal checks, on the light still moving (no new pause: the picture before was not quiet).
+2. **The zone fires before the pause sees the light (4 files).** The first, faint edge of the light passes a
+   zone's level (0.8–1.2% of a zone) before it is 0.5% of the picture. The pause starts in the same second,
+   after the recording.
+3. **One picture records at once (3 files, ch6, no zones).** A change of 3% or more in one picture starts a
+   recording on the next picture. The log then says "changed in one picture only — not recorded", which is
+   wrong: it was recorded.
+4. **No pause (2 files).**
+
+**Why the replay of section 8 missed this.** It checked only whether a pause covered the trigger. It did not
+run the slow-movement check or the seconds after the pause.
+
+**Dawn.** The first, half-switched picture of the infrared-to-colour switch is under the 75% light rule. The
+back yard recorded it through the slow-movement check, the front yard through the normal checks. The patio
+camera saw the same switch as a light change.
+
+**Insects.** The back yard records at 0.8% of the picture at night (sensitivity 90, night +15) and outside
+its zones. Insects flying in the infrared change 1–3%, over several pictures, so the one-picture rule does
+not stop them.
+
+**Dusk was not tested.** The dusk recordings of 24 Oct (17:59–20:14) are from the build before
+3.9.0-rc1.0.
