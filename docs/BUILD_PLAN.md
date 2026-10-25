@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 24 October 2026. Store version: 3.8.3 (released 2026-10-20: pushed, GitHub Latest, store; running on test systems A and B). Repository: 3.9.0-rc1.0 built 2026-10-24, committed and tagged on this PC, not pushed or published: B68, B69 and the 14 Ready tickets of 2026-10-24, with the headlight pause (C30) tested on 334 recordings. 3.8.4 (B68, B69) was never published; it is part of 3.9.0-rc1.0. Next: the field test, then C32 (decisions made 2026-10-24; B75 folded into it). Previous: 3.8.2 (2026-10-20). rc numbers are single-digit (CrystalHeeler, 2026-10-10).
+**Compiled:** Updated 24 October 2026. Store version: 3.9.0-rc1.0 (released 2026-10-24: pushed, GitHub prerelease, store; CrystalHeeler's order); GitHub Latest stays 3.8.3. 3.9.0-rc1.0 holds B68, B69 and the 14 Ready tickets of 2026-10-24, with the headlight pause (C30) tested on 334 recordings. 3.8.4 (B68, B69) was never published; it is part of 3.9.0-rc1.0. Next: the field test, then C32 (decisions made 2026-10-24; B75 folded into it). Previous: 3.8.2 (2026-10-20). rc numbers are single-digit (CrystalHeeler, 2026-10-10).
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.
@@ -9,7 +9,7 @@
 
 ## Next up: field-test 3.9.0-rc1.0, then C32
 
-0. **Built, not pushed (2026-10-24):** 3.9.0-rc1.0 — B68 and B69 (from 3.8.4, which is not published on its own) and B79, B72, B70, B74, B71, B73, B81, B78, B80, C31, B58, B63, B62 (first steps), C30. Tagged on this PC; waits for CrystalHeeler's push and publish orders.
+0. **Released (2026-10-24):** 3.9.0-rc1.0 — B68 and B69 (from 3.8.4, which is not published on its own) and B79, B72, B70, B74, B71, B73, B81, B78, B80, C31, B58, B63, B62 (first steps), C30. Pushed, GitHub prerelease and store (CrystalHeeler's order, 2026-10-24).
 1. **Field test 3.9.0-rc1.0:** a night of recordings (headlights paused, "a passing light" lines; insects; the day-to-night switch); the card order after a restart; the Storage tab's zone lists; the phone's LIVE-PLAY lines (B62); a recorder's channel cards (D5) and the settings copy (C27) from 3.8.3.
 2. **Then C32,** the object-based motion engine (decisions of 2026-10-24); a design document first. Version to decide (3.9.1 or 4.0.0).
 3. **Waiting on CrystalHeeler:** B33 (check after a rescan); C23 (the revamp list).
