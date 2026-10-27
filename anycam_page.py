@@ -212,6 +212,14 @@ header h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:8p
 .btn-xs{{padding:3px 8px;font-size:.72rem}}
 /* ── Focus overlay ── */
 #focus-overlay{{position:fixed;inset:0;background:#000;z-index:9000;display:flex;flex-direction:column;align-items:stretch;padding:0}}
+/* 4.1.2 (C34): a recording camera's card, and Enhanced View, get a red pulsing border */
+@keyframes recpulse{{0%,100%{{box-shadow:0 0 0 2px var(--red),0 0 10px 1px var(--red)}}50%{{box-shadow:0 0 0 2px var(--red),0 0 2px 0 var(--red)}}}}
+.camera-card.card-rec{{border-color:var(--red);animation:recpulse 1.6s ease-in-out infinite}}
+#focus-overlay.card-rec{{box-shadow:inset 0 0 0 3px var(--red)}}
+@media (prefers-reduced-motion:reduce){{.camera-card.card-rec{{animation:none;box-shadow:0 0 0 2px var(--red)}}}}
+/* 4.1.2 (C35): this device's live mode, in Enhanced View's bar */
+.fz-live{{display:flex;align-items:center;gap:4px;font-size:12px;color:#ddd}}
+.fz-live select{{background:#222;color:#ddd;border:1px solid #555;border-radius:4px;font-size:12px;padding:1px 2px}}
 #focus-img{{width:100vw;height:calc(100vh - 52px - 44px);height:calc(100dvh - 52px - 44px);object-fit:contain;display:block;margin:44px 0 0 0}}
 /* 2.6.3 go2rtc live view: same box as #focus-img, swapped in its place */
 #focus-video{{width:100vw;height:calc(100vh - 52px - 44px);height:calc(100dvh - 52px - 44px);margin:44px 0 0 0;background:#000}}
@@ -366,7 +374,7 @@ header h1{{cursor:pointer}}
 .zl-empty{{color:#888}}
 .stor-zone{{margin-left:8px;font-size:.72rem;color:var(--orange);border:1px solid var(--orange);border-radius:6px;padding:0 5px;max-width:45%;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}  /* 3.9.0 (C31): a list of zones */
 @media (max-width:700px){{#zone-panel{{left:8px;right:8px;top:auto;bottom:60px;width:auto;max-height:45dvh}}
-  #focus-zone-ctl label{{display:none}}}}
+  #focus-zone-ctl label.fz-show{{display:none}}}}
 .nc-modal-inner{{width:min(460px,94vw)}}
 .nc-subtitle{{font-size:.82rem;color:var(--text-dim);margin-top:-4px}}
 .nc-reasons{{display:flex;flex-wrap:wrap;gap:7px}}
@@ -816,6 +824,12 @@ header h1{{cursor:pointer}}
     <div id="focus-zone-ctl">
       <label class="fz-show"><input type="checkbox" id="focus-zone-show" onchange="zoneShowToggle()"> Show zones</label>
       <button class="btn btn-ghost btn-sm" onclick="zoneEditOpen()">Zones</button>
+      <label class="fz-live" title="How live video plays on this device. Remote: steadier over a slow or lossy link, about 1-2 s behind">Live
+        <select id="focus-live-mode" onchange="liveModeSet(this.value)">
+          <option value="auto">Automatic</option>
+          <option value="webrtc">WebRTC</option>
+          <option value="mse">Remote</option>
+        </select></label>
     </div>
     <div id="focus-controls"></div>
   </div>

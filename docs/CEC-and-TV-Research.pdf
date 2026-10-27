@@ -1,0 +1,1633 @@
+%PDF-1.4
+%“Œ‹ž ReportLab Generated PDF document (opensource)
+1 0 obj
+<<
+/F1 2 0 R /F2 3 0 R /F3 8 0 R /F4 11 0 R
+>>
+endobj
+2 0 obj
+<<
+/BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font
+>>
+endobj
+3 0 obj
+<<
+/BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding /Name /F2 /Subtype /Type1 /Type /Font
+>>
+endobj
+4 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/AlexxIT/go2rtc)
+>> /Border [ 0 0 0 ] /Rect [ 141.95 650 169.74 662 ] /Subtype /Link /Type /Annot
+>>
+endobj
+5 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/gugutab/TvOverlay)
+>> /Border [ 0 0 0 ] /Rect [ 228.1 538 273.66 550 ] /Subtype /Link /Type /Annot
+>>
+endobj
+6 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/rogro82/PiPup)
+>> /Border [ 0 0 0 ] /Rect [ 312.58 538 339.26 550 ] /Subtype /Link /Type /Annot
+>>
+endobj
+7 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/playing-camera-stream-to-chromecast-or-something/1020595)
+>> /Border [ 0 0 0 ] /Rect [ 210.33 510 277.56 522 ] /Subtype /Link /Type /Annot
+>>
+endobj
+8 0 obj
+<<
+/BaseFont /Courier /Encoding /WinAnsiEncoding /Name /F3 /Subtype /Type1 /Type /Font
+>>
+endobj
+9 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/)
+>> /Border [ 0 0 0 ] /Rect [ 168.67 408 298.15 420 ] /Subtype /Link /Type /Annot
+>>
+endobj
+10 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://ipcamtalk.com/)
+>> /Border [ 0 0 0 ] /Rect [ 320.39 408 375.4 420 ] /Subtype /Link /Type /Annot
+>>
+endobj
+11 0 obj
+<<
+/BaseFont /Helvetica-BoldOblique /Encoding /WinAnsiEncoding /Name /F4 /Subtype /Type1 /Type /Font
+>>
+endobj
+12 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://en.wikipedia.org/wiki/Consumer_Electronics_Control)
+>> /Border [ 0 0 0 ] /Rect [ 320.82 287 364.16 299 ] /Subtype /Link /Type /Annot
+>>
+endobj
+13 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://en.wikipedia.org/wiki/Consumer_Electronics_Control)
+>> /Border [ 0 0 0 ] /Rect [ 225.78 267 269.12 279 ] /Subtype /Link /Type /Annot
+>>
+endobj
+14 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://en.wikipedia.org/wiki/Consumer_Electronics_Control)
+>> /Border [ 0 0 0 ] /Rect [ 245.24 247 288.58 259 ] /Subtype /Link /Type /Annot
+>>
+endobj
+15 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://en.wikipedia.org/wiki/Consumer_Electronics_Control)
+>> /Border [ 0 0 0 ] /Rect [ 422.49 227 465.83 239 ] /Subtype /Link /Type /Annot
+>>
+endobj
+16 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://en.wikipedia.org/wiki/Consumer_Electronics_Control)
+>> /Border [ 0 0 0 ] /Rect [ 220.76 164 264.1 176 ] /Subtype /Link /Type /Annot
+>>
+endobj
+17 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://support.pulse-eight.com/support/solutions/articles/30000053359-understanding-cec-opcodes)
+>> /Border [ 0 0 0 ] /Rect [ 269.66 164 320.79 176 ] /Subtype /Link /Type /Annot
+>>
+endobj
+18 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.mankier.com/1/cec-ctl)
+>> /Border [ 0 0 0 ] /Rect [ 456.39 164 532.53 176 ] /Subtype /Link /Type /Annot
+>>
+endobj
+19 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://en.wikipedia.org/wiki/Consumer_Electronics_Control)
+>> /Border [ 0 0 0 ] /Rect [ 82.93 130 126.27 142 ] /Subtype /Link /Type /Annot
+>>
+endobj
+20 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.mankier.com/1/cec-ctl)
+>> /Border [ 0 0 0 ] /Rect [ 262.95 96 339.09 108 ] /Subtype /Link /Type /Annot
+>>
+endobj
+21 0 obj
+<<
+/Annots [ 4 0 R 5 0 R 6 0 R 7 0 R 9 0 R 10 0 R 12 0 R 13 0 R 14 0 R 15 0 R 
+  16 0 R 17 0 R 18 0 R 19 0 R 20 0 R ] /Contents 187 0 R /MediaBox [ 0 0 612 792 ] /Parent 186 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+22 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://support.pulse-eight.com/support/solutions/articles/30000053359-understanding-cec-opcodes)
+>> /Border [ 0 0 0 ] /Rect [ 119.73 720 170.86 732 ] /Subtype /Link /Type /Annot
+>>
+endobj
+23 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.mankier.com/1/cec-ctl)
+>> /Border [ 0 0 0 ] /Rect [ 144.18 494 220.32 506 ] /Subtype /Link /Type /Annot
+>>
+endobj
+24 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://en.wikipedia.org/wiki/Consumer_Electronics_Control)
+>> /Border [ 0 0 0 ] /Rect [ 257.56 451 300.9 463 ] /Subtype /Link /Type /Annot
+>>
+endobj
+25 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://forums.audioholics.com/forums/threads/tv-on-off-sync-issue.129930/post-1669327)
+>> /Border [ 0 0 0 ] /Rect [ 432.51 202 511.98 214 ] /Subtype /Link /Type /Annot
+>>
+endobj
+26 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.gtplanet.net/forum/threads/hdmi-control-between-brands.236017/)
+>> /Border [ 0 0 0 ] /Rect [ 443.64 182 514.22 194 ] /Subtype /Link /Type /Annot
+>>
+endobj
+27 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://forums.audioholics.com/forums/threads/tv-on-off-sync-issue.129930/post-1669327)
+>> /Border [ 0 0 0 ] /Rect [ 453.06 162 532.53 174 ] /Subtype /Link /Type /Annot
+>>
+endobj
+28 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://npmjs.org/package/homebridge-cec-tv-control)
+>> /Border [ 0 0 0 ] /Rect [ 328.6 128 444.74 140 ] /Subtype /Link /Type /Annot
+>>
+endobj
+29 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://forums.plex.tv/t/rasplex-always-switches-tv-input/80901)
+>> /Border [ 0 0 0 ] /Rect [ 491.75 108 539.54 120 ] /Subtype /Link /Type /Annot
+>>
+endobj
+30 0 obj
+<<
+/Annots [ 22 0 R 23 0 R 24 0 R 25 0 R 26 0 R 27 0 R 28 0 R 29 0 R ] /Contents 188 0 R /MediaBox [ 0 0 612 792 ] /Parent 186 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+31 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://lkml.iu.edu/hypermail/linux/kernel/2101.2/01348.html)
+>> /Border [ 0 0 0 ] /Rect [ 159.17 633 262.53 645 ] /Subtype /Link /Type /Annot
+>>
+endobj
+32 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://archlinuxarm.org/forum/viewtopic.php?p=66879)
+>> /Border [ 0 0 0 ] /Rect [ 481.95 613 529.19 625 ] /Subtype /Link /Type /Annot
+>>
+endobj
+33 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://archlinuxarm.org/forum/viewtopic.php?p=66879)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 599 130.16 611 ] /Subtype /Link /Type /Annot
+>>
+endobj
+34 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://forum.libreelec.tv/thread/28180-rpi4-cec-hard-coded-to-hdmi-0/)
+>> /Border [ 0 0 0 ] /Rect [ 475.36 599 523.71 611 ] /Subtype /Link /Type /Annot
+>>
+endobj
+35 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://forum.libreelec.tv/thread/28180-rpi4-cec-hard-coded-to-hdmi-0/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 585 105.16 597 ] /Subtype /Link /Type /Annot
+>>
+endobj
+36 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://forum.libreelec.tv/thread/20161-rpi4-hdmi-cec-not-working/?pageNo=6)
+>> /Border [ 0 0 0 ] /Rect [ 206.26 551 282.95 563 ] /Subtype /Link /Type /Annot
+>>
+endobj
+37 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://lkml.iu.edu/hypermail/linux/kernel/2101.2/01348.html)
+>> /Border [ 0 0 0 ] /Rect [ 503.06 551 526.96 563 ] /Subtype /Link /Type /Annot
+>>
+endobj
+38 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://lkml.iu.edu/hypermail/linux/kernel/2101.2/01348.html)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 537 156.28 549 ] /Subtype /Link /Type /Annot
+>>
+endobj
+39 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://docs.kernel.org/userspace-api/media/cec/cec-intro.html)
+>> /Border [ 0 0 0 ] /Rect [ 82.93 474 127.39 486 ] /Subtype /Link /Type /Annot
+>>
+endobj
+40 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://docs.kernel.org/userspace-api/media/cec/cec-intro.html)
+>> /Border [ 0 0 0 ] /Rect [ 309.44 440 353.9 452 ] /Subtype /Link /Type /Annot
+>>
+endobj
+41 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/Pulse-Eight/libcec)
+>> /Border [ 0 0 0 ] /Rect [ 179.64 406 253 418 ] /Subtype /Link /Type /Annot
+>>
+endobj
+42 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://rfc1149.net/devel/homeassistant-addon-pi-cec.html)
+>> /Border [ 0 0 0 ] /Rect [ 82.93 372 226.31 384 ] /Subtype /Link /Type /Annot
+>>
+endobj
+43 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.mankier.com/1/cec-ctl)
+>> /Border [ 0 0 0 ] /Rect [ 134.49 323 210.63 335 ] /Subtype /Link /Type /Annot
+>>
+endobj
+44 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://pimylifeup.com/raspberrypi-hdmi-cec/)
+>> /Border [ 0 0 0 ] /Rect [ 493.94 185 537.84 197 ] /Subtype /Link /Type /Annot
+>>
+endobj
+45 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://pimylifeup.com/raspberrypi-hdmi-cec/)
+>> /Border [ 0 0 0 ] /Rect [ 63.6 171 76.38 183 ] /Subtype /Link /Type /Annot
+>>
+endobj
+46 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://archlinuxarm.org/forum/viewtopic.php?p=73923)
+>> /Border [ 0 0 0 ] /Rect [ 90.71 114 191.29 126 ] /Subtype /Link /Type /Annot
+>>
+endobj
+47 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/issues-with-cec/1018323)
+>> /Border [ 0 0 0 ] /Rect [ 191.87 80 259.1 92 ] /Subtype /Link /Type /Annot
+>>
+endobj
+48 0 obj
+<<
+/Annots [ 31 0 R 32 0 R 33 0 R 34 0 R 35 0 R 36 0 R 37 0 R 38 0 R 39 0 R 40 0 R 
+  41 0 R 42 0 R 43 0 R 44 0 R 45 0 R 46 0 R 47 0 R ] /Contents 189 0 R /MediaBox [ 0 0 612 792 ] /Parent 186 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+49 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/Pulse-Eight/libcec)
+>> /Border [ 0 0 0 ] /Rect [ 82.93 706 156.29 718 ] /Subtype /Link /Type /Annot
+>>
+endobj
+50 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/hdmi_cec/)
+>> /Border [ 0 0 0 ] /Rect [ 193.27 522 231.06 534 ] /Subtype /Link /Type /Annot
+>>
+endobj
+51 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/hdmi_cec/)
+>> /Border [ 0 0 0 ] /Rect [ 431.61 502 469.4 514 ] /Subtype /Link /Type /Annot
+>>
+endobj
+52 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/hdmi_cec/)
+>> /Border [ 0 0 0 ] /Rect [ 348.04 482 385.83 494 ] /Subtype /Link /Type /Annot
+>>
+endobj
+53 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/hdmi_cec/)
+>> /Border [ 0 0 0 ] /Rect [ 228.56 448 266.35 460 ] /Subtype /Link /Type /Annot
+>>
+endobj
+54 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/hdmi_cec/)
+>> /Border [ 0 0 0 ] /Rect [ 432.08 428 469.87 440 ] /Subtype /Link /Type /Annot
+>>
+endobj
+55 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://contributors.home-assistant.io/apps/reference/configuration/)
+>> /Border [ 0 0 0 ] /Rect [ 391.39 379 475.87 391 ] /Subtype /Link /Type /Annot
+>>
+endobj
+56 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/RobertMe/cec2mqtt)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 205 120.17 217 ] /Subtype /Link /Type /Annot
+>>
+endobj
+57 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://rfc1149.net/devel/homeassistant-addon-pi-cec.html)
+>> /Border [ 0 0 0 ] /Rect [ 89.05 171 207.41 183 ] /Subtype /Link /Type /Annot
+>>
+endobj
+58 0 obj
+<<
+/Annots [ 49 0 R 50 0 R 51 0 R 52 0 R 53 0 R 54 0 R 55 0 R 56 0 R 57 0 R ] /Contents 190 0 R /MediaBox [ 0 0 612 792 ] /Parent 186 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+59 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://support.pulse-eight.com/support/solutions/articles/30000053359-understanding-cec-opcodes)
+>> /Border [ 0 0 0 ] /Rect [ 128.63 706 179.76 718 ] /Subtype /Link /Type /Annot
+>>
+endobj
+60 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/ha-dashboard-via-hdmi-on-tv/919280)
+>> /Border [ 0 0 0 ] /Rect [ 354.15 597 421.38 609 ] /Subtype /Link /Type /Annot
+>>
+endobj
+61 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/new-release-of-haoskiosk-add-on-0-9-8-to-display-dashboards-directly-on-your-haos-server/899429/8)
+>> /Border [ 0 0 0 ] /Rect [ 156.86 549 224.09 561 ] /Subtype /Link /Type /Annot
+>>
+endobj
+62 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://npmjs.org/package/homebridge-cec-tv-control)
+>> /Border [ 0 0 0 ] /Rect [ 129.06 384 245.2 396 ] /Subtype /Link /Type /Annot
+>>
+endobj
+63 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://ipcamtalk.com/threads/blue-iris-pip-picture-in-picture-on-tv-when-motion-detected.17219/)
+>> /Border [ 0 0 0 ] /Rect [ 152.62 350 207.63 362 ] /Subtype /Link /Type /Annot
+>>
+endobj
+64 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/gugutab/TvOverlay)
+>> /Border [ 0 0 0 ] /Rect [ 222.09 217 315.45 229 ] /Subtype /Link /Type /Annot
+>>
+endobj
+65 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/gugutab/TvOverlay)
+>> /Border [ 0 0 0 ] /Rect [ 482.5 197 541.96 209 ] /Subtype /Link /Type /Annot
+>>
+endobj
+66 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/gugutab/TvOverlay)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 183 110.72 195 ] /Subtype /Link /Type /Annot
+>>
+endobj
+67 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.openhab.org/t/android-notifications-binding-with-support-for-tv-overlay-5-0-0-5-9-9/164620)
+>> /Border [ 0 0 0 ] /Rect [ 463.11 163 505.91 175 ] /Subtype /Link /Type /Annot
+>>
+endobj
+68 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.openhab.org/t/android-notifications-binding-with-support-for-tv-overlay-5-0-0-5-9-9/164620)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 149 130.16 161 ] /Subtype /Link /Type /Annot
+>>
+endobj
+69 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/gugutab/TvOverlay)
+>> /Border [ 0 0 0 ] /Rect [ 159.09 115 252.45 127 ] /Subtype /Link /Type /Annot
+>>
+endobj
+70 0 obj
+<<
+/Annots [ 59 0 R 60 0 R 61 0 R 62 0 R 63 0 R 64 0 R 65 0 R 66 0 R 67 0 R 68 0 R 
+  69 0 R ] /Contents 191 0 R /MediaBox [ 0 0 612 792 ] /Parent 186 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+71 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/rogro82/PiPup)
+>> /Border [ 0 0 0 ] /Rect [ 177.42 706 251.9 718 ] /Subtype /Link /Type /Annot
+>>
+endobj
+72 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/rogro82/PiPup)
+>> /Border [ 0 0 0 ] /Rect [ 115.71 672 190.19 684 ] /Subtype /Link /Type /Annot
+>>
+endobj
+73 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/pipup-notification-service/714248)
+>> /Border [ 0 0 0 ] /Rect [ 155.74 638 222.97 650 ] /Subtype /Link /Type /Annot
+>>
+endobj
+74 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/pipup-fork-home-assistant-integration-popups-tts-buttons-screen-control-on-android-tv-fire-tv/1022171)
+>> /Border [ 0 0 0 ] /Rect [ 194.08 590 261.31 602 ] /Subtype /Link /Type /Annot
+>>
+endobj
+75 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.homey.app/t/app-pro-pipup/18498)
+>> /Border [ 0 0 0 ] /Rect [ 82.93 556 167.94 568 ] /Subtype /Link /Type /Annot
+>>
+endobj
+76 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/nfandroidtv/)
+>> /Border [ 0 0 0 ] /Rect [ 109.61 496 147.4 508 ] /Subtype /Link /Type /Annot
+>>
+endobj
+77 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/nfandroidtv/)
+>> /Border [ 0 0 0 ] /Rect [ 532.27 476 546.16 488 ] /Subtype /Link /Type /Annot
+>>
+endobj
+78 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/nfandroidtv/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 462 100.72 474 ] /Subtype /Link /Type /Annot
+>>
+endobj
+79 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/AlexxIT/go2rtc)
+>> /Border [ 0 0 0 ] /Rect [ 370.24 442 398.03 454 ] /Subtype /Link /Type /Annot
+>>
+endobj
+80 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/androidtv/)
+>> /Border [ 0 0 0 ] /Rect [ 366.76 382 404.55 394 ] /Subtype /Link /Type /Annot
+>>
+endobj
+81 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/androidtv/)
+>> /Border [ 0 0 0 ] /Rect [ 410.84 362 448.63 374 ] /Subtype /Link /Type /Annot
+>>
+endobj
+82 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://playsignage.com/support/amazon-firetv-launch-on-startup/)
+>> /Border [ 0 0 0 ] /Rect [ 485.33 296 535.34 308 ] /Subtype /Link /Type /Annot
+>>
+endobj
+83 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://playsignage.com/support/amazon-firetv-launch-on-startup/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 282 116.29 294 ] /Subtype /Link /Type /Annot
+>>
+endobj
+84 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.ipcamtalk.com/threads/how-do-i-get-foscam-to-automatically-show-on-fire-tablet-when-motion-is-detected.67658)
+>> /Border [ 0 0 0 ] /Rect [ 415.81 262 470.82 274 ] /Subtype /Link /Type /Annot
+>>
+endobj
+85 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://developer.android.com/training/tv/start/multitasking)
+>> /Border [ 0 0 0 ] /Rect [ 171.97 222 259.78 234 ] /Subtype /Link /Type /Annot
+>>
+endobj
+86 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/actions/camera.play_stream/)
+>> /Border [ 0 0 0 ] /Rect [ 132.4 151 170.19 163 ] /Subtype /Link /Type /Annot
+>>
+endobj
+87 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/cast/)
+>> /Border [ 0 0 0 ] /Rect [ 334.22 117 372.01 129 ] /Subtype /Link /Type /Annot
+>>
+endobj
+88 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/cast/)
+>> /Border [ 0 0 0 ] /Rect [ 497.73 97 535.52 109 ] /Subtype /Link /Type /Annot
+>>
+endobj
+89 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/cast/)
+>> /Border [ 0 0 0 ] /Rect [ 282.45 77 320.24 89 ] /Subtype /Link /Type /Annot
+>>
+endobj
+90 0 obj
+<<
+/Annots [ 71 0 R 72 0 R 73 0 R 74 0 R 75 0 R 76 0 R 77 0 R 78 0 R 79 0 R 80 0 R 
+  81 0 R 82 0 R 83 0 R 84 0 R 85 0 R 86 0 R 87 0 R 88 0 R 89 0 R ] /Contents 192 0 R /MediaBox [ 0 0 612 792 ] /Parent 186 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+91 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/playing-camera-stream-to-chromecast-or-something/1020595)
+>> /Border [ 0 0 0 ] /Rect [ 251.35 720 318.58 732 ] /Subtype /Link /Type /Annot
+>>
+endobj
+92 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/camera-play-stream-lag-issues/116258)
+>> /Border [ 0 0 0 ] /Rect [ 385.84 720 453.07 732 ] /Subtype /Link /Type /Annot
+>>
+endobj
+93 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.openhab.org/t/google-assistent-chromecast-hls-video-stream/99381?page=3)
+>> /Border [ 0 0 0 ] /Rect [ 349.75 706 445.89 718 ] /Subtype /Link /Type /Annot
+>>
+endobj
+94 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/AlexxIT/go2rtc)
+>> /Border [ 0 0 0 ] /Rect [ 369.88 686 397.67 698 ] /Subtype /Link /Type /Annot
+>>
+endobj
+95 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://forums.appleinsider.com/discussion/216345)
+>> /Border [ 0 0 0 ] /Rect [ 440.29 617 495.87 629 ] /Subtype /Link /Type /Annot
+>>
+endobj
+96 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://support.apple.com/en-ae/guide/tv/atvb90537bb0/tvos)
+>> /Border [ 0 0 0 ] /Rect [ 308.01 603 371.38 615 ] /Subtype /Link /Type /Annot
+>>
+endobj
+97 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/homekit/)
+>> /Border [ 0 0 0 ] /Rect [ 205.71 569 243.5 581 ] /Subtype /Link /Type /Annot
+>>
+endobj
+98 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/webostv/)
+>> /Border [ 0 0 0 ] /Rect [ 188.53 472 226.32 484 ] /Subtype /Link /Type /Annot
+>>
+endobj
+99 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/webostv/)
+>> /Border [ 0 0 0 ] /Rect [ 439.72 452 477.51 464 ] /Subtype /Link /Type /Annot
+>>
+endobj
+100 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/webostv/)
+>> /Border [ 0 0 0 ] /Rect [ 259.65 432 297.44 444 ] /Subtype /Link /Type /Annot
+>>
+endobj
+101 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/video-doorbell-snapshots-as-an-overlay-on-an-lg-webos-tv/1019201)
+>> /Border [ 0 0 0 ] /Rect [ 517.01 412 530.9 424 ] /Subtype /Link /Type /Annot
+>>
+endobj
+102 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/video-doorbell-snapshots-as-an-overlay-on-an-lg-webos-tv/1019201)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 398 130.16 410 ] /Subtype /Link /Type /Annot
+>>
+endobj
+103 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/samsungtv/)
+>> /Border [ 0 0 0 ] /Rect [ 525.9 329 539.79 341 ] /Subtype /Link /Type /Annot
+>>
+endobj
+104 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/samsungtv/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 315 100.72 327 ] /Subtype /Link /Type /Annot
+>>
+endobj
+105 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/ollo69/ha-samsungtv-smart/issues/106)
+>> /Border [ 0 0 0 ] /Rect [ 82.93 281 140.17 293 ] /Subtype /Link /Type /Annot
+>>
+endobj
+106 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.samsung.com/us/support/answer/ANS00087644)
+>> /Border [ 0 0 0 ] /Rect [ 454.17 261 534.21 273 ] /Subtype /Link /Type /Annot
+>>
+endobj
+107 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/kodi/)
+>> /Border [ 0 0 0 ] /Rect [ 398.62 198 436.41 210 ] /Subtype /Link /Type /Annot
+>>
+endobj
+108 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/kodi/)
+>> /Border [ 0 0 0 ] /Rect [ 409.16 178 446.95 190 ] /Subtype /Link /Type /Annot
+>>
+endobj
+109 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/roku/)
+>> /Border [ 0 0 0 ] /Rect [ 202.97 95 240.76 107 ] /Subtype /Link /Type /Annot
+>>
+endobj
+110 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/roku/)
+>> /Border [ 0 0 0 ] /Rect [ 382.49 75 420.28 87 ] /Subtype /Link /Type /Annot
+>>
+endobj
+111 0 obj
+<<
+/Annots [ 91 0 R 92 0 R 93 0 R 94 0 R 95 0 R 96 0 R 97 0 R 98 0 R 99 0 R 100 0 R 
+  101 0 R 102 0 R 103 0 R 104 0 R 105 0 R 106 0 R 107 0 R 108 0 R 109 0 R 110 0 R ] /Contents 193 0 R /MediaBox [ 0 0 612 792 ] /Parent 186 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+112 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.openhab.org/t/android-notifications-binding-with-support-for-tv-overlay-5-0-0-5-9-9/164620)
+>> /Border [ 0 0 0 ] /Rect [ 421.1211 550.4 455.3611 560 ] /Subtype /Link /Type /Annot
+>>
+endobj
+113 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/camera-play-stream-lag-issues/116258)
+>> /Border [ 0 0 0 ] /Rect [ 421.1211 462.4 432.2331 472 ] /Subtype /Link /Type /Annot
+>>
+endobj
+114 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/camera-play-stream-lag-issues/116258)
+>> /Border [ 0 0 0 ] /Rect [ 418.4571 452.4 458.9051 462 ] /Subtype /Link /Type /Annot
+>>
+endobj
+115 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (http://supervisor/core/api/services/<domain>/<service>)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 156 403.6 168 ] /Subtype /Link /Type /Annot
+>>
+endobj
+116 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://contributors.home-assistant.io/apps/reference/configuration/)
+>> /Border [ 0 0 0 ] /Rect [ 189.05 142 273.53 154 ] /Subtype /Link /Type /Annot
+>>
+endobj
+117 0 obj
+<<
+/Annots [ 112 0 R 113 0 R 114 0 R 115 0 R 116 0 R ] /Contents 194 0 R /MediaBox [ 0 0 612 792 ] /Parent 186 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+118 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/AlexxIT/go2rtc)
+>> /Border [ 0 0 0 ] /Rect [ 175.71 523 203.5 535 ] /Subtype /Link /Type /Annot
+>>
+endobj
+119 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/cast/)
+>> /Border [ 0 0 0 ] /Rect [ 449.08 483 486.87 495 ] /Subtype /Link /Type /Annot
+>>
+endobj
+120 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/AlexxIT/go2rtc)
+>> /Border [ 0 0 0 ] /Rect [ 185.74 449 213.53 461 ] /Subtype /Link /Type /Annot
+>>
+endobj
+121 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/AlexxIT/WebRTC)
+>> /Border [ 0 0 0 ] /Rect [ 374.2 429 486.44 441 ] /Subtype /Link /Type /Annot
+>>
+endobj
+122 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/rogro82/PiPup)
+>> /Border [ 0 0 0 ] /Rect [ 388.84 237 463.32 249 ] /Subtype /Link /Type /Annot
+>>
+endobj
+123 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/androidtv/)
+>> /Border [ 0 0 0 ] /Rect [ 163.71 203 201.5 215 ] /Subtype /Link /Type /Annot
+>>
+endobj
+124 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://npmjs.org/package/homebridge-cec-tv-control)
+>> /Border [ 0 0 0 ] /Rect [ 82.93 135 199.07 147 ] /Subtype /Link /Type /Annot
+>>
+endobj
+125 0 obj
+<<
+/Annots [ 118 0 R 119 0 R 120 0 R 121 0 R 122 0 R 123 0 R 124 0 R ] /Contents 195 0 R /MediaBox [ 0 0 612 792 ] /Parent 186 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+126 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://archlinuxarm.org/forum/viewtopic.php?p=73923)
+>> /Border [ 0 0 0 ] /Rect [ 503.49 686 524.05 698 ] /Subtype /Link /Type /Annot
+>>
+endobj
+127 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://archlinuxarm.org/forum/viewtopic.php?p=73923)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 672 156.84 684 ] /Subtype /Link /Type /Annot
+>>
+endobj
+128 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://en.wikipedia.org/wiki/Consumer_Electronics_Control)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 309.75 271.31 323.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+129 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://support.pulse-eight.com/support/solutions/articles/30000053359-understanding-cec-opcodes)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 289.75 278.01 303.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+130 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://docs.kernel.org/userspace-api/media/cec/cec-intro.html)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 269.75 215.2 283.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+131 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.mankier.com/1/cec-ctl)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 249.75 202.41 263.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+132 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/Pulse-Eight/libcec)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 229.75 152.96 243.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+133 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://lkml.iu.edu/hypermail/linux/kernel/2101.2/01348.html)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 209.75 327.99 223.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+134 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://forum.libreelec.tv/thread/28180-rpi4-cec-hard-coded-to-hdmi-0/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 189.75 318.01 203.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+135 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://forum.libreelec.tv/thread/20161-rpi4-hdmi-cec-not-working/?pageNo=6)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 169.75 300.2 183.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+136 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://archlinuxarm.org/forum/viewtopic.php?p=66879)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 149.75 330.23 163.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+137 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://archlinuxarm.org/forum/viewtopic.php?p=73923)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 129.75 295.22 143.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+138 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://pimylifeup.com/raspberrypi-hdmi-cec/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 109.75 315.76 123.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+139 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://forums.plex.tv/t/rasplex-always-switches-tv-input/80901)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 89.75 294.66 103.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+140 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://npmjs.org/package/homebridge-cec-tv-control)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 69.75 230.75 83.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+141 0 obj
+<<
+/Annots [ 126 0 R 127 0 R 128 0 R 129 0 R 130 0 R 131 0 R 132 0 R 133 0 R 134 0 R 135 0 R 
+  136 0 R 137 0 R 138 0 R 139 0 R 140 0 R ] /Contents 196 0 R /MediaBox [ 0 0 612 792 ] /Parent 186 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+142 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://forums.audioholics.com/forums/threads/tv-on-off-sync-issue.129930/post-1669327)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 720.75 264.67 734.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+143 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.gtplanet.net/forum/threads/hdmi-control-between-brands.236017/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 700.75 298.01 714.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+144 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/hdmi_cec/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 680.75 264.64 694.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+145 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/issues-with-cec/1018323)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 660.75 235.74 674.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+146 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://rfc1149.net/devel/homeassistant-addon-pi-cec.html)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 640.75 285.23 654.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+147 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/RobertMe/cec2mqtt)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 620.75 167.97 634.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+148 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://contributors.home-assistant.io/apps/reference/configuration/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 600.75 354.16 614.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+149 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/new-release-of-haoskiosk-add-on-0-9-8-to-display-dashboards-directly-on-your-haos-server/899429/8)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 580.75 274.11 594.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+150 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/ha-dashboard-via-hdmi-on-tv/919280)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 560.75 299.66 574.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+151 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/actions/camera.play_stream/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 540.75 285.22 554.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+152 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/stream/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 520.75 246.88 534.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+153 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/cast/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 500.75 270.23 514.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+154 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/playing-camera-stream-to-chromecast-or-something/1020595)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 480.75 332.44 494.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+155 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/camera-play-stream-lag-issues/116258)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 460.75 300.21 474.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+156 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.openhab.org/t/google-assistent-chromecast-hls-video-stream/99381?page=3)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 440.75 336.07 454.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+157 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/AlexxIT/go2rtc)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 420.75 155.19 434.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+158 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/AlexxIT/WebRTC)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 400.75 206.85 414.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+159 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/androidtv/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 380.75 313.03 394.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+160 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/nfandroidtv/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 360.75 328.01 374.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+161 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/rogro82/PiPup)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 340.75 154.08 354.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+162 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/pipup-notification-service/714248)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 320.75 274.65 334.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+163 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/pipup-fork-home-assistant-integration-popups-tts-buttons-screen-control-on-android-tv-fire-tv/1022171)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 300.75 339.41 314.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+164 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.homey.app/t/app-pro-pipup/18498)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 280.75 257.44 294.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+165 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/gugutab/TvOverlay)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 260.75 172.96 274.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+166 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.openhab.org/t/android-notifications-binding-with-support-for-tv-overlay-5-0-0-5-9-9/164620)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 240.75 391.37 254.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+167 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://developer.android.com/training/tv/start/multitasking)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 220.75 265.22 234.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+168 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://playsignage.com/support/amazon-firetv-launch-on-startup/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 200.75 435.27 214.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+169 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://ipcamtalk.com/threads/blue-iris-pip-picture-in-picture-on-tv-when-motion-detected.17219/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 180.75 334.7 194.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+170 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.ipcamtalk.com/threads/how-do-i-get-foscam-to-automatically-show-on-fire-tablet-when-motion-is-detected.67658)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 160.75 323.57 174.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+171 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://forums.appleinsider.com/discussion/216345)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 140.75 273.01 154.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+172 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://support.apple.com/en-ae/guide/tv/atvb90537bb0/tvos)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 120.75 341.94 134.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+173 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/homekit/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 100.75 284.67 114.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+174 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/webostv/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 80.75 279.12 94.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+175 0 obj
+<<
+/Annots [ 142 0 R 143 0 R 144 0 R 145 0 R 146 0 R 147 0 R 148 0 R 149 0 R 150 0 R 151 0 R 
+  152 0 R 153 0 R 154 0 R 155 0 R 156 0 R 157 0 R 158 0 R 159 0 R 160 0 R 161 0 R 
+  162 0 R 163 0 R 164 0 R 165 0 R 166 0 R 167 0 R 168 0 R 169 0 R 170 0 R 171 0 R 
+  172 0 R 173 0 R 174 0 R ] /Contents 197 0 R /MediaBox [ 0 0 612 792 ] /Parent 186 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+176 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://community.home-assistant.io/t/video-doorbell-snapshots-as-an-overlay-on-an-lg-webos-tv/1019201)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 720.75 375.82 734.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+177 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/samsungtv/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 700.75 301.9 714.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+178 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://github.com/ollo69/ha-samsungtv-smart/issues/106)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 680.75 256.33 694.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+179 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.samsung.com/us/support/answer/ANS00087644)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 660.75 328.59 674.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+180 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/kodi/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 640.75 234.66 654.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+181 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.home-assistant.io/integrations/roku/)
+>> /Border [ 0 0 0 ] /Rect [ 79.6 620.75 237.99 634.75 ] /Subtype /Link /Type /Annot
+>>
+endobj
+182 0 obj
+<<
+/A <<
+/S /URI /Type /Action /URI (https://www.reddit.com/)
+>> /Border [ 0 0 0 ] /Rect [ 98.61 594 145.29 606 ] /Subtype /Link /Type /Annot
+>>
+endobj
+183 0 obj
+<<
+/Annots [ 176 0 R 177 0 R 178 0 R 179 0 R 180 0 R 181 0 R 182 0 R ] /Contents 198 0 R /MediaBox [ 0 0 612 792 ] /Parent 186 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 
+  /Trans <<
+
+>> /Type /Page
+>>
+endobj
+184 0 obj
+<<
+/PageMode /UseNone /Pages 186 0 R /Type /Catalog
+>>
+endobj
+185 0 obj
+<<
+/Author (CrystalHeeler) /CreationDate (D:20261026215708-05'00') /Creator (\(unspecified\)) /Keywords () /ModDate (D:20261026215708-05'00') /Producer (ReportLab PDF Library - \(opensource\)) 
+  /Subject (\(unspecified\)) /Title (HDMI-CEC and TV Research) /Trapped /False
+>>
+endobj
+186 0 obj
+<<
+/Count 12 /Kids [ 21 0 R 30 0 R 48 0 R 58 0 R 70 0 R 90 0 R 111 0 R 117 0 R 125 0 R 141 0 R 
+  175 0 R 183 0 R ] /Type /Pages
+>>
+endobj
+187 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 2300
+>>
+stream
+GauHL?$"`@&q/*0kjgoBEm%AQK`Jm`')O^ifs93Qfn\ZQ%+9Z</MtVoaI%I,]4WCnJMN'4Clra')KhZ4IJRFf6@b]Trlp`/s-^ZXlO^o=-?BG+5Cpph\=1)-riWpjU`1OCD6Nj8+<74$m/F1(oK_&4mgno=(nXqtn$6,Xfb1/Z1k;'V^OPgo=(>W<%_@`P;([;a`g0jaO;4.7_rTR!R/@DWJ!7Y17\c(f,f@pq*F!IgT.U!D6$I+n(]gGM'_dDb"7Upc*^p\9@6BABr>iBK+?$V&iAuR06lV.qg2HE`hQnj@fHM=(i'"EYl_*n<\`QRs"l/]Q.e<`$5"OIk"o/3q3$^V[NJ<Eg5c=b];%)T9A;4GV'L\o:#%!PjE4`-[\q%%hCW":6c:b<fpl``;(Uc&+H0uhhr5[`el$C@7>/Qn]"I^h'$?"pf_kkocD,_J4^"Y1omG2%(I[Ro7LQsOsfNT2P)#4;!:4pA:!C+Q<EG,A*A>Dn2QYfU;>Un)iEOOBr&R*&;(-cb-rAY/]km73_F7PL!A.ubs8pP(PL`o\$USh0u^$`*h#S+crNh497g5EjL+Jl/!$G!14JQuAer%2Q!QeMf>C^Rs[<k:R+_,\T5ULYZ+9c*>8M,^7dl$G/i/,$b5=HdYUA!$ShfRu[10G8;SW9VCtnB#bP1rn,TC6=oRE??N`VYpP=7cQN:oN]M7"_odRr)$uEIl$i3G#H'nDuAQ]98%krP&q^F;E\\m;n9>f,m"XV2,GuDo6OGX_FTthB%%eR,KMR&:TZ"g.HeefJa*%V_WV5[ng-k7O4,sI5%E-3!",($KkrS13sY\!IokFPL<b>UFFXr$IK55J)+P2"aM6*?^O5+BA8>Rq:!%N\j[tCMI@Y;dqlc6Bddi#]Y(`UR5$U7UAR0=5JesI0eE$/N3SI1XdKUjYC>hqC2>(9RZDAu$<[:3>mQgrt$%l37a"Ap1oi3VGS*eR_*D)5g]J<;6\PR*VXfNrPX:1)imAeFeQA.-CN]U3D-4tZ,8/0qb3(i@.=b=p5kLDT:RVa4b==F^%Q;n>!<o#SB5bfQY(NN8:R.cQgE-$lX[Tk_U0Y:R2eR+KRV,#fe8fl2+Sp/.5k?9F:M`lKr\*'\%,3Xt@KN(BW7e,pV8ZtVW?!uB4N4C9HM%QaY$lcpp2hDuH]$`cImZ_p'R1X*lQX%"Zbbhc)6-r>3Q_M1X$@5piiTpGT+$O__6tsWPX[s9*F[s8=s#9?DQ?mG8So,;O"HMoWLUG":<(-Z)ac=e.1rjs7kJCJ+#pS*)Y_d00GL!ID@L9n,X8![rPX?C?\-i;bkUUGba-c7KkBrJ0.mATocRY$@[6e)_"Qt0M7u^HiZ!N3LaW#F!4#_j=QS]"N2l)V3g<Vh=qZX"9A"=Nc+V0j'U\6n-d5V7B<^,k6^S0b$1:`#_Lq?]lNP^F<hRI**WOn`IYnFT1D*+"-gV^C38d"u?j/P#Il+&<!1_(H'A<)d8Lq9;,!BiD3FEBV@H_0C@Z'n(q@U'4fpli;KAulR?LgM-'S_qdh[bsXiWHdHQf5L$MS`^-mOM7LYId9(;]ra<S1E,u/kMc$K@90/=NpP560R.#QCO%Vf>!A;Z?Jl'.3i!ju=0f]*AnM]]?t%3_5%8GIHbLMB>[OCC#o@>_1PNa=Fr5N>3L<!2Mj<!K.n,/5%`=lKT;Ug]A]MBq"GEc;"t3OqKQ6#kQ;^m#gj*fc/G+g=.-^<U&%/H&`Ik+70%eMDW[Ri18>SNdW:WoZP1L(B.k]"k.9@>$AeO9c,TOTnQk0&#<$\B9,'a8*?Y_-FR!;@=g5<l7eLHnf3[kroWQ9nPW!dsBY_fB2c5=br4IKZI:r`>)p7*p"^Y%UU1f<C0B'eG,CDna+H!8KuV;8a)Nm_99JKq\KF53PQ7r!"17OP4PXlWW>Oo>+LZWr:p,JY:HN'p!(XZK^Y&%G\#O^Yf>nJ)DVkd<d/1De<IM20E-`c2a:,dU!CG:BHCZ!nDZ^S;';gC+VA?LW&r7qU^leX;ROcfg=m`Ud\QSH$C0W[Th"Y/I%gqm*M%Q&_CRarQe"+2O64bf`[OBjldeT+u5\%8S:8kkM3ZIAtjbcbB.S3[48TEnN=nZPo1qZfd8*e!pX0G(G"LUX,q$)YRQ7.r5moB*pY)Bc&-D,1me48Ug,c[=59a6Z4Z3mS_$/pb+c#QRmJD-fIW-V\sfe_qf*c]q\Kh#P?\j5gS(!/bC)-Zl.5-o@_Ta7gIC2m^\#.ZdQR*_VV4*SO,'Hs$4.(LBl"M2t6a&.NcQFS]SO.lB3#P7?DGKd4I2"pO?II,>A~>endstream
+endobj
+188 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 2362
+>>
+stream
+Gau0E>BALX'RnB337F3g]>=.LF6W$YR\jqFH_Cb8cKo)=,E0Df[R;^XK`:g2P&2=m@,kOU#r.Tk/t^ELqMsomNPCML$kn0C6[8FX!QToQ"<?=i@JBjULF5;]MOCW=kZL2+DRF>Z(HCpZIlc*j3/.!J#9WI)R06:2q=9+_E9FeQGlQpd<U8Z8!XKm#N5U><.1cbV6;mr;K8M&cDkFr:3t,J0I@ERZSn7fT;XT'/.C^>+IR0aPHNOcfkVul?0mCT>q<dLG*TO'fgsuthju8jJkq.`J.UeKt"H7<LkrE&T/2+4h>p$-J5<['B4NLu'>F0.E.<Fr]9`KZPS#.'>g7Fq+B(bLsf1)`&:]K@&FON0nEd`;4$[sb5]$PI!81@5=S<QXg(!8\d.p/n.$3Y="G-5HKR5G\]L>q<!2d^)Ik6%6'SqgcKT/>Hi3*%iOT5^'f'^L#bbAANuCIAjj"_0j[PN'u!^K3e0pHZ*6Du3O"e.V(0&:9]+d(O"4!M=WP,2QZ%c;"OMaUCNrc_WbS(/0DoNZh.ika>?9WMFo8e),,%cSK/"6dYLp+S_f@_-1:i3]Nr0W\/hI?LbW.]YRDJ,2p@1SJ`hI/-U\]-0Zo5:(cT@nkAI=YLdIg?Iu:ZYEm[n^7C%:rM4BWZ8AZ*a6m:(]<Q^R$8N*J<.0"7"^(T2=I<3T7\^,G=SEtAY0b>on(AcK3_g@TJdUjZ8UV9h<5FPd.=*io.]P`efW/C=HG^q@jXa3c1&]3\N(&HTj?-U<(6Wor*#Xf9.]#o)&Ieo`lita^nFZ$GfuJ>`<I!)Xq?TlN.5b:0i99PC]GnmWVBce3'#6:7.AgufI+;.G'Lu`MSm`'r-tR;GhGW!:0C^ReP/Fbl^ElV56?&3I(^<#<kd[W8*j4T/pBZTVR*nANg'S491V/7Mf!u<k-@856Y!D:A*TL=68s@MXM"#+YffNI:3B,a%fOtkq\O`!:%/!L(NRhAhrJ?$];:CD6G&eXKrU'g!pgQYnPCa#(lPON`\@ifg+,nklGEqd3Sp(6[4c\-pEFd_&EP,V;3u`41[8&!djY1#,U[>J:mBo]-XjYtN\=p.VLKkBl>&2?ces:ZSK8ZO<nuHfnbN%O09gIGBoP/9'q`T-nF+>:KhX4c"9\X%Am!u3"QEtU"RT)!LXbgflr!p`U(4N:,G?N%),Da7;->gr[hS2!\@JiR8o%)Tlgb`%]mS5:eRZN9+:rSM-%WbODb8Q&GkBdiu?lKe;`^9CLESFm3=r2?@T'Nb'no7EM<]eVW*s5/C@q)i?@QBeZY>\0.3-);f"Q/DpanR"gh^-*l*>oTT`j#[&T4XN+CE,Vk\5?N:\$'Vfk&ehg(19qIK=TsD0mn2g]t4^7:%4_&krd>pGC"&@:Xq58XCXg2l'La<Api;;Cu%*O^K9'*+3Si>JaFQ9p#1WOo+-f+p=ntWO(<GXpd!%,?hWIOp%e"*3SZ02GZK:@St)qVp^-L.^!fsU(*(N,TRh"`_MJtsKmgJE]"BY$HN+3J.ig^(bC<^Lmg@,5@l_!4O+5$OLrF0_qf#-fZ:;bQ/'GUq=WW]IN]I(`',#$sJ#kL$R\]aUaG>gH+,b7lO/?\RrC(Jri>sN:h'Qic/S8--SCUMI\-iaTnoQOL>CW`mG+0cNH\QW4@WQ\8IPIN4j.aEgA#6B`,^hoKfb1F$^3]hA'll8"(2;KX^Tph+3-k`MOT8o:L8!1R:K1VU,geHB?4D(+D^Y's?2OXH7r=4^R#r!3+glt8<=<Qo,FVcOQ!E'-dSe`ki?[b7iRrm;.SFJ*+d:QfZcRltPUjYlE(>t'K&;C$FcmLK,A]P88q@@])Z*>VF.=5h[@#Zn2J+-G0ajgac7Cu?i]>m?_,gn+%).9p+C,`[V3jpf]aOpE_Et%SCdGs<+R@?@_Ldi5BBC2_S@V#>b"i:1\h=Uj0i8cR2'@9*`,^S(YT\J3Z1&,>i-.m_MG4h?SeMK2$p+oSKqt2.E&!R!`#VP(4YUsBL@JG(rZseX$_ZGn[4qOI@@28JLVS`-V\Y<'j9,;>c^_j7cDHO&a]*qIEfi+g?:L;,bciLh''$t?j["c;l*EF!N_YleV=h>>-MSm]W<IS%]4u-Qp(p'^:_PUZ-sA2j.h?A/1I5>J]]hZh"J6J"?=Q\RN.=dJ``(U>IB`QNSp)3f2YOt&;_uAZ>t\*.iog/[6Gk)a-*[ItLW$`Eh7s2q'U\]1q:8),[U,:VTKf\&Qt(j0Ye_h#)kq>h^9K--ZLJBtqSkKnIlLY&&iD?b`:UcP!p$u<ep)<PFgk-JE5r9MNk5.ZFaqRLH9^#*Qt"bf/R/%U!QMT4>I<>AeODeO9>p@gGqE_S3[AFNe1kY=)X"Ph:#Y/?Om-rd~>endstream
+endobj
+189 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 2044
+>>
+stream
+Gau0D=`<%S&:X)O(i6I-]8.0en<!eLi25b9BSpC@GInB2TdAFT7M8^aMX,c,_aAHRb?#9#60q.4KCaM]K)p)a-SU%6*8oWic9DFCKJ8ua&Gn2@Dr>C.lGkFLAuK'ApjMnlmra8@IK8]+@\s;1VnG#SJI#h-k_tD\-->+0$jUbMrprYKo'-iYOb0+p"Y41M+<``["F'r^:1=(H)]8S[j$0oaVb4i7^Dd]!]shNA+aUHdDfiQsgQ0^45qp5?imY&UqV9%B`*//RI+N7BDmA>JhD:]A>5L[beaF!&EJ,Kk_P#Mq!'dplDm9ro$YX0dm"@QM-*j%;+dR)jE0ZFi`b(;)Ia;.-JnP_h^^h[f&iF!s>EA]R[3%aIkjR_$cZp);/Jh"tb:.jM$&*u/<:4`,pP:H/o:nIu@Fmbf*t/?X!#o1E2#heQX94bMGZJe6L7g=lcBnUWM$16EL1QJ964'5p<(J,'Op<HDRR&FU,8DoM^ChDSFi`mnQhY#9pD/^kk8tm\Z?)&lc4cXgh2Bu']q:;pi\l?q9qVU_*V0OCXl2Y>qO1.:pM17)kCs`%ce@cVYY6.)N(IS+=8Ta^j6m2R2iNb#/;ar>b\:Ac/.-S'p.`sr;ILRWNS/V[4(fl^PfQ]MkYDA>Rg7j=hKbI_G_'g*Sifj2"6pR5">u)pU^Jdr1r.dBb6WDb`()#>K*cn<l-AMYB:*^:jdSPk03O/RA8Hi'_k^aEM?Z^W=K@4?#BqW-'er!nShHJ"CX;UiW%ntWl=Q;D3a7!g6^4Nn.\]>E?QdK3cRIp+&_o0TR\Z`Y)X!>pU/G)PFRmqGd"n$i5YUZ8=3(Q4ZC`t]9[JpOeV/;qUBtdH[*n:iB-AF^ll`;b&`:`k;3Q"`,L*aD/T['nD^EuHH8@6$<Mg8O#EA=.OVbkB%Edi)DZAg59F.8lV](Gl^n#7i_kV;YB=Efh+?WN'ELM+&RW*nAD0te3P.N>*Y0J;E&quT_>;l8#?.c#0-j?6:!A%n0HdIV1@JZH$?HqWJGbQshC6g`B\oRk$/7X&[B#bN1NeXGu+WC=]$BK2h<Jk?)*R6IO$,Cko1!gu]Ch'$374QWfCa@O&"1j6M]O6V,P0kE8<(cL5Z%Zjkan%8tUi8?UWFj(R2c^AOK'$<8f4_O,Rpt!CCYFLqRTGn#&ZH_7e"YZX:PH7-HmIE(:UHZJ-38U=7_PoZ8\HW4Rk(%2";/h`VM)BfQSD[B:#(h,5($<PX0OS,nPdujGr.sgJQ@t(>C"fF++TGg*,t3=MlH#WE\'u5TR.lQSE;'nn2l@0!NpRi*_D4]L_L1JL4MSY]4[MHm#eUC0Vl#_Z0cs?D)d,^#Jm;In1fb0O(DYV+kAp2BerIH%!.7Qq</sqj45+d`PKaJa9XEGA`Su$$OcMjh&'t+A7RE<V69L)AUE2AgErkD2fR[I3B8p-*YNrQMS7,tR(qIjM6Lca`SYS;`TAWt9%!9s#gu?1W/n*82RJT0"klt8lY?cF`hkP&+r4,s4WleDQ5Nh#8FiuWVn@!/hh6&ns/'4/]bN2SVLJisWtj.MbhC[!1]@&*pkX;OV43t?%Xb$m<`)n4T*^b/+"YG4HB4";OMP_p+s/En_K'/4.)h`bo4t8$q,0!7&N':e<\\tmY[_jrm%>Wun'nm6&qpM;PIqNbea7(aIg1@'s/\5(K@L=LBC1cg"eKCu&(8Sj5_EjQgTGaPrl$O$WU457/I7i4!16;87Q>I(V;(@iL'Wn\!dQ#@UspJE_I+V$WIhOWcuUCoM\T"^J?t*`4teXs:01rP\+81I(rS'e+N3cKi/9qB!LmC8^[aP^:I/s"RD<N#P#3GcE$?sj9\/r8ABHFO(D(otVG'NlmjrQ0,#dTd%F0GSUFFKHBrVEKFl5E$._%Cod]+:W[*:;[!6u&m2cl=hYi?@,2cPE.bmf=(@m_23f:t!C%9g^,)W#\^dpVAEB=L3N/:Hke_YZ8GUY)pN7OlAUWbA-b_s$.*ebe7>5Z6K$ga/aE:aIR6-62/G''D,Elohh2Jnl&1#sA''=a)QH!tMO6#I\CHj8~>endstream
+endobj
+190 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 2456
+>>
+stream
+Gau0ElYkN9&HCV%im:J=OiVkE'jqlkXKS='e(3_Z/42Zq[*;Va<K`7*s*dI9Oroioh41@!6BQK)h];077sj1R5L97d;LmXOd!b/0kJLg7?Kd%rGmc8P:VK%Bh[K19Ojbu(SY#/,qB##&(3@1)/#DtE\0/RE.<NS_lB\5bn,!33rVO2cf=*DNJRgLV"^eQO%Kmu=;F,hGTGA4gT:`s\.nlOMI@ES%OlM269(!^f;[>=ZI_\ZZF8GuU@,QcQiuUQm1NRot0)2T3II@ULHR'+kCWYJC(OJN_fJ='W:gL3/;?WPD9d:R-/EV"'Pm!kUq_BQIFr#)?*bJYFoO5R9SeUd']Q-anX91"hXQrVA=5A[F1H'I,&(Odg>Ykgq*J9_X#oQeU;ahq=K6ZRn@ic6G^^CA)"FYJJ%)M2gcbS9l"24AbWRo,=/6H,%s30/JY2P]GBW/a_NXpFO<6%AVILdE*mifJ@pg1-gC,d__H5c;@b7Hd35@Xij2#&(us+Q1ZLkm3_.8r1Fd"k@/H=V4:VIgY3!>>0.AHf70G"9T[THm\`\3*DbM!cLGbTB<Z`!A<L&(-!5bV?^sDkr(dJ=arC.sU:fR'+Zo.u9V/2^j`Fg-oa"GVNR`)$3^SN-?@H9KB,6.!q`kmQ9IT+41Jc4u56c9J&L]3TOFQe4$mmCt4J=5"d"*;D-Lb3L(Fg\KI$Oh&B"%[<b1m+t<VQF^V<FM3A7cdK6f`c;Ve4N?p:._O$[u=7QCpqH-:u#=/l)0u(H:4tO*#.&Au-NSZ.HS?Rn5<^"1E0Jhl0o`Pc;k30OaPY<Qi.>&:cE(#&V/Ou$[CZBLmEq]gPhLT;@Aps0l75e`8Be8/C`T]dakZe\<G]mVm^3cP1=\<R+PLlttpA7,tO^9*MRH$gW+E&/i0BYtX*_P0FP20,JVPFNiTa,og)nGLQPEKhuMi`@*:7r*s7p:Z8rNd9%(^BMPFc,T<IY`6;iqsSBJh/GM>`FB],Am8uGuCGt]f5*hGt_2,NCT3/lS2Fp8=l<oHg]Rldm#F+gpYQ9%i<kWQqK0A.GCl*'!kuQBHTYu`>$5c;k:4,Ue!0KEm\!\d[6/P4<Z4)p'Y:b=RcGk4Qhl6&G:!e+k00$B;<`tUdTU*0jo8L'mb=_:dX=j=uA(`-AFRX((rA"14Js5,ZR9^8H?[-Ki25+q+PDq*fK.TrMM00IC):2(flA%+AjZt353ckitL#4%-oLeF'GkgQ;fue$!>5f'P7Cs0kMi-1qQ3YU?UW:?,rj",)A'VBp^50qBh3c%GtD'GQ2L7:CLLC%JCI`KdKZRj>@2&RR'Ycmkh*KGuDeM`EcB8?WH/[D3a.E^E\SM"?+RZNiCc*Vh<CTs5P1bghNYS4-$Ml*1kW\KoU8[Lj"o@\4o0XlX;;q6/-:<3:I<@=-g(r/7Nlk/[$f$\Ef`l6!BC-Bm<4u>'-aN/]3_W=uoEMl8e]3'1>9rqs\4$oqka_HX=fn8+(&Hc)!3'oG@MHXuA122:L%%fAW[s%,oq+@s#TSq:;h(i5gB'aO`E3X+N7`YNW/MQs(!*htQq4#3kmSS\`VXIPI>NJ_M7]0_.u#)/RDG]<3+J]8jgZNbj,g:lADaH^ed,O^**R'JaLjiefa*$FL<_#+ECUNsZnf=;mT%Yo+,T8ZSq0mN>A7#C@]ZpWgdoFG&66MIM(5CJF9jg.IVBC1Yq=Y=&-M/'X#EKIBKW,Ei7Hs&ih"4>gcu'X=$pRg*0AO;]RdU,F#&Cf83@6uBH!6(Z[ue;bUP.2\Tbd]?!&#A_:M;#(>rZq&4TTrG>S"+P=\Xh5T,ofO$qhnSC/ORa7;c"uOX>M[erBW6QG1b&W,/'u6qRifM`$dQb#JW27\qUu1;Z]i`AcB"I(<7t2H-Kdo)No;f7e(FH`%?UEkXJ93t<.<<`aoW7B,ElAS,FmW0II;cDiLRP@V(=uD&1]BeT_\cjImnnQCd,(Kp>`2$B\0ObZ>#_=olC2,bkQL+Hd(<5<P<<TmpTP+a76\Y*t7IDI&oeaIQ`RLeL8k9C(qcWW#lLhmolW;WcW]'X0[6l['Bkm58ZNM2_]H-o9n^0p(@X`qC;cXggBK.12f.`&H+4-T1$F)<HQGMIem?LSO*g\5Xp9_j*)coBWjG<NU,4;'!u6g.FN:;YLjg[mO>*JO>Ag5R]n$ce:`;:p;%BiG98/q3[5K<RW:)"l*i/f%?$0E$kF*@Xs>5@2Ps!cUM"AX,s9R]?&ga.@lR)hoPI3_l&9l-lt6VOUU5?)Cf5I`h17XLQY@DJn*@$]bo?D"CK._KVXuUt/_#6cY2L5OiMcG=H/<PBr!$2O@VOBk+\!0;4aPS#m;Gb]klFD+0`AgUM%g^HJK\Q-;gjcJ!lfUW'AIa!PJ54)f('8BWTHrL3Db/WA8]1WRleS/;Q6hbk$^MF#O0W3?5lt9lbD6oLQ6):FSqC?N0DTM,Hpt8Y2,*DT)8tEj3F4~>endstream
+endobj
+191 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 2129
+>>
+stream
+Gau0DgN)"=&:Ml+FRcZ^Q;N_T[scrHFqS'G$S`p=>NM2;)UPQ3%@J*mnFt[#,N0$K+BMfk@2VX"h5>VFkoLpMpuC,T-j)Gs_M:oNp]4(Oi.kVEdgPq1IJ<\GH)FFs#%"e:hWqQH6.^nTJ(9-Wn4W)<*kp"@G;;,rk3Gs3_/0bU@!$R;hE:a]$7q6(-h:U)$XaONN%5)f#Es+oIX;USs'Y[bXnUI]0^r7S^Toq5$P&^tO+'BmX(T%]FJ.4m0h)t:^PU_6e*F^WoY[R,r"_`RZ9N()7p#6uEbSpi#%9>akFPtsU1>?/!fB874Ot(c/7WcFo5s@cj#eQi^'T6!f6P8gfbd1JX>imaTd&=n_pbuO'CHMG,o2aqN['Z>$Nik%Gi8;:hS?YUI_,hk]A)WD6h%\^g%MP_j!*$dq,&[UA"S1*jS$7l;d<ubIdkk`b$hG`Alk&h8jqHCc4&?:]dIK2iS!UbGZII""Z@W2+(0*p+&/P:NZ_O]P<dDR_I`-]ri;!\P-2%m?m^C$Z,_R$F^]K2mWQcRMuSu-km\]8edH;-@k%l%-L>%Ub\!8Hj5S(?Iaa(G)nn)7i5O'[=,"(^EhQUtC*QdG?JB.bDH%Dk<A2G1*"ZPj:VLXpmrt:_SrZ;]FMJ9_g=o`tJ`#]%[_-L)*TqVP^/*AEH,k4PH9RiSkMBls4b9lBm__Z8>a"-WVk)"(WQ^tf45:]q?C-gZ^Xmf]/#D4n4-EGQPJ9O['-j86(R<@/E#,?VCCe^MjU0$o/kn+Q1:<V+L3`iXN3JhWP`&e6oeqfrJLTs9KrH(6L6JtA%&\:<1/LmW5oC)qls15%&HVZnOSWjQel`tO&Me2S1&Z/%f1V]FO]r_O>V?G--VtZpU<V6Y7`@3!=NkkBP>&q7-C9e9:e-E7gd=rs:uJsM)D'A/*7Y%l^7q-*NL&]OKr-sLU'N(?,i,^6BhcB0_CT8##]+Cgg+:6U\-8Q.RE,cRoin=V*":[Pje_(-.7]Xh36MFgcZmD!X^&o(1th#h+p3M28hFckauJs;Jsfoc5a_nD.9kgQ62M)ZYr+]5BZ8f]j?aY2"&)(j>g_T59Vd*u$?a3D!k<dr0<9jLUqMYNik^I&<>&c7a`=_PC)07Jhl5ft.q,:a[SV=7e_\E[@B]@iGW1/X@bBp5/;4g?Z%rh4V';&Wj'ASU2C)KFXs\WgVK60NN`!c:rkh]54r20eJ?tJE[AU<Em/u56edX3E*>Y-Nr3P$\O1Q.^e?pW+Tom9<-0&K4FXW`fPN?SD:glZc9$5hEQT[U-'[KM(,1%Q:jS1eiYd&=%FhF\MlD0bK$\dS7OZ1HVUo1I7mq%o15BnFN9$8lJ#2:\M_pS:mWX"s3-#=D\`Mn)3W'4l)aP#%FTBSH9W&9MH.5c;V_AUe@9[P0#Uc6Z>@QrrX26-KRFIlle5>rb4n7KV6VHGd]%5:DOFh,1+p>64"B=TASQP.JaqMd1`<9=Qd:I56nGO4H0L=6tD)`oZrbr4i7S<&4jcRDNU+QM.6Ln2t*Ln,LW\p/aP`\`eoJfS?:eMm^&8+u8$*:2bIFqE.NX_+p8nnQ"6[-G&hpD(Sm@27&4FTT1lgnkA/kocuTFr`T<g=C.&YYp`J6?N.8a-Z5P=/eq"]DZ.Z.k+r]=!-A,P`(d<lVBk#.spb.;3FaJJM!5<)pM2<M<Ag7n*r7T*0?0<)9]1ch.h:QqmD3;"1MFkn!Ym&D6l_t,"bl,F7XB,L#Mg^1=bKQl'1<>?+!f%Wh6SFcrQ>f(E>H`YWGT#o%0?=G9EW<-1tI\DPiWf0oR_3%si4RS;\F>:,7Zsd)7?XYc1nJZlqBTPI>lTAlR">DG7h6^JS0,b;Ia8!j)/p6@t`(=gl9F*mmR):htWW$7bS\_oiDurhb?GL(M`U%M>3K$i:#QAKP%ga%^;TM.ceGn5)5k%Ysr)*$gPeUYuO'6lt(baMK4TW=m?R<E:IfRq%*9^lCZ4nedY1#7W+d*!0c`i!.;)O'ThoD[!#E>SG=3H^NDEUD"E;=E'H6Z##&I?(?&ClDRRt=r)W?@r<%6,YAi1"GUP:Y0.e`\P8#NekUo>CN*a/OCqj46nq05Oa6mLIOuGEH95-<hlAC<fPVBrbA9"Bi+R6,Ci+Fk5G%H5bl~>endstream
+endobj
+192 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 2416
+>>
+stream
+GauHMCN&2l'`C51ibCZb/"2V+YO6/%[^=MdqI#*&N^g%%9Obfl`+Eh`/G&3%g.?f-g-TFT9rA.-hq7,IHgUtPlM/]5^S;M$/;3%V(L.Kf&\*B*5^3AIiJ6kDMCWObU#Rtfc^dP]m5/*Ns!u-%JQl5pZuCSWCJm,Ojn!PV_Lq$Zi2V-NI<9pX%YVlq-=Y!i(^NMTV36AeTI1Gj^CDFb)o>t+o2^is*N'sc9=m>BVU/SYohX@bH#M0P%CGC$T(.MeeErgQ[p96BDJ_VJXk!lG>FhVPn';f^D6qm&&6_ork)nbXE6#&H9d*q;;m+>YVa>,Tf]p7C8?`Ue^@[>+#JL!um[O[07e>VCC%K,k>8f;M*/>]>/7g8^ZbE;;\a>6m<34s])n%Ms_lC*^dh=!&YohKd.6&n63tNWMJ;PVKk*1a;-Lf(e#PJ@4d<GO)3.A3jC'WZRn[Iti@"d0[@eqRtT=RG[iQuj>982qKX1ft($d1V0hFE546"1`7j%>L\;8=Wp>=Y(!6OX6h,XA5*0iamF#+dePN2:37cBM$8Qi=ICG]>f)]t*nX%_c9,Fmm't+@k0q<[%'aJ/mTh:QXb*GD&(H#n`>[)(,_]3YfFEA3;/sC]$t<#>QETBps%=kAYR$b\0&'`:taB3*,7mP2bJDN[tDMKLo\iekirRaMnl<@1,h*]4]HkDnuYGkIfU*Y#I73m9Q^\K<;(#/?_q0H`p@f$;8m.`'*8PU46h>iDr1Q!6nE!WgGPIij45^SE8+g5^a[KLVk#=1TaMWC(Q-u4K7D1,P\M\N?#IZ0I(>KLSh#`7]G=/8IG4j)LN0,S=$*^Q_3hN$5VZ+#C:!O?o8Ro$(59sZ@m6-_`>YW7']5@#&$C[K`[X\9Ya2V+%u;@p1+Wmj-7>8`q5*VF=S7,.5,B$/+"(;G7;PGMFqG)&[Pccr]pU+:aK+tTfOor_l=ne\c&:InYoRO'2W4oYMjQTmt&n(Ppo+a-lZ_e.2Q*)K.1gprs;d0)ZnR9]hP14XCC0h0Y&uBSOFgMM^J<S4V*Qon&/;XGi0g0hl*0)9AVEF?9^^%fp?%[Q?VtZZ]$4,M"*>/G+anMTb1_0)<O:jb9.F)52VaUA:u[N,2]CjW=H=)O^UCC9>]5D8BR^<"*\55-+VoM(Or]Ge?1tJ2"t"!'UIX=$Y-&mH@_IGc8II>/9iqr+Z+b7cnUC>Q$epbT)"KZI`qb1/Cj>n^V?-BESX9r']nj-V+PU':Uf@q_<&<($$PI/\K*iL-@18&Kb6$'&``1%/Dl1-H9<p2ccHlj,Akk#$=i$d*E<)&-<#(MP":B"pQU]q"(lFrB+4`HUCILr-4tJi#><V5dU>%g1Wa)FlW?)/*,_dH<\*>,lCd%k=-+2`G7;o@_6k!0(p'M5ULIdI&5O"h6heg(pcrS?^k%>[.P\:C)X2ecR>e/NQ&pqp'.c=$Rpt5229]h3]^Ah&0*$1"3>n3A)*b);2A*(LO^`ThlC>=;`P(#,3q%o9Is7aF/s?0m6Mj4th]"R5onk3nUP,$bdBr%ui#G;hJj6]hFl4c3\n$?4@KgS[G:[JMEtr<bEM&'S9DeWbq_fCucn.Q,5r@;>Ju/8f/Oho]bYM?MUC_$/E`?$.`EWZhe[/EQJYY>j*42rN6kYu)Dk6b/^%+h0H?J!!o50gKM<Tu!f:VBr9kM%^a\:+Pi(bVdENnmE]Yo)MjT/hJ>)RiFO[[AH28b[$PUU1EZ>Up;mU1@gll(B2B#J)9Fg3=G,["eUT8e,!#419ghS(2kHV`^0pV9H]6]sPuAfDcWDP)nF9:)p6<ljiGBMSu9nKCbjW:!kT\FQ;`&Sl3C!3a+N^@Jq9YGQ-s;IdV-g)+cYq-Z(:R>I0FC-9C'DN:8HSt#Ch\+<In6u(25I5J0:CRmm-;[LE0a<B[WAUF/R:h@hlj`&Cf:2.]05MMZsdV0X7QhA?39i,ij"rW-l_Y[27'\MOhMs/QE8gEXX`a^_*4eL.@[e1ID%%H!&To7/J[Q.#LA>MG;K-7Yjk<q9^DVT#Xj-^SUGQc?01cs6eNRPu1.0.sWY>Lr2<hL@k=,o,_M)#a0Et$T`7egS,fMR8_MH@!eiEOiq)g(d!@tj#GA^%?f?QN=0+aoGJ"C<KJ(,:Wf7TNat9-pCkNc0jiV3ma7_5j'>of+a^:f[\MbFsn+ZTR\?iHnB"G*1`H&Wp;SObdYhVkq:[;ILdlSIn&@X"`m'*;$MAa'RWErNi#NR4p/(Z[::_O]CgoKn9Ul1;S(.1o;E$UT;H_X,f%GWkrq:-,8TIb5nH'`3I7`F-#s8G%PC!XOPqA:%22B..*D*f*2Onnq9DQnAK#5b5kTO>%43Q6U>7qr!I<f(^t80D!iMM+9iJ\Zp,C3H\/Nq-B-L1hIS/lQ-d/D,"9g/&Q7h)R'_U<lMhJ+q!]rB5]\m~>endstream
+endobj
+193 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 2091
+>>
+stream
+Gau0EgN)"=&:Ml+FSR4n@k.g.AGkRL:@Q942/MjC.b>dP0X7EN1a<\-laM3d).Kh4LfLV;,"=_te(potO)8RjT5@p5#iO_K5('fTm_EK;G1Z#rkT!>fDgoDLIQ=2GqGsf0DRjVrhm;;+HTIuBm)$@"i=-:R'1(qD?C\5*DEAjL#+mNn%SfbpJAhPfR@K1[$4M:tnW\T`6-hNL^:f0H%iG76qlLe(oW<<2YdAc%VB!76V>m4;jk?;Y%X@@n53"F0dP`V*GIn<T[]t6rHd>jgqFf!rJ%sZ#Uml3'T`MPq>F$3ol^VZ1qhl]?'MfI>4HZV_/J4GCdfotZK$k(2h6tPqppc@OG[NPF[Wg@-X,!m=D2\paiC$.4((7f0MjO=r^,,Q<9>c6oc[r3bKB>et'GR%'fX(kG6XXDlBe]FCq+T_lTm5Mm`eTJeY>;nI/)$<$>Z/B_RIGH?r:))BIZ)TWr-O4,j56mOrke/gn986"r`"&=m6cb&TR^tho5oMr0am^KiF7$=HP$cV(?)akI!d_2_;>gq]dd^Wk%d?6CC6eB!RYL(#-0%B3GPZ0VDL"/<^t/XKSep.cdJ&u)Nn&p;\iMTVElVtA75bd:H=KF4em?pY,kuSgtY?A7Sl0!=<0`[6$PK"gZu%'m9fu7\%?&&oGJZnNT72'^i>Nj:WR=81Ms`I:+@gHj<X\C2)J".OGC$Y2'=1MEXqX@.t&03#8(n]o,3U/iBTm1X3_DKR>s93,/pcdU)AU3=fftR\q+J;cYq>Y^J$Fg#el6F,)qg1QEj_VZU?O/5-U-H]"/P/bRu,X\g?D1]S7V4=KWOX&I&Q`]*ug%<!6,$.0fc%ObtghlWiWk(^E6PFp^=5:rN)j\1:Fh;`n)9/QS.K[0Z$Fp%=e!WJ-;']<ti6$)Fb>LVe&"$:Sk.3Vpm.ZGp7<;O=r:K-MohV@beHcGA.$,q'umjZ4bJL#5TO-SidV;EuOf=AT,Y+e99;AA_O7a21YhYmm4`[upC>;S0RGm<.Cc$dAGACA>(j?*E'\U^G;W'oe#,a/22VMsWK^r>EJrP2q`o<cVL9OSelLaXm,\dj2\V[h"l*J\q1P&Yfm&((_jmoRg-p=gtY>AZ_Je2?0L%n7!Shj(D@H[nAl,h:b`+V?RCFo`PrIB_BJ5?u82o.?,Ma=Y5k%$Xk5GDSZL7(D-0u2D(rC3D2A?#?(g\0o[K.(KGVN:=)!q60IS7h6fWr%M5b0F%jRAm%37HKCe+rO=ANVef5;t^Xl;](RAj&3__5U3C8gbr./Ea8=i?=TOO5F-"LSaLpBVOKP[n(@iS`o&/h9AC?4m3\%In7LP'=q5*kidPDnPP`jAom'o)%roLg0&%1C%3@pS1mY"H$*.iJ`99&37Ubqt<[O4rIC[[aMpH>UiZ+cB<SUW,k&a5\`mfhJH)_Xa>nY.XG_o7b=_<\Qa4/'Gi+bfj$Y#V,*j,"_h'brO/Pc(#Ut9_U:5mq\fm/e$.tq@*I/=KVto0haRU)5_GsIqCZZ_ZXBsEnL^S<Luq\fR7:0Ae-Z50V\0-eQC$4_2N4Z(2ASG1!W1sm-5>4r?CkV)rlmX10tpRY1jYt?$?Ne$_Z?#JFaTa1t2@.DJ7&i<)W1-.SIX7d@!bm4YeRf@pD0fjT(?R<ThQ2Y."mb=@ULS,iEn]ig:FQd+5OO;^$8R7#,dXdH*:-Sc2*qlI`f%,HMr6Q%=25&\EMPXk"caNI?#/"<i8e#Zp0c4>@M3LhN_1raGUB7+,s;DlX9JTnn[n$QP1q'.S0(:"Ar\`J^Ve3Jt6(*'A/5,hL1RT^-BGM4]Yn><`fO4J2N:UO*Q6'Pn=O[j`HU*Rr39.2<]C?UQ;!IXepg"*;t0WdQ@.!.+k6HUrfc]Y?t;O(^d$n5Y</[8KW8@T:r.7i<O.%YBnHLhmh]G39T/N!D<45'ttFIT+[k^KnB0CH69s`Z7@f;iBN#ba#Spbs=jG;#AmKr@eVX@m&$5=f=5!;m!0[P4$eAf%Qk2gZM>nO^>AbMlabjj&&<d;iqs[h`&ctUqp7+C'V+LWHjum\V7=Ac+Im7phI;Y[j/=8,85Y`j'b8A5`usU7>,#DB3)nUhY[oKD%>J~>endstream
+endobj
+194 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 2900
+>>
+stream
+Gau0FD0)I3')k)0U-Ett'$Rs2ZZT?;bY.Xf4-L\3kN]'FPu<QMCBB=N`K'E=D[RG6'8&$+m*s#t6pIg)e#dL2"*FHRP^hj._##".58djr0Y7S-eng^Z_8k5uT5V/64Rp5=ghj[ck_AOEnFSYFL_l#PFD$1Y=SPVoU[r_O5pEfnbm@X(puAj4MiSZ>iW-81?aFtX"Qgu(.01JW^8*I[rYB*1@.oMoCC2qI9t.f.mPS-Dn/>U47&?ruY([3V$kLD21(_.c\Z<.K;Y5r'RC!6kppK%P/OF7sUpR-SXXYG`T8G=UCn=NCCN+PVKok@PSo9-)8]YSBm3(g7N%$HQ[C`"`FjUW8R[=RuVM,g%BU3?lY5_0W966nX2Ah1Y7Lbnd6V$b+Jk$,==XN9_gkE+8.65@n"n(]jVq[m?QM:u?EOP4s(9tZF\7#1db!.ah81E?oZ=CM$YtRSO2,'N[X39@s*02PH=NJ=pS0pnNaaDc&J;L?&'>q8oE]U$9Hc?#?V[j[#V`[9u<u@^Uo<2(86#b!,J$f=sp-eLhdiSelL!h(o*D)sM`C.,oR>.X8K*V6WSC9;HOuuZf.n56QFs)+Fk'>6_(h1B[J>WbIRU*B(>->"OShUZC8ii\5\f%>$iFu&>S%#M][Uj-Dkm\m#a8:4JhsTuA@Bf)Q%V&#/#co<s723FIC-;O3)[K?Ic="Tmaq)+;l##C':n85!Jgp%Y5nT4-4PZHX:h.I8KeiX<ae#8XY1T7:*i\m(n!'D17Bn!%-om/X_CKW$#KF**dsR@XfJJa4f>HR%=S9Ec3tVZ2/uL5@SF<UZD([aa0jCu3^8/0gYrF2d.9!jKeVUdPYi0Rb>g2C9BVjisOTE@e8[?"#o@\=iP6VFTMsC+sGn(E4=cq.*LBA$knKhBjhn`TUM+Be-1s;#2*H#TNP1BYFm=dT^K9W]Mr0d.F8B2)*'2(d""+3PdO>Ol$D"Uf:SM[*KOT7k1LQ7a$qlebRB*[fVB=$o9e@dsL1=')FmkQ8]TR/E.Zj.i;6\>U7KqD>!Kj&bDgZ5RH%2fGs%q+l6q"h3".2M:o:MY(N.h66M*UA5P/Q.08Wq"h[HJMt,H&5\18-q!qFS1KG8XbQe/Ya$'',k5L^G#K7@"$The*4<h?8MOG"'.g&9#D')IE5!!!p:Z^X4Ds$&^.I4efd4hXj=+_lr_Y]C;ot>88l^R]??;c-70%"-1+R<FthB*RNg1pNprqI(qok3L#jen0fnFapX<hEE:%'G(3B0@o;$&De(TccN+9Gi@>kNOV?b-H5[8Gb!#LTNJ%XC+Dk)CJe4(@`XdQG=KR6t<CQIae`YF+8^KZhe@.4_d4q'?^::VCg)og*`bSs\"g@$`%LQ(8lS8-E$Yel)Fa/$=@T'DR*\EmqNfOP]b@_$%j^V\+j#VIeqK^Ho^f+)lm4C6W8Ke$grZ^]]#Dlf!FH;\O/b.d.bbL[pXd1_297BlK[?H(h%ksY\.H?iB&>.K\1,q32sUn&+*-Ogp9ELp_0A"MAu4@?k<:"Rf:P7D_/!d/dkH=-.i.Un]^#%UY"%!,gQd0Gn)(fS;W-tsCbUIuZUhcUHX;\gq<G6D]Z3)CcA3Q7N/pT2%2X.<]"7PCZa@C_9j"6>?.iarmDT&.jKlsN]8r^#6[ZX!8-MLW0A]E9m[B!$)TngP.)s)f_=ifX@We=hj0hXM?7eRr"5]<B]$r9Z-:p,c$Wq3BFL*1E?(,!cSCNiILT>*4-HW;:IZJCp8,7[]$UB?H+hK2dVfXlt=!8]C&t#k=9%B(V2<`lS#e@]=ie>J+_k/iWsU(%dG/?GMNuY>7nX!!+I@/1_EspE8ZBJAVL1+LZ'#'e*KlY+jn`b>hL]A6o['/&K0KO**'Wa(P4_o74XtJ*c\/mIa,o!>+_q,P9fh+#JL3L#_^(A]s6iXQnG$S!0_[7Q^Jo*F&5)b4)17i*W144?akd`ZL'ZA:8m/^.OJ,Uj%mg7BcWsk\0MGBLG*)+%//'pHg1T^[_=G-q;a4'7#JogZLMa%;U*>+kduH&D&(!bB@1!l8rj/UK@,9htr_gBQn2/-J"Sb]=:o/Q<1QU[;*`U7CD/ueS[592B')[<TAu&Wnjjer>O4g6/<I.W?If:@KWjOS*4)F';4Wf[Y&!-dW`WNF]1NF&P4VecdbbM\S"JpQd;_%qRP_?P)nV5\nTBMkt"F37]C:*kC5Z):0)Z6`RoM[a6ZQ#pE'l+4[!WmKr*;aCQ#(5]nbltO(MI?&USNA&cm!b'$&P\"3oIBL9+K.`:m"JB;-dVGtdOS&uPD$B8p0@J8#Y%]KE:bKAR\7emIYif2hCe4iW[a;jpP?h(RJ'Baa,E;uZVUKBtLJoht/+=/XcX,qm+8(0i+0npK106sNjn"Ql50!FOm;c[sOaY]"jO,adQ(OtF+oO0aPm*.mc5@p)Rd*!3jp+EGudoi!B-dP.LCfYEY\ePd7HFHI3X8/?iVW51K)$X5jH(7*e&(fKr(/Sr&Q88M_SS:k;t`gJJY?7_E((oKehdhU'QfohRaDU(N7EGl;/rH10%FR%S$>ip<P2BHL'i-<OG3[P.PB;/s41V(mrqGmLt4<dJ%et[`;TA:"3f:"kr%IXGN/71TiHc\^V\>?tmW_n9(c-q8.irdTp;\='-:YUsZI+H!_/hD>/MM>6VVT?T!p1t-1&<V)/=<a/Z59`\@:VThTioO*EKQFC4c.3o:R^+=J0j)=V9CZqde)Y<aYXK5MJAd%VBRs953t_"Q4qdD61II@NK7W8f*59,JnSR;JppS)b><0fWZJ,p+PPT6Y/lWjVkBD";Ka%JPG*Qbq_qkR&#hCHJ;'?uZ+@V=''+PI\>%Z["8nek`5^]IBLV#rZI#.T%"G-,/cG9LZl[)^ialMPa-PNXsH<Q#ARYuea:U=b[o/@1g>>b~>endstream
+endobj
+195 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 2117
+>>
+stream
+Gau0E>>s9;&:X)Of]gQcB>F;29@%H'PemiG;b/o%bV4pV,iUeLZ",9_rp35e:#ZkN9KaCgOJTAYgXWdj.NZ+pcSPUAF+F!03'?lLo3jHV06BMt?,26CS,5.pP<M,H38J?)M-OuGojI`B0r5%[ANf>;JcOEHTlZG]*O@c]pjNb!:-P3j*.KpPQ6i29nkipr?kBY)0,Vb=oSg]OH4NJh0`%?s[qsP93,[AUfH%7HLV_EgYINi9ghqW]k]qUKnL'@,B'/Be?*L2E]O(%SL3nOpL@83qL:#Mf!$7^9i48Ks`G;,6mbZ+Q<^.GM#'D_uo+!oJP`ps1o$3[ch*F^%</.l'7mGdD<_U&)Fa$`W1roun*<FKnd"3dXl-+Ds)!!,mie?*A9PQ;-!l^'&&T`*$#I4@*^^HY4/C3;0jb7H$Ut6A-^"jg!bCnL;W(%OQ3gH&t'+q!m:KX%MS%\dSU.LcM.P<^,f%9:&EpM1S`c=a5]frt5dASWbUYQJUb(=>Yk@R)QiJE.c,)']Ef]39f&@aZG9s+\;\JjhsC+NqbaN':CAeGHBF/EAt_:CE9(9C),3kC&9JV0A=U;`Y+@.=RXg>^9C/mO6@gm<WYgR0UN%;7/c*c4%&pd=KK5mSVB/>cqYOXZE3;bjR:+K,b;7r<6]Zm3'*7>CW":!eeLhEWNdZJN^n*KN(p0GPJG'N#_:I8CP5152an/40CO,a(,'B&\iis&G>m&Jh!^?Q\_HXB1GF"[,'O`t.Z,!)DI!oPbhP^kp.o_p]/ZO$9>kLrfNif*U@B2iA<"#iDHPkZTk1bP/FS<tN(u?In[N]E3RC?sYEm+2n>c&4JT8Q%#E:Eb?P0/ri,bJqrlhU)9f69^'$nR#BK:M]uDdY(j;1Q^HY.-jo_-m,AA>?>OnDi"&sC%[B?*R0R='+'$7/R<b>fm4T^jqr.!i`V;7ud;5q"X;K4"m;/5%X3-HK@FLDAREN.aq/et-1de55.%`2a\o+\nJqN_57h!ra0f/2e!#kYBASOjCgoV3$Z]WV3rPCpk6ChQ$1#=hDP?$:'8h%_WQ>dg/\)83sF@lV)7R<5@qIJ.s1M&$);Z9`UGTZW`o"HmW'"ugk$[IC1iHtn^8W^5WFZ+!fkbKtGBe;n38g!AK_MrfY>*tEY1aZ-`MIrEIVd>QbGU*q?X)2o-%"$a'lFX6PeQQ:3'eAO,\5la$*96hM&6(ZmNj9OYE$.*`OpF]>j/37"B-&8YY,^/K_-ABW/K+tS;h<N]GKRG7c9&"m$dB?2/<T(PKt)'i(l)GE(?F';QB5JD\1E;^H=pp*!qBrKr_2>.!<&K4PUK=JVUV@l&rXBPB!4Jb?Tu1D*Flf&\X++q.XiBt3&1+)3B6q`0(GS@m)2NpXG3ql2*pU&2V.d+\+RpZITYu\<K4Z(Z(N&E6Xl>>m3qnB''kWhhChH?qQj%#"^tW<KKH^7"dNRMo.mL-:VqW"<UIR62X%),PD+qIKVXPDQQe="L!ljq]J"QPS%A:.Dp)pG#Htm?K)qjcB\KrMf"TsGU/bo]$@KE#!.-A,[/i$Y_(d!'2n7uD>B7pUn)2b/9N*skWr84r0]`Jh+]QF!6"+CFc_qabnSE*-Ssk&5pG_d8./J'3(;V<KAWbC5"!*00^g\cd<$O0I\BTa[##S%_#>p[3o4s'HbE;pT=&WAD42VW^\gZho-^rZUS/-<+[6#c2/Eq>p>h#E9e$@o8WI.&f`)gD7Ih_a\*,d>Cr9ZBA/&d,/DN_]6@\JhPdE2:Ij'%3U[9@%D7T!#j!h!iNo+QK#Oc'\4T.<B#eXWp#_kWo<bYD_JL/NtJJi9uBMPmBlDA<djrBd2HQ0`YJ;TY3c/YbRZ6QLL>(XcJNRiCZt.r$+%#Nfo1>Kg+Mj1ra?JXg2ECSUKWoL3re%#e%RA,[j=WtiGdb;k>4W?KcH6=[Zs^(Kjd[a]8-H!=rH*7p<QF@Grt4JSB+CsB+Vrk0W*^m#R_V*ag9)05!GiB8Am&KG*VVW^_+/%qdVAR$d1+g4Gm)+$D;6o*j/0olk;_Z<VV+k*QWg#"?@4nfbMj"A\[A3&,FI1R(9*NUU0bPQ%TPj_Ml^FX7NA7dI4@Q$ud8Z[g1:_9>L(P2!8f'qgOB>!`t~>endstream
+endobj
+196 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 1990
+>>
+stream
+Gau0D?$G!^&:O#NR)a:b48o:/m1Z=1e$DWh-FEZSf`tpncsg4>,X_D%4-C'K0\DAOS=Gd&@#]QscJ5sr$P*0Gk'*$kI$h_6-Pp"u-8TTC4+PEf>YO#0^T"q-dpJX"KBdNin$qN_(S:XAF1oAkUA%#[i8^7?:57G66rLPd]FZ\[?@T4L(F(&*%!'29/=Q`mLnmu]i#/HsKuoCb0_lM3^Zk\<#PE\(W+.T\i&Zqer"G]JHgAJf4$tA\L^.lYk0Bl#m==Aei-0&U*f(f-5=E58]%B0pMd;N4P>ati\_RN)&]\:RSpp7202H&g@M+moi9sUW4H4%8r);FX%<)B+f@EAQS$BN;+_gNFFrS/+;NW6(/Qr=7<@F0Sg((4.4A.E02GC&KpchXKD/!NL.bWtH`/8!tggF9168haT/Sjl&V6]+3IZi>%BnOcX-.8g70-oqNAp)ZUb@Jb!0tOf<p)IsG6d>>+,*?=bC.V`fLt6kK0'Srr1VqOD6AaK<[\P+B#n1W<,&#8UK"D\;^[20<l\AmF""-2=^`MEPh^rV@7#N(D="GkN_XQ\+Am?&3Ae,chHeV"-[cAr9<^sef&>eIU+Y>!u-PO_HQpFn`'pD%+L]pqN>ZEg@/$M$E,Ueh/R\N:XMdG!sPGgs6k!TbLH]SdnVZLIpW'X>)l]Q7uKW3mF8]<<3>_&u).POjV&QB!5RNd=q'F'YVk,h33eQMq-$-O%8/op4L_=f^b5-jIarP<b2.DFUkZP%fSl>+U:hrJ?VLN$JAkLeTI"tjA41-U=J(X(rRl^rka-+FY'[u&lilEbpJRbR@Q#]rKk"ht0<8^]_p5RPJ/U);3%1;m6n+;[<6]E]Z*<NjtOfaOd>i%.p0\klr`a18!&P?3,@K#qR3F8\DFm!+NC)2(_\+7---&a)a0f3&XP$Utj^:hXAMbcln;(/^H/4_j(,LN4?>THc5,&R!H]fgdB&Up,E67-]%W=ad?,5/ghM(HG_q-=[mQ^IZ_'=TRm*R]-I$*3aB'$3`1W@iDhmpH$/%)W?$KLdfKd\YCnFiFT:q2FDn\r6UlIO_KD!NHns4'pQ=3B@+Z3r37frC>LNJX/NI*cCV.QfthhImG5f=43WZ#j$$g1q@OrV/_g(SB'^<];&/n\PNXM4lAqMX7Q;SELYluX5t&@43(qg^*_JtLkT[?(@l_8?(ufe/Yq/@cN83ugQ6dRCW(9e_UiF`"isA\fPV(YqNrN;I.3n<S<gJA-jP18c#d#&1?#pu;BXFT*]:*:!9P.#'X0.6c+nSkj8]H,_PqRGj2o2GGr#I1_e/T=$3&U=I#u3qFEKrP6%r&c3U3AF$4n6YF##qqd3!nC=4UcBpQEW/BQjgNl6Ye/R4@cPI#LZ)+J+d?G#/A)T(&2?GIYBR&M`-Y3l')OV4tL&HI9!u?JB<nbPS/g"aV8D-]J/-A6%6S$1q%.\^D5Q(Va7f3[*+cKSC_^PrltTeFS*>2WP@)KjYUSFHl!lu@7!*hE09'l'g,uge0![]dYuW?l3A7KO*>a]PiEsMe@K&ZKdq(kcd:n8$aJ)Xe(<LJLrX@3H<kAnU\XEa7fcbMS'=ei9.geke',d"U^^',['%-GdF`][;4poZ%&h,_jSFu$mc9gIIk^hEeH2eP?gBYfnr<c%@8fRkLW!i&/rOEOPcd&&BS:CG*@[$WWcNr[YXJ4c_IV28X!f[*e>=Yeq"lbVp-RAJ7dP<KPfA"3*_0/3fMp4UWtJ3*SRpZ:=^Wpu:Bt'#Muu#cSJJG8[H4J%luBDo0\G4GXe,:`fDpbH!SUOfc5V<U7qqT5(d'nW.a`^B8o9>PKi<3`NAd(SJ@fRC_5$?0nSpt\0]L-NLh<#F=o%*q:cj#p7^M+r8#26HlO@<o;>?_a7R1]0G=@ID'"B)?7oLorB\&[3G!6"D1d+A"4:1u^Ug&[4+-C).2A5)>.=AOdk-Q8S$e9D'h[sRto/VgjAU+H!JZm&S99l=oK3DF*?L%r:rW>`U=G[~>endstream
+endobj
+197 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 1486
+>>
+stream
+Gau10mrP3_(rtP.YBXAsmq/[Fq!4ca]@GU&eiUG!S'Ke37*$)L%7/&7rY!#K=rZ+!SBfcd5ftI"puIopTIYLgq&-77DEYN*M?#ZpXT5mP(VC"Jia'6(eOPAZ^o5_c^[Lg+B[fOkqO:"?!`ZYc)orDk]OhW)j)d6MfC8,d".7qnT7*;YR=LoaON201dg1=,r&*FsYS9K!^jGn\hS8"IVZ,I]UQ56&lJ.F++EVSb+7c#tVtRAXF+AuXnH4ehH04X&GG/aj\K<Xi(qhg(HI_8k(uYL;E5+IO]$T]b:OLk2?#Wf=ALD]&:0+iC4YB(D@[>@`LDAi<h*^%_m"QIf>!]kq"/'pGOJBF5LY3c;@eOo2FgM)aoA5raIS.O%UT+A$==Q:'?qJ;&O;+!cejSAF3\X"iCJb=;:oA,(@%?C:(Odi/$D+,H7,/TCV%&AH;oXBSZ"Ji3$kp'U(F^*2MK#FB1l!Xt0hBXq3,Ap\eA>WEE-rBCjGl:$>cZ76*mm!Mg_GR9)b8<.4X2PW*VT[^E7V3Z.-'/_0eJ];R\$KfS?@mLB1F[(UD/k#8Q\GAKM8tb*6<,c_=Me,E6k/@HWDsQg,tBY;rot\btSqa-0;dd*2hi;`Abs1Qb#kagDP-g%?.1,E?$RjV3E4>$2ltm17s?+Tmekm8CjQsE":As57Z7rg<n6Wq4gPOSLj;Ts5\bF)5R2'7Fdjla3dAKSfRd""'nlFXf"bB=@q5rj'G,F-/h!s;*n[MkMd:3NV0&@4RT'<,K&A5AbnI8f-Mpa9O]XO,`qL)^rA"T`ZOqQ/irTS-@SqUp4bEi)V[e%L0QeuOu$c4*T*IZ^5XB8%b$2eoP[9&4jXYN`_t5s,1hj>,3EhVZqWs@<'OKSLp.our(WK,H5!9HrNa!LP,W3#2X0/C/[!*-a;GHGN\$(oDE/.NdU''.e219sHE\^ESDjF_"C9EJA1KSJIeJ<d"?5h8EmbeUYc2`K2?I;Kd[AR0OgQfD;kIH7aMF0/cMP/7Aq+BR*Xj7RKPtPNYef?:]1*`^*(s/l%&Y"3=e79]ME%d!ek`2RCa3fdEU;@lGFmQU92-#Afe@4B1tI^GkW!bXj)#hrKZd3@p0i'%]qPrlc:,Xp?D#8I?.(Q/)7J>KP%LhCU4M3(7bVhA=P@Tj3E+LU,PAdlpEC2Kq"]j-D6\U\VCHVoYm8rZO]m.J*K;=A!XfpCl5`14=\k#4RMTZL.oN>k/df!:<$$Bk8/bNq]^28u%.I6`'fGW=WMNj:AjUYl24LWP#bI[$<8DM_'Ei$<k/p]SGf)Ed.BHZ4*JHnC5`c1k+]EHmg>IYNR-Pdb,%fS^2b`=PLI=kKlHb@#!SGn=Xu8'Z4)Q!M=[H_70%XOE+r2,#cLRp&V7of(0@AjB2di((bgki)A4^2:',F$&0ja&%C42;h:f4qcguA`kWCF>-TZLle6ITPIbO$M@+b+XB@k9*HS@[M0mbo4qA1?hH.dCM7\G?`MXr*<~>endstream
+endobj
+198 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 616
+>>
+stream
+Gau1,?Z4XP'ZJu*'^%3AZn0L0o#PKGVKH&Id@U2DL^2dm9c[l&Da-;iV*L_h`g"Q,m-E^']=rFo4S+ZGSJAr\$m.YF&0KS$OO+H!h;K^H4ndTl^)]c#\F"JbO/+MHiE+:k"Oa;?M4"pB3<bq(fF2JF#N&<2])MR%rU=D).WUa]\`R?2MA\"5U6#G&_3"W*6M:f?41j?j;*Wj8hU=J@Y+J.32kILPEF9t(dPlt034q:mhmJ5/4%rDj-L";!Z0-FA5_9,V&:6u5KH$C=3)#$]d#-CGp6m72$dNF9Te)'nE4otKF"O5WZK2^qTIZ3G?%SMH5lP2,8N/OlGIL\\l*nd+_'AM1m7Q5"8)DDf1V#%R#%bnL9ndK;-aY9P;[\e@.W$X8>\H#s<-'Kp@84>=VIs%qMm2&Y4fYB+N!?GYjCMJ^)YW/l!2GR)O`qQp\d76C``9()<:+R`mBM*ikBeLll#%a?NqZ2Z6!%B5Q8eSW`VW*dr!`haoid5Jh0'7bKs%6gpr;lKobKaK)EI)D;SOr2m%RX0k@L+d3+J9;gt6T22,C!`;0AZrP=6M'PBaUSg>&H,EL*(TAC0*Sg)lFD(/dLS3a9tqP.:g.kkt\O.BOi~>endstream
+endobj
+xref
+0 199
+0000000000 65535 f 
+0000000061 00000 n 
+0000000123 00000 n 
+0000000230 00000 n 
+0000000342 00000 n 
+0000000513 00000 n 
+0000000686 00000 n 
+0000000856 00000 n 
+0000001088 00000 n 
+0000001193 00000 n 
+0000001367 00000 n 
+0000001527 00000 n 
+0000001647 00000 n 
+0000001844 00000 n 
+0000002041 00000 n 
+0000002238 00000 n 
+0000002435 00000 n 
+0000002631 00000 n 
+0000002866 00000 n 
+0000003038 00000 n 
+0000003234 00000 n 
+0000003405 00000 n 
+0000003718 00000 n 
+0000003953 00000 n 
+0000004125 00000 n 
+0000004321 00000 n 
+0000004546 00000 n 
+0000004759 00000 n 
+0000004984 00000 n 
+0000005173 00000 n 
+0000005375 00000 n 
+0000005641 00000 n 
+0000005840 00000 n 
+0000006031 00000 n 
+0000006220 00000 n 
+0000006429 00000 n 
+0000006636 00000 n 
+0000006850 00000 n 
+0000007049 00000 n 
+0000007246 00000 n 
+0000007446 00000 n 
+0000007646 00000 n 
+0000007819 00000 n 
+0000008014 00000 n 
+0000008186 00000 n 
+0000008369 00000 n 
+0000008549 00000 n 
+0000008739 00000 n 
+0000008936 00000 n 
+0000009268 00000 n 
+0000009443 00000 n 
+0000009634 00000 n 
+0000009824 00000 n 
+0000010015 00000 n 
+0000010206 00000 n 
+0000010397 00000 n 
+0000010604 00000 n 
+0000010777 00000 n 
+0000010972 00000 n 
+0000011245 00000 n 
+0000011480 00000 n 
+0000011691 00000 n 
+0000011965 00000 n 
+0000012154 00000 n 
+0000012389 00000 n 
+0000012564 00000 n 
+0000012738 00000 n 
+0000012911 00000 n 
+0000013158 00000 n 
+0000013403 00000 n 
+0000013578 00000 n 
+0000013868 00000 n 
+0000014038 00000 n 
+0000014209 00000 n 
+0000014419 00000 n 
+0000014697 00000 n 
+0000014884 00000 n 
+0000015077 00000 n 
+0000015271 00000 n 
+0000015463 00000 n 
+0000015635 00000 n 
+0000015827 00000 n 
+0000016019 00000 n 
+0000016222 00000 n 
+0000016423 00000 n 
+0000016682 00000 n 
+0000016881 00000 n 
+0000017076 00000 n 
+0000017263 00000 n 
+0000017449 00000 n 
+0000017634 00000 n 
+0000017980 00000 n 
+0000018213 00000 n 
+0000018426 00000 n 
+0000018654 00000 n 
+0000018826 00000 n 
+0000019014 00000 n 
+0000019211 00000 n 
+0000019400 00000 n 
+0000019590 00000 n 
+0000019780 00000 n 
+0000019971 00000 n 
+0000020212 00000 n 
+0000020452 00000 n 
+0000020644 00000 n 
+0000020835 00000 n 
+0000021029 00000 n 
+0000021222 00000 n 
+0000021410 00000 n 
+0000021598 00000 n 
+0000021785 00000 n 
+0000021971 00000 n 
+0000022336 00000 n 
+0000022590 00000 n 
+0000022810 00000 n 
+0000023030 00000 n 
+0000023221 00000 n 
+0000023429 00000 n 
+0000023680 00000 n 
+0000023852 00000 n 
+0000024040 00000 n 
+0000024213 00000 n 
+0000024385 00000 n 
+0000024557 00000 n 
+0000024749 00000 n 
+0000024939 00000 n 
+0000025206 00000 n 
+0000025398 00000 n 
+0000025588 00000 n 
+0000025790 00000 n 
+0000026030 00000 n 
+0000026235 00000 n 
+0000026412 00000 n 
+0000026593 00000 n 
+0000026797 00000 n 
+0000027011 00000 n 
+0000027229 00000 n 
+0000027425 00000 n 
+0000027621 00000 n 
+0000027809 00000 n 
+0000028015 00000 n 
+0000028208 00000 n 
+0000028542 00000 n 
+0000028772 00000 n 
+0000028990 00000 n 
+0000029186 00000 n 
+0000029391 00000 n 
+0000029592 00000 n 
+0000029772 00000 n 
+0000029984 00000 n 
+0000030263 00000 n 
+0000030479 00000 n 
+0000030680 00000 n 
+0000030874 00000 n 
+0000031066 00000 n 
+0000031304 00000 n 
+0000031522 00000 n 
+0000031755 00000 n 
+0000031932 00000 n 
+0000032109 00000 n 
+0000032306 00000 n 
+0000032505 00000 n 
+0000032681 00000 n 
+0000032896 00000 n 
+0000033179 00000 n 
+0000033372 00000 n 
+0000033552 00000 n 
+0000033804 00000 n 
+0000034008 00000 n 
+0000034216 00000 n 
+0000034455 00000 n 
+0000034719 00000 n 
+0000034912 00000 n 
+0000035114 00000 n 
+0000035309 00000 n 
+0000035502 00000 n 
+0000035986 00000 n 
+0000036232 00000 n 
+0000036428 00000 n 
+0000036627 00000 n 
+0000036824 00000 n 
+0000037016 00000 n 
+0000037208 00000 n 
+0000037370 00000 n 
+0000037637 00000 n 
+0000037709 00000 n 
+0000038002 00000 n 
+0000038151 00000 n 
+0000040544 00000 n 
+0000042999 00000 n 
+0000045136 00000 n 
+0000047685 00000 n 
+0000049907 00000 n 
+0000052416 00000 n 
+0000054600 00000 n 
+0000057593 00000 n 
+0000059803 00000 n 
+0000061886 00000 n 
+0000063465 00000 n 
+trailer
+<<
+/ID 
+[<7e75e3e0abfb23849ff72fa38383c615><7e75e3e0abfb23849ff72fa38383c615>]
+% ReportLab generated PDF document -- digest (opensource)
+
+/Info 185 0 R
+/Root 184 0 R
+/Size 199
+>>
+startxref
+64173
+%%EOF

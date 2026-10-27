@@ -1233,6 +1233,37 @@ console.log('\n[3.9.0] cards stay paused behind Enhanced View (B81), playback nu
         && page.includes("if (!fromMenu && !document.getElementById('cameras-view').classList.contains('active'))"));
   check('D7 Back to Cameras shows in the status bar on every menu but the cameras',
         page.includes("if (back) back.style.display = (viewMap[v] && v !== 'cameras') ? '' : 'none';"));
+  // 4.1.2 (C35): the live mode per device
+  {
+    const store = {};
+    globalThis.localStorage = {getItem: k => (k in store ? store[k] : null),
+                               setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; }};
+    vm.runInThisContext('globalThis.__lm = {liveModeNow, liveModeGet};');   // the page script is loaded already
+    const fresh = __lm.liveModeNow();
+    store['anycam-live-mode'] = 'mse';
+    const forced = __lm.liveModeNow();
+    store['anycam-live-mode'] = 'auto'; store['anycam-live-auto-mse'] = String(Date.now() - 3600e3);
+    const autoOn = __lm.liveModeNow();
+    store['anycam-live-auto-mse'] = String(Date.now() - 13 * 3600e3);
+    const autoOld = __lm.liveModeNow();
+    check('C35 a device starts on WebRTC; Remote forces MSE; Automatic uses MSE for 12 h after heavy loss, then WebRTC again',
+          fresh === 'webrtc,mse' && forced === 'mse' && autoOn === 'mse' && autoOld === 'webrtc,mse',
+          [fresh, forced, autoOn, autoOld].join(' '));
+    globalThis.localStorage = {getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); },
+                               removeItem() {}};
+    check('C35 ... blocked browser storage: WebRTC, no error', __lm.liveModeNow() === 'webrtc,mse');
+    delete globalThis.localStorage;
+  }
+  check('C35 Automatic switches on 5% lost packets or 3 freezes, and both players use the device mode',
+        page.includes('const LIVE_AUTO_LOSS = 0.05;') && page.includes('const LIVE_AUTO_FREEZES = 3;')
+        && (page.match(/_liveAutoCheck\(value\);/g) || []).length === 2
+        && (page.match(/liveModeNow\(\);\s+\/\/ 4\.1\.2 \(C35\)/g) || []).length === 2);
+  check('C35 MSE jumps to the live edge when more than 2 s behind',
+        page.includes('const LIVE_BEHIND_MAX_S = 2.0;')
+        && page.includes('if (end - v.currentTime > LIVE_BEHIND_MAX_S) v.currentTime = end - 0.3;'));
+  check('C34 a recording camera gets the red border on its card and around Enhanced View',
+        page.includes("_cardRecMark(cam.id, rec);") && page.includes("_focusRecMark();")
+        && page.includes("(_recording[cam.id] ? ' card-rec' : '')"));
   check('C32 ... the cog warning follows the server', page.includes("dg.style.display = d.detector === 'snapshots' ? '' : 'none';"));
 }
 

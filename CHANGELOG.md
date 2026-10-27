@@ -1,3 +1,22 @@
+## 4.1.2
+
+Live view steadies itself over a slow or lossy connection, and a camera that is recording shows a red border on its card.
+
+### Changes & improvements
+
+- **Remote viewing.** Enhanced View's bar has a Live choice for the device you watch on: Automatic, WebRTC or Remote. Remote plays over MSE, which loses nothing on a lossy link and stays about 1-2 s behind live instead of freezing. Each phone or computer keeps its own choice.
+- **Automatic switching.** When a live view loses 5% of its video or freezes 3 times in its first 20 s, that device switches to Remote for 12 hours, then tries WebRTC again.
+- **A red border while recording.** A camera that is recording has a pulsing red border on its card and around Enhanced View.
+
+### Bugs fixed
+
+- **Live video froze and skipped over a relayed VPN.** Remote viewing avoids the lost packets.
+
+### Known issues
+
+- **Remote viewing over a very poor link may be slow to start** for a 4K main stream; the smaller stream starts faster.
+- **Insects in the infrared still record** on both engines; lower the camera's night sensitivity.
+
 ## 4.1.1
 
 Recording names put the zone after the camera and use dashes only, and shaking shadows no longer count as moving objects.

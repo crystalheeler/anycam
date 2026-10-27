@@ -1,18 +1,18 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 26 October 2026. Store version: 4.1.1 (released 2026-10-26: pushed, GitHub Latest, store; CrystalHeeler's order): C33 and B87. The first field night of 4.1.0 (25-26 Oct): headlights gone from the front yard and the patio; the street records where a zone covers it (B88) or no zone is set (driveway-right). New: C34, D8. rc numbers are single-digit (CrystalHeeler, 2026-10-10).
+**Compiled:** Updated 26 October 2026. Store version: 4.1.1 (C33, B87; released 2026-10-26). 4.1.2 (C34, C35) is built, not pushed. B62's cause: the phone's ZeroTier link is RELAY; C35 is the answer without open ports. D8 research done (52 sources). rc numbers are single-digit (CrystalHeeler, 2026-10-10).
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.
 
 ---
 
-## Next up: field-test 4.1.1
+## Next up: field-test 4.1.2 (remote viewing over ZeroTier)
 
-0. **Released (2026-10-26):** 4.1.1 — C33 (recording names <camera>-<zone>-<date>-<time>, dashes only) and B87 (shaking shadows). Pushed, GitHub Latest and store (CrystalHeeler's order, 2026-10-26).
-1. **Field test 4.1.1:** the new file names in the Storage tab; the patio camera's shadows by day.
-2. **Waiting on CrystalHeeler:** zones clear of the street on driveway-left (B88), the patio camera's top edge and driveway-right (no zones); B62 (the phone's VPN route), B86, F11 (the rc format), B33, C23.
-3. **Next features:** C34 (card border while recording), D8 (HDMI-CEC research).
+0. **Built (2026-10-26):** 4.1.2 — C34 (border while recording) and C35 (remote viewing). Committed and tagged, not pushed. 4.1.1 (C33, B87) is the store version.
+1. **Field test 4.1.2:** the phone over ZeroTier in Automatic (a toast when it switches) and in Remote; the LIVE-PLAY lines.
+2. **D8:** the research is done; CrystalHeeler chooses the TVs and the mode.
+3. **Waiting on CrystalHeeler:** zones clear of the street (B88, driveway-right, the patio camera's top edge); B86, F11, B33, C23.
 
 ---
 
@@ -56,8 +56,6 @@ Every ticket reads: Discovered (date, version, test system); Problem; Solution(s
 
 | # | Status | Item | Discovered | Problem | Solution(s) |
 |---|---|---|---|---|---|
-| C35 | Discuss | **Remote viewing: MSE with live-edge catch-up** | Discovered 26 Oct 2026 in 4.1.1 running on Test System A | Over a relayed VPN (ZeroTier RELAY, B62) WebRTC loses about a quarter of its packets, so live view freezes and skips. WebRTC connects, so the page never falls back to MSE | • A live mode per device, kept in the browser: Auto, WebRTC, MSE. • MSE plays over TCP (no lost packets) and jumps to the live edge when it falls more than about 2 s behind. • Auto: switch to MSE when the LIVE-PLAY report shows heavy loss. • Questions for CrystalHeeler: switch, automatic, or both; the version |
-| C34 | Ready | **The card's border lights up while it records** | Requested 26 Oct 2026 in 4.1.0 by CrystalHeeler | A recording shows only on the card's record button ("⏺ REC"); from across the room the cards look the same | • While motion recording is in progress the card gets a coloured border (red, gently pulsing), on the cameras page and in the card grid; it goes when the recording stops. • The same in Enhanced View's frame |
 | C23 | You | **Storage tab revamp** | Discovered 05 Oct 2026 in 3.7.0-rc2.0 (CrystalHeeler's request) | CrystalHeeler wants a larger revamp of the Storage tab; details to follow. Known fault: on a phone held upright the file names are hidden, because the fixed columns need 480 px. | • CrystalHeeler sends the revamp list. • A design discussion before any code. |
 | C25 | Later | **A better on/off design for Remote Storage** | Discovered 05 Oct 2026 in 3.7.0-rc2.0 (CrystalHeeler's request) | The camera choice "Do not upload" is an awkward way to turn Remote Storage off. | Design an "Enable remote storage" toggle or checkbox; discuss when CrystalHeeler picks it up. |
 | C21 | Later | **Remove the classic engine** | Discovered 04 Oct 2026 in 3.1.0-rc1.0 from the code (no test system) | The classic engine (snapshot loop, adaptive ladder, Adaptive Quality) stays as the fallback when a camera or browser cannot play live video. It was still needed on 15 and 23 Oct, when phone cards got no live video. | Remove it once no camera or browser needs the fallback. |
@@ -66,7 +64,7 @@ Every ticket reads: Discovered (date, version, test system); Problem; Solution(s
 
 | # | Status | Item | Discovered | Problem | Solution(s) |
 |---|---|---|---|---|---|
-| D8 | Discuss | **Investigate HDMI-CEC (Consumer Electronics Control)** | Requested 26 Oct 2026 in 4.1.0 by CrystalHeeler | CEC lets one HDMI device control others on the same HDMI chain: turn a TV on or off, switch its input, send remote-control keys. How AnyCam could use it is not known yet | • Research: what the Pi's HDMI port offers (/dev/cec0, cec-ctl from v4l-utils, libcec), what Home Assistant already has (its HDMI-CEC integration), and what an add-on may open. • Ideas to weigh with CrystalHeeler: turn on a TV and switch it to a camera's view when motion records; react to the TV remote. • A design note for CrystalHeeler |
+| D8 | Discuss | **Investigate HDMI-CEC (Consumer Electronics Control)** | Requested 26 Oct 2026 in 4.1.0 by CrystalHeeler | CrystalHeeler's aim: motion on chosen cameras interrupts what any TV in the house shows and plays that camera. Research of 26 Oct (docs/CEC-and-TV-Research.md and .pdf, 52 sources): HDMI-CEC only wakes a TV and switches its input; the picture must come from the device on that cable, so it reaches one TV cabled to the Pi, and the HAOS Pi would also have to draw the camera on its HDMI port | • For any TV: an overlay app on Android TV, Google TV or Fire TV (TvOverlay, PiPup fork) shows the live camera over the program; Google Cast or Roku full screen as a second choice. • AnyCam decides when (per camera: targets, mode, duration, cooldown, quiet hours) and asks Home Assistant to show it, with go2rtc stream URLs. • CEC last, only for a TV cabled to the Pi. • Questions for CrystalHeeler: which TVs (brand, Android or not), overlay or full screen |
 
 ## E. Code health
 
@@ -84,6 +82,8 @@ Every ticket reads: Discovered (date, version, test system); Problem; Solution(s
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
+| The card's border lights up while it records (C34) | This plan, C34 | 4.1.2 (built 2026-10-26): a red pulsing border on the card and around Enhanced View, from the 3 s motion poll; still for reduced motion. Tests AY5, page check. Not field-tested |
+| Remote viewing: MSE with live-edge catch-up (C35) | This plan, C35 | 4.1.2 (built 2026-10-26): Live in Enhanced View's bar, per device: Automatic (MSE for 12 h after 5% lost packets or 3 freezes), WebRTC, Remote; MSE jumps to live past 2 s behind. Seen at 375x812 and 812x375. Tests AY5, page checks. Not field-tested over ZeroTier |
 | The object engine counts a shaking shadow as travel (B87) | This plan, B87 | 4.1.1 (built 2026-10-26): travel is net, first place to last, and at least half of all the object moved. Replayed on 535 recordings against 4.1.0: 1 shadow and 1 empty file fewer, no person, cat or vehicle lost. Test AY1. Not field-tested |
 | The zone right after the camera in recording names (C33) | This plan, C33 | 4.1.1 (built 2026-10-26): <camera>-<zone>-<date>-<time>-partNN, dashes only (CrystalHeeler, 26 Oct); the Storage tab reads old and new names. Tests AR6, O10, L14, AG10, AU8, AY4 |
 | One Scans menu for every scan (D6) | This plan, D6 | 4.1.0 (built 2026-10-25): Port Scan is Scans; Deeper Scan (ports 1-10,000, ports table and cards) and Scan All Ports for the chosen hosts, grey until one is chosen; Rescan Entire System with its Deeper Scan box; the cameras show at the first new camera (only from the Scans menu); Cancel stops a queue. Tests AX1-AX5, page checks; seen at 1366x768, 375x812 and 812x375. Not field-tested |

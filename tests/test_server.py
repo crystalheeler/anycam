@@ -6953,6 +6953,13 @@ async def test_411():
           Z.rec_zone_for("Cam-Lawn-20261026-101010-part02.mp4") == "Lawn"
           and Z.rec_zone_for("Lawn_Cam_20261020_101010_part02.mp4") == "Lawn")
     Z.REC_ZONES.pop("Cam-Lawn-20261026-101010", None); Z.REC_ZONES.pop("Lawn_Cam_20261020_101010", None)
+    html = cd.build_html()
+    check("AY5 4.1.2 (C34) the recording border has its style, and stays still for reduced motion",
+          ".camera-card.card-rec{border-color:var(--red);animation:recpulse" in html
+          and "prefers-reduced-motion:reduce" in html)
+    check("AY5 ... (C35) Enhanced View's bar has this device's live mode: Automatic, WebRTC, Remote",
+          'id="focus-live-mode" onchange="liveModeSet(this.value)"' in html
+          and '<option value="auto">Automatic</option>' in html and '<option value="mse">Remote</option>' in html)
 
 
 async def main():

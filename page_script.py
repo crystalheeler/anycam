@@ -757,6 +757,23 @@ async function toggleMotion(camId) {
  * that a camera was armed, and another device's change never showed. */
 const _reducedDet = {};   // 4.0.0 (C32): camera id -> judged from still pictures
 
+// 4.1.2 (C34): a camera that is recording has a red pulsing border, on its
+// card and around Enhanced View, so it shows from across the room. A border
+// is decoration: a missing element never stops the motion poll.
+function _cardRecMark(camId, on) {
+  try {
+    const c = document.querySelector('[data-id="' + CSS.escape(camId) + '"]');
+    if (c && c.classList) c.classList.toggle('card-rec', !!on);
+  } catch (e) {}
+}
+// Enhanced View's border follows the camera it shows (the motion poll, every 3 s)
+function _focusRecMark() {
+  try {
+    const f = document.getElementById('focus-overlay');
+    if (f && f.classList) f.classList.toggle('card-rec', !!(_focusCamId && _recording[_focusCamId]));
+  } catch (e) {}
+}
+
 async function syncMotion(redraw) {
   try {
     const all = await (await fetch(BASE + '/api/motion')).json();
@@ -764,6 +781,7 @@ async function syncMotion(redraw) {
       const m  = all[cam.id] || {};
       const on = !!m.enabled, rec = !!m.recording;
       _recZone[cam.id] = m.zone || null;    // 3.4.0 (answer 16)
+      _cardRecMark(cam.id, rec);              // 4.1.2 (C34)
       const red = !!m.reduced;               // 4.0.0 (C32, answer 14)
       if (on !== !!_motionEnabled[cam.id] || rec !== !!_recording[cam.id] || red !== !!_reducedDet[cam.id]) {
         _motionEnabled[cam.id] = on;
@@ -772,6 +790,7 @@ async function syncMotion(redraw) {
         if (redraw) updateCard(cam);
       }
     });
+    _focusRecMark();                          // 4.1.2 (C34)
     if (_zoneShow) _zoneDraw();
   } catch(e) {}
 }
@@ -1409,6 +1428,76 @@ function _playbackSummary(stats, video, ms) {
           decoded: q ? n(q.totalVideoFrames) : null, dropped: q ? n(q.droppedVideoFrames) : null,
           behind_s: behind != null ? Math.round(behind * 10) / 10 : null};
 }
+/* 4.1.2 (C35): remote viewing, chosen per device and kept in its browser.
+ * Over a relayed VPN (ZeroTier RELAY, B62) WebRTC lost about a quarter of its
+ * packets and the picture froze. MSE comes over TCP: nothing is lost, and the
+ * player jumps to the live edge when it falls behind, so the picture is about
+ * 1-2 s late instead of frozen. Auto switches this device to MSE when a live
+ * view's playback numbers show heavy loss, for LIVE_AUTO_HOURS; then it
+ * measures WebRTC again. */
+const LIVE_MODE_KEY = 'anycam-live-mode';
+const LIVE_AUTO_KEY = 'anycam-live-auto-mse';
+const LIVE_AUTO_LOSS = 0.05;        // lost / (received + lost) packets in the first 20 s
+const LIVE_AUTO_FREEZES = 3;        // or this many freezes
+const LIVE_AUTO_HOURS = 12;
+const LIVE_BEHIND_MAX_S = 2.0;      // MSE: further behind than this jumps to live
+function liveModeGet() {
+  try { const v = localStorage.getItem(LIVE_MODE_KEY); return (v === 'webrtc' || v === 'mse') ? v : 'auto'; }
+  catch (e) { return 'auto'; }
+}
+function _liveAutoOn() {
+  try { const t = Number(localStorage.getItem(LIVE_AUTO_KEY)) || 0; return Date.now() - t < LIVE_AUTO_HOURS * 3600e3; }
+  catch (e) { return false; }
+}
+// The VideoRTC mode string for a new player on this device.
+function liveModeNow() {
+  const m = liveModeGet();
+  if (m === 'mse') return 'mse';
+  if (m === 'webrtc') return 'webrtc,mse';
+  return _liveAutoOn() ? 'mse' : 'webrtc,mse';
+}
+function _liveModeLabel() {
+  const m = liveModeGet();
+  return m === 'mse' ? 'remote viewing (MSE)' : m === 'webrtc' ? 'WebRTC'
+       : (_liveAutoOn() ? 'remote viewing (MSE, chosen automatically)' : 'automatic (WebRTC)');
+}
+function liveModeSet(v) {
+  try {
+    localStorage.setItem(LIVE_MODE_KEY, v);
+    localStorage.removeItem(LIVE_AUTO_KEY);
+  } catch (e) {}
+  showToast('Live view on this device: ' + _liveModeLabel());
+  _liveModeShow();
+  _liveModeRestart();
+}
+function _liveModeShow() {
+  const sel = document.getElementById('focus-live-mode');
+  if (sel) sel.value = liveModeGet();
+}
+// Start every live view again in the new mode.
+function _liveModeRestart() {
+  Object.keys(_cardLive).forEach(camId => {
+    const st = _cardLive[camId];
+    if (!st || st.kind === 'mjpeg') return;
+    _cardLiveFail(camId, st, 'live mode changed', false);
+    delete _cardLiveOff[camId];
+    stopSnap(camId);
+    if (!_focusCamId) cardLiveAttach(camId);
+  });
+  if (_focusCamId) { const id = _focusCamId; closeFocus().then(() => openFocus(id)); }
+}
+// Auto: a WebRTC live view that lost many packets turns this device to MSE.
+function _liveAutoCheck(diag) {
+  if (!diag || diag.mode !== 'WebRTC' || liveModeGet() !== 'auto' || _liveAutoOn()) return;
+  const lost = Math.max(0, diag.lost || 0), got = Math.max(0, diag.packets || 0);
+  const share = lost / Math.max(1, got + lost);
+  if (share < LIVE_AUTO_LOSS && (diag.freezes || 0) < LIVE_AUTO_FREEZES) return;
+  try { localStorage.setItem(LIVE_AUTO_KEY, String(Date.now())); } catch (e) { return; }
+  showToast('This device\'s network lost ' + Math.round(share * 100) + '% of the live video; '
+            + 'live view now plays as remote viewing (MSE), about 1-2 s behind. Change it in Enhanced View: Live.');
+  _liveModeShow();
+  _liveModeRestart();
+}
 function _livePlayReport(camId, where, diag) {
   if (!diag) return;
   const key = camId + '|' + where, now = Date.now();
@@ -1486,6 +1575,7 @@ function _go2rtcLoadPlayer() {
           } catch (e) {}
         }
         ondisconnect() {
+          clearInterval(this._edgeTid);         // 4.1.2 (C35)
           this._keepPicture();
           return super.ondisconnect();
         }
@@ -1553,6 +1643,21 @@ function _go2rtcLoadPlayer() {
         onconnect() {
           if (typeof this.anycamHold === 'function' && this.anycamHold()) return false;
           return super.onconnect();
+        }
+        // 4.1.2 (C35): MSE jumps to the live edge when it falls behind. go2rtc's
+        // player speeds up to close a gap and keeps at most 5 s; over a slow
+        // link that showed as fast-forward, then late again
+        onmse() {
+          super.onmse();
+          clearInterval(this._edgeTid);
+          this._edgeTid = setInterval(() => {
+            const v = this.video;
+            try {
+              if (!v || !v.buffered.length || v.paused) return;
+              const end = v.buffered.end(v.buffered.length - 1);
+              if (end - v.currentTime > LIVE_BEHIND_MAX_S) v.currentTime = end - 0.3;
+            } catch (e) {}
+          }, 1000);
         }
         // 3.9.0 (B62): the playback numbers, once the video has played a while
         _playDiagLater() {
@@ -1690,7 +1795,7 @@ function _go2rtcMount(camId, cam, info, session, rtcOnly) {
   wrap.innerHTML     = '';
   wrap.style.display = 'block';
   const el = document.createElement('anycam-video');
-  el.mode  = rtcOnly ? 'webrtc' : 'webrtc,mse';
+  el.mode  = rtcOnly ? 'webrtc' : liveModeNow();          // 4.1.2 (C35)
   el.media = rtcOnly ? 'video' : 'video,audio';    // 3.2.0 (C5): sound too; it starts muted
   _go2rtc = {
     el, camId, cam, session, rtcOnly: !!rtcOnly,
@@ -1749,6 +1854,7 @@ function _go2rtcEvent(session, kind, value) {
   } else if (kind === 'webrtc-diag') {
     _liveDiagReport(g.camId, 'enhanced view', value);      // 3.8.2 (B62)
   } else if (kind === 'play-diag') {
+    _liveAutoCheck(value);                                  // 4.1.2 (C35)
     _livePlayReport(g.camId, 'enhanced view', value);      // 3.9.0 (B62)
   } else if (kind === 'decode') {
     console.warn('[AnyCam] live view: the browser cannot use the stream: ' + value);
@@ -2055,7 +2161,7 @@ async function _cardLiveStart(camId) {
   if (_cardLive[camId] !== st) return;
   const el = document.createElement('anycam-video');
   el.className = 'card-live';
-  el.mode  = 'webrtc,mse';
+  el.mode  = liveModeNow();                                 // 4.1.2 (C35)
   el.media = 'video';
   el.visibilityThreshold = 0.01;   // read once, when the player is first attached
   el.style.opacity = '0';          // not display:none: that reads as off screen
@@ -2213,6 +2319,7 @@ function _cardLiveEvent(camId, st, kind, value) {
   } else if (kind === 'webrtc-diag') {
     _liveDiagReport(camId, 'card', value);                 // 3.8.2 (B62)
   } else if (kind === 'play-diag') {
+    _liveAutoCheck(value);                                  // 4.1.2 (C35)
     _livePlayReport(camId, 'card', value);                 // 3.9.0 (B62)
   } else if (kind === 'decode') {
     if (st.played || st.repairTried || !DESCRIPTION_ERROR_RE.test(value || '')) return;
@@ -3499,7 +3606,8 @@ async function cardOrderSave() {
 
 function buildCard(cam) {
   const d = document.createElement('div');
-  d.className = 'camera-card' + (cam.verdict === 'uncertain' || cam.verdict === 'not_camera' ? ' uncertain' : '');
+  d.className = 'camera-card' + (cam.verdict === 'uncertain' || cam.verdict === 'not_camera' ? ' uncertain' : '')
+              + (_recording[cam.id] ? ' card-rec' : '');
   d.dataset.id = cam.id;
   // 2.4.0-rc3.3: stable_key set on creation so the ID-change-preserving
   // matcher in renderGrid finds this card on next update.
@@ -4554,6 +4662,7 @@ function jsArg(s) {
 
 /* ── Init ──────────────────────────────────────────────────────────────────── */
 (async () => {
+  _liveModeShow();                          // 4.1.2 (C35): this device's live mode
   await loadCameras();
   const s = await (await fetch(BASE + '/api/scan/status')).json();
   if (s.running) {
