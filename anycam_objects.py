@@ -21,7 +21,9 @@ import math
 OBJ_LINK = 2                  # changed cells this many cells apart belong to one object
 OBJ_MAX_CELLS = 0.30          # more changed than this share of the picture: one object, not grouped
 OBJ_CONFIRM_PICTURES = 3      # an object counts once seen in this many pictures ...
-OBJ_MIN_TRAVEL = 0.03         # ... and moved this share of the picture's width
+OBJ_MIN_TRAVEL = 0.03         # ... and moved this share of the picture's width, first place to last
+OBJ_MIN_STRAIGHT = 0.5        # 4.1.1 (B87): ... and that is at least half of all it moved:
+                              # a shadow shaking out and back moves a lot and gets nowhere
 OBJ_FOLLOW_S = 3.0            # a confirmed object is followed this long unseen (B75)
 OBJ_DROP_S = 1.0              # an unconfirmed one is forgotten after this long unseen
 OBJ_MATCH = 0.25              # an object this share of the width from a track's last place is the same one
@@ -124,20 +126,26 @@ def track(state: dict, objects: list[dict], t: float, grid: tuple[int, int],
                 continue
             state["next_id"] = state.get("next_id", 0) + 1
             best = {"id": state["next_id"], "t0": t, "first": obj, "path": [], "confirmed": False,
-                    "t_conf": None, "travel": 0.0, "n_max": 0}
+                    "t_conf": None, "travel": 0.0, "walk": 0.0, "n_max": 0}
             tracks.append(best)
         elif not best["confirmed"] and not counts(obj):
             continue
         used.add(id(best))
+        prev = best.get("last")
+        if prev is not None:                    # 4.1.1 (B87): the whole distance moved
+            best["walk"] += math.hypot(obj["cx"] - prev["cx"], obj["cy"] - prev["cy"]) / gw
         best["last"], best["t_last"] = obj, t
         best["path"].append((t, obj["cx"], obj["cy"], obj["n"], obj["bright"], obj["fill"]))
         del best["path"][:-16]
         best["n_max"] = max(best["n_max"], obj["n"])
         f = best["first"]
-        best["travel"] = max(best["travel"],
-                             math.hypot(obj["cx"] - f["cx"], obj["cy"] - f["cy"]) / gw)
+        # 4.1.1 (B87): net travel, from the first place to this one. The farthest
+        # point reached let a shadow shaking out and back pass (25 Oct 19:40:38,
+        # 26 Oct 07:26:59: x 25, 32, 25)
+        best["travel"] = math.hypot(obj["cx"] - f["cx"], obj["cy"] - f["cy"]) / gw
         if (not best["confirmed"] and len(best["path"]) >= OBJ_CONFIRM_PICTURES
-                and best["travel"] >= OBJ_MIN_TRAVEL):
+                and best["travel"] >= OBJ_MIN_TRAVEL
+                and best["travel"] >= OBJ_MIN_STRAIGHT * best["walk"]):
             best["confirmed"], best["t_conf"] = True, t
         seen.append(best)
     return seen

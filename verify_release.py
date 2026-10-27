@@ -313,6 +313,8 @@ CONTRACTS = {
     "api_pscan_start":       ["anycam_scan.PSCAN_PORTS", 'PSCAN["cancelled"] = False', "run_batch_port_scan(mode)"],
     "run_batch_port_scan":   ['PSCAN.get("cancelled")', "anycam_scan.deeper_scan_cards"],
     "deeper_scan_cards":     ["_probe_broad_hosts", "save_cameras", 'PSCAN.get("cancelled")'],
+    # 4.1.1 (B87): net travel and a mostly straight path confirm an object
+    "track":                 ['best["walk"]', "OBJ_MIN_STRAIGHT", "OBJ_MIN_TRAVEL"],
     # 4.0.0 (C32): the object engine
     "_motion_objects":       ["anycam_objects.find_objects", "anycam_objects.track", "_motion_obj_insect",
                               "_motion_obj_light", "_motion_note_rec_zones", "_motion_obj_need"],
@@ -345,7 +347,7 @@ CONTRACTS = {
     # 2.6.6: per-camera settings; the global override wins when it is on.
     "_motion_cfg":           ["CFG_MOTION_GLOBAL", "_MOTION_CFG", "MOTION_DEFAULTS"],
     "_motion_validate":      ["MOTION_PATH_ROOT", "MOTION_CLIP_CHOICES"],
-    "_start_recording":      ['"segment"', "_motion_cfg(camera_id)", "_part%02d.mp4",
+    "_start_recording":      ['"segment"', "_motion_cfg(camera_id)", "-part%02d.mp4", '"%Y%m%d-%H%M%S"',
                               "_cam_file_tag(camera)",
                               "buf.preroll(want_s)", "_motion_light_preroll(ms", 'ms["rec_queue"]',
                               'ms["recording"] = True', "_drain_stderr"],

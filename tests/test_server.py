@@ -1021,22 +1021,22 @@ async def test_cam_settings():
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
-        one = {"clip_base": "motion_20261001_120000", "clip_path": d / "motion_20261001_120000_part01.mp4"}
-        (d / "motion_20261001_120000_part01.mp4").write_bytes(b"x")
+        one = {"clip_base": "motion-20261001-120000", "clip_path": d / "motion-20261001-120000-part01.mp4"}
+        (d / "motion-20261001-120000-part01.mp4").write_bytes(b"x")
         cd._motion_finish_files("ch7", one)
         check("L14 one file: renamed without the part suffix",
-              (d / "motion_20261001_120000.mp4").exists()
-              and not (d / "motion_20261001_120000_part01.mp4").exists()
-              and one["clip_path"].name == "motion_20261001_120000.mp4")
-        three = {"clip_base": "motion_20261001_130000", "clip_path": d / "motion_20261001_130000_part01.mp4"}
+              (d / "motion-20261001-120000.mp4").exists()
+              and not (d / "motion-20261001-120000-part01.mp4").exists()
+              and one["clip_path"].name == "motion-20261001-120000.mp4")
+        three = {"clip_base": "motion-20261001-130000", "clip_path": d / "motion-20261001-130000-part01.mp4"}
         for n in (1, 2, 3):
-            (d / f"motion_20261001_130000_part0{n}.mp4").write_bytes(b"x")
+            (d / f"motion-20261001-130000-part0{n}.mp4").write_bytes(b"x")
         cd._motion_finish_files("ch7", three)
         check("L14 a split event keeps part01 to part03",
-              all((d / f"motion_20261001_130000_part0{n}.mp4").exists() for n in (1, 2, 3))
-              and not (d / "motion_20261001_130000.mp4").exists())
+              all((d / f"motion-20261001-130000-part0{n}.mp4").exists() for n in (1, 2, 3))
+              and not (d / "motion-20261001-130000.mp4").exists())
         CAP.lines.clear()
-        cd._motion_finish_files("ch7", {"clip_base": "motion_x", "clip_path": d / "motion_x_part01.mp4"})
+        cd._motion_finish_files("ch7", {"clip_base": "motion-x", "clip_path": d / "motion-x-part01.mp4"})
         check("L14 no file written: a warning, no crash", any("no file was written" in l for l in CAP.lines))
     html = cd.build_html()
     check("L15 Identity opens from an info icon after the name, not a <details> box",
@@ -1608,8 +1608,8 @@ async def test_confirm():
     check("O9 name tag: no name -> Camera",
           cd._cam_file_tag({}) == "Camera")
     src = repo_source()
-    check("O10 recordings start with the tag (3.8.2: after the zone, when a zone started it)",
-          'base     = f"{prefix}{_cam_file_tag(camera)}_{ts}"' in src)
+    check("O10 recordings start with the camera tag (4.1.1: the zone comes after it, dashes)",
+          'base     = f"{_cam_file_tag(camera)}{zone_tag}-{ts}"' in src)
     check("O10 live detector passes the stream clock", "stream_t=frames / MOTION_DETECT_FPS" in src)
     cd._MOTION.clear(); cd._MOTION_CFG.clear(); cd.CAMERAS.clear()
     cd.MOTION_REF_S = real_ref
@@ -4187,12 +4187,12 @@ async def test_360():
 
         # the recorder hands finished files over
         U._QUEUE.clear()
-        f3 = rec_dir / "LorexCH4_20261004_121212_part01.mp4"
+        f3 = rec_dir / "LorexCH4-20261004-121212-part01.mp4"
         f3.write_bytes(b"v3")
-        ms = {"clip_base": "LorexCH4_20261004_121212", "clip_path": f3}
+        ms = {"clip_base": "LorexCH4-20261004-121212", "clip_path": f3}
         cd._motion_finish_files("a", ms)
         check("AG10 C14: a finished recording goes to the upload queue under its final name",
-              [q["file"] for q in U._QUEUE] == [str(rec_dir / "LorexCH4_20261004_121212.mp4")])
+              [q["file"] for q in U._QUEUE] == [str(rec_dir / "LorexCH4-20261004-121212.mp4")])
     finally:
         cd.DATA_DIR = real_data
         U._STATE.update({"global": None, "cameras": {}, "host_keys": {}})
@@ -5884,14 +5884,16 @@ async def test_382():
         finally:
             cd.asyncio.create_subprocess_exec = real_exec
     zb, nb = names.get("FrontYard-Left", ""), names.get(None, "")
-    check("AR6 a recording a zone started begins with the zone: <zone>_<camera>_<date>_<time>",
-          _re.fullmatch(r"FrontYard-Left_LorexCH7_\d{8}_\d{6}", zb) is not None, zb)
+    check("AR6 a recording a zone started: <camera>-<zone>-<date>-<time>, dashes only (4.1.1)",
+          _re.fullmatch(r"LorexCH7-FrontYard-Left-\d{8}-\d{6}", zb) is not None, zb)
+    check("AR6 ... one no zone started is <camera>-<date>-<time>",
+          _re.fullmatch(r"LorexCH7-\d{8}-\d{6}", nb) is not None, nb)
     check("AR6 ... ffmpeg writes the files under that name",
-          any(str(a[-1]).endswith(zb + "_part%02d.mp4") for a in started), str([a[-1] for a in started]))
+          any(str(a[-1]).endswith(zb + "-part%02d.mp4") for a in started), str([a[-1] for a in started]))
     check("AR6 ... and the Storage tab still finds the zone from the file name",
-          zmod.rec_zone_for(zb + "_part02.mp4") == "FrontYard-Left" and zmod.rec_zone_for(zb + ".mp4") == "FrontYard-Left")
-    check("AR6 a recording whole-picture motion started keeps the old name",
-          _re.fullmatch(r"LorexCH7_\d{8}_\d{6}", nb) is not None, nb)
+          zmod.rec_zone_for(zb + "-part02.mp4") == "FrontYard-Left" and zmod.rec_zone_for(zb + ".mp4") == "FrontYard-Left")
+    check("AR6 ... no underscore in any recording name (CrystalHeeler, 2026-10-26)",
+          "_" not in zb and "_" not in nb, f"{zb} {nb}")
     cd._MOTION.clear(); cd._MOTION_CFG.clear(); zmod.REC_ZONES.clear()
 
     # AR7: the motion calibration log (CrystalHeeler, 2026-10-20)
@@ -6344,9 +6346,9 @@ async def test_390():
     cd._motion_note_rec_zones(ms2, [None, "Patio", "Walkway"])
     cd._motion_note_rec_zones(ms2, ["FrontYard-Right"])
     rec_dir = SCRATCH / "au_rec"; rec_dir.mkdir(exist_ok=True)
-    base_name = "Walkway_Cam_20261024_101010"
-    (rec_dir / f"{base_name}_part01.mp4").write_bytes(b"x")
-    ms2.update(clip_base=base_name, clip_path=rec_dir / f"{base_name}_part01.mp4")
+    base_name = "Cam-Walkway-20261024-101010"
+    (rec_dir / f"{base_name}-part01.mp4").write_bytes(b"x")
+    ms2.update(clip_base=base_name, clip_path=rec_dir / f"{base_name}-part01.mp4")
     CAP.lines.clear()
     real_enq = cd.anycam_upload.enqueue if hasattr(cd, "anycam_upload") else None
     sys.modules["anycam_upload"].enqueue, real_enqueue = (lambda cid_, parts: None), sys.modules["anycam_upload"].enqueue
@@ -6921,6 +6923,38 @@ async def test_410():
           "min-height:30px;\n             flex-wrap:wrap" in html)
 
 
+# ── AY. 4.1.1: shaking shadows (B87), headlights through the slow check (B88) ──
+async def test_411():
+    print("\n[AY] 4.1.1 net travel for objects, the light test in the slow check, dash names")
+    import random as _r
+    O = sys.modules["anycam_objects"]
+    W, H = cd.MOTION_GRID
+
+    def blob(x, y):
+        return {"n": 6, "box": (x, y, x + 2, y + 2), "cx": x + 1.0, "cy": y + 1.0, "foot": (x + 1, y + 2),
+                "bright": 0.5, "delta": 30.0, "fill": 0.6, "cells": []}
+    st, seen = {}, []
+    for k, x in enumerate((25, 32, 25, 32, 25)):          # out and back, as the shadow at 07:26:59
+        seen = O.track(st, [blob(x, 20)], k * 0.25, (W, H))
+    check("AY1 B87 an object that moves out and back (a shaking shadow) is not confirmed",
+          seen and not seen[0]["confirmed"], str(seen and seen[0]["travel"]))
+    st = {}
+    for k, x in enumerate((10, 13, 16)):
+        seen = O.track(st, [blob(x, 20)], k * 0.25, (W, H))
+    check("AY1 ... one that keeps going is", seen and seen[0]["confirmed"])
+
+    src = (REPO / "anycam_motion.py").read_text(encoding="utf-8")
+    check("AY4 recording names: dashes only, the time joined by a dash",
+          'time.strftime("%Y%m%d-%H%M%S")' in src and '-part%02d.mp4' in src and '_part%02d' not in src)
+    Z = sys.modules["anycam_zones"]
+    Z.REC_ZONES["Cam-Lawn-20261026-101010"] = "Lawn"
+    Z.REC_ZONES["Lawn_Cam_20261020_101010"] = "Lawn"
+    check("AY4 ... the Storage tab finds zones for new and old names",
+          Z.rec_zone_for("Cam-Lawn-20261026-101010-part02.mp4") == "Lawn"
+          and Z.rec_zone_for("Lawn_Cam_20261020_101010_part02.mp4") == "Lawn")
+    Z.REC_ZONES.pop("Cam-Lawn-20261026-101010", None); Z.REC_ZONES.pop("Lawn_Cam_20261020_101010", None)
+
+
 async def main():
     test_pure()
     fake = FakeGo2rtc()
@@ -6982,6 +7016,7 @@ async def main():
     await test_390_rc2()
     await test_400()
     await test_410()
+    await test_411()
     os.environ["FAKE_LIFETIME"] = "1.5"
     await test_supervisor()
 

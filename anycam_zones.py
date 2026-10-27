@@ -206,7 +206,8 @@ def evaluate(camera_id: str, flags: bytes, grid: tuple, outside_pct: float,
 def rec_zone_for(filename: str) -> str | None:
     """The zone that started the recording in this file, if one did."""
     import re
-    return REC_ZONES.get(re.sub(r"(_part\d+)?\.mp4$", "", filename))
+    # 4.1.1: new files end -partNN, files before 4.1.1 _partNN
+    return REC_ZONES.get(re.sub(r"([-_]part\d+)?\.mp4$", "", filename))
 
 
 def best_pass(results: list[tuple[str | None, float, float]]) -> tuple[str | None, float] | None:

@@ -1,3 +1,20 @@
+## 4.1.1
+
+Recording names put the zone after the camera and use dashes only, and shaking shadows no longer count as moving objects.
+
+### Changes & improvements
+
+- **New recording names.** Camera, zone, date and time, joined by dashes: PatioCH7-FrontYard-Left-20261025-223334.mp4, with -part01, -part02 for long events. Each camera's files now sort together by time. Older files keep their names, and the Storage tab still shows their zones.
+
+### Bugs fixed
+
+- **Shaking shadows recorded on the object engine.** An object must end up away from where it started, and its path must be mostly in one direction; a shadow moving out and back no longer counts.
+
+### Known issues
+
+- **Cars on the street record when a zone covers the street,** with their headlights at night, on both engines; draw zones clear of the street.
+- **Insects in the infrared still record** on both engines; lower the camera's night sensitivity.
+
 ## 4.1.0
 
 All scans are in one Scans menu, and Back to Cameras sits in the status bar of every menu. This release also carries 4.0.0: the object engine, a second motion engine you can choose per camera.

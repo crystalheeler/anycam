@@ -1116,11 +1116,11 @@ def _motion_report_peak(camera_id: str, ms: dict, now_m: float) -> None:
 def _motion_finish_files(camera_id: str, ms: dict) -> None:
     """Name a finished recording's files and log them.
 
-    2.6.6 (CrystalHeeler, 2026-10-01): the _partNN suffix only when an event ran
+    2.6.6 (CrystalHeeler, 2026-10-01): the partNN suffix only when an event ran
     past the file length and was split. ffmpeg's segment muxer must number
     every file while it records, because it cannot know the event will end
-    early, so a lone <camera>_<date>_<time>_part01.mp4 is renamed here to
-    <camera>_<date>_<time>.mp4 once ffmpeg has stopped.
+    early, so a lone <camera>-<date>-<time>-part01.mp4 is renamed here to
+    <camera>-<date>-<time>.mp4 once ffmpeg has stopped (4.1.1: dashes).
     """
     base, clip = ms.get("clip_base"), ms.get("clip_path")
     if not (base and clip):
@@ -1131,7 +1131,7 @@ def _motion_finish_files(camera_id: str, ms: dict) -> None:
         anycam_zones.REC_ZONES[base] = ", ".join(zones)
         ms["rec_zones_dirty"] = True
     also = f" (zones: {', '.join(zones)})" if len(zones) > 1 else ""
-    parts = sorted(clip.parent.glob(f"{base}_part*.mp4"))
+    parts = sorted(clip.parent.glob(f"{base}-part*.mp4"))
     if len(parts) == 1:
         single = clip.parent / f"{base}.mp4"
         try:
@@ -2314,7 +2314,7 @@ def _cam_file_tag(camera: dict) -> str:
 
 
 def _zone_file_tag(zone: str) -> str:
-    """3.8.2: the zone that started a recording, at the front of its file name.
+    """3.8.2: the zone that started a recording, in its file name (4.1.1: after the camera).
 
     CrystalHeeler, 2026-10-20, changing answer 15 of docs/Detection_Zones_Plan.md
     (which kept zones out of file names because free-text names make long names
@@ -2342,11 +2342,13 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
 
     2.6.6: the segment muxer starts a new file every clip_s seconds
     while motion continues (build plan C12). Files are
-    <camera>_<date>_<time>_part01.mp4, part02, ...: a new event gets a new
+    <camera>-<date>-<time>-part01.mp4, part02, ...: a new event gets a new
     date and time; a higher part number is a continuation. 2.6.7: <camera>
     is _cam_file_tag, for example LorexCH4. 3.8.2: a recording a zone
-    started begins with that zone, <zone>_<camera>_<date>_<time>, for example
-    FrontYard-Left_LorexCH7_20261020_101500.mp4. Each file ends
+    started carries that zone; 4.1.1 (CrystalHeeler, 2026-10-26) right after
+    the camera, and dashes only, never underscores:
+    <camera>-<zone>-<date>-<time>, for example
+    LorexCH7-FrontYard-Left-20261020-101500.mp4, parts -part01, -part02. Each file ends
     on the first keyframe after the interval, so lengths are approximate.
     """
     ms = _motion_state(camera_id)
@@ -2357,13 +2359,14 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
     ms["recording"] = True
     cfg      = _motion_cfg(camera_id)
     cam_dir  = await _ensure_cam_dir(camera, Path(cfg["path"]))
-    ts       = time.strftime("%Y%m%d_%H%M%S")
+    ts       = time.strftime("%Y%m%d-%H%M%S")            # 4.1.1: dashes, no underscores
     zone     = ms.get("judge_zone")
     # 3.4.0 (answer 15): the zone goes into the log and the Storage tab. 3.8.2
-    # (CrystalHeeler, 2026-10-20): and at the front of the file name.
-    prefix   = f"{_zone_file_tag(zone)}_" if zone is not None else ""
-    base     = f"{prefix}{_cam_file_tag(camera)}_{ts}"
-    clip     = cam_dir / f"{base}_part01.mp4"
+    # (CrystalHeeler, 2026-10-20): and into the file name; 4.1.1 (CrystalHeeler,
+    # 2026-10-26): right after the camera, so the files sort by camera
+    zone_tag = f"-{_zone_file_tag(zone)}" if zone is not None else ""
+    base     = f"{_cam_file_tag(camera)}{zone_tag}-{ts}"
+    clip     = cam_dir / f"{base}-part01.mp4"
     ms["clip_path"] = clip
     ms["clip_base"] = base
     ms["rec_zone"] = zone
@@ -2381,7 +2384,7 @@ async def _start_recording(camera_id: str, camera: dict, url: str) -> None:
                 "-segment_start_number", "1", "-reset_timestamps", "1",
                 "-segment_format", "mp4",
                 "-segment_format_options", "movflags=+faststart",
-                str(cam_dir / f"{base}_part%02d.mp4")]
+                str(cam_dir / f"{base}-part%02d.mp4")]
     # H.265 in MP4 needs the hvc1 tag for Chrome and Apple players.
     tag = (["-tag:v", "hvc1"]
            if (camera.get("stream_codec") or "").lower() in ("hevc", "h265") else [])

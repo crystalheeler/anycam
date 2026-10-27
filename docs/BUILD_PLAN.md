@@ -1,17 +1,18 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 25 October 2026. Store version: 4.1.0 (released 2026-10-25: pushed, GitHub Latest, store; CrystalHeeler's order, run unattended): D6 and D7 (the Scans menu, Back to Cameras in the status bar), with 4.0.0 (C32, the object engine, a per-camera choice, classic by default). 3.9.0 (B84, B85) was released the same day. Next: the field test. rc numbers are single-digit (CrystalHeeler, 2026-10-10).
+**Compiled:** Updated 26 October 2026. Store version: 4.1.1 (released 2026-10-26: pushed, GitHub Latest, store; CrystalHeeler's order): C33 and B87. The first field night of 4.1.0 (25-26 Oct): headlights gone from the front yard and the patio; the street records where a zone covers it (B88) or no zone is set (driveway-right). New: C34, D8. rc numbers are single-digit (CrystalHeeler, 2026-10-10).
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.
 
 ---
 
-## Next up: field-test 4.1.0
+## Next up: field-test 4.1.1
 
-0. **Released (2026-10-25):** 4.1.0 — D6 and D7, with 4.0.0 (C32, the object engine, classic by default; B75). Pushed, GitHub Latest and store (CrystalHeeler's order, 2026-10-25). 3.9.0 (B84, B85) the same day.
-1. **Field test 4.1.0:** a night of recordings with one camera on the object engine (its "an object" lines); the Scans menu (Deeper Scan on a chosen host, Rescan Entire System); the Pi's memory with the 17 s buffer and its time per picture on the object engine.
-2. **Waiting on CrystalHeeler:** B62 (the phone's VPN route), B86 (the back yard's night sensitivity), F11 (the rc format), B33, C23.
+0. **Released (2026-10-26):** 4.1.1 — C33 (recording names <camera>-<zone>-<date>-<time>, dashes only) and B87 (shaking shadows). Pushed, GitHub Latest and store (CrystalHeeler's order, 2026-10-26).
+1. **Field test 4.1.1:** the new file names in the Storage tab; the patio camera's shadows by day.
+2. **Waiting on CrystalHeeler:** zones clear of the street on driveway-left (B88), the patio camera's top edge and driveway-right (no zones); B62 (the phone's VPN route), B86, F11 (the rc format), B33, C23.
+3. **Next features:** C34 (card border while recording), D8 (HDMI-CEC research).
 
 ---
 
@@ -39,6 +40,7 @@ Every ticket reads: Discovered (date, version, test system); Problem; Solution(s
 
 | # | Status | Item | Discovered | Problem | Solution(s) |
 |---|---|---|---|---|---|
+| B88 | Discuss | **Driveway-left records cars on the street, with their headlights** | Discovered 26 Oct 2026 in 4.1.0 running on Test System B | Driveway-left (classic engine) recorded about 13 night headlight passes (19:39:48, 20:08:31, 20:55:55, 21:16:20, 00:07:26, 06:07:43 and more), most through the slow-movement check. They are cars driving on the street, inside the gravel zone and the zones over the neighbours' yards. Tried in 4.1.1: the headlight test inside the slow-movement check stopped 2 of 13 and lost 7 people on other cameras, so it was left out; the object engine records 9 of 13 too, as the cars are real moving objects | • CrystalHeeler draws the gravel and neighbour zones clear of the street. • Later: a classifier (person, vehicle) with per-zone types |
 | B86 | Discuss | **Insects record the back yard for minutes at night** | Discovered 25 Oct 2026 in 3.9.0-rc1.0 running on Test System B | The back yard made 9 insect recordings from 04:55 to 06:00, one of 15.5 min (31 files). It records at 0.8% of the picture at night (sensitivity 90, night +15) and outside its zones; insects flying in the infrared change 1-3% over several pictures, so the one-picture rule does not stop them. The light by the hot tub is a motion-sensitive light (CrystalHeeler, 25 Oct: insects switch it on most of the time, a rabbit once); 3.9.0-rc2.0 no longer records it switching (B85) | • CrystalHeeler lowers the back yard's night sensitivity or turns on "Recording in zones only". • C32's minimum object size and tracking |
 | B83 | Ready | **The live-view fall-back message blames the camera's codec** | Discovered 24 Oct 2026 in 3.9.0-rc1.0 running on Test System A | The Microseven's Enhanced View on the phone showed "Live view unavailable (no video within 15 s)" with advice to turn off H.264+, H.265+ or Smart Codec. The log shows the cause was the network: WebRTC and MSE both got no video while the phone's route lost about a quarter of its packets (B62). The advice sends the user to the wrong place | • Name both possible causes: the camera's codec settings, or a slow or lossy network. • Give the codec advice only when LIVE-DIAG shows the connection worked and the stream had no key picture |
 | B82 | Ready | **The classic view cannot read go2rtc's copy with Low Latency Probe on** | Discovered 24 Oct 2026 in 3.9.0-rc1.0 running on Test System A | The Microseven's classic view read go2rtc's copy three times with 0 pictures ("could not find codec parameters", analyzeduration 0, probesize 32), then opened the camera directly and got pictures (23:11:00-23:11:12). With Low Latency Probe on, ffmpeg gives up after 32 bytes; go2rtc's copy may not start on a full picture, so ffmpeg finds nothing to name the video by. Likely the cause of the 23 Oct fall-back too (B80) | Use the normal probe when ffmpeg reads go2rtc's copy (it is on the Pi itself, so the probe costs well under a second); keep the low-latency probe for direct camera reads |
@@ -54,6 +56,7 @@ Every ticket reads: Discovered (date, version, test system); Problem; Solution(s
 
 | # | Status | Item | Discovered | Problem | Solution(s) |
 |---|---|---|---|---|---|
+| C34 | Ready | **The card's border lights up while it records** | Requested 26 Oct 2026 in 4.1.0 by CrystalHeeler | A recording shows only on the card's record button ("⏺ REC"); from across the room the cards look the same | • While motion recording is in progress the card gets a coloured border (red, gently pulsing), on the cameras page and in the card grid; it goes when the recording stops. • The same in Enhanced View's frame |
 | C23 | You | **Storage tab revamp** | Discovered 05 Oct 2026 in 3.7.0-rc2.0 (CrystalHeeler's request) | CrystalHeeler wants a larger revamp of the Storage tab; details to follow. Known fault: on a phone held upright the file names are hidden, because the fixed columns need 480 px. | • CrystalHeeler sends the revamp list. • A design discussion before any code. |
 | C25 | Later | **A better on/off design for Remote Storage** | Discovered 05 Oct 2026 in 3.7.0-rc2.0 (CrystalHeeler's request) | The camera choice "Do not upload" is an awkward way to turn Remote Storage off. | Design an "Enable remote storage" toggle or checkbox; discuss when CrystalHeeler picks it up. |
 | C21 | Later | **Remove the classic engine** | Discovered 04 Oct 2026 in 3.1.0-rc1.0 from the code (no test system) | The classic engine (snapshot loop, adaptive ladder, Adaptive Quality) stays as the fallback when a camera or browser cannot play live video. It was still needed on 15 and 23 Oct, when phone cards got no live video. | Remove it once no camera or browser needs the fallback. |
@@ -62,6 +65,7 @@ Every ticket reads: Discovered (date, version, test system); Problem; Solution(s
 
 | # | Status | Item | Discovered | Problem | Solution(s) |
 |---|---|---|---|---|---|
+| D8 | Discuss | **Investigate HDMI-CEC (Consumer Electronics Control)** | Requested 26 Oct 2026 in 4.1.0 by CrystalHeeler | CEC lets one HDMI device control others on the same HDMI chain: turn a TV on or off, switch its input, send remote-control keys. How AnyCam could use it is not known yet | • Research: what the Pi's HDMI port offers (/dev/cec0, cec-ctl from v4l-utils, libcec), what Home Assistant already has (its HDMI-CEC integration), and what an add-on may open. • Ideas to weigh with CrystalHeeler: turn on a TV and switch it to a camera's view when motion records; react to the TV remote. • A design note for CrystalHeeler |
 
 ## E. Code health
 
@@ -79,6 +83,8 @@ Every ticket reads: Discovered (date, version, test system); Problem; Solution(s
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
+| The object engine counts a shaking shadow as travel (B87) | This plan, B87 | 4.1.1 (built 2026-10-26): travel is net, first place to last, and at least half of all the object moved. Replayed on 535 recordings against 4.1.0: 1 shadow and 1 empty file fewer, no person, cat or vehicle lost. Test AY1. Not field-tested |
+| The zone right after the camera in recording names (C33) | This plan, C33 | 4.1.1 (built 2026-10-26): <camera>-<zone>-<date>-<time>-partNN, dashes only (CrystalHeeler, 26 Oct); the Storage tab reads old and new names. Tests AR6, O10, L14, AG10, AU8, AY4 |
 | One Scans menu for every scan (D6) | This plan, D6 | 4.1.0 (built 2026-10-25): Port Scan is Scans; Deeper Scan (ports 1-10,000, ports table and cards) and Scan All Ports for the chosen hosts, grey until one is chosen; Rescan Entire System with its Deeper Scan box; the cameras show at the first new camera (only from the Scans menu); Cancel stops a queue. Tests AX1-AX5, page checks; seen at 1366x768, 375x812 and 812x375. Not field-tested |
 | Back to Cameras in the status bar, in colour, on every menu (D7) | This plan, D7 | 4.1.0 (built 2026-10-25): one button at the left of the status bar on every menu but the cameras, an accent outline; the rows on the Scans, Connect Camera and Storage menus are gone; the bar wraps on a phone. Tests AX5, page check |
 | A motion engine that judges objects, not cells (C32) | This plan, C32 | 4.0.0 (built 2026-10-25): anycam_objects.py and the object path in anycam_motion.py, chosen per camera (classic by default); objects by size, the zone at their feet, tracking over 3 pictures with travel, insects and lit surfaces left out, the 3 s light hold, followed across zones while recording, the reduced-detection warning. Design and replay of 409 recordings: docs/C32_Object_Engine.md. Tests AW1-AW8. Not field-tested |
