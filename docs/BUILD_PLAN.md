@@ -1,6 +1,6 @@
 # AnyCam Build Plan
 
-**Compiled:** Updated 26 October 2026. Store version: 4.1.1 (C33, B87; released 2026-10-26). 4.1.2 (C34, C35) is built, not pushed. B62's cause: the phone's ZeroTier link is RELAY; C35 is the answer without open ports. D8 research done (52 sources). rc numbers are single-digit (CrystalHeeler, 2026-10-10).
+**Compiled:** Updated 28 October 2026. Store version: 4.1.2 (C34, C35; released 2026-10-28). B62's cause: the phone's ZeroTier link is RELAY; C35 is the answer without open ports. D8 research done (52 sources). rc numbers are single-digit (CrystalHeeler, 2026-10-10).
 **Purpose:** the open task list. CLAUDE.md rule 7: read it before every build, and confirm the version and the scope with CrystalHeeler.
 
 `docs/BUILD_PLAN.html` is generated from this file by `docs/render_build_plan.py`; regenerate it after every change here.
@@ -9,7 +9,7 @@
 
 ## Next up: field-test 4.1.2 (remote viewing over ZeroTier)
 
-0. **Built (2026-10-26):** 4.1.2 — C34 (border while recording) and C35 (remote viewing). Committed and tagged, not pushed. 4.1.1 (C33, B87) is the store version.
+0. **Released (2026-10-28):** 4.1.2 — C34 (border while recording) and C35 (remote viewing). Pushed, published, and in the add-on store.
 1. **Field test 4.1.2:** the phone over ZeroTier in Automatic (a toast when it switches) and in Remote; the LIVE-PLAY lines.
 2. **D8:** the research is done; CrystalHeeler chooses the TVs and the mode.
 3. **Waiting on CrystalHeeler:** zones clear of the street (B88, driveway-right, the patio camera's top edge); B86, F11, B33, C23.
@@ -82,8 +82,8 @@ Every ticket reads: Discovered (date, version, test system); Problem; Solution(s
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
-| The card's border lights up while it records (C34) | This plan, C34 | 4.1.2 (built 2026-10-26): a red pulsing border on the card and around Enhanced View, from the 3 s motion poll; still for reduced motion. Tests AY5, page check. Not field-tested |
-| Remote viewing: MSE with live-edge catch-up (C35) | This plan, C35 | 4.1.2 (built 2026-10-26): Live in Enhanced View's bar, per device: Automatic (MSE for 12 h after 5% lost packets or 3 freezes), WebRTC, Remote; MSE jumps to live past 2 s behind. Seen at 375x812 and 812x375. Tests AY5, page checks. Not field-tested over ZeroTier |
+| The card's border lights up while it records (C34) | This plan, C34 | 4.1.2 (released 2026-10-28): a red pulsing border on the card and around Enhanced View, from the 3 s motion poll; still for reduced motion. Tests AY5, page check. Not field-tested |
+| Remote viewing: MSE with live-edge catch-up (C35) | This plan, C35 | 4.1.2 (released 2026-10-28): Live in Enhanced View's bar, per device: Automatic (MSE for 12 h after 5% lost packets or 3 freezes), WebRTC, Remote; MSE jumps to live past 2 s behind. Seen at 375x812 and 812x375. Tests AY5, page checks. Not field-tested over ZeroTier |
 | The object engine counts a shaking shadow as travel (B87) | This plan, B87 | 4.1.1 (built 2026-10-26): travel is net, first place to last, and at least half of all the object moved. Replayed on 535 recordings against 4.1.0: 1 shadow and 1 empty file fewer, no person, cat or vehicle lost. Test AY1. Not field-tested |
 | The zone right after the camera in recording names (C33) | This plan, C33 | 4.1.1 (built 2026-10-26): <camera>-<zone>-<date>-<time>-partNN, dashes only (CrystalHeeler, 26 Oct); the Storage tab reads old and new names. Tests AR6, O10, L14, AG10, AU8, AY4 |
 | One Scans menu for every scan (D6) | This plan, D6 | 4.1.0 (built 2026-10-25): Port Scan is Scans; Deeper Scan (ports 1-10,000, ports table and cards) and Scan All Ports for the chosen hosts, grey until one is chosen; Rescan Entire System with its Deeper Scan box; the cameras show at the first new camera (only from the Scans menu); Cancel stops a queue. Tests AX1-AX5, page checks; seen at 1366x768, 375x812 and 812x375. Not field-tested |
