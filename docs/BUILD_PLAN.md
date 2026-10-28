@@ -82,6 +82,7 @@ Every ticket reads: Discovered (date, version, test system); Problem; Solution(s
 
 | Item | Where it was listed | Evidence |
 |---|---|---|
+| The Install section on every release note | CrystalHeeler, 2026-10-28 | Lost from 3.8.0-rc3 to 4.1.2 (notes copied from the changelog alone). Added back to 4.1.0, 4.1.1, 4.1.2. docs/release-install-section.md, docs/tools/release-notes.py; CLAUDE.md rule 11 |
 | The card's border lights up while it records (C34) | This plan, C34 | 4.1.2 (released 2026-10-28): a red pulsing border on the card and around Enhanced View, from the 3 s motion poll; still for reduced motion. Tests AY5, page check. Not field-tested |
 | Remote viewing: MSE with live-edge catch-up (C35) | This plan, C35 | 4.1.2 (released 2026-10-28): Live in Enhanced View's bar, per device: Automatic (MSE for 12 h after 5% lost packets or 3 freezes), WebRTC, Remote; MSE jumps to live past 2 s behind. Seen at 375x812 and 812x375. Tests AY5, page checks. Not field-tested over ZeroTier |
 | The object engine counts a shaking shadow as travel (B87) | This plan, B87 | 4.1.1 (built 2026-10-26): travel is net, first place to last, and at least half of all the object moved. Replayed on 535 recordings against 4.1.0: 1 shadow and 1 empty file fewer, no person, cat or vehicle lost. Test AY1. Not field-tested |

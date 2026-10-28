@@ -198,6 +198,18 @@ dialog was cut off at top and bottom on a phone, and on a desktop with
 many zones, with no way to scroll (B67). The release gate checks the
 page's styles for this (added with B67).
 
+## 11. Every release note ends with the Install section
+
+Make every GitHub release note with `python docs/tools/release-notes.py
+<version>`. It writes the version's CHANGELOG.md entry, then
+`docs/release-install-section.md` word for word. Change that section only
+on CrystalHeeler's order. Check the published page shows it.
+
+**Why (CrystalHeeler, 2026-10-28):** the Install section was on every
+release up to 3.8.0-rc2. From 3.8.0-rc3 to 4.1.2 the notes were copied
+from the changelog alone, and the section was lost. It was added back to
+4.1.0, 4.1.1 and 4.1.2 on 2026-10-28.
+
 ---
 
 ## Coding standards
